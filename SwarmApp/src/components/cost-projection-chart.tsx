@@ -47,7 +47,7 @@ export function CostProjectionChart({ historical, projections }: CostProjectionC
 
     // Projected dates and costs
     const projDates = projections.map((p) => p.date);
-    const projCosts = projections.map((p) => p.projectedCost);
+    const projCosts = projections.map((p) => p.projected);
 
     // Combine for x-axis labels
     const allDates = [...histDates, ...projDates];

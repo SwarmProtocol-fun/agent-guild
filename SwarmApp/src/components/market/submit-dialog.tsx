@@ -834,8 +834,8 @@ export function SubmitMarketItemDialog({
                                         const result = await uploadArtifact(file, orgId, "screenshot", submitterAddress);
                                         setScreenshots(prev => [...prev, {
                                             cid: result.cid,
-                                            filename: result.filename,
-                                            gatewayUrl: result.gatewayUrl,
+                                            filename: file.name,
+                                            gatewayUrl: result.url,
                                         }]);
                                     } catch (err) {
                                         setError(err instanceof Error ? err.message : "Screenshot upload failed");
