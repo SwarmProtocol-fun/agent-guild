@@ -17,6 +17,7 @@ import type { AppKitNetwork } from "@reown/appkit/networks";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
 import type { WalletAdapter, ConnectButtonProps, WalletState } from "../types";
+import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
 
@@ -34,6 +35,16 @@ const networks = Object.values(CHAIN_CONFIGS)
   ) as unknown as [AppKitNetwork, ...AppKitNetwork[]];
 
 const defaultNetwork = networks.find((n) => n.id === 296) ?? networks[0];
+
+// Wallets pinned to the top of the connect modal (e.g. Tangem, which is
+// WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
+// list of WalletConnect Explorer IDs.
+const featured = parseWalletIds(process.env.NEXT_PUBLIC_FEATURED_WALLET_IDS);
+if (featured.invalid.length > 0) {
+  console.warn(
+    `[wallet] Ignoring invalid NEXT_PUBLIC_FEATURED_WALLET_IDS entries (expected 64-char hex Explorer IDs): ${featured.invalid.join(", ")}`,
+  );
+}
 
 const wagmiAdapter = new WagmiAdapter({
   projectId: projectId || "unconfigured",
@@ -56,6 +67,7 @@ if (projectId) {
       url: origin,
       icons: [`${origin}/lobsterlogo.png`],
     },
+    ...(featured.ids.length > 0 ? { featuredWalletIds: featured.ids } : {}),
     features: { analytics: false },
   });
 } else {

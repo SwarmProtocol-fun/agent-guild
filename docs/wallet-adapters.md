@@ -22,3 +22,10 @@ Login is provider-agnostic: any adapter that can `personal_sign` a SIWE message 
 
 1. Create a project at <https://cloud.reown.com> and add your domains to the allowlist.
 2. Set `NEXT_PUBLIC_REOWN_PROJECT_ID` in `SwarmApp/.env.local`.
+
+### Hardware wallets (Tangem)
+
+[Tangem](https://tangem.com/en/help-center/tangem-dapps/) connects to dApps **only through WalletConnect**, so it works with the built-in adapter and needs no separate one: the user picks WalletConnect, scans the QR code in the Tangem app (Settings → WalletConnect → +), approves, and taps their card to sign.
+
+- Tangem users must first add the networks they want to use in the Tangem app, or the session will be rejected.
+- To pin Tangem in the modal, set `NEXT_PUBLIC_FEATURED_WALLET_IDS` to its WalletConnect Explorer ID (look it up at <https://walletguide.walletconnect.network>). Malformed IDs are ignored with a console warning.
