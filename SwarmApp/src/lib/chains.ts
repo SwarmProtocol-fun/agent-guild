@@ -5,9 +5,6 @@
  * Import this everywhere instead of hardcoding chain IDs, RPCs, or currency symbols.
  */
 
-import { defineChain, type Chain } from "thirdweb/chains";
-import { ethereum, avalanche, base } from "thirdweb/chains";
-
 // ═══════════════════════════════════════════════════════════════
 // Types
 // ═══════════════════════════════════════════════════════════════
@@ -21,8 +18,6 @@ export interface ChainConfig {
     name: string;
     /** EVM chain ID (0 for non-EVM chains like Solana) */
     chainId: number;
-    /** Thirdweb Chain object for wallet / contract interactions */
-    thirdwebChain: Chain;
     /** Public RPC endpoint */
     rpc: string;
     /** Native currency */
@@ -65,47 +60,6 @@ export interface ChainConfig {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Chain Definitions
-// ═══════════════════════════════════════════════════════════════
-
-const hederaMainnet = defineChain({
-    id: 295,
-    name: "Hedera Mainnet",
-    rpc: "https://mainnet.hashio.io/api",
-});
-
-const hederaTestnet = defineChain({
-    id: 296,
-    name: "Hedera Testnet",
-    rpc: "https://testnet.hashio.io/api",
-});
-
-const filecoin = defineChain({
-    id: 314,
-    name: "Filecoin",
-    rpc: "https://api.node.glif.io/rpc/v1",
-});
-
-const sepoliaChain = defineChain({
-    id: 11155111,
-    name: "Ethereum Sepolia",
-    rpc: "https://ethereum-sepolia-rpc.publicnode.com",
-});
-
-const baseSepoliaChain = defineChain({
-    id: 84532,
-    name: "Base Sepolia",
-    rpc: "https://sepolia.base.org",
-});
-
-// Solana is non-EVM — we use a sentinel Chain object for type compatibility
-const solanaDevnet = defineChain({
-    id: 0,
-    name: "Solana Devnet",
-    rpc: "https://api.devnet.solana.com",
-});
-
-// ═══════════════════════════════════════════════════════════════
 // Chain Configs
 // ═══════════════════════════════════════════════════════════════
 
@@ -114,7 +68,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "ethereum",
         name: "Ethereum",
         chainId: 1,
-        thirdwebChain: ethereum,
         rpc: "https://ethereum-rpc.publicnode.com",
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
         explorer: {
@@ -137,7 +90,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "avalanche",
         name: "Avalanche",
         chainId: 43114,
-        thirdwebChain: avalanche,
         rpc: "https://api.avax.network/ext/bc/C/rpc",
         nativeCurrency: { name: "Avalanche", symbol: "AVAX", decimals: 18 },
         explorer: {
@@ -160,7 +112,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "base",
         name: "Base",
         chainId: 8453,
-        thirdwebChain: base,
         rpc: "https://mainnet.base.org",
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
         explorer: {
@@ -183,7 +134,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "hedera",
         name: "Hedera Testnet",
         chainId: 296,
-        thirdwebChain: hederaTestnet,
         rpc: "https://testnet.hashio.io/api",
         nativeCurrency: { name: "HBAR", symbol: "HBAR", decimals: 8 },
         explorer: {
@@ -209,7 +159,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "filecoin",
         name: "Filecoin",
         chainId: 314,
-        thirdwebChain: filecoin,
         rpc: "https://api.node.glif.io/rpc/v1",
         nativeCurrency: { name: "Filecoin", symbol: "FIL", decimals: 18 },
         explorer: {
@@ -229,7 +178,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "sepolia",
         name: "Ethereum Sepolia",
         chainId: 11155111,
-        thirdwebChain: sepoliaChain,
         rpc: "https://ethereum-sepolia-rpc.publicnode.com",
         nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 },
         explorer: {
@@ -252,7 +200,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "baseSepolia",
         name: "Base Sepolia",
         chainId: 84532,
-        thirdwebChain: baseSepoliaChain,
         rpc: "https://sepolia.base.org",
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
         explorer: {
@@ -277,7 +224,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         key: "solana",
         name: "Solana Devnet",
         chainId: 0, // Non-EVM sentinel
-        thirdwebChain: solanaDevnet,
         rpc: process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com",
         nativeCurrency: { name: "SOL", symbol: "SOL", decimals: 9 },
         explorer: {
@@ -302,19 +248,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
 
 /** All enabled chains */
 export const ENABLED_CHAINS = Object.values(CHAIN_CONFIGS).filter((c) => c.enabled);
-
-/** Thirdweb chain objects for wallet ConnectButton */
-export const WALLET_CHAINS: Chain[] = [
-  hederaTestnet,
-  ethereum,
-  base,
-  avalanche,
-  sepoliaChain,
-  baseSepoliaChain,
-];
-
-/** Default chain for ConnectButton — Hedera Testnet */
-export const DEFAULT_CHAIN = hederaTestnet;
 
 /** Get chain config by EVM chain ID */
 export function getChainById(chainId: number): ChainConfig | undefined {

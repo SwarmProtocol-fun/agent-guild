@@ -11,12 +11,12 @@ import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import { Search, Building2, Users } from "lucide-react";
 import { Organization, getPublicOrganizations, createChannel, getChannelsByOrg } from "@/lib/firestore";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 
 export default function OrganizationsPage() {
     const router = useRouter();
     const { currentOrg, organizations: myOrgs } = useOrg();
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const [orgs, setOrgs] = useState<Organization[]>([]);
     const [loading, setLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState("");

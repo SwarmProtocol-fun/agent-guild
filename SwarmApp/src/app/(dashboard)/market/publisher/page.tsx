@@ -22,7 +22,7 @@ import {
     SelectValue,
 } from "@/components/ui/select";
 import { useSession } from "@/contexts/SessionContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 const trackMarketplaceEvent = (..._args: unknown[]) => {}; // posthog removed
 
 const TIER_STYLES: Record<number, { label: string; color: string; icon: typeof Shield }> = {
@@ -79,7 +79,7 @@ interface PublisherItem {
 const STATUS_TABS = ["all", "pending", "approved", "rejected", "suspended"] as const;
 
 export default function PublisherPage() {
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const { address: sessionAddress, authenticated } = useSession();
     const address = account?.address?.toLowerCase() || sessionAddress?.toLowerCase() || "";
 

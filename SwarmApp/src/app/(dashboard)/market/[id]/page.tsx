@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import {
     type Skill, type OwnedItem,
     SKILL_REGISTRY, MOD_REGISTRY, getModCapabilities,
@@ -26,7 +26,7 @@ export default function MarketItemPage() {
     const params = useParams();
     const router = useRouter();
     const { currentOrg } = useOrg();
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const itemId = params.id as string;
 
     const [inventory, setInventory] = useState<OwnedItem[]>([]);

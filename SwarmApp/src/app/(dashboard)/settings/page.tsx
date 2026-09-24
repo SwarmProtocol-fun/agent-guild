@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useOrg } from '@/contexts/OrgContext';
-import { useActiveAccount } from 'thirdweb/react';
+import { useWalletAccount } from "@/lib/wallet";
 import { updateOrganization, getProfile, setProfile, removeMemberFromOrganization } from '@/lib/firestore';
 
 import { Badge } from '@/components/ui/badge';
@@ -21,7 +21,7 @@ import Link from 'next/link';
 
 export default function SettingsPage() {
   const { currentOrg, refreshOrgs } = useOrg();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const address = account?.address;
   const { skin, setSkin, skins, availableSkins, refreshInstalled, scanLines, setScanLines } = useSkin();
 

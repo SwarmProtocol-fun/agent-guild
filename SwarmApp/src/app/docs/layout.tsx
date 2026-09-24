@@ -3,10 +3,10 @@
 
 import { HeaderWrapper as Header } from "@/components/header-wrapper";
 import { Sidebar } from "@/components/sidebar";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 
 export default function DocsLayout({ children }: { children: React.ReactNode }) {
-    const account = useActiveAccount();
+    const account = useWalletAccount();
 
     // If logged in, show full layout with sidebar
     if (account) {

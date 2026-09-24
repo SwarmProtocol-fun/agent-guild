@@ -1,12 +1,12 @@
 "use client";
 
 import { useSession } from "@/contexts/SessionContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useEffect, useState } from "react";
 
 export default function DebugAuthPage() {
   const session = useSession();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const [sessionCheck, setSessionCheck] = useState<any>(null);
   const [cookieCheck, setCookieCheck] = useState<string>("checking...");
 

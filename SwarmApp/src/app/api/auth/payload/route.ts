@@ -1,15 +1,14 @@
 /**
  * POST /api/auth/payload
- * Generates a thirdweb SIWE login payload for the given wallet address.
- * Body: { address: string, chainId?: string }
- * Returns: LoginPayload (thirdweb format — domain, nonce, statement, etc.)
+ * Issues a SIWE (EIP-4361) login payload for the given wallet address.
+ * Body: { address: string, chainId?: number }
+ * Returns: { payload, message } — the client signs `message` and posts
+ * { payload, signature } to /api/auth/verify.
  *
  * The domain is read from the request Host header so it matches the
- * actual site the user is visiting (localhost, swarm-protocol.xyz, etc.)
- *
- * Called by ConnectButton's auth.getLoginPayload callback.
+ * actual site the user is visiting (localhost, preview deploys, prod).
  */
-import { getThirdwebAuth, getDomainFromRequest } from "../thirdweb-auth";
+import { generateSiwePayload, getDomainFromRequest, getOriginFromRequest } from "@/lib/auth/siwe";
 
 export async function POST(req: Request) {
   try {
@@ -17,26 +16,20 @@ export async function POST(req: Request) {
     const address = body.address?.trim();
 
     if (!address || typeof address !== "string") {
-      return Response.json(
-        { error: "address is required" },
-        { status: 400 }
-      );
+      return Response.json({ error: "address is required" }, { status: 400 });
     }
 
     const domain = getDomainFromRequest(req);
-    const auth = getThirdwebAuth(domain);
-
-    const payload = await auth.generatePayload({
+    const result = generateSiwePayload({
       address,
       chainId: body.chainId ? Number(body.chainId) : undefined,
+      domain,
+      uri: getOriginFromRequest(req, domain),
     });
 
-    return Response.json(payload);
+    return Response.json(result);
   } catch (err) {
     console.error("[auth/payload] Error:", err);
-    return Response.json(
-      { error: "Failed to generate login payload" },
-      { status: 500 }
-    );
+    return Response.json({ error: "Failed to generate login payload" }, { status: 500 });
   }
 }

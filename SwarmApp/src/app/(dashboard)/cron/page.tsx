@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useAuthAddress } from "@/hooks/useAuthAddress";
 import { getAgentsByOrg, type Agent } from "@/lib/firestore";
 import {
@@ -44,7 +44,7 @@ function TaskDialog({
     const [enabled, setEnabled] = useState(job?.enabled ?? true);
     const [selectedAgents, setSelectedAgents] = useState<string[]>(job?.agentIds || []);
     const [showAgentPicker, setShowAgentPicker] = useState(false);
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const { currentOrg } = useOrg();
 
     const toggleAgent = (agentId: string) => {
@@ -298,7 +298,7 @@ function TaskDialog({
 
 export default function CronPage() {
     const { currentOrg } = useOrg();
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const authAddress = useAuthAddress();
     const [jobs, setJobs] = useState<CronJob[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);

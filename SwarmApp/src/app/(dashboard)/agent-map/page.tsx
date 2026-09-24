@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useChainCurrency } from "@/hooks/useChainCurrency";
 import { motion } from "motion/react";
 import type { DispatchPayload } from "@/components/agent-map/agent-map";
@@ -39,7 +39,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 export default function AgentMapPage() {
     const { currentOrg } = useOrg();
     const { symbol: currencySymbol } = useChainCurrency();
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const [agents, setAgents] = useState<Agent[]>([]);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [jobs, setJobs] = useState<Job[]>([]);

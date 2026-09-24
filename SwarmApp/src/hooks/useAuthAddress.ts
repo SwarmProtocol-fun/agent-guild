@@ -1,7 +1,7 @@
 /**
  * useAuthAddress — Returns the authenticated user's address.
  *
- * Combines wallet connection (useActiveAccount) with server-backed session
+ * Combines wallet connection (useWalletAccount) with server-backed session
  * (SessionContext) so pages don't show "Connect your wallet" when the
  * wallet reconnects slowly but the session is still valid.
  *
@@ -9,11 +9,11 @@
  */
 "use client";
 
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 
 export function useAuthAddress(): string | null {
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const { authenticated, address: sessionAddress } = useSession();
     return account?.address || (authenticated ? sessionAddress : null) || null;
 }

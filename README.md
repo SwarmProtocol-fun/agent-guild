@@ -25,14 +25,14 @@ Swarm Core is the **open foundation** of the Swarm Protocol — the parts you ca
 ```bash
 git clone https://github.com/SwarmProtocol-fun/swarm-core.git
 cd swarm-core/SwarmApp
-cp .env.example .env.local   # fill in Firebase + Thirdweb keys
+cp .env.example .env.local   # fill in Firebase + Reown (WalletConnect) keys
 npm install
 npm run dev
 ```
 
 Open <http://localhost:3000>.
 
-The minimum to boot is **Firebase + Thirdweb client ID + a session secret**. Everything else is optional.
+The minimum to boot is **Firebase + a Reown (WalletConnect) project ID + a session secret**. Everything else is optional.
 
 ---
 

@@ -6,12 +6,11 @@
 
 "use client";
 
-import { useActiveWalletChain } from "thirdweb/react";
+import { useWallet } from "@/lib/wallet";
 import { getCurrencySymbol } from "@/lib/chains";
 
 export function useChainCurrency() {
-  const chain = useActiveWalletChain();
-  const chainId = chain?.id;
+  const chainId = useWallet().chainId ?? undefined;
   const symbol = getCurrencySymbol(chainId);
   const isHedera = chainId === 295 || chainId === 296;
 

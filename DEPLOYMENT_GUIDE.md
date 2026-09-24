@@ -385,8 +385,8 @@ FIREBASE_STORAGE_BUCKET=your-project.appspot.com
 FIREBASE_MESSAGING_SENDER_ID=123456789
 FIREBASE_APP_ID=1:123456789:web:abc123
 
-# Thirdweb
-NEXT_PUBLIC_THIRDWEB_CLIENT_ID=your-thirdweb-client-id
+# WalletConnect / Reown
+NEXT_PUBLIC_REOWN_PROJECT_ID=your-reown-project-id
 
 # Platform admin wallets (comma-separated)
 PLATFORM_ADMIN_WALLETS=0x1234...abcd,0x5678...efgh

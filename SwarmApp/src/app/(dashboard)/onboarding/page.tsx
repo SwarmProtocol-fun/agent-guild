@@ -6,12 +6,12 @@ import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useOrg } from '@/contexts/OrgContext';
-import { useActiveWallet } from 'thirdweb/react';
+import { useDisconnectWallet } from "@/lib/wallet";
 
 export default function OnboardingPage() {
   const router = useRouter();
   const { createOrg, refreshOrgs } = useOrg();
-  const wallet = useActiveWallet();
+  const disconnectWallet = useDisconnectWallet();
   const [activeTab, setActiveTab] = useState<'create' | 'join'>('create');
   
   // Create state
@@ -173,7 +173,7 @@ export default function OnboardingPage() {
             </button>
             <span className="text-muted-foreground/30">•</span>
             <button
-              onClick={() => { wallet?.disconnect(); router.push('/'); }}
+              onClick={() => { disconnectWallet(); router.push('/'); }}
               className="text-xs text-red-500/70 hover:text-red-500 transition-colors"
             >
               Disconnect Wallet

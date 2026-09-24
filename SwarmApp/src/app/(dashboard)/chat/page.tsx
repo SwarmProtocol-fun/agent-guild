@@ -14,7 +14,7 @@ import {
   formatFileSize,
 } from "@/lib/storage";
 import type { Attachment } from "@/lib/firestore";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useAuthAddress } from "@/hooks/useAuthAddress";
 import { useOrg } from "@/contexts/OrgContext";
 import {
@@ -138,7 +138,7 @@ function applyOrder(channels: Channel[], savedIds: string[] | undefined): Channe
 /* ------------------------------------------------------------------ */
 
 export default function ChatPage() {
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const authAddress = useAuthAddress();
   const address = account?.address || authAddress;
   const { currentOrg } = useOrg();

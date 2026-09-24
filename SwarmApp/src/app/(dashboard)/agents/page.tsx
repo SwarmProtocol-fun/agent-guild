@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { createAgent, updateAgent, deleteAgent, getTasksByOrg, getJobsByOrg, type Agent, type Task, type Job } from "@/lib/firestore";
 
 /** Hash an API key with SHA-256 for secure storage (Web Crypto API for client-side). */
@@ -314,7 +314,7 @@ export default function AgentsPage() {
   const [showRegister, setShowRegister] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const { currentOrg } = useOrg();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const { registerAgent: registerOnChain } = useSwarmWrite();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [allTasks, setAllTasks] = useState<Task[]>([]);

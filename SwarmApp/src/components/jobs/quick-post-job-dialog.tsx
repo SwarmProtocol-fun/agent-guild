@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 // import { Checkbox } from "@/components/ui/checkbox";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { createJob } from "@/lib/firestore";
 import { Plus, Zap } from "lucide-react";
 
@@ -23,7 +23,7 @@ interface QuickPostJobDialogProps {
 
 export function QuickPostJobDialog({ onJobCreated }: QuickPostJobDialogProps) {
   const { currentOrg } = useOrg();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
 
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");

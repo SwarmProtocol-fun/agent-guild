@@ -16,7 +16,7 @@ import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import ShinyText from "@/components/reactbits/ShinyText";
 import DecryptedText from "@/components/reactbits/DecryptedText";
 import { VitalsWidget } from "@/components/vitals-widget";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 import { GripVertical, RotateCcw, Plus, X, Check, FolderKanban, Bot, Target, CheckCircle2, Briefcase, ListTodo, BarChart3, Handshake, Users, Loader2, Pencil, Wifi, WifiOff, Zap, TrendingUp, Clock } from "lucide-react";
 import {
@@ -339,7 +339,7 @@ function getColSpanClass(cols: number, isStat: boolean) {
 export default function DashboardPage() {
   const { currentOrg } = useOrg();
   const currencySymbol = "$";
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const { address: sessionAddress, authenticated } = useSession();
   const userAddress = account?.address || sessionAddress || "";
   const [stats, setStats] = useState<OrgStats | null>(null);

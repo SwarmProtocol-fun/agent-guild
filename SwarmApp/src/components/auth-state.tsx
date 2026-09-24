@@ -4,10 +4,7 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
-import { ConnectButton } from 'thirdweb/react';
-import { thirdwebClient } from '@/lib/thirdweb-client';
-import { WALLET_CHAINS, DEFAULT_CHAIN } from '@/lib/chains';
-import { swarmWallets } from '@/lib/wallets';
+import { ConnectWalletButton } from "@/lib/wallet";
 import {
   WifiOff,
   LogOut,
@@ -17,7 +14,6 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useThirdwebAuth } from '@/hooks/useThirdwebAuth';
 
 export type AuthPhase =
   | 'initializing'
@@ -89,7 +85,6 @@ function ReconnectingState() {
 }
 
 function DisconnectedState() {
-  const authConfig = useThirdwebAuth();
   return (
     <>
       <div className="p-3 rounded-full bg-muted">
@@ -101,7 +96,7 @@ function DisconnectedState() {
           Your wallet was disconnected.
         </p>
       </div>
-      <ConnectButton client={thirdwebClient} wallets={swarmWallets} chain={DEFAULT_CHAIN} chains={WALLET_CHAINS} />
+      <ConnectWalletButton />
       <Link
         href="/"
         className="text-xs text-muted-foreground hover:text-foreground transition-colors"

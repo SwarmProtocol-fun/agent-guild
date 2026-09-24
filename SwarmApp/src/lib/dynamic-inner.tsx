@@ -1,30 +1,8 @@
 /** Dynamic Inner — Internal component loaded by the dynamic wrapper after code splitting.
- *  Includes AutoConnect to handle OAuth redirect callbacks (Google, Apple, etc.)
- *  so the in-app wallet connection completes after the redirect. */
+ *  Mounts the active wallet adapter's provider (see src/lib/wallet). */
 'use client';
-import { ThirdwebProvider, AutoConnect } from 'thirdweb/react';
-import { thirdwebClient } from '@/lib/thirdweb-client';
-import { swarmWallets } from '@/lib/wallets';
-import { debug } from '@/lib/debug';
-import type { Wallet } from 'thirdweb/wallets';
+import { WalletProvider } from '@/lib/wallet';
 
 export function Web3ProviderInner({ children }: { children: React.ReactNode }) {
-  if (!thirdwebClient) {
-    // No thirdweb client configured — render children without wallet connect
-    return <>{children}</>;
-  }
-
-  return (
-    <ThirdwebProvider>
-      <AutoConnect
-        client={thirdwebClient}
-        wallets={swarmWallets}
-        timeout={15000}
-        onConnect={(wallet: Wallet) => {
-          debug.log("[Swarm:AutoConnect] Wallet connected!", wallet.id);
-        }}
-      />
-      {children}
-    </ThirdwebProvider>
-  );
+  return <WalletProvider>{children}</WalletProvider>;
 }
