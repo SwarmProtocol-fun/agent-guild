@@ -20,6 +20,7 @@ import {
   saveRiskProfile,
 } from "@/lib/fraud-detection";
 import { computeRiskProfile } from "@/lib/fraud-risk-scoring";
+import { createPenaltyProposal, emitPenalty } from "@/lib/mod-stubs";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 

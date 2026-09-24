@@ -15,6 +15,7 @@
 import { NextRequest } from "next/server";
 import { requirePlatformAdminOrAgent, unauthorized } from "@/lib/auth-guard";
 import { simulateScore } from "@/lib/credit-service";
+import type { ScoreEvent } from "@/lib/credit-types";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 // [swarm-core] Hedera type removed — install swarm-hedera mod
 

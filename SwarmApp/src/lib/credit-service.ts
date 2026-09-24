@@ -11,10 +11,20 @@
  *   - firebase.ts: Firestore db
  */
 
-import { db } from "@/lib/firebase";
-// [swarm-core] Hedera HCS removed — install swarm-hedera mod
-type ScoreEvent = { agentId: string; delta: number; reason: string; timestamp: number };
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
+import {
+    getScoreBand,
+    getDefaultPolicy,
+    type ScoreBandInfo,
+    type PolicyState,
+} from "@/lib/credit-scoring";
+import type { ScoreEvent } from "@/lib/credit-types";
 import { getCached, setCache } from "@/lib/credit-cache";
+
+// [swarm-core] Hedera HCS removed — install swarm-hedera mod.
+// No reputation topic is configured in core, so HCS history is always empty.
+const getReputationTopicId = (): string | null => null;
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -219,12 +229,11 @@ function timestampToString(ts: unknown): string | null {
  * Get a complete credit profile for an agent by ID.
  */
 export async function getCreditProfile(agentId: string): Promise<CreditProfile | null> {
-    const agentRef = doc(db, "agents", agentId);
-    const agentSnap = await getDoc(agentRef);
+    const agentSnap = await adminDb().collection("agents").doc(agentId).get();
 
-    if (!agentSnap.exists()) return null;
+    if (!agentSnap.exists) return null;
 
-    const data = agentSnap.data();
+    const data = agentSnap.data()!;
     const creditScore = (data.creditScore as number) ?? DEFAULT_CREDIT_SCORE;
     const trustScore = (data.trustScore as number) ?? DEFAULT_TRUST_SCORE;
 
@@ -247,8 +256,7 @@ export async function getCreditProfile(agentId: string): Promise<CreditProfile |
  * Get a credit profile by ASN.
  */
 export async function getCreditProfileByAsn(asn: string): Promise<CreditProfile | null> {
-    const q = query(collection(db, "agents"), where("asn", "==", asn));
-    const snap = await getDocs(q);
+    const snap = await adminDb().collection("agents").where("asn", "==", asn).limit(1).get();
 
     if (snap.empty) return null;
 
@@ -470,14 +478,14 @@ export async function getPolicyTier(agentId: string): Promise<PolicyTierResult |
  * Updates Firestore with the recomputed score.
  */
 export async function recomputeScore(agentId: string): Promise<RecomputeResult> {
-    const agentRef = doc(db, "agents", agentId);
-    const agentSnap = await getDoc(agentRef);
+    const agentRef = adminDb().collection("agents").doc(agentId);
+    const agentSnap = await agentRef.get();
 
-    if (!agentSnap.exists()) {
+    if (!agentSnap.exists) {
         throw new Error("Agent not found");
     }
 
-    const data = agentSnap.data();
+    const data = agentSnap.data()!;
     const asn = data.asn as string;
     if (!asn) {
         throw new Error("Agent does not have an ASN — cannot recompute from HCS");
@@ -488,13 +496,17 @@ export async function recomputeScore(agentId: string): Promise<RecomputeResult> 
 
     // Fetch all events and replay
     const { events } = await fetchHCSEventsForASN(asn, 1000);
+    if (events.length === 0) {
+        // Replaying zero events would reset the agent to the baseline score.
+        throw new Error("No HCS events available (reputation topic not configured) — refusing to overwrite score");
+    }
     const { finalCredit, finalTrust } = buildScoreTimeline(events);
 
     // Update Firestore
-    await updateDoc(agentRef, {
+    await agentRef.update({
         creditScore: finalCredit,
         trustScore: finalTrust,
-        lastCreditUpdate: serverTimestamp(),
+        lastCreditUpdate: FieldValue.serverTimestamp(),
         lastCreditReason: `Recomputed from ${events.length} HCS events`,
     });
 

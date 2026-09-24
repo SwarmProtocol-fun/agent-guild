@@ -17,7 +17,7 @@ import { SOURCE_EVENT_MAP } from "./types";
 import { validateCreditEvent, computeIdempotencyKey } from "./validation";
 import { isDuplicate, storeCreditEvent } from "./store";
 // [swarm-core] Hedera HCS removed — install swarm-hedera mod
-type ScoreEvent = { agentId: string; delta: number; reason: string; timestamp: number };
+import type { ScoreEvent } from "@/lib/credit-types";
 const isHCSConfigured = () => false;
 const submitScoreEvent = async (..._args: unknown[]) => ({});
 

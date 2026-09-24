@@ -34,7 +34,7 @@ import {
     serverTimestamp,
 } from "firebase/firestore";
 // [swarm-core] Hedera removed
-type ScoreEvent = { agentId: string; delta: number; reason: string; timestamp: number };
+import type { ScoreEvent } from "@/lib/credit-types";
 import { getScoreBand, type ScoreBand } from "./credit-scoring";
 
 // ═══════════════════════════════════════════════════════════════

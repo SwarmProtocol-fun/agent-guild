@@ -8,9 +8,18 @@
 import { db } from "@/lib/firebase";
 import { collection, doc, getDoc } from "firebase/firestore";
 // [swarm-core] Storage and Hedera removed
-const retrieveContent = async () => null;
+const retrieveContent = async (_cid: string): Promise<Response> => {
+    throw new Error("Storage mod not installed");
+};
 const isStorageConfigured = () => false;
-const getAgentNFTIdentity = async (_id: string) => null;
+const getAgentNFTIdentity = async (
+    _walletAddress: string,
+): Promise<{
+    creditScore?: number;
+    trustScore?: number;
+    tier?: "Bronze" | "Silver" | "Gold" | "Platinum";
+    hasNFT?: boolean;
+} | null> => null;
 
 export interface AutoRestoreResult {
     restored: boolean;

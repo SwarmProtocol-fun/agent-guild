@@ -19,6 +19,7 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { emitAdminOverride } from "@/lib/mod-stubs";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 import { recordCreditOpsAudit } from "./audit";
 import type { CreditOpsOverride, OverrideType } from "./types";

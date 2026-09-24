@@ -8,10 +8,7 @@
  */
 
 import { adminDb } from "@/lib/firebase-admin";
-// [swarm-core] Hedera removed
-const emitPenalty = async (..._args: unknown[]) => ({});
-// [swarm-core] Hedera removed
-const createPenaltyProposal = async (..._args: unknown[]) => ({});
+import { emitPenalty, createPenaltyProposal } from "./mod-stubs";
 import { updateSignalStatus, type RiskSignal, type RiskSignalType, type FraudDetectionConfig } from "./fraud-detection";
 import { computeRiskTier } from "./fraud-risk-scoring";
 import { logActivity } from "./activity";
