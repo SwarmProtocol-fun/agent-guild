@@ -2,6 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import { requirePlatformAdmin } from "../auth-guard";
 
+// auth-guard reads PLATFORM_ADMIN_WALLETS once at module load, so the env var
+// must be set before the import above is evaluated.
+vi.hoisted(() => {
+  process.env.PLATFORM_ADMIN_WALLETS = "0x723708273e811a07d90d2e81e799b9Ab27F0B549";
+});
+
 // Mock the imports that auth-guard pulls in (Firestore, verify, etc.)
 vi.mock("@/app/api/v1/verify", () => ({
   verifyAgentRequest: vi.fn(),
@@ -33,7 +39,7 @@ describe("requirePlatformAdmin", () => {
     expect(requirePlatformAdmin(req)).toEqual({ ok: true });
   });
 
-  it("grants access when x-wallet-address matches hardcoded admin", () => {
+  it("grants access when x-wallet-address is listed in PLATFORM_ADMIN_WALLETS", () => {
     const req = makeRequest({
       "x-wallet-address": "0x723708273e811a07d90d2e81e799b9Ab27F0B549",
     });
