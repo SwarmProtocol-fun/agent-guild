@@ -77,7 +77,7 @@ If you want any of these back, install the corresponding mod (or write your own)
 
 Swarm Core is designed to be extended via **mods** — sandboxed packages that plug into well-defined integration points (sidebar, API, agent skills, marketplace).
 
-A mod is just a directory with a `swarm.mod.json` manifest declaring its capabilities, permissions, and UI surfaces. See [`docs/creating-mods.md`](docs/creating-mods.md) and [`SWARM_INTEGRATION_SPECS.md`](SWARM_INTEGRATION_SPECS.md) for the spec.
+A mod is a directory in `SwarmApp/mods/` with a `swarm.mod.json` manifest and optional `server.ts` / `client.tsx` entries. Core is the workspace; mods add panels, API routes and event handlers through the versioned `@swarm/sdk`. Mods are trusted, in-process code (not a security sandbox). See [`docs/mod-sdk.md`](docs/mod-sdk.md); wallet providers are swappable adapters ([`docs/wallet-adapters.md`](docs/wallet-adapters.md)). Marketplace listings are a separate concept: [`docs/creating-mods.md`](docs/creating-mods.md).
 
 Official mods (separate repos):
 
@@ -99,7 +99,7 @@ Official mods (separate repos):
 │  SwarmApp (Next.js)                                     │
 │  ├─ Office UI ── Workspace, kanban, agents, market      │
 │  ├─ API routes ─ /api/v1/{agents,compute,credit,...}    │
-│  └─ Mod loader ─ swarm.mod.json discovery + sandboxing  │
+│  └─ Mod runtime ─ swarm.mod.json discovery, routes, events  │
 └────────────┬────────────────────────────────────────────┘
              │
        ┌─────┴──────┬─────────────┬────────────┐
@@ -121,7 +121,8 @@ Official mods (separate repos):
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — Common issues
 - [`GOVERNANCE.md`](GOVERNANCE.md) — Project governance model
 - [`SECURITY.md`](SECURITY.md) — Security policy & disclosure
-- [`docs/creating-mods.md`](docs/creating-mods.md) — Build your own mod
+- [`docs/mod-sdk.md`](docs/mod-sdk.md) — Build your own mod (code)
+- [`docs/creating-mods.md`](docs/creating-mods.md) — Marketplace mod listings
 
 ---
 

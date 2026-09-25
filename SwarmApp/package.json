@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "mods:sync": "node scripts/sync-mods.mjs",
+    "predev": "node scripts/sync-mods.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/sync-mods.mjs --strict",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

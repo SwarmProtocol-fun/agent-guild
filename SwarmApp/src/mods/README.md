@@ -1,3 +1,5 @@
+> **Note:** installable runtime mods now live in `SwarmApp/mods/` and are documented in [`docs/mod-sdk.md`](../../../docs/mod-sdk.md). This directory holds legacy reskin/theme material.
+
 # Swarm Mods
 
 This directory contains all first-party mods organized for eventual extraction into standalone repositories.

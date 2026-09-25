@@ -17,6 +17,7 @@ import { getCachedOrgs, cacheOrgs } from "@/lib/org-cache";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit-firestore";
 import { verifySiwePayload, getDomainFromRequest } from "@/lib/auth/siwe";
 import { recordLogin } from "@/lib/platform-analytics";
+import { emitEvent } from "@/lib/mods/runtime";
 
 export async function POST(req: Request) {
   try {
@@ -180,6 +181,9 @@ export async function POST(req: Request) {
     recordLogin(address, role, sessionId, req).catch((err) => {
       console.warn("[auth/verify] analytics recordLogin error:", err);
     });
+
+    // 6. Let mods react to the login (non-blocking; mod errors are contained)
+    emitEvent("auth.login", { address, role }).catch(() => {});
 
     return Response.json({
       success: true,

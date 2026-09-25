@@ -25,6 +25,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      '@swarm/sdk': path.resolve(__dirname, './src/lib/mods/sdk.ts'),
     },
   },
 });
