@@ -12,17 +12,8 @@
  * they are recording.
  */
 
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  addDoc,
-  serverTimestamp,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  getDocs,
-} from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 
 const AUDIT_COLLECTION = "gatewayAuditLog";
 
@@ -62,9 +53,9 @@ export async function logAudit(
   entry: Omit<AuditEntry, "id" | "timestamp">,
 ): Promise<void> {
   try {
-    await addDoc(collection(db, AUDIT_COLLECTION), {
+    await adminDb().collection(AUDIT_COLLECTION).add({
       ...entry,
-      timestamp: serverTimestamp(),
+      timestamp: FieldValue.serverTimestamp(),
     });
   } catch (err) {
     console.error("[audit] Failed to log:", err);
@@ -84,13 +75,9 @@ export async function getAuditLog(
   targetId?: string,
   max = 100,
 ): Promise<AuditEntry[]> {
-  const constraints = [
-    where("orgId", "==", orgId),
-    ...(targetId ? [where("targetId", "==", targetId)] : []),
-    orderBy("timestamp", "desc"),
-    firestoreLimit(max),
-  ];
-  const q = query(collection(db, AUDIT_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(AUDIT_COLLECTION).where("orgId", "==", orgId);
+  if (targetId) q = q.where("targetId", "==", targetId);
+  q = q.orderBy("timestamp", "desc").limit(max);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as AuditEntry);
 }

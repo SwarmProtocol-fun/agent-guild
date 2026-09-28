@@ -89,14 +89,18 @@ export function WorkflowRunsTab({ workflowId, orgId }: WorkflowRunsTabProps) {
     fetchRuns();
   }, [fetchRuns]);
 
-  // Auto-refresh when there are active runs
+  // Auto-refresh when there are active runs. Skip ticks while the tab is in
+  // the background — a run left running unattended shouldn't keep the list
+  // refetching every 5s until someone looks at it again.
   useEffect(() => {
     const hasActive = runs.some(
       (r) => r.status === "running" || r.status === "pending",
     );
     if (!hasActive) return;
 
-    const interval = setInterval(fetchRuns, 5000);
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") fetchRuns();
+    }, 5000);
     return () => clearInterval(interval);
   }, [runs, fetchRuns]);
 

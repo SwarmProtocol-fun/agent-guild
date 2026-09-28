@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import { CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import DecryptedText from "@/components/reactbits/DecryptedText";
@@ -32,29 +32,16 @@ interface UsageData {
 }
 
 export function UsageWidget() {
-    const [data, setData] = useState<UsageData | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-
-    const fetchUsage = async () => {
-        try {
+    const { data, isLoading: loading, error } = useQuery<UsageData, Error>({
+        queryKey: ["usage"],
+        queryFn: async () => {
             const res = await fetch("/api/usage");
             if (!res.ok) throw new Error("Failed to fetch usage data");
-            const json = await res.json();
-            setData(json);
-            setError(null);
-        } catch (err: any) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchUsage();
-        const interval = setInterval(fetchUsage, 10000); // refresh every 10s
-        return () => clearInterval(interval);
-    }, []);
+            return res.json();
+        },
+        refetchInterval: 10000,
+        refetchIntervalInBackground: false,
+    });
 
     if (loading && !data) {
         return (
@@ -82,7 +69,7 @@ export function UsageWidget() {
                     </CardTitle>
                 </CardHeader>
                 <CardContent className="h-40 flex items-center justify-center text-red-400 text-sm">
-                    {error || "Failed to load"}
+                    {error?.message || "Failed to load"}
                 </CardContent>
             </SpotlightCard>
         );

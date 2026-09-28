@@ -5,20 +5,8 @@
  * Enables agents to send/receive messages across all platforms.
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDoc,
-  getDocs,
-  setDoc,
-  updateDoc,
-  deleteField,
-  query,
-  where,
-  serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { encryptValue, decryptValue } from "./secrets";
 
 // ═══════════════════════════════════════════════════════════════
@@ -93,13 +81,13 @@ export async function createPlatformConnection(
   // Encrypt credentials before storage (AES-256-GCM)
   const { encryptedValue, iv } = encryptValue(credentials, orgId, masterSecret);
 
-  const ref = await addDoc(collection(db, "platformConnections"), {
+  const ref = await adminDb().collection("platformConnections").add({
     orgId,
     platform,
     credentials: encryptedValue,
     credentialsIV: iv,
     webhookUrl: "",
-    connectedAt: serverTimestamp(),
+    connectedAt: FieldValue.serverTimestamp(),
     active: true,
     metadata: metadata || {},
   });
@@ -111,14 +99,12 @@ export async function getPlatformConnection(
   platform: "telegram" | "discord" | "slack",
   masterSecret: string
 ): Promise<PlatformConnection | null> {
-  const q = query(
-    collection(db, "platformConnections"),
-    where("orgId", "==", orgId),
-    where("platform", "==", platform),
-    where("active", "==", true)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("platformConnections")
+    .where("orgId", "==", orgId)
+    .where("platform", "==", platform)
+    .where("active", "==", true)
+    .get();
   if (snap.empty) return null;
 
   const doc = snap.docs[0];
@@ -149,13 +135,11 @@ export async function getAllPlatformConnections(
   orgId: string,
   masterSecret: string
 ): Promise<PlatformConnection[]> {
-  const q = query(
-    collection(db, "platformConnections"),
-    where("orgId", "==", orgId),
-    where("active", "==", true)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("platformConnections")
+    .where("orgId", "==", orgId)
+    .where("active", "==", true)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
 
@@ -188,13 +172,11 @@ export async function getAllPlatformConnections(
 export async function listPlatformConnections(
   orgId: string
 ): Promise<Omit<PlatformConnection, "credentials" | "credentialsIV">[]> {
-  const q = query(
-    collection(db, "platformConnections"),
-    where("orgId", "==", orgId),
-    where("active", "==", true)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("platformConnections")
+    .where("orgId", "==", orgId)
+    .where("active", "==", true)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -210,8 +192,7 @@ export async function listPlatformConnections(
 }
 
 export async function deactivatePlatformConnection(connectionId: string): Promise<void> {
-  await setDoc(
-    doc(db, "platformConnections", connectionId),
+  await adminDb().collection("platformConnections").doc(connectionId).set(
     { active: false },
     { merge: true }
   );
@@ -228,18 +209,17 @@ export async function bridgeChannel(
   platformChannelId: string,
   platformMetadata?: Record<string, unknown>
 ): Promise<string> {
-  const ref = await addDoc(collection(db, "bridgedChannels"), {
+  const ref = await adminDb().collection("bridgedChannels").add({
     orgId,
     swarmChannelId,
     platformType,
     platformChannelId,
     platformMetadata: platformMetadata || {},
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   // Update Swarm channel to indicate it's bridged
-  await setDoc(
-    doc(db, "channels", swarmChannelId),
+  await adminDb().collection("channels").doc(swarmChannelId).set(
     {
       platformType,
       platformChannelId,
@@ -254,12 +234,10 @@ export async function bridgeChannel(
 export async function getBridgedChannel(
   swarmChannelId: string
 ): Promise<BridgedChannel | null> {
-  const q = query(
-    collection(db, "bridgedChannels"),
-    where("swarmChannelId", "==", swarmChannelId)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("bridgedChannels")
+    .where("swarmChannelId", "==", swarmChannelId)
+    .get();
   if (snap.empty) return null;
 
   const d = snap.docs[0];
@@ -279,13 +257,11 @@ export async function getBridgedChannelByPlatform(
   platform: PlatformType,
   platformChannelId: string
 ): Promise<BridgedChannel | null> {
-  const q = query(
-    collection(db, "bridgedChannels"),
-    where("platformType", "==", platform),
-    where("platformChannelId", "==", platformChannelId)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("bridgedChannels")
+    .where("platformType", "==", platform)
+    .where("platformChannelId", "==", platformChannelId)
+    .get();
   if (snap.empty) return null;
 
   const d = snap.docs[0];
@@ -303,22 +279,19 @@ export async function getBridgedChannelByPlatform(
 
 export async function unbridgeChannel(bridgeId: string): Promise<void> {
   // Get the bridge record to find the Swarm channel ID
-  const bridgeDoc = await getDoc(doc(db, "bridgedChannels", bridgeId));
-  const bridgeData = bridgeDoc.exists() ? bridgeDoc.data() : null;
+  const bridgeRef = adminDb().collection("bridgedChannels").doc(bridgeId);
+  const bridgeDoc = await bridgeRef.get();
+  const bridgeData = bridgeDoc.exists ? bridgeDoc.data() : null;
 
   // Deactivate the bridge
-  await setDoc(
-    doc(db, "bridgedChannels", bridgeId),
-    { active: false },
-    { merge: true }
-  );
+  await bridgeRef.set({ active: false }, { merge: true });
 
   // Clear platform fields from the Swarm channel
   if (bridgeData?.swarmChannelId) {
-    await updateDoc(doc(db, "channels", bridgeData.swarmChannelId), {
-      platformType: deleteField(),
-      platformChannelId: deleteField(),
-      platformMetadata: deleteField(),
+    await adminDb().collection("channels").doc(bridgeData.swarmChannelId).update({
+      platformType: FieldValue.delete(),
+      platformChannelId: FieldValue.delete(),
+      platformMetadata: FieldValue.delete(),
     });
   }
 }
@@ -338,7 +311,7 @@ export async function logBridgedMessage(
   swarmMessageId?: string,
   attachments?: Array<{ url: string; type: string; name: string }>
 ): Promise<string> {
-  const ref = await addDoc(collection(db, "bridgedMessages"), {
+  const ref = await adminDb().collection("bridgedMessages").add({
     swarmMessageId: swarmMessageId || null,
     platformMessageId,
     channelId,
@@ -348,7 +321,7 @@ export async function logBridgedMessage(
     content,
     attachments: attachments || [],
     direction,
-    timestamp: serverTimestamp(),
+    timestamp: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }

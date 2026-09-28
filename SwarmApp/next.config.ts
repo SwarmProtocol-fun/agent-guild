@@ -22,6 +22,11 @@ const nextConfig: NextConfig = {
   },
   // Disable source maps in production to reduce memory during build.
   productionBrowserSourceMaps: false,
+  // Tree-shake per-icon/per-component instead of pulling in the whole module
+  // graph — lucide-react alone is imported in 140+ files.
+  experimental: {
+    optimizePackageImports: ["lucide-react", "recharts"],
+  },
   // Pin Turbopack root to this project directory so it doesn't infer
   // /home/god and exceed the OS inotify watch limit.
   turbopack: {

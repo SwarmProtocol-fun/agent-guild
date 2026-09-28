@@ -7,19 +7,8 @@
  * Guiding principle: "Anyone can submit. Not everyone gets distribution."
  */
 
-import {
-    doc,
-    getDoc,
-    setDoc,
-    updateDoc,
-    getDocs,
-    query,
-    collection,
-    where,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { checkRateLimit } from "./rate-limit-firestore";
 import { scanForSecrets, hasCriticalSecrets } from "./secret-scanner";
 import type { MarketItemType, PermissionScope } from "./skills";
@@ -54,11 +43,11 @@ export async function getOrCreatePublisher(
     wallet: string,
     displayName?: string,
 ): Promise<PublisherProfile> {
-    const ref = doc(db, PUBLISHER_COLLECTION, wallet);
-    const snap = await getDoc(ref);
+    const ref = adminDb().collection(PUBLISHER_COLLECTION).doc(wallet);
+    const snap = await ref.get();
 
-    if (snap.exists()) {
-        const data = snap.data();
+    if (snap.exists) {
+        const data = snap.data()!;
         return {
             id: snap.id,
             walletAddress: data.walletAddress,
@@ -96,10 +85,10 @@ export async function getOrCreatePublisher(
         updatedAt: null,
     };
 
-    await setDoc(ref, {
+    await ref.set({
         ...profile,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
     });
 
     return { id: wallet, ...profile };
@@ -110,9 +99,10 @@ export async function updatePublisherStats(wallet: string): Promise<PublisherPro
     const profile = await getOrCreatePublisher(wallet);
 
     // Count community items
-    const communitySnap = await getDocs(
-        query(collection(db, "communityMarketItems"), where("submittedBy", "==", wallet)),
-    );
+    const communitySnap = await adminDb()
+        .collection("communityMarketItems")
+        .where("submittedBy", "==", wallet)
+        .get();
     let approved = 0;
     let rejected = 0;
     let total = communitySnap.size;
@@ -124,9 +114,10 @@ export async function updatePublisherStats(wallet: string): Promise<PublisherPro
     });
 
     // Count agent packages
-    const agentSnap = await getDocs(
-        query(collection(db, "marketplaceAgents"), where("authorWallet", "==", wallet)),
-    );
+    const agentSnap = await adminDb()
+        .collection("marketplaceAgents")
+        .where("authorWallet", "==", wallet)
+        .get();
     total += agentSnap.size;
     let totalInstalls = 0;
     let ratingSum = 0;
@@ -146,15 +137,15 @@ export async function updatePublisherStats(wallet: string): Promise<PublisherPro
     const avgRating = ratingCount > 0 ? ratingSum / ratingCount : 0;
     const newTier = computeTier({ ...profile, approvedCount: approved, avgRating, totalInstalls });
 
-    const ref = doc(db, PUBLISHER_COLLECTION, wallet);
-    await updateDoc(ref, {
+    const ref = adminDb().collection(PUBLISHER_COLLECTION).doc(wallet);
+    await ref.update({
         totalSubmissions: total,
         approvedCount: approved,
         rejectedCount: rejected,
         avgRating,
         totalInstalls,
         tier: newTier,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
     });
 
     return {
@@ -296,9 +287,10 @@ export async function runIntakeValidation(
 
     // 4. Duplicate name check (exact match, case-insensitive)
     const normalizedName = itemName.toLowerCase().trim().replace(/\s+/g, " ");
-    const existingSnap = await getDocs(
-        query(collection(db, "communityMarketItems"), where("status", "==", "approved")),
-    );
+    const existingSnap = await adminDb()
+        .collection("communityMarketItems")
+        .where("status", "==", "approved")
+        .get();
     for (const d of existingSnap.docs) {
         const existing = d.data().name as string;
         if (existing && existing.toLowerCase().trim().replace(/\s+/g, " ") === normalizedName) {
@@ -315,14 +307,14 @@ export async function recordSubmission(wallet: string): Promise<void> {
     const publisher = await getOrCreatePublisher(wallet);
     const tierConfig = TIER_QUOTAS[publisher.tier] || TIER_QUOTAS[0];
 
-    const ref = doc(db, PUBLISHER_COLLECTION, wallet);
-    await updateDoc(ref, {
-        lastSubmissionAt: serverTimestamp(),
+    const ref = adminDb().collection(PUBLISHER_COLLECTION).doc(wallet);
+    await ref.update({
+        lastSubmissionAt: FieldValue.serverTimestamp(),
         cooldownUntil: tierConfig.cooldownMs > 0
             ? Timestamp.fromMillis(Date.now() + tierConfig.cooldownMs)
             : null,
         totalSubmissions: (publisher.totalSubmissions || 0) + 1,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
     });
 }
 

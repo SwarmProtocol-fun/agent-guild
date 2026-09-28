@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useOrg } from "@/contexts/OrgContext";
 import type { Workspace, UsageSummary } from "@/lib/compute/types";
 import { SIZE_PRESETS, type SizeKey } from "@/lib/compute/types";
-import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/billing";
+import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/pricing";
 import { UsageChart } from "@/components/compute/usage-chart";
 
 export default function UsagePage() {

@@ -5,19 +5,8 @@
  * Deduplication, flexible querying, and replay support.
  */
 
-import {
-  collection,
-  addDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  Timestamp,
-  type QueryConstraint,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
 import type {
   CreditEvent,
   CreditEventInput,
@@ -40,9 +29,10 @@ const CREDIT_EVENTS_COLLECTION = "creditEvents";
  * Pattern from hedera-slashing.ts checkIfAlreadySlashed().
  */
 export async function isDuplicate(idempotencyKey: string): Promise<boolean> {
-  const ref = collection(db, CREDIT_EVENTS_COLLECTION);
-  const q = query(ref, where("idempotencyKey", "==", idempotencyKey));
-  const snapshot = await getDocs(q);
+  const snapshot = await adminDb()
+    .collection(CREDIT_EVENTS_COLLECTION)
+    .where("idempotencyKey", "==", idempotencyKey)
+    .get();
   return !snapshot.empty;
 }
 
@@ -60,10 +50,10 @@ export async function storeCreditEvent(event: CreditEventInput): Promise<string>
     event.source.sourceEventId,
   );
 
-  const ref = await addDoc(collection(db, CREDIT_EVENTS_COLLECTION), {
+  const ref = await adminDb().collection(CREDIT_EVENTS_COLLECTION).add({
     ...event,
     idempotencyKey,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   return ref.id;
@@ -80,36 +70,34 @@ export async function storeCreditEvent(event: CreditEventInput): Promise<string>
 export async function queryCreditEvents(
   params: CreditEventQuery,
 ): Promise<CreditEvent[]> {
-  const constraints: QueryConstraint[] = [];
+  let q: Query = adminDb().collection(CREDIT_EVENTS_COLLECTION);
 
   if (params.agentId) {
-    constraints.push(where("agentId", "==", params.agentId));
+    q = q.where("agentId", "==", params.agentId);
   }
   if (params.asn) {
-    constraints.push(where("asn", "==", params.asn));
+    q = q.where("asn", "==", params.asn);
   }
   if (params.orgId) {
-    constraints.push(where("orgId", "==", params.orgId));
+    q = q.where("orgId", "==", params.orgId);
   }
   if (params.eventType) {
-    constraints.push(where("eventType", "==", params.eventType));
+    q = q.where("eventType", "==", params.eventType);
   }
   if (params.provenance) {
-    constraints.push(where("provenance", "==", params.provenance));
+    q = q.where("provenance", "==", params.provenance);
   }
   if (params.fromTimestamp) {
-    constraints.push(where("timestamp", ">=", params.fromTimestamp));
+    q = q.where("timestamp", ">=", params.fromTimestamp);
   }
   if (params.toTimestamp) {
-    constraints.push(where("timestamp", "<=", params.toTimestamp));
+    q = q.where("timestamp", "<=", params.toTimestamp);
   }
 
   const direction = params.orderDirection || "desc";
-  constraints.push(orderBy("timestamp", direction));
-  constraints.push(firestoreLimit(params.limit || 100));
+  q = q.orderBy("timestamp", direction).limit(params.limit || 100);
 
-  const q = query(collection(db, CREDIT_EVENTS_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
 
   return snap.docs.map((d) => {
     const data = d.data();

@@ -4,20 +4,8 @@
  * Inspired by abhi1693/openclaw-mission-control BoardGoalPanel.
  */
 
-import {
-    collection,
-    doc,
-    addDoc,
-    updateDoc,
-    deleteDoc,
-    getDocs,
-    query,
-    where,
-    orderBy,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -62,23 +50,17 @@ const GOALS_COLLECTION = "boardGoals";
 export async function createGoal(
     goal: Omit<BoardGoal, "id" | "createdAt">,
 ): Promise<string> {
-    const ref = await addDoc(collection(db, GOALS_COLLECTION), {
-        ...goal, createdAt: serverTimestamp(),
+    const ref = await adminDb().collection(GOALS_COLLECTION).add({
+        ...goal, createdAt: FieldValue.serverTimestamp(),
     });
     return ref.id;
 }
 
 export async function getGoals(orgId: string, projectId?: string): Promise<BoardGoal[]> {
-    let q;
-    if (projectId) {
-        q = query(collection(db, GOALS_COLLECTION),
-            where("orgId", "==", orgId), where("projectId", "==", projectId),
-            orderBy("createdAt", "desc"));
-    } else {
-        q = query(collection(db, GOALS_COLLECTION),
-            where("orgId", "==", orgId), orderBy("createdAt", "desc"));
-    }
-    const snap = await getDocs(q);
+    let q: Query = adminDb().collection(GOALS_COLLECTION).where("orgId", "==", orgId);
+    if (projectId) q = q.where("projectId", "==", projectId);
+    q = q.orderBy("createdAt", "desc");
+    const snap = await q.get();
     return snap.docs.map(d => {
         const data = d.data();
         return {
@@ -94,9 +76,9 @@ export async function getGoals(orgId: string, projectId?: string): Promise<Board
 
 export async function updateGoal(id: string, updates: Partial<BoardGoal>): Promise<void> {
     const { id: _id, createdAt, ...rest } = updates;
-    await updateDoc(doc(db, GOALS_COLLECTION, id), rest);
+    await adminDb().collection(GOALS_COLLECTION).doc(id).update(rest);
 }
 
 export async function deleteGoal(id: string): Promise<void> {
-    await deleteDoc(doc(db, GOALS_COLLECTION, id));
+    await adminDb().collection(GOALS_COLLECTION).doc(id).delete();
 }

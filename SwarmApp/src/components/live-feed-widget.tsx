@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import { CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -22,32 +23,26 @@ interface LogEvent {
 }
 
 export function LiveFeedWidget() {
-    const [events, setEvents] = useState<LogEvent[]>([]);
     const [paused, setPaused] = useState(false);
-    const [loading, setLoading] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
 
     const autoScroll = useRef(true);
 
-    const fetchLogs = async () => {
-        if (paused) return;
-        try {
-            // Only fetch the last 30 events to keep it lightweight
+    // Only fetch the last 30 events to keep it lightweight
+    const { data, isLoading: loading } = useQuery({
+        queryKey: ["live-feed"],
+        queryFn: async () => {
             const res = await fetch("/api/live-feed?limit=30");
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.events) {
-                setEvents(data.events.reverse()); // Show oldest first so newest is at the bottom
-            }
-        } catch (err) { }
-        finally { setLoading(false); }
-    };
-
-    useEffect(() => {
-        fetchLogs();
-        const interval = setInterval(fetchLogs, 3000);
-        return () => clearInterval(interval);
-    }, [paused]);
+            if (!res.ok) throw new Error("Failed to fetch live feed");
+            const json = await res.json();
+            return (json.events ?? []) as LogEvent[];
+        },
+        // Show oldest first so newest is at the bottom
+        select: (raw) => [...raw].reverse(),
+        refetchInterval: paused ? false : 3000,
+        refetchIntervalInBackground: false,
+    });
+    const events = data ?? [];
 
     useEffect(() => {
         if (autoScroll.current && scrollRef.current) {

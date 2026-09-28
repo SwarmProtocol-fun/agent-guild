@@ -5,21 +5,8 @@
  * automatically (slashing, anomaly detection) or manually by admins.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-  getCountFromServer,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import { recordCreditOpsAudit } from "./audit";
 import type {
   CreditOpsReviewItem,
@@ -46,9 +33,7 @@ async function getAgentScores(agentId: string): Promise<{
   trustScore: number;
 }> {
   // Try to look up the agent document
-  const agentsRef = collection(db, "agents");
-  const q = query(agentsRef, where("id", "==", agentId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection("agents").where("id", "==", agentId).get();
 
   if (snap.empty) {
     return { creditScore: 680, trustScore: 50 }; // defaults
@@ -96,9 +81,9 @@ export async function flagAgentForReview(params: {
     reviewHistory: [],
   };
 
-  const ref = await addDoc(collection(db, REVIEW_COLLECTION), {
+  const ref = await adminDb().collection(REVIEW_COLLECTION).add({
     ...item,
-    flaggedAt: serverTimestamp(),
+    flaggedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -128,23 +113,21 @@ export async function getReviewQueue(opts: {
   limit?: number;
   sort?: "newest" | "oldest" | "priority";
 }): Promise<CreditOpsReviewItem[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(REVIEW_COLLECTION);
 
   if (opts.status) {
-    constraints.push(where("status", "==", opts.status));
+    q = q.where("status", "==", opts.status);
   }
   if (opts.priority) {
-    constraints.push(where("priority", "==", opts.priority));
+    q = q.where("priority", "==", opts.priority);
   }
   if (opts.flagType) {
-    constraints.push(where("flagType", "==", opts.flagType));
+    q = q.where("flagType", "==", opts.flagType);
   }
 
-  constraints.push(orderBy("flaggedAt", opts.sort === "oldest" ? "asc" : "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("flaggedAt", opts.sort === "oldest" ? "asc" : "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, REVIEW_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
 
   return snap.docs.map((d) => ({
     id: d.id,
@@ -156,9 +139,8 @@ export async function getReviewQueue(opts: {
 export async function getReviewItem(
   itemId: string,
 ): Promise<CreditOpsReviewItem | null> {
-  const ref = doc(db, REVIEW_COLLECTION, itemId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(REVIEW_COLLECTION).doc(itemId).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as CreditOpsReviewItem;
 }
 
@@ -177,11 +159,11 @@ export async function updateReviewItem(
     resolution?: ReviewResolution;
   },
 ): Promise<void> {
-  const ref = doc(db, REVIEW_COLLECTION, itemId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Review item not found");
+  const ref = adminDb().collection(REVIEW_COLLECTION).doc(itemId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Review item not found");
 
-  const current = snap.data();
+  const current = snap.data()!;
   const reviewHistory: ReviewHistoryEntry[] = Array.isArray(
     current.reviewHistory,
   )
@@ -206,22 +188,22 @@ export async function updateReviewItem(
     case "start_review":
       updates.status = "in_review";
       updates.assignedTo = update.performedBy;
-      updates.reviewedAt = serverTimestamp();
+      updates.reviewedAt = FieldValue.serverTimestamp();
       break;
     case "resolve":
       updates.status = "resolved";
       updates.resolution = update.resolution || "no_action";
       updates.resolutionComment = update.comment || "";
-      updates.resolvedAt = serverTimestamp();
+      updates.resolvedAt = FieldValue.serverTimestamp();
       break;
     case "dismiss":
       updates.status = "dismissed";
       updates.resolutionComment = update.comment || "";
-      updates.resolvedAt = serverTimestamp();
+      updates.resolvedAt = FieldValue.serverTimestamp();
       break;
   }
 
-  await updateDoc(ref, updates);
+  await ref.update(updates);
 
   await recordCreditOpsAudit({
     action: `review.${update.action}`,
@@ -249,16 +231,11 @@ export async function getReviewQueueStats(): Promise<{
   byPriority: Record<ReviewPriority, number>;
   byFlagType: Record<ReviewFlagType, number>;
 }> {
+  const col = adminDb().collection(REVIEW_COLLECTION);
   const [pendingSnap, inReviewSnap, resolvedSnap] = await Promise.all([
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "==", "pending")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "==", "in_review")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "==", "resolved")),
-    ),
+    col.where("status", "==", "pending").count().get(),
+    col.where("status", "==", "in_review").count().get(),
+    col.where("status", "==", "resolved").count().get(),
   ]);
 
   const pending = pendingSnap.data().count;
@@ -266,38 +243,21 @@ export async function getReviewQueueStats(): Promise<{
   const resolved = resolvedSnap.data().count;
 
   // Priority breakdown (for active items only)
+  const activeCol = col.where("status", "in", ["pending", "in_review"]);
   const [lowSnap, medSnap, highSnap, critSnap] = await Promise.all([
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("priority", "==", "low")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("priority", "==", "medium")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("priority", "==", "high")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("priority", "==", "critical")),
-    ),
+    activeCol.where("priority", "==", "low").count().get(),
+    activeCol.where("priority", "==", "medium").count().get(),
+    activeCol.where("priority", "==", "high").count().get(),
+    activeCol.where("priority", "==", "critical").count().get(),
   ]);
 
   // Flag type breakdown (for active items)
   const [slashSnap, anomalySnap, fraudSnap, manualSnap, appealSnap] = await Promise.all([
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("flagType", "==", "slashing")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("flagType", "==", "anomaly")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("flagType", "==", "fraud")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("flagType", "==", "manual")),
-    ),
-    getCountFromServer(
-      query(collection(db, REVIEW_COLLECTION), where("status", "in", ["pending", "in_review"]), where("flagType", "==", "appeal_trigger")),
-    ),
+    activeCol.where("flagType", "==", "slashing").count().get(),
+    activeCol.where("flagType", "==", "anomaly").count().get(),
+    activeCol.where("flagType", "==", "fraud").count().get(),
+    activeCol.where("flagType", "==", "manual").count().get(),
+    activeCol.where("flagType", "==", "appeal_trigger").count().get(),
   ]);
 
   return {

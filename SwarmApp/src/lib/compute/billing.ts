@@ -8,13 +8,10 @@
 import type {
   SizeKey,
   Region,
-  ProviderKey,
   UsageSummary,
-  PricingSettings,
   ProfitabilitySummary,
   BillingLedgerEntry,
 } from "./types";
-import { PROVIDER_HOURLY_COSTS } from "./types";
 import {
   recordUsage,
   getUsage,
@@ -22,88 +19,13 @@ import {
   getAllLedgerEntries,
   getPricingSettings,
 } from "./firestore";
+import { resolveMarkupPercent, calculateCustomerPrice, estimateProviderHourlyCost } from "./pricing";
 
 // ═══════════════════════════════════════════════════════════════
 // Provider Cost Lookup (raw cost in cents per hour, per provider)
 // ═══════════════════════════════════════════════════════════════
 
 const STORAGE_COST_PER_GB_MONTH = 5; // $0.05/GB/month raw
-
-// ═══════════════════════════════════════════════════════════════
-// Markup Resolution
-// ═══════════════════════════════════════════════════════════════
-
-export function resolveMarkupPercent(
-  settings: PricingSettings,
-  sizeKey: SizeKey,
-  region: Region,
-  provider: string,
-): number {
-  // Check promo override first (if not expired)
-  if (settings.promoOverride) {
-    const expires = settings.promoOverride.expiresAt;
-    if (!expires || expires.getTime() > Date.now()) {
-      return settings.promoOverride.percent;
-    }
-  }
-
-  // Provider-specific override
-  if (settings.providerOverrides[provider] !== undefined) {
-    return settings.providerOverrides[provider];
-  }
-
-  // Size-specific override
-  if (settings.sizeOverrides[sizeKey] !== undefined) {
-    return settings.sizeOverrides[sizeKey]!;
-  }
-
-  // Region-specific override
-  if (settings.regionOverrides[region] !== undefined) {
-    return settings.regionOverrides[region]!;
-  }
-
-  return settings.defaultMarkupPercent;
-}
-
-export function calculateCustomerPrice(
-  providerCostCents: number,
-  markupPercent: number,
-  minimumFloorCents: number,
-): { customerPriceCents: number; platformProfitCents: number } {
-  const rawPrice = Math.ceil(providerCostCents * (1 + markupPercent / 100));
-  const customerPriceCents = Math.max(rawPrice, minimumFloorCents);
-  return {
-    customerPriceCents,
-    platformProfitCents: customerPriceCents - providerCostCents,
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Provider Cost Estimation (raw)
-// ═══════════════════════════════════════════════════════════════
-
-export function estimateProviderHourlyCost(sizeKey: SizeKey, providerKey: ProviderKey = "e2b"): number {
-  const costs = PROVIDER_HOURLY_COSTS[providerKey] || PROVIDER_HOURLY_COSTS.e2b;
-  return costs[sizeKey] || costs.small;
-}
-
-/**
- * Customer-facing hourly cost (provider cost + markup).
- * Use this for UI display. Call with settings for dynamic pricing.
- */
-export function estimateHourlyCost(sizeKey: SizeKey, settings?: PricingSettings, providerKey: ProviderKey = "e2b"): number {
-  const providerCost = estimateProviderHourlyCost(sizeKey, providerKey);
-  if (!settings) {
-    // Default 30% markup when settings not loaded
-    return Math.ceil(providerCost * 1.3);
-  }
-  const markup = resolveMarkupPercent(settings, sizeKey, "us-east", providerKey);
-  return calculateCustomerPrice(providerCost, markup, settings.minimumPriceFloorCents).customerPriceCents;
-}
-
-export function estimateMonthlyCost(sizeKey: SizeKey, hoursPerDay: number, settings?: PricingSettings, providerKey: ProviderKey = "e2b"): number {
-  return estimateHourlyCost(sizeKey, settings, providerKey) * hoursPerDay * 30;
-}
 
 // ═══════════════════════════════════════════════════════════════
 // Recording (with ledger entry)

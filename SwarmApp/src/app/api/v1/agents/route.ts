@@ -75,7 +75,12 @@ export async function GET(req: NextRequest) {
     const statusFilter = url.searchParams.get("status");
 
     try {
-        const snap = await adminDb().collection("agents").where("orgId", "==", orgId).get();
+        // Push the exact-match status filter into Firestore so busy orgs with many
+        // agents don't pull the full roster just to return a handful of "online" ones.
+        // (type/skill stay client-side — they're matched case-insensitively/by substring.)
+        let query = adminDb().collection("agents").where("orgId", "==", orgId);
+        if (statusFilter) query = query.where("status", "==", statusFilter);
+        const snap = await query.get();
 
         let agents: AgentResult[] = snap.docs.map(d => {
             const data = d.data();
@@ -97,12 +102,9 @@ export async function GET(req: NextRequest) {
             };
         });
 
-        // Apply filters
+        // Apply remaining filters (status is already applied at the Firestore level above)
         if (typeFilter) {
             agents = agents.filter(a => a.type.toLowerCase() === typeFilter.toLowerCase());
-        }
-        if (statusFilter) {
-            agents = agents.filter(a => a.status === statusFilter);
         }
         if (skillFilter) {
             agents = agents.filter(a =>

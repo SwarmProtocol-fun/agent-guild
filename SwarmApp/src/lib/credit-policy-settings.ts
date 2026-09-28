@@ -5,8 +5,8 @@
  * Follows the same cache + defaults pattern as marketplace-settings.ts.
  */
 
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import type { PolicyTierName, OrgPolicyOverride } from "./credit-policy";
 
 // ═══════════════════════════════════════════════════════════════
@@ -64,8 +64,8 @@ export async function getCreditPolicyConfig(): Promise<CreditPolicyConfig> {
     }
 
     try {
-        const snap = await getDoc(doc(db, "platformConfig", "creditPolicy"));
-        const data = snap.exists() ? snap.data() : {};
+        const snap = await adminDb().collection("platformConfig").doc("creditPolicy").get();
+        const data = snap.exists ? snap.data() : {};
         const config = { ...CONFIG_DEFAULTS, ...data } as CreditPolicyConfig;
         configCache = { data: config, expiresAt: Date.now() + CACHE_TTL_MS };
         return config;
@@ -79,19 +79,19 @@ export async function setCreditPolicyConfig(
     update: Partial<CreditPolicyConfig>,
     updatedBy?: string,
 ): Promise<void> {
-    const ref = doc(db, "platformConfig", "creditPolicy");
-    const snap = await getDoc(ref);
+    const ref = adminDb().collection("platformConfig").doc("creditPolicy");
+    const snap = await ref.get();
 
     const payload = {
         ...update,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
         ...(updatedBy ? { updatedBy } : {}),
     };
 
-    if (snap.exists()) {
-        await updateDoc(ref, payload);
+    if (snap.exists) {
+        await ref.update(payload);
     } else {
-        await setDoc(ref, { ...CONFIG_DEFAULTS, ...payload });
+        await ref.set({ ...CONFIG_DEFAULTS, ...payload });
     }
 
     // Bust cache
@@ -110,8 +110,8 @@ export async function getOrgPolicyOverride(orgId: string): Promise<OrgPolicyOver
     }
 
     try {
-        const snap = await getDoc(doc(db, "orgPolicies", orgId));
-        if (!snap.exists()) {
+        const snap = await adminDb().collection("orgPolicies").doc(orgId).get();
+        if (!snap.exists) {
             orgCache.set(orgId, { data: null, expiresAt: Date.now() + CACHE_TTL_MS });
             return null;
         }
@@ -130,14 +130,13 @@ export async function setOrgPolicyOverride(
     override: Partial<OrgPolicyOverride>,
     updatedBy?: string,
 ): Promise<void> {
-    const ref = doc(db, "orgPolicies", orgId);
+    const ref = adminDb().collection("orgPolicies").doc(orgId);
 
-    await setDoc(
-        ref,
+    await ref.set(
         {
             ...override,
             orgId,
-            updatedAt: serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
             ...(updatedBy ? { updatedBy } : {}),
         },
         { merge: true },
@@ -177,10 +176,9 @@ export async function recordPolicyEvent(
     event: Omit<PolicyEnforcementEvent, "timestamp">,
 ): Promise<void> {
     try {
-        const { addDoc, collection } = await import("firebase/firestore");
-        await addDoc(collection(db, "creditPolicyLog"), {
+        await adminDb().collection("creditPolicyLog").add({
             ...event,
-            timestamp: serverTimestamp(),
+            timestamp: FieldValue.serverTimestamp(),
         });
     } catch (err) {
         console.error("Failed to record policy event:", err);

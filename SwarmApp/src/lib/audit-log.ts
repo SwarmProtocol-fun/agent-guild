@@ -5,17 +5,8 @@
  * in the `marketplaceAuditLog` collection.
  */
 
-import {
-  addDoc,
-  collection,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 
 const AUDIT_COLLECTION = "marketplaceAuditLog";
 
@@ -33,9 +24,9 @@ export interface AuditEntry {
 export async function recordAuditEntry(
   entry: Omit<AuditEntry, "id" | "timestamp">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, AUDIT_COLLECTION), {
+  const ref = await adminDb().collection(AUDIT_COLLECTION).add({
     ...entry,
-    timestamp: serverTimestamp(),
+    timestamp: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -47,23 +38,21 @@ export async function getAuditLog(opts: {
   targetId?: string;
   targetType?: AuditEntry["targetType"];
 }): Promise<AuditEntry[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(AUDIT_COLLECTION);
 
   if (opts.action) {
-    constraints.push(where("action", "==", opts.action));
+    q = q.where("action", "==", opts.action);
   }
   if (opts.targetId) {
-    constraints.push(where("targetId", "==", opts.targetId));
+    q = q.where("targetId", "==", opts.targetId);
   }
   if (opts.targetType) {
-    constraints.push(where("targetType", "==", opts.targetType));
+    q = q.where("targetType", "==", opts.targetType);
   }
 
-  constraints.push(orderBy("timestamp", "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("timestamp", "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, AUDIT_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
 
   return snap.docs.map((d) => ({
     id: d.id,

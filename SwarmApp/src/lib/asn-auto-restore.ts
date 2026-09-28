@@ -5,8 +5,7 @@
  * Checks if an ASN has a backup and returns restoration data without requiring auth.
  */
 
-import { db } from "@/lib/firebase";
-import { collection, doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 // [swarm-core] Storage and Hedera removed
 const retrieveContent = async (_cid: string): Promise<Response> => {
     throw new Error("Storage mod not installed");
@@ -47,10 +46,10 @@ export interface AutoRestoreResult {
 export async function checkAndRestoreASN(asn: string): Promise<AutoRestoreResult> {
     try {
         // Look up ASN backup in Firestore
-        const asnMemoryRef = doc(collection(db, "asnMemoryBackups"), asn);
-        const asnDoc = await getDoc(asnMemoryRef);
+        const asnMemoryRef = adminDb().collection("asnMemoryBackups").doc(asn);
+        const asnDoc = await asnMemoryRef.get();
 
-        if (!asnDoc.exists()) {
+        if (!asnDoc.exists) {
             return {
                 restored: false,
                 asn,
@@ -58,7 +57,7 @@ export async function checkAndRestoreASN(asn: string): Promise<AutoRestoreResult
             };
         }
 
-        const backupData = asnDoc.data();
+        const backupData = asnDoc.data()!;
         const { cid, sizeBytes, createdAt, lastBackup, walletAddress, messageCount } = backupData;
 
         // Download memory from storage provider

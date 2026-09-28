@@ -5,20 +5,8 @@
  * Small overrides (delta <= 50) auto-approve; large overrides require a second admin.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import { emitAdminOverride } from "@/lib/mod-stubs";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 import { recordCreditOpsAudit } from "./audit";
@@ -37,9 +25,7 @@ async function getAgentScores(agentId: string): Promise<{
   trustScore: number;
   docId: string;
 }> {
-  const agentsRef = collection(db, "agents");
-  const q = query(agentsRef, where("id", "==", agentId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection("agents").where("id", "==", agentId).get();
 
   if (snap.empty) {
     return { creditScore: 680, trustScore: 50, docId: "" };
@@ -60,17 +46,14 @@ async function updateAgentScores(
   trustScore: number,
   reason: string,
 ): Promise<void> {
-  const agentsRef = collection(db, "agents");
-  const q = query(agentsRef, where("id", "==", agentId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection("agents").where("id", "==", agentId).get();
 
   if (snap.empty) return;
 
-  const agentDocRef = doc(db, "agents", snap.docs[0].id);
-  await updateDoc(agentDocRef, {
+  await adminDb().collection("agents").doc(snap.docs[0].id).update({
     creditScore: Math.max(300, Math.min(900, creditScore)),
     trustScore: Math.max(0, Math.min(100, trustScore)),
-    lastCreditUpdate: serverTimestamp(),
+    lastCreditUpdate: FieldValue.serverTimestamp(),
     lastCreditReason: reason,
   });
 }
@@ -118,10 +101,10 @@ export async function requestOverride(params: {
     rolledBack: false,
   };
 
-  const ref = await addDoc(collection(db, OVERRIDE_COLLECTION), {
+  const ref = await adminDb().collection(OVERRIDE_COLLECTION).add({
     ...override,
     expiresAt: params.expiresAt || null,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -155,11 +138,11 @@ export async function approveOverride(
   overrideId: string,
   approvedBy: string,
 ): Promise<{ applied: boolean }> {
-  const ref = doc(db, OVERRIDE_COLLECTION, overrideId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Override not found");
+  const ref = adminDb().collection(OVERRIDE_COLLECTION).doc(overrideId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Override not found");
 
-  const data = snap.data();
+  const data = snap.data()!;
   if (data.approvalStatus !== "pending") {
     throw new Error(`Override is not pending (status: ${data.approvalStatus})`);
   }
@@ -175,7 +158,7 @@ export async function approveOverride(
   // Need at least 2 approvers for large overrides
   const fullyApproved = approvedByList.length >= 2;
 
-  await updateDoc(ref, {
+  await ref.update({
     approvedBy: approvedByList,
     approvalStatus: fullyApproved ? "approved" : "pending",
   });
@@ -202,11 +185,11 @@ export async function approveOverride(
 
 /** Apply an approved override to the agent's scores. */
 export async function applyOverride(overrideId: string): Promise<void> {
-  const ref = doc(db, OVERRIDE_COLLECTION, overrideId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Override not found");
+  const ref = adminDb().collection(OVERRIDE_COLLECTION).doc(overrideId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Override not found");
 
-  const data = snap.data();
+  const data = snap.data()!;
 
   // Update agent scores in Firestore
   await updateAgentScores(
@@ -230,9 +213,9 @@ export async function applyOverride(overrideId: string): Promise<void> {
     console.error("Failed to emit admin override HCS event:", err);
   }
 
-  await updateDoc(ref, {
+  await ref.update({
     approvalStatus: "approved",
-    appliedAt: serverTimestamp(),
+    appliedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -260,11 +243,11 @@ export async function rollbackOverride(
   rolledBackBy: string,
   reason: string,
 ): Promise<void> {
-  const ref = doc(db, OVERRIDE_COLLECTION, overrideId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Override not found");
+  const ref = adminDb().collection(OVERRIDE_COLLECTION).doc(overrideId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Override not found");
 
-  const data = snap.data();
+  const data = snap.data()!;
   if (data.rolledBack) throw new Error("Override already rolled back");
 
   // Restore previous scores
@@ -289,9 +272,9 @@ export async function rollbackOverride(
     console.error("Failed to emit rollback HCS event:", err);
   }
 
-  await updateDoc(ref, {
+  await ref.update({
     rolledBack: true,
-    rollbackAt: serverTimestamp(),
+    rollbackAt: FieldValue.serverTimestamp(),
     rollbackBy: rolledBackBy,
     rollbackReason: reason,
   });
@@ -319,13 +302,12 @@ export async function rollbackOverride(
 export async function getOverridesForAgent(
   asn: string,
 ): Promise<CreditOpsOverride[]> {
-  const q = query(
-    collection(db, OVERRIDE_COLLECTION),
-    where("asn", "==", asn),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(50),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(OVERRIDE_COLLECTION)
+    .where("asn", "==", asn)
+    .orderBy("createdAt", "desc")
+    .limit(50)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsOverride[];
 }
 
@@ -335,20 +317,18 @@ export async function listOverrides(opts: {
   overrideType?: string;
   limit?: number;
 }): Promise<CreditOpsOverride[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(OVERRIDE_COLLECTION);
 
   if (opts.approvalStatus) {
-    constraints.push(where("approvalStatus", "==", opts.approvalStatus));
+    q = q.where("approvalStatus", "==", opts.approvalStatus);
   }
   if (opts.overrideType) {
-    constraints.push(where("overrideType", "==", opts.overrideType));
+    q = q.where("overrideType", "==", opts.overrideType);
   }
 
-  constraints.push(orderBy("createdAt", "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("createdAt", "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, OVERRIDE_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsOverride[];
 }
 
@@ -356,22 +336,20 @@ export async function listOverrides(opts: {
 export async function getOverride(
   overrideId: string,
 ): Promise<CreditOpsOverride | null> {
-  const ref = doc(db, OVERRIDE_COLLECTION, overrideId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(OVERRIDE_COLLECTION).doc(overrideId).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as CreditOpsOverride;
 }
 
 /** Expire temporary overrides that have passed their expiry date. */
 export async function expireTemporaryOverrides(): Promise<number> {
   const now = new Date();
-  const q = query(
-    collection(db, OVERRIDE_COLLECTION),
-    where("overrideType", "==", "temporary"),
-    where("expired", "==", false),
-    where("rolledBack", "==", false),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(OVERRIDE_COLLECTION)
+    .where("overrideType", "==", "temporary")
+    .where("expired", "==", false)
+    .where("rolledBack", "==", false)
+    .get();
   let count = 0;
 
   for (const d of snap.docs) {
@@ -384,7 +362,7 @@ export async function expireTemporaryOverrides(): Promise<number> {
 
     if (expiresAt <= now) {
       await rollbackOverride(d.id, "system", "Temporary override expired");
-      await updateDoc(doc(db, OVERRIDE_COLLECTION, d.id), { expired: true });
+      await adminDb().collection(OVERRIDE_COLLECTION).doc(d.id).update({ expired: true });
       count++;
     }
   }

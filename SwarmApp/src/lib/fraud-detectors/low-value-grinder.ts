@@ -13,8 +13,7 @@
  * This is an informational signal — recommends credit discounting, not direct penalty.
  */
 
-import { db } from "@/lib/firebase";
-import { collection, getDocs, query, where, doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import type { RiskSignal, FraudDetectionConfig } from "../fraud-detection";
 
 export async function detectLowValueGrinding(
@@ -28,13 +27,11 @@ export async function detectLowValueGrinding(
   const windowEnd = Date.now();
 
   // Query completed assignments in the org
-  const assignmentsSnap = await getDocs(
-    query(
-      collection(db, "taskAssignments"),
-      where("orgId", "==", orgId),
-      where("status", "==", "completed"),
-    ),
-  );
+  const assignmentsSnap = await adminDb()
+    .collection("taskAssignments")
+    .where("orgId", "==", orgId)
+    .where("status", "==", "completed")
+    .get();
 
   // Group by agent
   const agentTasks = new Map<string, { title: string; id: string }[]>();
@@ -100,9 +97,9 @@ export async function detectLowValueGrinding(
     // Get agent details
     let agentAsn = "";
     try {
-      const agentDoc = await getDoc(doc(db, "agents", agentId));
-      if (agentDoc.exists()) {
-        agentAsn = agentDoc.data().asn || "";
+      const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+      if (agentDoc.exists) {
+        agentAsn = agentDoc.data()!.asn || "";
       }
     } catch {
       // continue

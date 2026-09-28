@@ -205,6 +205,9 @@ async function routeBroadcast(db, message, broadcastToChannel, log) {
     senderType: "agent",
     content: typeof payload === "string" ? payload : JSON.stringify(payload),
     verified: true,
+    // Already pushed live via broadcastToChannel above — see streamChannel
+    // in index.mjs, which skips docs carrying this marker.
+    deliveredViaHub: true,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 

@@ -17,14 +17,8 @@
  * Uses the existing session routing from message-router.mjs for agent communication.
  */
 
-import { db } from "./firebase";
-import {
-  doc,
-  setDoc,
-  getDoc,
-  serverTimestamp,
-  runTransaction,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -156,10 +150,10 @@ export class DeliberationManager {
       votes: [],
     };
 
-    await setDoc(doc(db, "deliberations", id), {
+    await adminDb().collection("deliberations").doc(id).set({
       ...deliberation,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
 
     return id;
@@ -173,7 +167,7 @@ export class DeliberationManager {
     participants: VoteParticipants,
   ): Promise<string> {
     const id = crypto.randomUUID();
-    await setDoc(doc(db, "deliberations", id), {
+    await adminDb().collection("deliberations").doc(id).set({
       id,
       config: { ...config, type: "vote" },
       participants,
@@ -182,8 +176,8 @@ export class DeliberationManager {
       proposals: [],
       critiques: [],
       votes: [],
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
     return id;
   }
@@ -196,7 +190,7 @@ export class DeliberationManager {
     participants: RedBlueParticipants,
   ): Promise<string> {
     const id = crypto.randomUUID();
-    await setDoc(doc(db, "deliberations", id), {
+    await adminDb().collection("deliberations").doc(id).set({
       id,
       config: { ...config, type: "red_blue" },
       participants,
@@ -205,8 +199,8 @@ export class DeliberationManager {
       proposals: [],
       critiques: [],
       votes: [],
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
     return id;
   }
@@ -219,11 +213,11 @@ export class DeliberationManager {
     deliberationId: string,
     proposal: Omit<Proposal, "submittedAt">,
   ): Promise<void> {
-    const ref = doc(db, "deliberations", deliberationId);
+    const ref = adminDb().collection("deliberations").doc(deliberationId);
 
-    await runTransaction(db, async (txn) => {
+    await adminDb().runTransaction(async (txn) => {
       const snap = await txn.get(ref);
-      if (!snap.exists()) throw new Error("Deliberation not found");
+      if (!snap.exists) throw new Error("Deliberation not found");
       const delib = snap.data() as Deliberation;
 
       if (delib.status !== "proposing") {
@@ -255,7 +249,7 @@ export class DeliberationManager {
       txn.update(ref, {
         proposals,
         status: shouldAdvance ? this.getNextPhase(delib) : "proposing",
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     });
   }
@@ -268,11 +262,11 @@ export class DeliberationManager {
     deliberationId: string,
     critique: Omit<Critique, "submittedAt">,
   ): Promise<void> {
-    const ref = doc(db, "deliberations", deliberationId);
+    const ref = adminDb().collection("deliberations").doc(deliberationId);
 
-    await runTransaction(db, async (txn) => {
+    await adminDb().runTransaction(async (txn) => {
       const snap = await txn.get(ref);
-      if (!snap.exists()) throw new Error("Deliberation not found");
+      if (!snap.exists) throw new Error("Deliberation not found");
       const delib = snap.data() as Deliberation;
 
       if (delib.status !== "critiquing") {
@@ -314,7 +308,7 @@ export class DeliberationManager {
         critiques,
         status: nextStatus,
         currentRound: nextStatus === "proposing" ? delib.currentRound + 1 : delib.currentRound,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     });
   }
@@ -327,11 +321,11 @@ export class DeliberationManager {
     deliberationId: string,
     vote: Omit<Vote, "submittedAt">,
   ): Promise<void> {
-    const ref = doc(db, "deliberations", deliberationId);
+    const ref = adminDb().collection("deliberations").doc(deliberationId);
 
-    await runTransaction(db, async (txn) => {
+    await adminDb().runTransaction(async (txn) => {
       const snap = await txn.get(ref);
-      if (!snap.exists()) throw new Error("Deliberation not found");
+      if (!snap.exists) throw new Error("Deliberation not found");
       const delib = snap.data() as Deliberation;
 
       if (delib.status !== "voting") {
@@ -359,13 +353,13 @@ export class DeliberationManager {
           votes,
           status: "completed",
           result,
-          completedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
+          completedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       } else {
         txn.update(ref, {
           votes,
-          updatedAt: serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
         });
       }
     });
@@ -378,11 +372,11 @@ export class DeliberationManager {
     deliberationId: string,
     synthesis: { content: string; confidence: number },
   ): Promise<void> {
-    const ref = doc(db, "deliberations", deliberationId);
+    const ref = adminDb().collection("deliberations").doc(deliberationId);
 
-    await runTransaction(db, async (txn) => {
+    await adminDb().runTransaction(async (txn) => {
       const snap = await txn.get(ref);
-      if (!snap.exists()) throw new Error("Deliberation not found");
+      if (!snap.exists) throw new Error("Deliberation not found");
       const delib = snap.data() as Deliberation;
 
       if (delib.status !== "synthesizing") {
@@ -404,8 +398,8 @@ export class DeliberationManager {
           ],
           consensusLevel,
         },
-        completedAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        completedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     });
   }
@@ -414,8 +408,8 @@ export class DeliberationManager {
    * Get a deliberation by ID.
    */
   async get(id: string): Promise<Deliberation | null> {
-    const snap = await getDoc(doc(db, "deliberations", id));
-    if (!snap.exists()) return null;
+    const snap = await adminDb().collection("deliberations").doc(id).get();
+    if (!snap.exists) return null;
     return snap.data() as Deliberation;
   }
 

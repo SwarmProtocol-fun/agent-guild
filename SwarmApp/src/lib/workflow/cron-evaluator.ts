@@ -8,13 +8,7 @@
  * Supports: *, N, N-M (ranges), N,M (lists), *​/N (steps)
  */
 
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  getDocs,
-  query,
-  where,
-} from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import type { TriggerPolicy, CronTriggerConfig } from "./triggers";
 import { fireEvent } from "./triggers";
 import { getRedis } from "@/lib/redis";
@@ -88,12 +82,11 @@ const TRIGGER_POLICIES = "triggerPolicies";
 
 /** Get all enabled cron trigger policies (cross-org). */
 async function getEnabledCronPolicies(): Promise<TriggerPolicy[]> {
-  const q = query(
-    collection(db, TRIGGER_POLICIES),
-    where("triggerType", "==", "cron"),
-    where("enabled", "==", true),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(TRIGGER_POLICIES)
+    .where("triggerType", "==", "cron")
+    .where("enabled", "==", true)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as TriggerPolicy);
 }
 
@@ -165,11 +158,7 @@ interface RawCronJob {
 
 /** Get all enabled cron jobs (cross-org). */
 async function getEnabledCronJobs(): Promise<RawCronJob[]> {
-  const q = query(
-    collection(db, "cronJobs"),
-    where("enabled", "==", true),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection("cronJobs").where("enabled", "==", true).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as RawCronJob);
 }
 

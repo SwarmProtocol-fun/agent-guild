@@ -12,8 +12,7 @@
  * 4. Compute reciprocity ratio and flag if above threshold
  */
 
-import { db } from "@/lib/firebase";
-import { collection, getDocs, query, where, Timestamp } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import type { RiskSignal, FraudDetectionConfig } from "../fraud-detection";
 
 export async function detectSelfDealLoops(
@@ -27,13 +26,11 @@ export async function detectSelfDealLoops(
   const windowEnd = Date.now();
 
   // Query completed assignments in the org within the window
-  const assignmentsRef = collection(db, "taskAssignments");
-  const q = query(
-    assignmentsRef,
-    where("orgId", "==", orgId),
-    where("status", "==", "completed"),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("taskAssignments")
+    .where("orgId", "==", orgId)
+    .where("status", "==", "completed")
+    .get();
 
   // Filter by window and build edge counts
   const edgeCounts = new Map<string, number>(); // "fromId->toId" → count
@@ -116,11 +113,9 @@ export async function detectSelfDealLoops(
 
 async function getAgentInfo(agentId: string): Promise<{ asn: string; orgId: string } | null> {
   try {
-    const { doc: docRef, getDoc } = await import("firebase/firestore");
-    const { db } = await import("@/lib/firebase");
-    const agentDoc = await getDoc(docRef(db, "agents", agentId));
-    if (!agentDoc.exists()) return null;
-    const data = agentDoc.data();
+    const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+    if (!agentDoc.exists) return null;
+    const data = agentDoc.data()!;
     return { asn: data.asn || "", orgId: data.orgId || "" };
   } catch {
     return null;

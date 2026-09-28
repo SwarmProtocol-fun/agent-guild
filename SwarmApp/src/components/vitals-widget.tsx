@@ -1,7 +1,7 @@
 /** Vitals Widget — 3 SVG circular gauges (CPU/RAM/Disk) with color-coded thresholds. */
 "use client";
 
-import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Cpu, HardDrive, MemoryStick, Server } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { vitalColor, vitalBg, fmtBytes, getLatestVitals } from "@/lib/vitals";
@@ -67,30 +67,19 @@ const DEMO_VITALS: VitalsData = {
 
 export function VitalsWidget({ data }: { data?: VitalsData | null }) {
     const { currentOrg } = useOrg();
-    const [fetched, setFetched] = useState<VitalsData | null>(null);
 
-    // Fetch real vitals when no data prop is provided
-    useEffect(() => {
-        if (data !== undefined || !currentOrg) return;
-        let cancelled = false;
-        getLatestVitals(currentOrg.id).then((v) => {
-            if (cancelled || !v) return;
-            setFetched({ cpu: v.cpu, memory: v.memory, disk: v.disk, hostname: v.hostname, uptime: v.uptime });
-        }).catch(() => {});
-        return () => { cancelled = true; };
-    }, [currentOrg, data]);
-
-    // Auto-refresh every 60s
-    useEffect(() => {
-        if (data !== undefined || !currentOrg) return;
-        const interval = setInterval(() => {
-            getLatestVitals(currentOrg.id).then((v) => {
-                if (!v) return;
-                setFetched({ cpu: v.cpu, memory: v.memory, disk: v.disk, hostname: v.hostname, uptime: v.uptime });
-            }).catch(() => {});
-        }, 60_000);
-        return () => clearInterval(interval);
-    }, [currentOrg, data]);
+    // Fetch real vitals when no data prop is provided, refreshing every 60s
+    const { data: fetched } = useQuery({
+        queryKey: ["vitals", currentOrg?.id],
+        queryFn: async () => {
+            const v = await getLatestVitals(currentOrg!.id);
+            if (!v) return null;
+            return { cpu: v.cpu, memory: v.memory, disk: v.disk, hostname: v.hostname, uptime: v.uptime } as VitalsData;
+        },
+        enabled: data === undefined && !!currentOrg,
+        refetchInterval: 60_000,
+        refetchIntervalInBackground: false,
+    });
 
     const vitals: VitalsData = data || fetched || DEMO_VITALS;
     const isDemo = !data && !fetched;

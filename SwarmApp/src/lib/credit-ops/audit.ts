@@ -6,17 +6,8 @@
  * Mirrors pattern from `@/lib/audit-log.ts`.
  */
 
-import {
-  addDoc,
-  collection,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import type { CreditOpsAuditEntry, CreditOpsAuditTargetType } from "./types";
 
 const CREDIT_OPS_AUDIT_COLLECTION = "creditOpsAuditLog";
@@ -25,9 +16,9 @@ const CREDIT_OPS_AUDIT_COLLECTION = "creditOpsAuditLog";
 export async function recordCreditOpsAudit(
   entry: Omit<CreditOpsAuditEntry, "id" | "timestamp">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, CREDIT_OPS_AUDIT_COLLECTION), {
+  const ref = await adminDb().collection(CREDIT_OPS_AUDIT_COLLECTION).add({
     ...entry,
-    timestamp: serverTimestamp(),
+    timestamp: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -39,23 +30,21 @@ export async function getCreditOpsAuditLog(opts: {
   targetId?: string;
   targetType?: CreditOpsAuditTargetType;
 }): Promise<CreditOpsAuditEntry[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(CREDIT_OPS_AUDIT_COLLECTION);
 
   if (opts.action) {
-    constraints.push(where("action", "==", opts.action));
+    q = q.where("action", "==", opts.action);
   }
   if (opts.targetId) {
-    constraints.push(where("targetId", "==", opts.targetId));
+    q = q.where("targetId", "==", opts.targetId);
   }
   if (opts.targetType) {
-    constraints.push(where("targetType", "==", opts.targetType));
+    q = q.where("targetType", "==", opts.targetType);
   }
 
-  constraints.push(orderBy("timestamp", "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("timestamp", "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, CREDIT_OPS_AUDIT_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
 
   return snap.docs.map((d) => ({
     id: d.id,
@@ -68,14 +57,13 @@ export async function getCreditOpsAuditForAgent(
   agentIdentifier: string,
   max?: number,
 ): Promise<CreditOpsAuditEntry[]> {
-  const q = query(
-    collection(db, CREDIT_OPS_AUDIT_COLLECTION),
-    where("targetType", "==", "agent"),
-    where("targetId", "==", agentIdentifier),
-    orderBy("timestamp", "desc"),
-    firestoreLimit(max || 50),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(CREDIT_OPS_AUDIT_COLLECTION)
+    .where("targetType", "==", "agent")
+    .where("targetId", "==", agentIdentifier)
+    .orderBy("timestamp", "desc")
+    .limit(max || 50)
+    .get();
 
   return snap.docs.map((d) => ({
     id: d.id,

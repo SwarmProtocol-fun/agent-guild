@@ -5,22 +5,8 @@
  * Follows the same patterns as src/lib/firestore.ts.
  */
 
-import { db } from "../firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDoc,
-  getDocs,
-  updateDoc,
-  deleteDoc,
-  query,
-  where,
-  onSnapshot,
-  serverTimestamp,
-  Timestamp,
-  type Unsubscribe,
-} from "firebase/firestore";
+import { adminDb } from "../firebase-admin";
+import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
 import type {
   Workspace,
   Computer,
@@ -93,18 +79,18 @@ function toDate(val: unknown): Date | null {
 // ═══════════════════════════════════════════════════════════════
 
 export async function createWorkspace(data: Omit<Workspace, "id" | "createdAt" | "updatedAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.workspaces), {
+  const ref = await adminDb().collection(COLLECTIONS.workspaces).add({
     ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getWorkspace(id: string): Promise<Workspace | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.workspaces, id));
-  if (!snap.exists()) return null;
-  const d = snap.data();
+  const snap = await adminDb().collection(COLLECTIONS.workspaces).doc(id).get();
+  if (!snap.exists) return null;
+  const d = snap.data()!;
   return {
     id: snap.id,
     orgId: d.orgId,
@@ -123,8 +109,7 @@ export async function getWorkspace(id: string): Promise<Workspace | null> {
 }
 
 export async function getWorkspaces(orgId: string): Promise<Workspace[]> {
-  const q = query(collection(db, COLLECTIONS.workspaces), where("orgId", "==", orgId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.workspaces).where("orgId", "==", orgId).get();
   return snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -147,19 +132,18 @@ export async function getWorkspaces(orgId: string): Promise<Workspace[]> {
 
 export async function updateWorkspace(id: string, data: Partial<Workspace>): Promise<void> {
   const { id: _id, ...rest } = data;
-  await updateDoc(doc(db, COLLECTIONS.workspaces, id), {
+  await adminDb().collection(COLLECTIONS.workspaces).doc(id).update({
     ...rest,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteWorkspace(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.workspaces, id));
+  await adminDb().collection(COLLECTIONS.workspaces).doc(id).delete();
 }
 
-export function subscribeWorkspaces(orgId: string, cb: (workspaces: Workspace[]) => void): Unsubscribe {
-  const q = query(collection(db, COLLECTIONS.workspaces), where("orgId", "==", orgId));
-  return onSnapshot(q, (snap) => {
+export function subscribeWorkspaces(orgId: string, cb: (workspaces: Workspace[]) => void): () => void {
+  return adminDb().collection(COLLECTIONS.workspaces).where("orgId", "==", orgId).onSnapshot((snap) => {
     const items = snap.docs.map((s) => {
       const d = s.data();
       return {
@@ -227,27 +211,27 @@ function parseComputer(id: string, d: Record<string, unknown>): Computer {
 }
 
 export async function createComputer(data: Omit<Computer, "id" | "createdAt" | "updatedAt" | "lastActiveAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.computers), {
+  const ref = await adminDb().collection(COLLECTIONS.computers).add({
     ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    lastActiveAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+    lastActiveAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getComputer(id: string): Promise<Computer | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.computers, id));
-  if (!snap.exists()) return null;
-  return parseComputer(snap.id, snap.data());
+  const snap = await adminDb().collection(COLLECTIONS.computers).doc(id).get();
+  if (!snap.exists) return null;
+  return parseComputer(snap.id, snap.data()!);
 }
 
 export async function getComputers(orgId: string, filters?: { status?: ComputerStatus; workspaceId?: string }): Promise<Computer[]> {
-  let q = query(collection(db, COLLECTIONS.computers), where("orgId", "==", orgId));
+  let q: Query = adminDb().collection(COLLECTIONS.computers).where("orgId", "==", orgId);
   if (filters?.workspaceId) {
-    q = query(collection(db, COLLECTIONS.computers), where("orgId", "==", orgId), where("workspaceId", "==", filters.workspaceId));
+    q = q.where("workspaceId", "==", filters.workspaceId);
   }
-  const snap = await getDocs(q);
+  const snap = await q.get();
   let items = snap.docs.map((s) => parseComputer(s.id, s.data()));
   if (filters?.status) {
     items = items.filter((c) => c.status === filters.status);
@@ -256,26 +240,24 @@ export async function getComputers(orgId: string, filters?: { status?: ComputerS
 }
 
 export async function getComputersByWorkspace(workspaceId: string): Promise<Computer[]> {
-  const q = query(collection(db, COLLECTIONS.computers), where("workspaceId", "==", workspaceId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.computers).where("workspaceId", "==", workspaceId).get();
   return snap.docs.map((s) => parseComputer(s.id, s.data()));
 }
 
 export async function updateComputer(id: string, data: Partial<Computer>): Promise<void> {
   const { id: _id, ...rest } = data;
-  await updateDoc(doc(db, COLLECTIONS.computers, id), {
+  await adminDb().collection(COLLECTIONS.computers).doc(id).update({
     ...rest,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteComputer(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.computers, id));
+  await adminDb().collection(COLLECTIONS.computers).doc(id).delete();
 }
 
-export function subscribeComputers(orgId: string, cb: (computers: Computer[]) => void): Unsubscribe {
-  const q = query(collection(db, COLLECTIONS.computers), where("orgId", "==", orgId));
-  return onSnapshot(q, (snap) => {
+export function subscribeComputers(orgId: string, cb: (computers: Computer[]) => void): () => void {
+  return adminDb().collection(COLLECTIONS.computers).where("orgId", "==", orgId).onSnapshot((snap) => {
     cb(snap.docs.map((s) => parseComputer(s.id, s.data())));
   });
 }
@@ -285,16 +267,15 @@ export function subscribeComputers(orgId: string, cb: (computers: Computer[]) =>
 // ═══════════════════════════════════════════════════════════════
 
 export async function createSnapshot(data: Omit<ComputerSnapshot, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.snapshots), {
+  const ref = await adminDb().collection(COLLECTIONS.snapshots).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getSnapshots(computerId: string): Promise<ComputerSnapshot[]> {
-  const q = query(collection(db, COLLECTIONS.snapshots), where("computerId", "==", computerId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.snapshots).where("computerId", "==", computerId).get();
   return snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -329,9 +310,9 @@ function parseSession(id: string, d: Record<string, unknown>): ComputerSession {
 }
 
 export async function createSession(data: Omit<ComputerSession, "id" | "startedAt" | "endedAt" | "totalActions" | "totalScreenshots" | "estimatedCostCents">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.sessions), {
+  const ref = await adminDb().collection(COLLECTIONS.sessions).add({
     ...data,
-    startedAt: serverTimestamp(),
+    startedAt: FieldValue.serverTimestamp(),
     endedAt: null,
     totalActions: 0,
     totalScreenshots: 0,
@@ -341,25 +322,24 @@ export async function createSession(data: Omit<ComputerSession, "id" | "startedA
 }
 
 export async function getSession(id: string): Promise<ComputerSession | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.sessions, id));
-  if (!snap.exists()) return null;
-  return parseSession(snap.id, snap.data());
+  const snap = await adminDb().collection(COLLECTIONS.sessions).doc(id).get();
+  if (!snap.exists) return null;
+  return parseSession(snap.id, snap.data()!);
 }
 
 export async function getSessions(opts: { computerId?: string; workspaceId?: string; limit?: number }): Promise<ComputerSession[]> {
-  const constraints = [];
-  if (opts.computerId) constraints.push(where("computerId", "==", opts.computerId));
-  if (opts.workspaceId) constraints.push(where("workspaceId", "==", opts.workspaceId));
-  const q = query(collection(db, COLLECTIONS.sessions), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(COLLECTIONS.sessions);
+  if (opts.computerId) q = q.where("computerId", "==", opts.computerId);
+  if (opts.workspaceId) q = q.where("workspaceId", "==", opts.workspaceId);
+  const snap = await q.get();
   const items = snap.docs.map((s) => parseSession(s.id, s.data()));
   items.sort((a, b) => (b.startedAt?.getTime() ?? 0) - (a.startedAt?.getTime() ?? 0));
   return items.slice(0, opts.limit || 50);
 }
 
 export async function endSession(id: string, stats: { totalActions: number; totalScreenshots: number; estimatedCostCents: number }): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.sessions, id), {
-    endedAt: serverTimestamp(),
+  await adminDb().collection(COLLECTIONS.sessions).doc(id).update({
+    endedAt: FieldValue.serverTimestamp(),
     ...stats,
   });
 }
@@ -369,19 +349,15 @@ export async function endSession(id: string, stats: { totalActions: number; tota
 // ═══════════════════════════════════════════════════════════════
 
 export async function recordAction(data: Omit<ComputerAction, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.actions), {
+  const ref = await adminDb().collection(COLLECTIONS.actions).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getActions(sessionId: string, max?: number): Promise<ComputerAction[]> {
-  const q = query(
-    collection(db, COLLECTIONS.actions),
-    where("sessionId", "==", sessionId),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.actions).where("sessionId", "==", sessionId).get();
   const items = snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -401,7 +377,7 @@ export async function getActions(sessionId: string, max?: number): Promise<Compu
 
 export async function updateAction(id: string, data: Partial<ComputerAction>): Promise<void> {
   const { id: _id, ...rest } = data;
-  await updateDoc(doc(db, COLLECTIONS.actions, id), rest);
+  await adminDb().collection(COLLECTIONS.actions).doc(id).update(rest);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -409,18 +385,17 @@ export async function updateAction(id: string, data: Partial<ComputerAction>): P
 // ═══════════════════════════════════════════════════════════════
 
 export async function createFileRecord(data: Omit<ComputeFile, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.files), {
+  const ref = await adminDb().collection(COLLECTIONS.files).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getFiles(workspaceId: string, computerId?: string): Promise<ComputeFile[]> {
-  const constraints = [where("workspaceId", "==", workspaceId)];
-  if (computerId) constraints.push(where("computerId", "==", computerId));
-  const q = query(collection(db, COLLECTIONS.files), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(COLLECTIONS.files).where("workspaceId", "==", workspaceId);
+  if (computerId) q = q.where("computerId", "==", computerId);
+  const snap = await q.get();
   const items = snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -442,7 +417,7 @@ export async function getFiles(workspaceId: string, computerId?: string): Promis
 }
 
 export async function deleteFileRecord(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.files, id));
+  await adminDb().collection(COLLECTIONS.files).doc(id).delete();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -472,42 +447,39 @@ function parseTemplate(id: string, d: Record<string, unknown>): ComputeTemplate 
 }
 
 export async function createTemplate(data: Omit<ComputeTemplate, "id" | "createdAt" | "updatedAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.templates), {
+  const ref = await adminDb().collection(COLLECTIONS.templates).add({
     ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getTemplate(id: string): Promise<ComputeTemplate | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.templates, id));
-  if (!snap.exists()) return null;
-  return parseTemplate(snap.id, snap.data());
+  const snap = await adminDb().collection(COLLECTIONS.templates).doc(id).get();
+  if (!snap.exists) return null;
+  return parseTemplate(snap.id, snap.data()!);
 }
 
 export async function getTemplates(opts?: { workspaceId?: string; category?: TemplateCategory; isPublic?: boolean }): Promise<ComputeTemplate[]> {
-  const constraints = [];
-  if (opts?.workspaceId) constraints.push(where("workspaceId", "==", opts.workspaceId));
-  if (opts?.category) constraints.push(where("category", "==", opts.category));
-  if (opts?.isPublic !== undefined) constraints.push(where("isPublic", "==", opts.isPublic));
-  const q = constraints.length > 0
-    ? query(collection(db, COLLECTIONS.templates), ...constraints)
-    : query(collection(db, COLLECTIONS.templates));
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(COLLECTIONS.templates);
+  if (opts?.workspaceId) q = q.where("workspaceId", "==", opts.workspaceId);
+  if (opts?.category) q = q.where("category", "==", opts.category);
+  if (opts?.isPublic !== undefined) q = q.where("isPublic", "==", opts.isPublic);
+  const snap = await q.get();
   return snap.docs.map((s) => parseTemplate(s.id, s.data()));
 }
 
 export async function updateTemplate(id: string, data: Partial<ComputeTemplate>): Promise<void> {
   const { id: _id, ...rest } = data;
-  await updateDoc(doc(db, COLLECTIONS.templates, id), {
+  await adminDb().collection(COLLECTIONS.templates).doc(id).update({
     ...rest,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteTemplate(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.templates, id));
+  await adminDb().collection(COLLECTIONS.templates).doc(id).delete();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -533,22 +505,21 @@ function parseMemory(id: string, d: Record<string, unknown>): MemoryEntry {
 }
 
 export async function createMemoryEntry(data: Omit<MemoryEntry, "id" | "createdAt" | "updatedAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.memory), {
+  const ref = await adminDb().collection(COLLECTIONS.memory).add({
     ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getMemoryEntries(scopeType: MemoryScopeType, scopeId: string, opts?: { pinned?: boolean; limit?: number }): Promise<MemoryEntry[]> {
-  const constraints = [
-    where("scopeType", "==", scopeType),
-    where("scopeId", "==", scopeId),
-  ];
-  if (opts?.pinned !== undefined) constraints.push(where("pinned", "==", opts.pinned));
-  const q = query(collection(db, COLLECTIONS.memory), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb()
+    .collection(COLLECTIONS.memory)
+    .where("scopeType", "==", scopeType)
+    .where("scopeId", "==", scopeId);
+  if (opts?.pinned !== undefined) q = q.where("pinned", "==", opts.pinned);
+  const snap = await q.get();
   const items = snap.docs.map((s) => parseMemory(s.id, s.data()));
   items.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   return items.slice(0, opts?.limit || 100);
@@ -556,14 +527,14 @@ export async function getMemoryEntries(scopeType: MemoryScopeType, scopeId: stri
 
 export async function updateMemoryEntry(id: string, data: Partial<MemoryEntry>): Promise<void> {
   const { id: _id, ...rest } = data;
-  await updateDoc(doc(db, COLLECTIONS.memory, id), {
+  await adminDb().collection(COLLECTIONS.memory).doc(id).update({
     ...rest,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteMemoryEntry(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.memory, id));
+  await adminDb().collection(COLLECTIONS.memory).doc(id).delete();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -571,16 +542,15 @@ export async function deleteMemoryEntry(id: string): Promise<void> {
 // ═══════════════════════════════════════════════════════════════
 
 export async function createEmbedToken(data: Omit<EmbedToken, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.embedTokens), {
+  const ref = await adminDb().collection(COLLECTIONS.embedTokens).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getEmbedTokens(workspaceId: string): Promise<EmbedToken[]> {
-  const q = query(collection(db, COLLECTIONS.embedTokens), where("workspaceId", "==", workspaceId));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.embedTokens).where("workspaceId", "==", workspaceId).get();
   return snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -597,13 +567,13 @@ export async function getEmbedTokens(workspaceId: string): Promise<EmbedToken[]>
 }
 
 export async function deleteEmbedToken(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTIONS.embedTokens, id));
+  await adminDb().collection(COLLECTIONS.embedTokens).doc(id).delete();
 }
 
 export async function validateEmbedToken(id: string): Promise<EmbedToken | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.embedTokens, id));
-  if (!snap.exists()) return null;
-  const d = snap.data();
+  const snap = await adminDb().collection(COLLECTIONS.embedTokens).doc(id).get();
+  if (!snap.exists) return null;
+  const d = snap.data()!;
   const token: EmbedToken = {
     id: snap.id,
     workspaceId: d.workspaceId,
@@ -623,19 +593,15 @@ export async function validateEmbedToken(id: string): Promise<EmbedToken | null>
 // ═══════════════════════════════════════════════════════════════
 
 export async function recordUsage(data: Omit<UsageRecord, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.usage), {
+  const ref = await adminDb().collection(COLLECTIONS.usage).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getUsage(workspaceId: string, opts?: { limit?: number }): Promise<UsageRecord[]> {
-  const q = query(
-    collection(db, COLLECTIONS.usage),
-    where("workspaceId", "==", workspaceId),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.usage).where("workspaceId", "==", workspaceId).get();
   const items = snap.docs.map((s) => {
     const d = s.data();
     return {
@@ -679,9 +645,9 @@ function parseLedgerEntry(id: string, d: Record<string, unknown>): BillingLedger
 }
 
 export async function createLedgerEntry(data: Omit<BillingLedgerEntry, "id" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.billingLedger), {
+  const ref = await adminDb().collection(COLLECTIONS.billingLedger).add({
     ...data,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -691,19 +657,17 @@ export async function getLedgerEntries(opts?: {
   orgId?: string;
   limit?: number;
 }): Promise<BillingLedgerEntry[]> {
-  const constraints = [];
-  if (opts?.workspaceId) constraints.push(where("workspaceId", "==", opts.workspaceId));
-  if (opts?.orgId) constraints.push(where("orgId", "==", opts.orgId));
-  const q = query(collection(db, COLLECTIONS.billingLedger), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(COLLECTIONS.billingLedger);
+  if (opts?.workspaceId) q = q.where("workspaceId", "==", opts.workspaceId);
+  if (opts?.orgId) q = q.where("orgId", "==", opts.orgId);
+  const snap = await q.get();
   const items = snap.docs.map((s) => parseLedgerEntry(s.id, s.data()));
   items.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   return items.slice(0, opts?.limit || 500);
 }
 
 export async function getAllLedgerEntries(limit?: number): Promise<BillingLedgerEntry[]> {
-  const q = query(collection(db, COLLECTIONS.billingLedger));
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.billingLedger).get();
   const items = snap.docs.map((s) => parseLedgerEntry(s.id, s.data()));
   items.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   return items.slice(0, limit || 1000);
@@ -746,30 +710,29 @@ function parsePricingSettings(id: string, d: Record<string, unknown>): PricingSe
 }
 
 export async function getPricingSettings(): Promise<PricingSettings> {
-  const snap = await getDoc(doc(db, COLLECTIONS.pricingSettings, PRICING_DOC_ID));
-  if (!snap.exists()) {
+  const snap = await adminDb().collection(COLLECTIONS.pricingSettings).doc(PRICING_DOC_ID).get();
+  if (!snap.exists) {
     return { id: PRICING_DOC_ID, ...DEFAULT_PRICING };
   }
-  return parsePricingSettings(snap.id, snap.data());
+  return parsePricingSettings(snap.id, snap.data()!);
 }
 
 export async function updatePricingSettings(
   data: Partial<Omit<PricingSettings, "id">>,
   userId: string,
 ): Promise<void> {
-  const { setDoc } = await import("firebase/firestore");
-  const ref = doc(db, COLLECTIONS.pricingSettings, PRICING_DOC_ID);
-  const snap = await getDoc(ref);
+  const ref = adminDb().collection(COLLECTIONS.pricingSettings).doc(PRICING_DOC_ID);
+  const snap = await ref.get();
   const update = {
     ...data,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
     updatedByUserId: userId,
   };
 
-  if (snap.exists()) {
-    await updateDoc(ref, update);
+  if (snap.exists) {
+    await ref.update(update);
   } else {
-    await setDoc(ref, { ...DEFAULT_PRICING, ...update });
+    await ref.set({ ...DEFAULT_PRICING, ...update });
   }
 }
 
@@ -793,9 +756,9 @@ function parseEntitlement(id: string, d: Record<string, unknown>): ComputeEntitl
 }
 
 export async function getEntitlement(orgId: string): Promise<ComputeEntitlement | null> {
-  const ref = doc(db, COLLECTIONS.entitlements, orgId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const ref = adminDb().collection(COLLECTIONS.entitlements).doc(orgId);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
   return parseEntitlement(snap.id, snap.data() as Record<string, unknown>);
 }
 
@@ -803,14 +766,13 @@ export async function upsertEntitlement(
   orgId: string,
   data: Partial<Omit<ComputeEntitlement, "id" | "orgId">>,
 ): Promise<void> {
-  const { setDoc } = await import("firebase/firestore");
-  const ref = doc(db, COLLECTIONS.entitlements, orgId);
-  const snap = await getDoc(ref);
+  const ref = adminDb().collection(COLLECTIONS.entitlements).doc(orgId);
+  const snap = await ref.get();
 
-  if (snap.exists()) {
-    await updateDoc(ref, { ...data, updatedAt: serverTimestamp() });
+  if (snap.exists) {
+    await ref.update({ ...data, updatedAt: FieldValue.serverTimestamp() });
   } else {
-    await setDoc(ref, {
+    await ref.set({
       orgId,
       creditBalanceCents: 0,
       monthlyHourQuota: 5,
@@ -818,9 +780,9 @@ export async function upsertEntitlement(
       maxConcurrentComputers: 1,
       allowedSizes: ["small"],
       planTier: "free",
-      periodStart: serverTimestamp(),
+      periodStart: FieldValue.serverTimestamp(),
       ...data,
-      updatedAt: serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
     });
   }
 }
@@ -870,19 +832,19 @@ export async function createTransfer(
   data: Omit<ComputerTransfer, "id" | "createdAt" | "completedAt" | "platformFeeCents">,
 ): Promise<string> {
   const platformFeeCents = Math.ceil(data.priceCents * (TRANSFER_FEE_PERCENT / 100));
-  const ref = await addDoc(collection(db, COLLECTIONS.transfers), {
+  const ref = await adminDb().collection(COLLECTIONS.transfers).add({
     ...data,
     platformFeeCents,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
     completedAt: null,
   });
   return ref.id;
 }
 
 export async function getTransfer(id: string): Promise<ComputerTransfer | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.transfers, id));
-  if (!snap.exists()) return null;
-  return parseTransfer(snap.id, snap.data());
+  const snap = await adminDb().collection(COLLECTIONS.transfers).doc(id).get();
+  if (!snap.exists) return null;
+  return parseTransfer(snap.id, snap.data()!);
 }
 
 export async function getTransfers(opts?: {
@@ -892,27 +854,26 @@ export async function getTransfers(opts?: {
   status?: TransferStatus;
   limit?: number;
 }): Promise<ComputerTransfer[]> {
-  const constraints = [];
-  if (opts?.computerId) constraints.push(where("computerId", "==", opts.computerId));
-  if (opts?.fromWallet) constraints.push(where("fromWallet", "==", opts.fromWallet));
-  if (opts?.toWallet) constraints.push(where("toWallet", "==", opts.toWallet));
-  if (opts?.status) constraints.push(where("status", "==", opts.status));
-  const q = query(collection(db, COLLECTIONS.transfers), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(COLLECTIONS.transfers);
+  if (opts?.computerId) q = q.where("computerId", "==", opts.computerId);
+  if (opts?.fromWallet) q = q.where("fromWallet", "==", opts.fromWallet);
+  if (opts?.toWallet) q = q.where("toWallet", "==", opts.toWallet);
+  if (opts?.status) q = q.where("status", "==", opts.status);
+  const snap = await q.get();
   const items = snap.docs.map((s) => parseTransfer(s.id, s.data()));
   items.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   return items.slice(0, opts?.limit || 50);
 }
 
 export async function completeTransfer(transferId: string): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.transfers, transferId), {
+  await adminDb().collection(COLLECTIONS.transfers).doc(transferId).update({
     status: "completed",
-    completedAt: serverTimestamp(),
+    completedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function cancelTransfer(transferId: string): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.transfers, transferId), {
+  await adminDb().collection(COLLECTIONS.transfers).doc(transferId).update({
     status: "cancelled",
   });
 }
@@ -1021,10 +982,6 @@ export async function unlistComputer(computerId: string, ownerWallet: string): P
 
 /** Get all computers currently listed for sale */
 export async function getListedComputers(): Promise<Computer[]> {
-  const q = query(
-    collection(db, COLLECTIONS.computers),
-    where("listedForSale", "==", true),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTIONS.computers).where("listedForSale", "==", true).get();
   return snap.docs.map((s) => parseComputer(s.id, s.data()));
 }

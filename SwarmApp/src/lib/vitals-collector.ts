@@ -5,20 +5,8 @@
  * Alerts on threshold violations (warning/critical levels).
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDocs,
-  setDoc,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  Timestamp,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -80,12 +68,12 @@ export async function recordVitals(
   vitals: AgentVitals,
   agentName?: string
 ): Promise<string> {
-  const ref = await addDoc(collection(db, "agentVitals"), {
+  const ref = await adminDb().collection("agentVitals").add({
     orgId,
     agentId,
     agentName: agentName || agentId,
     vitals,
-    timestamp: serverTimestamp(),
+    timestamp: FieldValue.serverTimestamp(),
   });
 
   // Check for threshold violations
@@ -186,31 +174,28 @@ async function createAlert(
   agentName?: string
 ): Promise<void> {
   // Check if alert already exists for this resource
-  const existingQ = query(
-    collection(db, "vitalAlerts"),
-    where("orgId", "==", orgId),
-    where("agentId", "==", agentId),
-    where("resource", "==", resource),
-    where("resolved", "==", false)
-  );
-
-  const existingSnap = await getDocs(existingQ);
+  const existingSnap = await adminDb()
+    .collection("vitalAlerts")
+    .where("orgId", "==", orgId)
+    .where("agentId", "==", agentId)
+    .where("resource", "==", resource)
+    .where("resolved", "==", false)
+    .get();
 
   if (!existingSnap.empty) {
     // Update existing alert
     const alertDoc = existingSnap.docs[0];
-    await setDoc(
-      doc(db, "vitalAlerts", alertDoc.id),
+    await adminDb().collection("vitalAlerts").doc(alertDoc.id).set(
       {
         currentValue,
         severity,
-        timestamp: serverTimestamp(),
+        timestamp: FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
   } else {
     // Create new alert
-    await addDoc(collection(db, "vitalAlerts"), {
+    await adminDb().collection("vitalAlerts").add({
       orgId,
       agentId,
       agentName: agentName || agentId,
@@ -218,7 +203,7 @@ async function createAlert(
       threshold,
       currentValue,
       severity,
-      timestamp: serverTimestamp(),
+      timestamp: FieldValue.serverTimestamp(),
       resolved: false,
     });
   }
@@ -235,15 +220,13 @@ export async function getVitalsHistory(
   const since = new Date();
   since.setHours(since.getHours() - hoursBack);
 
-  const q = query(
-    collection(db, "agentVitals"),
-    where("agentId", "==", agentId),
-    where("timestamp", ">=", Timestamp.fromDate(since)),
-    orderBy("timestamp", "asc"),
-    firestoreLimit(1000)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("agentVitals")
+    .where("agentId", "==", agentId)
+    .where("timestamp", ">=", Timestamp.fromDate(since))
+    .orderBy("timestamp", "asc")
+    .limit(1000)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -264,15 +247,13 @@ export async function getAllVitalsHistory(
   const since = new Date();
   since.setHours(since.getHours() - hoursBack);
 
-  const q = query(
-    collection(db, "agentVitals"),
-    where("orgId", "==", orgId),
-    where("timestamp", ">=", Timestamp.fromDate(since)),
-    orderBy("timestamp", "desc"),
-    firestoreLimit(5000)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("agentVitals")
+    .where("orgId", "==", orgId)
+    .where("timestamp", ">=", Timestamp.fromDate(since))
+    .orderBy("timestamp", "desc")
+    .limit(5000)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -287,14 +268,12 @@ export async function getAllVitalsHistory(
 }
 
 export async function getLatestVitals(agentId: string): Promise<VitalsRecord | null> {
-  const q = query(
-    collection(db, "agentVitals"),
-    where("agentId", "==", agentId),
-    orderBy("timestamp", "desc"),
-    firestoreLimit(1)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("agentVitals")
+    .where("agentId", "==", agentId)
+    .orderBy("timestamp", "desc")
+    .limit(1)
+    .get();
   if (snap.empty) return null;
 
   const d = snap.docs[0];
@@ -314,14 +293,12 @@ export async function getLatestVitals(agentId: string): Promise<VitalsRecord | n
 // ═══════════════════════════════════════════════════════════════
 
 export async function getActiveAlerts(orgId: string): Promise<VitalAlert[]> {
-  const q = query(
-    collection(db, "vitalAlerts"),
-    where("orgId", "==", orgId),
-    where("resolved", "==", false),
-    orderBy("timestamp", "desc")
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("vitalAlerts")
+    .where("orgId", "==", orgId)
+    .where("resolved", "==", false)
+    .orderBy("timestamp", "desc")
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -344,14 +321,12 @@ export async function getAlertHistory(
   orgId: string,
   limit: number = 100
 ): Promise<VitalAlert[]> {
-  const q = query(
-    collection(db, "vitalAlerts"),
-    where("orgId", "==", orgId),
-    orderBy("timestamp", "desc"),
-    firestoreLimit(limit)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("vitalAlerts")
+    .where("orgId", "==", orgId)
+    .orderBy("timestamp", "desc")
+    .limit(limit)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -371,29 +346,25 @@ export async function getAlertHistory(
 }
 
 export async function resolveAlert(alertId: string): Promise<void> {
-  await setDoc(
-    doc(db, "vitalAlerts", alertId),
+  await adminDb().collection("vitalAlerts").doc(alertId).set(
     {
       resolved: true,
-      resolvedAt: serverTimestamp(),
+      resolvedAt: FieldValue.serverTimestamp(),
     },
     { merge: true }
   );
 }
 
 export async function resolveAllAlerts(orgId: string, agentId: string): Promise<void> {
-  const q = query(
-    collection(db, "vitalAlerts"),
-    where("orgId", "==", orgId),
-    where("agentId", "==", agentId),
-    where("resolved", "==", false)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("vitalAlerts")
+    .where("orgId", "==", orgId)
+    .where("agentId", "==", agentId)
+    .where("resolved", "==", false)
+    .get();
   const updates = snap.docs.map((d) =>
-    setDoc(
-      doc(db, "vitalAlerts", d.id),
-      { resolved: true, resolvedAt: serverTimestamp() },
+    adminDb().collection("vitalAlerts").doc(d.id).set(
+      { resolved: true, resolvedAt: FieldValue.serverTimestamp() },
       { merge: true }
     )
   );

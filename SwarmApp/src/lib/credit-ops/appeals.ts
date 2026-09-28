@@ -5,21 +5,8 @@
  * score anomalies, and tier demotions. Admins review and resolve.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-  getCountFromServer,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import { recordCreditOpsAudit } from "./audit";
 import type {
   CreditOpsAppeal,
@@ -52,9 +39,7 @@ export async function submitAppeal(params: {
   requestedOutcome?: string;
 }): Promise<string> {
   // Get current scores for context
-  const agentsSnap = await getDocs(
-    query(collection(db, "agents"), where("id", "==", params.agentId)),
-  );
+  const agentsSnap = await adminDb().collection("agents").where("id", "==", params.agentId).get();
   const agentData = agentsSnap.empty ? null : agentsSnap.docs[0].data();
   const currentCredit = agentData?.creditScore ?? 680;
   const currentTrust = agentData?.trustScore ?? 50;
@@ -79,10 +64,10 @@ export async function submitAppeal(params: {
     reviewHistory: [],
   };
 
-  const ref = await addDoc(collection(db, APPEAL_COLLECTION), {
+  const ref = await adminDb().collection(APPEAL_COLLECTION).add({
     ...appeal,
-    submittedAt: serverTimestamp(),
-    lastUpdatedAt: serverTimestamp(),
+    submittedAt: FieldValue.serverTimestamp(),
+    lastUpdatedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -106,9 +91,9 @@ export async function submitAppeal(params: {
 
 /** Get an appeal by ID. */
 export async function getAppeal(appealId: string): Promise<CreditOpsAppeal | null> {
-  const ref = doc(db, APPEAL_COLLECTION, appealId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const ref = adminDb().collection(APPEAL_COLLECTION).doc(appealId);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as CreditOpsAppeal;
 }
 
@@ -120,18 +105,16 @@ export async function listAppeals(opts: {
   appellantId?: string;
   limit?: number;
 }): Promise<CreditOpsAppeal[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(APPEAL_COLLECTION);
 
-  if (opts.status) constraints.push(where("status", "==", opts.status));
-  if (opts.priority) constraints.push(where("priority", "==", opts.priority));
-  if (opts.agentId) constraints.push(where("agentId", "==", opts.agentId));
-  if (opts.appellantId) constraints.push(where("appellantId", "==", opts.appellantId));
+  if (opts.status) q = q.where("status", "==", opts.status);
+  if (opts.priority) q = q.where("priority", "==", opts.priority);
+  if (opts.agentId) q = q.where("agentId", "==", opts.agentId);
+  if (opts.appellantId) q = q.where("appellantId", "==", opts.appellantId);
 
-  constraints.push(orderBy("submittedAt", "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("submittedAt", "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, APPEAL_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsAppeal[];
 }
 
@@ -150,11 +133,11 @@ export async function updateAppeal(
     resolution?: AppealResolution;
   },
 ): Promise<void> {
-  const ref = doc(db, APPEAL_COLLECTION, appealId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Appeal not found");
+  const ref = adminDb().collection(APPEAL_COLLECTION).doc(appealId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Appeal not found");
 
-  const current = snap.data();
+  const current = snap.data()!;
   const reviewHistory: ReviewHistoryEntry[] = Array.isArray(current.reviewHistory)
     ? current.reviewHistory
     : [];
@@ -168,7 +151,7 @@ export async function updateAppeal(
 
   const updates: Record<string, unknown> = {
     reviewHistory,
-    lastUpdatedAt: serverTimestamp(),
+    lastUpdatedAt: FieldValue.serverTimestamp(),
   };
 
   switch (update.action) {
@@ -185,11 +168,11 @@ export async function updateAppeal(
     case "resolve":
       updates.status = "resolved";
       updates.resolution = update.resolution;
-      updates.resolvedAt = serverTimestamp();
+      updates.resolvedAt = FieldValue.serverTimestamp();
       break;
     case "reject":
       updates.status = "rejected";
-      updates.resolvedAt = serverTimestamp();
+      updates.resolvedAt = FieldValue.serverTimestamp();
       break;
     case "escalate":
       updates.status = "escalated";
@@ -197,7 +180,7 @@ export async function updateAppeal(
       break;
   }
 
-  await updateDoc(ref, updates);
+  await ref.update(updates);
 
   await recordCreditOpsAudit({
     action: `appeal.${update.action}`,
@@ -223,11 +206,12 @@ export async function getAppealStats(): Promise<{
   resolved: number;
   rejected: number;
 }> {
+  const col = adminDb().collection(APPEAL_COLLECTION);
   const [submittedSnap, underReviewSnap, resolvedSnap, rejectedSnap] = await Promise.all([
-    getCountFromServer(query(collection(db, APPEAL_COLLECTION), where("status", "==", "submitted"))),
-    getCountFromServer(query(collection(db, APPEAL_COLLECTION), where("status", "==", "under_review"))),
-    getCountFromServer(query(collection(db, APPEAL_COLLECTION), where("status", "==", "resolved"))),
-    getCountFromServer(query(collection(db, APPEAL_COLLECTION), where("status", "==", "rejected"))),
+    col.where("status", "==", "submitted").count().get(),
+    col.where("status", "==", "under_review").count().get(),
+    col.where("status", "==", "resolved").count().get(),
+    col.where("status", "==", "rejected").count().get(),
   ]);
 
   const submitted = submittedSnap.data().count;

@@ -506,11 +506,14 @@ export default function DashboardPage() {
     loadDashboardData(true);
   }, [loadDashboardData]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh every 30 seconds. Skip ticks while the tab is in the
+  // background — this reload touches several collections (agents, computers,
+  // briefing cron, etc.), so a backgrounded dashboard tab shouldn't keep
+  // paying for it every 30s.
   useEffect(() => {
     if (!currentOrg) return;
     const interval = setInterval(() => {
-      loadDashboardData();
+      if (document.visibilityState === "visible") loadDashboardData();
     }, 30_000);
     return () => clearInterval(interval);
   }, [currentOrg, loadDashboardData]);

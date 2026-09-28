@@ -132,7 +132,10 @@ export default function CommandCenterPage() {
     };
 
     load();
-    const interval = setInterval(load, 30000); // Refresh every 30s
+    // Refresh every 30s, but not while the tab is in the background
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") load();
+    }, 30000);
     return () => clearInterval(interval);
   }, [currentOrg?.id]);
 

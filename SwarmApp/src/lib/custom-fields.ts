@@ -4,19 +4,8 @@
  * Inspired by abhi1693/openclaw-mission-control custom-fields component.
  */
 
-import {
-    collection,
-    doc,
-    addDoc,
-    updateDoc,
-    deleteDoc,
-    getDocs,
-    query,
-    where,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -58,15 +47,14 @@ const FIELDS_COLLECTION = "customFields";
 export async function createFieldDef(
     field: Omit<CustomFieldDef, "id" | "createdAt">,
 ): Promise<string> {
-    const ref = await addDoc(collection(db, FIELDS_COLLECTION), {
-        ...field, createdAt: serverTimestamp(),
+    const ref = await adminDb().collection(FIELDS_COLLECTION).add({
+        ...field, createdAt: FieldValue.serverTimestamp(),
     });
     return ref.id;
 }
 
 export async function getFieldDefs(orgId: string): Promise<CustomFieldDef[]> {
-    const q = query(collection(db, FIELDS_COLLECTION), where("orgId", "==", orgId));
-    const snap = await getDocs(q);
+    const snap = await adminDb().collection(FIELDS_COLLECTION).where("orgId", "==", orgId).get();
     return snap.docs.map(d => {
         const data = d.data();
         return {
@@ -80,9 +68,9 @@ export async function getFieldDefs(orgId: string): Promise<CustomFieldDef[]> {
 
 export async function updateFieldDef(id: string, updates: Partial<CustomFieldDef>): Promise<void> {
     const { id: _id, createdAt, ...rest } = updates;
-    await updateDoc(doc(db, FIELDS_COLLECTION, id), rest);
+    await adminDb().collection(FIELDS_COLLECTION).doc(id).update(rest);
 }
 
 export async function deleteFieldDef(id: string): Promise<void> {
-    await deleteDoc(doc(db, FIELDS_COLLECTION, id));
+    await adminDb().collection(FIELDS_COLLECTION).doc(id).delete();
 }

@@ -18,21 +18,8 @@
  *   ScoreSnapshot → Firestore (scoreSnapshots) + Agent doc update
  */
 
-import { db } from "@/lib/firebase";
-import {
-    collection,
-    doc,
-    getDoc,
-    getDocs,
-    addDoc,
-    setDoc,
-    updateDoc,
-    query,
-    where,
-    orderBy,
-    limit as firestoreLimit,
-    serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 // [swarm-core] Hedera removed
 import type { ScoreEvent } from "@/lib/credit-types";
 import { getScoreBand, type ScoreBand } from "./credit-scoring";
@@ -575,13 +562,12 @@ async function fetchAgentEvents(asn: string): Promise<ScoreEvent[]> {
     // Also fetch historical events from the activityEvents collection
     // that have score-related metadata
     try {
-        const q = query(
-            collection(db, "activityEvents"),
-            where("metadata.asn", "==", asn),
-            orderBy("createdAt", "desc"),
-            firestoreLimit(500),
-        );
-        const snap = await getDocs(q);
+        const snap = await adminDb()
+            .collection("activityEvents")
+            .where("metadata.asn", "==", asn)
+            .orderBy("createdAt", "desc")
+            .limit(500)
+            .get();
         const historicalEvents: ScoreEvent[] = [];
 
         for (const docSnap of snap.docs) {
@@ -609,11 +595,7 @@ async function fetchAgentEvents(asn: string): Promise<ScoreEvent[]> {
 /** Fetch slashing events for an agent */
 async function fetchSlashingEvents(asn: string): Promise<SlashingRecord[]> {
     try {
-        const q = query(
-            collection(db, "slashingEvents"),
-            where("asn", "==", asn),
-        );
-        const snap = await getDocs(q);
+        const snap = await adminDb().collection("slashingEvents").where("asn", "==", asn).get();
         return snap.docs.map(d => d.data() as SlashingRecord);
     } catch {
         return [];
@@ -623,11 +605,7 @@ async function fetchSlashingEvents(asn: string): Promise<SlashingRecord[]> {
 /** Fetch jobs completed by an agent */
 async function fetchAgentJobs(agentId: string): Promise<JobRecord[]> {
     try {
-        const q = query(
-            collection(db, "jobs"),
-            where("takenByAgentId", "==", agentId),
-        );
-        const snap = await getDocs(q);
+        const snap = await adminDb().collection("jobs").where("takenByAgentId", "==", agentId).get();
         return snap.docs.map(d => d.data() as JobRecord);
     } catch {
         return [];
@@ -644,9 +622,9 @@ async function buildTrustContext(
     let endorsementCount = 0;
 
     try {
-        const agentDoc = await getDoc(doc(db, "agents", agentId));
-        if (agentDoc.exists()) {
-            const data = agentDoc.data();
+        const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+        if (agentDoc.exists) {
+            const data = agentDoc.data()!;
             // Map on-chain registration to verification level
             if (data.asnOnChainRegistered && data.linkOnChainRegistered) {
                 verificationLevel = "certified";
@@ -683,9 +661,9 @@ async function buildTrustContext(
 /** Get risk flags from agent's ASN profile */
 async function fetchRiskFlags(agentId: string): Promise<string[]> {
     try {
-        const agentDoc = await getDoc(doc(db, "agents", agentId));
-        if (agentDoc.exists()) {
-            return (agentDoc.data().riskFlags as string[]) || [];
+        const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+        if (agentDoc.exists) {
+            return (agentDoc.data()!.riskFlags as string[]) || [];
         }
     } catch {
         // Use defaults
@@ -702,12 +680,11 @@ async function fetchRiskFlags(agentId: string): Promise<string[]> {
  */
 export async function getActiveScoringModel(): Promise<ScoringModel> {
     try {
-        const q = query(
-            collection(db, SCORING_MODELS_COLLECTION),
-            where("active", "==", true),
-            firestoreLimit(1),
-        );
-        const snap = await getDocs(q);
+        const snap = await adminDb()
+            .collection(SCORING_MODELS_COLLECTION)
+            .where("active", "==", true)
+            .limit(1)
+            .get();
         if (!snap.empty) {
             return snap.docs[0].data() as ScoringModel;
         }
@@ -728,20 +705,16 @@ export async function saveScoringModel(model: ScoringModel): Promise<void> {
     }
 
     // Deactivate previous active models
-    const q = query(
-        collection(db, SCORING_MODELS_COLLECTION),
-        where("active", "==", true),
-    );
-    const snap = await getDocs(q);
+    const snap = await adminDb().collection(SCORING_MODELS_COLLECTION).where("active", "==", true).get();
     for (const docSnap of snap.docs) {
-        await updateDoc(doc(db, SCORING_MODELS_COLLECTION, docSnap.id), { active: false });
+        await adminDb().collection(SCORING_MODELS_COLLECTION).doc(docSnap.id).update({ active: false });
     }
 
     // Save new model
-    await setDoc(doc(db, SCORING_MODELS_COLLECTION, model.version), {
+    await adminDb().collection(SCORING_MODELS_COLLECTION).doc(model.version).set({
         ...model,
         active: true,
-        createdAt: serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
     });
 }
 
@@ -830,13 +803,12 @@ export async function computeAgentScore(
     // Get previous snapshot for delta
     let delta = 0;
     try {
-        const prevQ = query(
-            collection(db, SCORE_SNAPSHOTS_COLLECTION),
-            where("agentId", "==", agentId),
-            orderBy("computedAt", "desc"),
-            firestoreLimit(1),
-        );
-        const prevSnap = await getDocs(prevQ);
+        const prevSnap = await adminDb()
+            .collection(SCORE_SNAPSHOTS_COLLECTION)
+            .where("agentId", "==", agentId)
+            .orderBy("computedAt", "desc")
+            .limit(1)
+            .get();
         if (!prevSnap.empty) {
             const prev = prevSnap.docs[0].data() as ScoreSnapshot;
             delta = compositeScore - prev.compositeScore;
@@ -869,9 +841,9 @@ export async function computeAgentScore(
  * Persist a score snapshot to the scoreSnapshots collection.
  */
 export async function persistScoreSnapshot(snapshot: ScoreSnapshot): Promise<string> {
-    const ref = await addDoc(collection(db, SCORE_SNAPSHOTS_COLLECTION), {
+    const ref = await adminDb().collection(SCORE_SNAPSHOTS_COLLECTION).add({
         ...snapshot,
-        computedAt: serverTimestamp(),
+        computedAt: FieldValue.serverTimestamp(),
     });
     return ref.id;
 }
@@ -882,11 +854,11 @@ export async function persistScoreSnapshot(snapshot: ScoreSnapshot): Promise<str
  */
 export async function syncCompositeToAgent(snapshot: ScoreSnapshot): Promise<void> {
     try {
-        const agentRef = doc(db, "agents", snapshot.agentId);
-        await updateDoc(agentRef, {
+        const agentRef = adminDb().collection("agents").doc(snapshot.agentId);
+        await agentRef.update({
             creditScore: snapshot.compositeScore,
             trustScore: snapshot.trustScore,
-            lastCreditUpdate: serverTimestamp(),
+            lastCreditUpdate: FieldValue.serverTimestamp(),
             lastCreditReason: `Scoring engine ${snapshot.modelVersion} recompute`,
             scoreBreakdown: {
                 execution: snapshot.subScores.execution.decayed,
@@ -910,13 +882,12 @@ export async function getScoreHistory(
     agentId: string,
     max: number = 50,
 ): Promise<ScoreSnapshot[]> {
-    const q = query(
-        collection(db, SCORE_SNAPSHOTS_COLLECTION),
-        where("agentId", "==", agentId),
-        orderBy("computedAt", "desc"),
-        firestoreLimit(max),
-    );
-    const snap = await getDocs(q);
+    const snap = await adminDb()
+        .collection(SCORE_SNAPSHOTS_COLLECTION)
+        .where("agentId", "==", agentId)
+        .orderBy("computedAt", "desc")
+        .limit(max)
+        .get();
     return snap.docs.map(d => ({ ...d.data() } as ScoreSnapshot));
 }
 
@@ -937,8 +908,8 @@ export async function simulateScoreChange(
     let modelOverride: ScoringModel | undefined;
     if (modelVersion) {
         try {
-            const modelDoc = await getDoc(doc(db, SCORING_MODELS_COLLECTION, modelVersion));
-            if (modelDoc.exists()) {
+            const modelDoc = await adminDb().collection(SCORING_MODELS_COLLECTION).doc(modelVersion).get();
+            if (modelDoc.exists) {
                 modelOverride = modelDoc.data() as ScoringModel;
             }
         } catch {

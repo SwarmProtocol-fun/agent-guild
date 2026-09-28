@@ -6,21 +6,8 @@
  *   workflowRuns         — execution instances
  */
 
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import type {
   WorkflowDefinition,
   WorkflowRun,
@@ -40,11 +27,11 @@ const STEP_LOGS = "workflowStepLogs";
 export async function createWorkflowDefinition(
   data: Omit<WorkflowDefinition, "id" | "createdAt" | "updatedAt" | "version">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, DEFINITIONS), {
+  const ref = await adminDb().collection(DEFINITIONS).add({
     ...data,
     version: 1,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -52,8 +39,8 @@ export async function createWorkflowDefinition(
 export async function getWorkflowDefinition(
   id: string,
 ): Promise<WorkflowDefinition | null> {
-  const snap = await getDoc(doc(db, DEFINITIONS, id));
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(DEFINITIONS).doc(id).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as WorkflowDefinition;
 }
 
@@ -66,31 +53,31 @@ export async function updateWorkflowDefinition(
     >
   >,
 ): Promise<void> {
-  const current = await getDoc(doc(db, DEFINITIONS, id));
-  if (!current.exists()) throw new Error("Workflow not found");
+  const ref = adminDb().collection(DEFINITIONS).doc(id);
+  const current = await ref.get();
+  if (!current.exists) throw new Error("Workflow not found");
 
-  await updateDoc(doc(db, DEFINITIONS, id), {
+  await ref.update({
     ...data,
-    version: (current.data().version || 0) + 1,
-    updatedAt: serverTimestamp(),
+    version: (current.data()!.version || 0) + 1,
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteWorkflowDefinition(id: string): Promise<void> {
-  await deleteDoc(doc(db, DEFINITIONS, id));
+  await adminDb().collection(DEFINITIONS).doc(id).delete();
 }
 
 export async function getOrgWorkflows(
   orgId: string,
   max = 50,
 ): Promise<WorkflowDefinition[]> {
-  const q = query(
-    collection(db, DEFINITIONS),
-    where("orgId", "==", orgId),
-    orderBy("updatedAt", "desc"),
-    firestoreLimit(max),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(DEFINITIONS)
+    .where("orgId", "==", orgId)
+    .orderBy("updatedAt", "desc")
+    .limit(max)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as WorkflowDefinition);
 }
 
@@ -99,10 +86,10 @@ export async function getOrgWorkflows(
 export async function createWorkflowRun(
   data: Omit<WorkflowRun, "id" | "createdAt" | "updatedAt">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, RUNS), {
+  const ref = await adminDb().collection(RUNS).add({
     ...data,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -110,8 +97,8 @@ export async function createWorkflowRun(
 export async function getWorkflowRun(
   id: string,
 ): Promise<WorkflowRun | null> {
-  const snap = await getDoc(doc(db, RUNS, id));
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(RUNS).doc(id).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as WorkflowRun;
 }
 
@@ -124,9 +111,9 @@ export async function updateWorkflowRun(
     >
   >,
 ): Promise<void> {
-  await updateDoc(doc(db, RUNS, id), {
+  await adminDb().collection(RUNS).doc(id).update({
     ...data,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
@@ -135,14 +122,10 @@ export async function getOrgRuns(
   status?: RunStatus,
   max = 50,
 ): Promise<WorkflowRun[]> {
-  const constraints = [
-    where("orgId", "==", orgId),
-    ...(status ? [where("status", "==", status)] : []),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(max),
-  ];
-  const q = query(collection(db, RUNS), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(RUNS).where("orgId", "==", orgId);
+  if (status) q = q.where("status", "==", status);
+  q = q.orderBy("createdAt", "desc").limit(max);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as WorkflowRun);
 }
 
@@ -150,24 +133,22 @@ export async function getWorkflowRuns(
   workflowId: string,
   max = 20,
 ): Promise<WorkflowRun[]> {
-  const q = query(
-    collection(db, RUNS),
-    where("workflowId", "==", workflowId),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(max),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(RUNS)
+    .where("workflowId", "==", workflowId)
+    .orderBy("createdAt", "desc")
+    .limit(max)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as WorkflowRun);
 }
 
 export async function getActiveRuns(orgId: string): Promise<WorkflowRun[]> {
-  const q = query(
-    collection(db, RUNS),
-    where("orgId", "==", orgId),
-    where("status", "in", ["pending", "running"]),
-    firestoreLimit(100),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(RUNS)
+    .where("orgId", "==", orgId)
+    .where("status", "in", ["pending", "running"])
+    .limit(100)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as WorkflowRun);
 }
 
@@ -176,13 +157,12 @@ export async function getActiveRuns(orgId: string): Promise<WorkflowRun[]> {
  * Used by the autonomous tick handler to advance workflows server-side.
  */
 export async function getGlobalActiveRuns(max = 50): Promise<WorkflowRun[]> {
-  const q = query(
-    collection(db, RUNS),
-    where("status", "in", ["pending", "running"]),
-    orderBy("updatedAt", "asc"), // oldest first = fairness
-    firestoreLimit(max),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(RUNS)
+    .where("status", "in", ["pending", "running"])
+    .orderBy("updatedAt", "asc") // oldest first = fairness
+    .limit(max)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as WorkflowRun);
 }
 
@@ -191,13 +171,12 @@ export async function getGlobalActiveRuns(max = 50): Promise<WorkflowRun[]> {
  * Used by trigger system to enforce maxConcurrentRuns.
  */
 export async function getWorkflowActiveRunCount(workflowId: string): Promise<number> {
-  const q = query(
-    collection(db, RUNS),
-    where("workflowId", "==", workflowId),
-    where("status", "in", ["pending", "running"]),
-    firestoreLimit(100),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(RUNS)
+    .where("workflowId", "==", workflowId)
+    .where("status", "in", ["pending", "running"])
+    .limit(100)
+    .get();
   return snap.size;
 }
 
@@ -213,9 +192,9 @@ export async function updateNodeState(
   const nodeStates = { ...run.nodeStates };
   nodeStates[nodeId] = { ...nodeStates[nodeId], ...state };
 
-  await updateDoc(doc(db, RUNS, runId), {
+  await adminDb().collection(RUNS).doc(runId).update({
     nodeStates,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
@@ -224,7 +203,7 @@ export async function updateNodeState(
 export async function addStepLog(
   log: Omit<StepLog, "id">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, STEP_LOGS), log);
+  const ref = await adminDb().collection(STEP_LOGS).add(log);
   return ref.id;
 }
 
@@ -233,13 +212,9 @@ export async function getStepLogs(
   nodeId?: string,
   max = 200,
 ): Promise<StepLog[]> {
-  const constraints = [
-    where("runId", "==", runId),
-    ...(nodeId ? [where("nodeId", "==", nodeId)] : []),
-    orderBy("timestamp", "asc"),
-    firestoreLimit(max),
-  ];
-  const q = query(collection(db, STEP_LOGS), ...constraints);
-  const snap = await getDocs(q);
+  let q: Query = adminDb().collection(STEP_LOGS).where("runId", "==", runId);
+  if (nodeId) q = q.where("nodeId", "==", nodeId);
+  q = q.orderBy("timestamp", "asc").limit(max);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as StepLog);
 }

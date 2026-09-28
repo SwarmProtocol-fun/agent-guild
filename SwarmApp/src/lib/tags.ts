@@ -4,19 +4,8 @@
  * Inspired by abhi1693/openclaw-mission-control tags component.
  */
 
-import {
-    collection,
-    doc,
-    addDoc,
-    updateDoc,
-    deleteDoc,
-    getDocs,
-    query,
-    where,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -44,15 +33,14 @@ export const TAG_COLORS = [
 const TAG_COLLECTION = "tags";
 
 export async function createTag(orgId: string, name: string, color: string): Promise<string> {
-    const ref = await addDoc(collection(db, TAG_COLLECTION), {
-        orgId, name, color, icon: "", usageCount: 0, createdAt: serverTimestamp(),
+    const ref = await adminDb().collection(TAG_COLLECTION).add({
+        orgId, name, color, icon: "", usageCount: 0, createdAt: FieldValue.serverTimestamp(),
     });
     return ref.id;
 }
 
 export async function getTags(orgId: string): Promise<Tag[]> {
-    const q = query(collection(db, TAG_COLLECTION), where("orgId", "==", orgId));
-    const snap = await getDocs(q);
+    const snap = await adminDb().collection(TAG_COLLECTION).where("orgId", "==", orgId).get();
     return snap.docs.map(d => {
         const data = d.data();
         return {
@@ -64,9 +52,9 @@ export async function getTags(orgId: string): Promise<Tag[]> {
 }
 
 export async function updateTag(id: string, updates: { name?: string; color?: string }): Promise<void> {
-    await updateDoc(doc(db, TAG_COLLECTION, id), updates);
+    await adminDb().collection(TAG_COLLECTION).doc(id).update(updates);
 }
 
 export async function deleteTag(id: string): Promise<void> {
-    await deleteDoc(doc(db, TAG_COLLECTION, id));
+    await adminDb().collection(TAG_COLLECTION).doc(id).delete();
 }

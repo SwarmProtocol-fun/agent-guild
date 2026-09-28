@@ -5,20 +5,8 @@
  * Stores encrypted values in Firestore with masked previews.
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDoc,
-  getDocs,
-  updateDoc,
-  deleteDoc,
-  query,
-  where,
-  serverTimestamp,
-  Timestamp,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { Timestamp, FieldValue } from "firebase-admin/firestore";
 import { logActivity } from "./activity";
 import crypto from "crypto";
 
@@ -198,13 +186,13 @@ export async function storeSecret(
     iv,
     maskedPreview,
     createdBy,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
     accessCount: 0,
     tags: options?.tags || [],
     description: options?.description || "",
   };
 
-  const ref = await addDoc(collection(db, "secrets"), secretData);
+  const ref = await adminDb().collection("secrets").add(secretData);
 
   // Log activity
   await logActivity({
@@ -227,8 +215,7 @@ export async function storeSecret(
  * Get all secrets for an organization (masked)
  */
 export async function getSecrets(orgId: string): Promise<Secret[]> {
-  const q = query(collection(db, "secrets"), where("orgId", "==", orgId));
-  const snapshot = await getDocs(q);
+  const snapshot = await adminDb().collection("secrets").where("orgId", "==", orgId).get();
 
   return snapshot.docs.map((doc) => {
     const data = doc.data();
@@ -265,9 +252,10 @@ export async function revealSecret(
     );
   }
 
-  const secretDoc = await getDoc(doc(db, "secrets", secretId));
+  const secretRef = adminDb().collection("secrets").doc(secretId);
+  const secretDoc = await secretRef.get();
 
-  if (!secretDoc.exists()) {
+  if (!secretDoc.exists) {
     throw new Error("Secret not found");
   }
 
@@ -286,8 +274,8 @@ export async function revealSecret(
   );
 
   // Update access tracking
-  await updateDoc(doc(db, "secrets", secretId), {
-    lastAccessedAt: serverTimestamp(),
+  await secretRef.update({
+    lastAccessedAt: FieldValue.serverTimestamp(),
     accessCount: (secret.accessCount || 0) + 1,
   });
 
@@ -302,9 +290,10 @@ export async function deleteSecret(
   orgId: string,
   deletedBy: string
 ): Promise<void> {
-  const secretDoc = await getDoc(doc(db, "secrets", secretId));
+  const secretRef = adminDb().collection("secrets").doc(secretId);
+  const secretDoc = await secretRef.get();
 
-  if (!secretDoc.exists()) {
+  if (!secretDoc.exists) {
     throw new Error("Secret not found");
   }
 
@@ -314,7 +303,7 @@ export async function deleteSecret(
     throw new Error("Secret does not belong to this organization");
   }
 
-  await deleteDoc(doc(db, "secrets", secretId));
+  await secretRef.delete();
 
   // Log activity
   await logActivity({

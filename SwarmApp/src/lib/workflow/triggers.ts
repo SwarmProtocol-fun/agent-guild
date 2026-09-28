@@ -15,21 +15,8 @@
  * are safe because workflow runs are tracked and deduped.
  */
 
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { getRedis } from "@/lib/redis";
 import { startRun } from "./executor";
 
@@ -130,18 +117,18 @@ const COLLECTION = "triggerPolicies";
 export async function createTriggerPolicy(
   data: Omit<TriggerPolicy, "id" | "createdAt" | "updatedAt" | "triggerCount" | "lastTriggeredAt">,
 ): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTION), {
+  const ref = await adminDb().collection(COLLECTION).add({
     ...data,
     triggerCount: 0,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
 
 export async function getTriggerPolicy(id: string): Promise<TriggerPolicy | null> {
-  const snap = await getDoc(doc(db, COLLECTION, id));
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(COLLECTION).doc(id).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as TriggerPolicy;
 }
 
@@ -149,38 +136,33 @@ export async function updateTriggerPolicy(
   id: string,
   data: Partial<Pick<TriggerPolicy, "name" | "description" | "config" | "enabled" | "maxConcurrentRuns" | "cooldownMs" | "staticInput">>,
 ): Promise<void> {
-  await updateDoc(doc(db, COLLECTION, id), {
+  await adminDb().collection(COLLECTION).doc(id).update({
     ...data,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
 export async function deleteTriggerPolicy(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTION, id));
+  await adminDb().collection(COLLECTION).doc(id).delete();
 }
 
 export async function getOrgTriggerPolicies(
   orgId: string,
   max = 100,
 ): Promise<TriggerPolicy[]> {
-  const q = query(
-    collection(db, COLLECTION),
-    where("orgId", "==", orgId),
-    orderBy("updatedAt", "desc"),
-    firestoreLimit(max),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(COLLECTION)
+    .where("orgId", "==", orgId)
+    .orderBy("updatedAt", "desc")
+    .limit(max)
+    .get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as TriggerPolicy);
 }
 
 export async function getPoliciesForWorkflow(
   workflowId: string,
 ): Promise<TriggerPolicy[]> {
-  const q = query(
-    collection(db, COLLECTION),
-    where("workflowId", "==", workflowId),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(COLLECTION).where("workflowId", "==", workflowId).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as TriggerPolicy);
 }
 
@@ -188,13 +170,12 @@ export async function getEnabledEventPolicies(
   orgId: string,
   eventName: TriggerEventName,
 ): Promise<TriggerPolicy[]> {
-  const q = query(
-    collection(db, COLLECTION),
-    where("orgId", "==", orgId),
-    where("triggerType", "==", "event"),
-    where("enabled", "==", true),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(COLLECTION)
+    .where("orgId", "==", orgId)
+    .where("triggerType", "==", "event")
+    .where("enabled", "==", true)
+    .get();
 
   // Filter by event name (Firestore doesn't support nested field queries well)
   return snap.docs
@@ -354,10 +335,10 @@ export async function fireEvent(
       startedRuns.push(runId);
 
       // Update policy stats
-      await updateDoc(doc(db, COLLECTION, policy.id), {
-        lastTriggeredAt: serverTimestamp(),
+      await adminDb().collection(COLLECTION).doc(policy.id).update({
+        lastTriggeredAt: FieldValue.serverTimestamp(),
         triggerCount: policy.triggerCount + 1,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     } catch (err) {
       console.error(`[triggers] Failed to start run for policy ${policy.id}:`, err);
@@ -375,13 +356,12 @@ export async function checkAlertTriggers(
   metricName: string,
   value: number,
 ): Promise<string[]> {
-  const q = query(
-    collection(db, COLLECTION),
-    where("orgId", "==", orgId),
-    where("triggerType", "==", "alert"),
-    where("enabled", "==", true),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection(COLLECTION)
+    .where("orgId", "==", orgId)
+    .where("triggerType", "==", "alert")
+    .where("enabled", "==", true)
+    .get();
   const policies = snap.docs
     .map((d) => ({ id: d.id, ...d.data() }) as TriggerPolicy)
     .filter((p) => {
@@ -433,10 +413,10 @@ export async function checkAlertTriggers(
 
       startedRuns.push(runId);
 
-      await updateDoc(doc(db, COLLECTION, policy.id), {
-        lastTriggeredAt: serverTimestamp(),
+      await adminDb().collection(COLLECTION).doc(policy.id).update({
+        lastTriggeredAt: FieldValue.serverTimestamp(),
         triggerCount: policy.triggerCount + 1,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     } catch (err) {
       console.error(`[triggers] Alert trigger failed for policy ${policy.id}:`, err);

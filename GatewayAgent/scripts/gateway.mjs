@@ -19,6 +19,7 @@
 
 import crypto from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -68,8 +69,26 @@ function loadState() {
   try { return JSON.parse(readFileSync(STATE_PATH, "utf-8")); } catch { return { activeTasks: 0, lastHeartbeat: 0, totalCompleted: 0, totalFailed: 0 }; }
 }
 
-function saveState(state) {
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+async function saveState(state) {
+  try {
+    await writeFile(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+  } catch (err) {
+    log("warn", `Failed to persist state: ${err.message}`);
+  }
+}
+
+// Coalesce bursts of state mutations (heartbeat tick + task completions that
+// land close together) into a single async write instead of one blocking
+// writeFileSync per event, and avoid the read-modify-write races that came
+// from each call site independently reloading state.json from disk.
+let statePersistScheduled = false;
+function scheduleSaveState(state) {
+  if (statePersistScheduled) return;
+  statePersistScheduled = true;
+  setImmediate(() => {
+    statePersistScheduled = false;
+    saveState(state);
+  });
 }
 
 function log(level, msg, meta = {}) {
@@ -796,6 +815,12 @@ async function cmdDaemon() {
   const activeTasks = new Map(); // taskId -> { promise, startedAt }
   let draining = false;
   let running = true;
+  // Single in-memory state object — mutated in place and persisted via
+  // scheduleSaveState() so concurrent task completions can't race on
+  // independent disk read-modify-write cycles.
+  const state = loadState();
+  let ticksSinceHttpPoll = 0;
+  const WS_BACKUP_POLL_EVERY_N_TICKS = 6; // safety-net HTTP poll cadence even while WS is healthy
 
   log("info", `Gateway daemon starting — polling every ${intervalSec}s, max ${config.maxConcurrent} concurrent tasks`);
 
@@ -866,7 +891,7 @@ async function cmdDaemon() {
     };
 
     log("info", `Executing WS-dispatched task ${task.id} (${task.taskType})`);
-    const taskPromise = runTask(config, task, activeTasks, wsClient);
+    const taskPromise = runTask(config, task, activeTasks, wsClient, state);
     activeTasks.set(task.id, { promise: taskPromise, startedAt: Date.now() });
     taskPromise.finally(() => activeTasks.delete(task.id));
   }
@@ -954,13 +979,20 @@ async function cmdDaemon() {
           log("warn", `Heartbeat failed: ${err.message}`);
         }
       }
-      const state = loadState();
       state.lastHeartbeat = Date.now();
       state.activeTasks = activeTasks.size;
-      saveState(state);
+      scheduleSaveState(state);
 
-      // 2. Pull tasks if we have capacity (always poll as backup, even with WS)
-      if (activeTasks.size < config.maxConcurrent && !draining) {
+      // 2. Pull tasks if we have capacity. When WS is connected, the hub
+      // pushes job:dispatch directly — skip the redundant HTTP poll and only
+      // fall back to it periodically as a safety net (or immediately if WS
+      // is down), instead of polling every tick regardless of WS health.
+      const wsHealthy = !!wsClient?.connected;
+      ticksSinceHttpPoll++;
+      const shouldHttpPoll = !wsHealthy || ticksSinceHttpPoll >= WS_BACKUP_POLL_EVERY_N_TICKS;
+
+      if (activeTasks.size < config.maxConcurrent && !draining && shouldHttpPoll) {
+        ticksSinceHttpPoll = 0;
         try {
           const resp = await apiPullTask(config, config.workerId);
           if (resp.ok) {
@@ -973,7 +1005,7 @@ async function cmdDaemon() {
                 timeoutMs: task.timeoutMs,
               });
 
-              const taskPromise = runTask(config, task, activeTasks, wsClient);
+              const taskPromise = runTask(config, task, activeTasks, wsClient, state);
               activeTasks.set(task.id, { promise: taskPromise, startedAt: Date.now() });
               taskPromise.finally(() => activeTasks.delete(task.id));
             }
@@ -999,9 +1031,7 @@ async function cmdDaemon() {
 /**
  * Execute a task, report status transitions, and handle results.
  */
-async function runTask(config, task, activeTasks, wsClient = null) {
-  const state = loadState();
-
+async function runTask(config, task, activeTasks, wsClient = null, state) {
   // Report running — prefer WS, fallback to HTTP
   const sentRunning = wsClient?.sendJobStatus(task.id, "running");
   if (!sentRunning) {
@@ -1061,7 +1091,7 @@ async function runTask(config, task, activeTasks, wsClient = null) {
     log("info", `Task ${task.id} completed (${result.executionTimeMs}ms)`);
 
     state.totalCompleted = (state.totalCompleted || 0) + 1;
-    saveState(state);
+    scheduleSaveState(state);
 
   } catch (err) {
     log("error", `Task ${task.id} failed: ${err.message}`);
@@ -1080,7 +1110,7 @@ async function runTask(config, task, activeTasks, wsClient = null) {
     }
 
     state.totalFailed = (state.totalFailed || 0) + 1;
-    saveState(state);
+    scheduleSaveState(state);
   }
 }
 

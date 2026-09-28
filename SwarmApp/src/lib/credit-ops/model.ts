@@ -5,20 +5,8 @@
  * comparison before promotion, and rollback to previous versions.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { recordCreditOpsAudit } from "./audit";
 import { getPolicy } from "./policy";
 import type { CreditOpsModel, ModelStatus, ShadowResults } from "./types";
@@ -51,10 +39,10 @@ export async function createModel(params: {
     publishedBy: params.publishedBy,
   };
 
-  const ref = await addDoc(collection(db, MODEL_COLLECTION), {
+  const ref = await adminDb().collection(MODEL_COLLECTION).add({
     ...model,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -70,32 +58,22 @@ export async function createModel(params: {
 
 /** Get a model by ID. */
 export async function getModel(modelId: string): Promise<CreditOpsModel | null> {
-  const ref = doc(db, MODEL_COLLECTION, modelId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const ref = adminDb().collection(MODEL_COLLECTION).doc(modelId);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as CreditOpsModel;
 }
 
 /** Get the active model. */
 export async function getActiveModel(): Promise<CreditOpsModel | null> {
-  const q = query(
-    collection(db, MODEL_COLLECTION),
-    where("status", "==", "active"),
-    firestoreLimit(1),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(MODEL_COLLECTION).where("status", "==", "active").limit(1).get();
   if (snap.empty) return null;
   return { id: snap.docs[0].id, ...snap.docs[0].data() } as CreditOpsModel;
 }
 
 /** List all models. */
 export async function listModels(): Promise<CreditOpsModel[]> {
-  const q = query(
-    collection(db, MODEL_COLLECTION),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(50),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(MODEL_COLLECTION).orderBy("createdAt", "desc").limit(50).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsModel[];
 }
 
@@ -105,16 +83,16 @@ export async function listModels(): Promise<CreditOpsModel[]> {
 
 /** Start shadow mode for a model. */
 export async function startShadowMode(modelId: string): Promise<void> {
-  const ref = doc(db, MODEL_COLLECTION, modelId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Model not found");
-  if (snap.data().status !== "draft") throw new Error("Only draft models can enter shadow mode");
+  const ref = adminDb().collection(MODEL_COLLECTION).doc(modelId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Model not found");
+  if (snap.data()!.status !== "draft") throw new Error("Only draft models can enter shadow mode");
 
-  await updateDoc(ref, {
+  await ref.update({
     status: "shadow",
     shadowModeEnabled: true,
-    shadowStartedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    shadowStartedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -134,9 +112,7 @@ export async function computeShadowComparison(modelId: string): Promise<ShadowRe
   if (!policy) throw new Error("Model policy not found");
 
   // Sample agents and compute divergence
-  const agentsSnap = await getDocs(
-    query(collection(db, "agents"), where("creditScore", ">", 0), firestoreLimit(100)),
-  );
+  const agentsSnap = await adminDb().collection("agents").where("creditScore", ">", 0).limit(100).get();
 
   let totalCreditDivergence = 0;
   let totalTrustDivergence = 0;
@@ -179,8 +155,8 @@ export async function computeShadowComparison(modelId: string): Promise<ShadowRe
   };
 
   // Save results to model
-  const ref = doc(db, MODEL_COLLECTION, modelId);
-  await updateDoc(ref, { shadowResults: results, updatedAt: serverTimestamp() });
+  const ref = adminDb().collection(MODEL_COLLECTION).doc(modelId);
+  await ref.update({ shadowResults: results, updatedAt: FieldValue.serverTimestamp() });
 
   return results;
 }
@@ -204,11 +180,11 @@ export async function promoteModel(
   modelId: string,
   promotedBy: string,
 ): Promise<void> {
-  const ref = doc(db, MODEL_COLLECTION, modelId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Model not found");
+  const ref = adminDb().collection(MODEL_COLLECTION).doc(modelId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Model not found");
 
-  const data = snap.data();
+  const data = snap.data()!;
   if (data.status !== "draft" && data.status !== "shadow") {
     throw new Error("Only draft or shadow models can be promoted");
   }
@@ -216,17 +192,17 @@ export async function promoteModel(
   // Deprecate current active model
   const currentActive = await getActiveModel();
   if (currentActive) {
-    const activeRef = doc(db, MODEL_COLLECTION, currentActive.id);
-    await updateDoc(activeRef, { status: "deprecated", updatedAt: serverTimestamp() });
+    const activeRef = adminDb().collection(MODEL_COLLECTION).doc(currentActive.id);
+    await activeRef.update({ status: "deprecated", updatedAt: FieldValue.serverTimestamp() });
   }
 
   // Promote new model
-  await updateDoc(ref, {
+  await ref.update({
     status: "active",
     shadowModeEnabled: false,
-    activatedAt: serverTimestamp(),
+    activatedAt: FieldValue.serverTimestamp(),
     previousModelId: currentActive?.id || null,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   await recordCreditOpsAudit({
@@ -247,27 +223,27 @@ export async function rollbackModel(
   rolledBackBy: string,
   reason: string,
 ): Promise<void> {
-  const ref = doc(db, MODEL_COLLECTION, modelId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Model not found");
+  const ref = adminDb().collection(MODEL_COLLECTION).doc(modelId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Model not found");
 
-  const data = snap.data();
+  const data = snap.data()!;
 
   // Mark as rolled back
-  await updateDoc(ref, {
+  await ref.update({
     status: "rolled_back",
-    rollbackAt: serverTimestamp(),
+    rollbackAt: FieldValue.serverTimestamp(),
     rollbackBy: rolledBackBy,
     rollbackReason: reason,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   // Restore previous model if available
   if (data.previousModelId) {
-    const prevRef = doc(db, MODEL_COLLECTION, data.previousModelId);
-    const prevSnap = await getDoc(prevRef);
-    if (prevSnap.exists()) {
-      await updateDoc(prevRef, { status: "active", updatedAt: serverTimestamp() });
+    const prevRef = adminDb().collection(MODEL_COLLECTION).doc(data.previousModelId);
+    const prevSnap = await prevRef.get();
+    if (prevSnap.exists) {
+      await prevRef.update({ status: "active", updatedAt: FieldValue.serverTimestamp() });
     }
   }
 
