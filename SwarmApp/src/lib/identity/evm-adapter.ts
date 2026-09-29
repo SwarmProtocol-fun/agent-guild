@@ -68,4 +68,40 @@ export class EvmIdentityAdapter implements IdentityAdapter {
     const provider = new ethers.JsonRpcProvider(chain.rpc);
     return this.contract(provider).hasNFT(agentAddress);
   }
+
+  /**
+   * Moves the identity NFT from the agent's old wallet to its new one via
+   * SwarmAgentIdentityNFT.emergencyTransfer() (burn-then-remint under the
+   * hood — see the contract). If the old wallet never actually had a token
+   * minted (e.g. this chain wasn't configured at the agent's first
+   * registration), there's nothing to move, so this falls back to a plain
+   * mint on the new wallet instead.
+   */
+  async reissueIdentity(oldAgentAddress: string, p: MintIdentityParams): Promise<IdentityMintReceipt | null> {
+    const chain = getChain(this.chainKey);
+    if (!chain) throw new Error(`Unknown chain: ${this.chainKey}`);
+
+    const privateKey = process.env.PLATFORM_SETTLEMENT_KEY;
+    if (!privateKey) throw new Error("PLATFORM_SETTLEMENT_KEY not configured");
+
+    const provider = new ethers.JsonRpcProvider(chain.rpc);
+    const wallet = new ethers.Wallet(privateKey, provider);
+    const nft = this.contract(wallet);
+
+    const oldTokenId: bigint = await nft.getTokenId(oldAgentAddress);
+    if (oldTokenId === 0n) return this.mintIdentity(p);
+
+    const alreadyOnNewWallet = await nft.hasNFT(p.agentAddress);
+    if (alreadyOnNewWallet) return null;
+
+    const tx = await nft.emergencyTransfer(oldTokenId, p.agentAddress);
+    const receipt = await tx.wait();
+
+    return {
+      chain: this.chainKey,
+      txSig: receipt.hash,
+      tokenId: oldTokenId.toString(),
+      explorerUrl: chain.explorer.txUrl(receipt.hash),
+    };
+  }
 }

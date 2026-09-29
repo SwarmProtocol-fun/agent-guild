@@ -45,3 +45,37 @@ export async function mintIdentityOnChains(
 
   return { receipts, errors };
 }
+
+/**
+ * Re-homes an agent's identity onto a new wallet on several chains at once
+ * — e.g. a reinstalled agent that lost its keypair and generated a fresh
+ * one. Same fan-out/error shape as mintIdentityOnChains; see each
+ * adapter's reissueIdentity() for what "reissue" means on that chain (an
+ * actual on-chain transfer where possible, a fresh mint where not).
+ */
+export async function reissueIdentityOnChains(
+  chains: string[],
+  oldAgentAddress: string,
+  params: MintIdentityParams,
+): Promise<{ receipts: IdentityMintReceipt[]; errors: { chain: string; error: string }[] }> {
+  const results = await Promise.allSettled(
+    chains.map(async (chain) => {
+      const adapter = adapters[chain];
+      if (!adapter) throw new Error(`Unsupported identity chain: ${chain}`);
+      return adapter.reissueIdentity(oldAgentAddress, params);
+    }),
+  );
+
+  const receipts: IdentityMintReceipt[] = [];
+  const errors: { chain: string; error: string }[] = [];
+
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") {
+      if (r.value) receipts.push(r.value);
+    } else {
+      errors.push({ chain: chains[i], error: r.reason?.message ?? String(r.reason) });
+    }
+  });
+
+  return { receipts, errors };
+}

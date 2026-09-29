@@ -1877,6 +1877,199 @@ async function cmdMemory() {
 }
 
 // ---------------------------------------------------------------------------
+// Mod Skill Commands — solana-settlement, tempo-settlement, hyperliquid-trading
+//
+// These call /api/mods/<modId>/<route> rather than /api/v1/* — same Ed25519
+// keypair, same signedBodyRequest/signedQuery helpers, just a different
+// signed-message prefix ("METHOD:/mods/<modId>/<path>" instead of
+// "METHOD:/v1/<endpoint>") matching what the mod dispatcher
+// (src/app/api/mods/[modId]/[...path]/route.ts) actually verifies against.
+// ---------------------------------------------------------------------------
+
+/**
+ * swarm settle --chain solana|tempo --task-id <id> --amount-usd <n> --wallet <address>
+ *              [--exit-code <n>] [--exec-ms <n>] [--invoice-ref <ref>] [--json]
+ */
+async function cmdSettle() {
+  const chain = arg("--chain") || "solana";
+  if (chain !== "solana" && chain !== "tempo") {
+    console.error('Usage: swarm settle --chain solana|tempo --task-id <id> --amount-usd <n> --wallet <address>');
+    process.exit(1);
+  }
+  const taskId = arg("--task-id");
+  const amountUsd = arg("--amount-usd");
+  const wallet = arg("--wallet");
+  if (!taskId || !amountUsd || !wallet) {
+    console.error('Usage: swarm settle --chain solana|tempo --task-id <id> --amount-usd <n> --wallet <address> [--exit-code <n>] [--exec-ms <n>] [--invoice-ref <ref>]');
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const modId = `${chain}-settlement`;
+  const invoiceRef = arg("--invoice-ref");
+
+  const resp = await signedBodyRequest(
+    config, privateKey, "POST", `POST:/mods/${modId}/settle`,
+    `${config.hubUrl}/api/mods/${modId}/settle?agent=${config.agentId}`,
+    {
+      agentId: config.agentId,
+      agentWallet: wallet,
+      taskId,
+      amountUsdc: Number(amountUsd),
+      exitCode: Number(arg("--exit-code") || "0"),
+      executionTimeMs: Number(arg("--exec-ms") || "0"),
+      ...(chain === "tempo" && invoiceRef ? { invoiceRef } : {}),
+    },
+  );
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Settlement failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data));
+    return;
+  }
+  console.log(`✓ Settled ${amountUsd} USDC — tx ${data.receipt.txSig}`);
+  console.log(`  ${data.receipt.explorerUrl}`);
+}
+
+/** swarm verify --chain solana|tempo --tx <signature> [--json] */
+async function cmdVerify() {
+  const chain = arg("--chain") || "solana";
+  const tx = arg("--tx");
+  if (!tx || (chain !== "solana" && chain !== "tempo")) {
+    console.error("Usage: swarm verify --chain solana|tempo --tx <signature>");
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const modId = `${chain}-settlement`;
+  const signPath = `/mods/${modId}/verify/${tx}`;
+  const qs = signedQuery(config, privateKey, signPath);
+
+  const resp = await fetch(`${config.hubUrl}/api${signPath}?${qs}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Verify failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data));
+    return;
+  }
+  console.log(data.hashVerified ? "✓ receipt hash verified on-chain" : "✗ hash mismatch or receipt not found");
+  if (data.confirmedAt) console.log(`  confirmed: ${data.confirmedAt}`);
+}
+
+/**
+ * swarm trade --coin <symbol> --side buy|sell --size-usd <n>
+ *             [--order-type market|limit] [--limit-price <n>] [--org-id <id>] [--json]
+ */
+async function cmdTrade() {
+  const coin = arg("--coin");
+  const side = arg("--side");
+  const sizeUsd = arg("--size-usd");
+  if (!coin || !sizeUsd || (side !== "buy" && side !== "sell")) {
+    console.error("Usage: swarm trade --coin <symbol> --side buy|sell --size-usd <n> [--order-type market|limit] [--limit-price <n>] [--org-id <id>]");
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const orgId = arg("--org-id") || config.orgId;
+  const orderType = arg("--order-type") || "market";
+  const limitPrice = arg("--limit-price");
+
+  const resp = await signedBodyRequest(
+    config, privateKey, "POST", "POST:/mods/hyperliquid-trading/trade",
+    `${config.hubUrl}/api/mods/hyperliquid-trading/trade?agent=${config.agentId}`,
+    {
+      agentId: config.agentId,
+      orgId,
+      coin,
+      isBuy: side === "buy",
+      sizeUsd: Number(sizeUsd),
+      orderType,
+      ...(limitPrice ? { limitPrice: Number(limitPrice) } : {}),
+    },
+  );
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Trade failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data));
+    return;
+  }
+  console.log(`✓ Queued task ${data.taskId} — check with: swarm trade-status ${data.taskId}`);
+}
+
+/** swarm trade-status <taskId> [--json] */
+async function cmdTradeStatus() {
+  const taskId = process.argv[3];
+  if (!taskId) {
+    console.error("Usage: swarm trade-status <taskId>");
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const signPath = `/mods/hyperliquid-trading/status/${taskId}`;
+  const qs = signedQuery(config, privateKey, signPath);
+
+  const resp = await fetch(`${config.hubUrl}/api${signPath}?${qs}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Status check failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data));
+    return;
+  }
+  console.log(`Task ${taskId}: ${data.status}`);
+  if (data.result) console.log(`  result: ${JSON.stringify(data.result)}`);
+  if (data.error) console.log(`  error: ${data.error}`);
+}
+
+/** swarm close --wallet <address> --coin <symbol> [--org-id <id>] [--json] */
+async function cmdClose() {
+  const wallet = arg("--wallet");
+  const coin = arg("--coin");
+  if (!wallet || !coin) {
+    console.error("Usage: swarm close --wallet <address> --coin <symbol> [--org-id <id>]");
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const orgId = arg("--org-id") || config.orgId;
+
+  const resp = await signedBodyRequest(
+    config, privateKey, "POST", "POST:/mods/hyperliquid-trading/close",
+    `${config.hubUrl}/api/mods/hyperliquid-trading/close?agent=${config.agentId}`,
+    { agentId: config.agentId, orgId, wallet, coin },
+  );
+
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Close failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data));
+    return;
+  }
+  console.log(`✓ Closing ${data.closing.coin} ${data.closing.side} ($${data.closing.sizeUsd.toFixed(2)}) — task ${data.taskId}`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -1904,6 +2097,11 @@ try {
   else if (cmd === "close-session") await cmdCloseSession();
   else if (cmd === "context") await cmdContext();
   else if (cmd === "memory") await cmdMemory();
+  else if (cmd === "settle") await cmdSettle();
+  else if (cmd === "verify") await cmdVerify();
+  else if (cmd === "trade") await cmdTrade();
+  else if (cmd === "trade-status") await cmdTradeStatus();
+  else if (cmd === "close") await cmdClose();
   else {
     console.log(`@swarmprotocol/agent-skill — Sandbox-safe Swarm agent
 
@@ -1937,6 +2135,15 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Mod Skill Commands (requires the matching plugin installed for your org):
+  settle       --chain solana|tempo --task-id <id> --amount-usd <n> --wallet <address> [--exit-code <n>] [--exec-ms <n>] [--invoice-ref <ref>]
+               — pay an agent for a completed job and commit its receipt hash on-chain
+  verify       --chain solana|tempo --tx <signature>       — confirm a settlement's receipt hash actually landed on-chain
+  trade        --coin <symbol> --side buy|sell --size-usd <n> [--order-type market|limit] [--limit-price <n>] [--org-id <id>]
+               — place an order on Hyperliquid via a GatewayAgent-executed job
+  trade-status <taskId>                                    — poll a queued trade/close task
+  close        --wallet <address> --coin <symbol> [--org-id <id>]  — close an open Hyperliquid position
 
 Auth:
   Ed25519 keypair generated on first run.

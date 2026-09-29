@@ -77,4 +77,15 @@ export class SolanaIdentityAdapter implements IdentityAdapter {
   async hasIdentity(): Promise<boolean> {
     return false;
   }
+
+  /**
+   * Solana has no admin override on a frozen token account — once soulbound,
+   * not even the platform can move it. There's nothing to transfer, so
+   * reissuing here just mints a fresh identity token on the new wallet
+   * (params.agentAddress) and leaves the old one frozen at oldAgentAddress,
+   * orphaned but harmless.
+   */
+  async reissueIdentity(_oldAgentAddress: string, params: MintIdentityParams): Promise<IdentityMintReceipt> {
+    return this.mintIdentity(params);
+  }
 }

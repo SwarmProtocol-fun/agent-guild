@@ -27,4 +27,14 @@ export interface IdentityAdapter {
   /** Idempotent — resolves to null if the agent already has an identity on this chain. */
   mintIdentity(params: MintIdentityParams): Promise<IdentityMintReceipt | null>;
   hasIdentity(agentAddress: string): Promise<boolean>;
+  /**
+   * Re-home an agent's identity onto a new wallet (e.g. a reinstall that
+   * lost its keypair and generated a fresh one) — `params.agentAddress` is
+   * the new wallet. Where the chain can actually move the credential (an
+   * owner-gated on-chain transfer), it moves it; where it can't (a
+   * soulbound token with no admin override), this issues a fresh one on
+   * the new wallet instead and leaves the old one orphaned. Resolves to
+   * null if the new wallet already has an identity on this chain.
+   */
+  reissueIdentity(oldAgentAddress: string, params: MintIdentityParams): Promise<IdentityMintReceipt | null>;
 }

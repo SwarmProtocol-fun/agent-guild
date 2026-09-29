@@ -23,7 +23,7 @@ import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
 import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory, issueAgentIdentity } from "@/lib/mod-stubs";
 import { getWalletAddress } from "@/lib/auth-guard";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { mintIdentityOnChains, supportedIdentityChains, type IdentityMintReceipt } from "@/lib/identity/registry";
+import { mintIdentityOnChains, reissueIdentityOnChains, supportedIdentityChains, type IdentityMintReceipt } from "@/lib/identity/registry";
 
 /** Chains the caller can mint the agent's ASN identity NFT on at birth — defaults to all of them. */
 function resolveChainChoice(body: Record<string, unknown>): string[] {
@@ -321,8 +321,13 @@ export async function POST(request: NextRequest) {
                 }, { status: 409 });
             }
 
-            // Derive new agent address from updated public key
+            // Derive new agent address from updated public key — a reinstall
+            // that lost its keypair (no publicKey match above) but keeps the
+            // same orgId+agentName lands here with a *different* address
+            // than the one already on file.
             const agentAddress = deriveAgentAddress(publicKey);
+            const oldAgentAddress = matchedData.agentAddress as string | undefined;
+            const addressChanged = !!oldAgentAddress && oldAgentAddress !== agentAddress;
 
             const nameUpdates: Record<string, unknown> = {
                 publicKey,
@@ -352,8 +357,23 @@ export async function POST(request: NextRequest) {
                 });
             }
 
-            // Mint the ASN identity NFT on the chosen chain(s) if not yet minted (non-blocking)
-            if (!matchedData.onChainRegistered) {
+            // Reissue the ASN identity NFT onto the new wallet if this is a
+            // reinstall with a fresh keypair, otherwise mint it for the
+            // first time if it's never been minted (both non-blocking).
+            if (addressChanged) {
+                reissueIdentityOnChains(chosenChains, oldAgentAddress!, {
+                    agentAddress,
+                    asn: matchedAsn,
+                    agentName: matchedData.name || agentName,
+                    creditScore: matchedData.creditScore ?? 680,
+                    trustScore: matchedData.trustScore ?? 50,
+                }).then(async ({ receipts }) => {
+                    const fields = identityUpdateFields(receipts);
+                    if (Object.keys(fields).length > 0) {
+                        await adminDb().collection("agents").doc(matchedDoc.id).update(fields);
+                    }
+                }).catch(() => {});
+            } else if (!matchedData.onChainRegistered) {
                 mintIdentityOnChains(chosenChains, {
                     agentAddress,
                     asn: matchedAsn,

@@ -130,15 +130,20 @@ export async function issueAgentIdentity(
     if (existing.exists) {
         const data = existing.data()!;
         // vaultPublicKey can be backfilled on a later registration (e.g. an
-        // agent that registered before generating a vault keypair), but an
-        // already-issued tokenId/asn never changes underneath the agent.
-        if (vaultPublicKey && !data.vaultPublicKey) {
-            await ref.update({ vaultPublicKey });
+        // agent that registered before generating a vault keypair), and
+        // agentAddress can change on a reinstall that lost its keypair and
+        // generated a fresh one (see register/route.ts's name-match path) —
+        // but an already-issued tokenId/asn never changes underneath the agent.
+        const updates: Record<string, unknown> = {};
+        if (vaultPublicKey && !data.vaultPublicKey) updates.vaultPublicKey = vaultPublicKey;
+        if (agentAddress && agentAddress !== data.agentAddress) updates.agentAddress = agentAddress;
+        if (Object.keys(updates).length > 0) {
+            await ref.update(updates);
         }
         return {
             tokenId: data.tokenId,
             asn: data.asn,
-            agentAddress: data.agentAddress,
+            agentAddress: (updates.agentAddress as string | undefined) ?? data.agentAddress,
             vaultPublicKey: vaultPublicKey || data.vaultPublicKey || null,
             issuedAt: data.issuedAt,
         };
