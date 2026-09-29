@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { selectGateway } from "@/lib/gateways";
+import { selectGateway } from "@/lib/firestore-admin";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);

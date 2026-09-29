@@ -6,8 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { getCronJob } from "@/lib/cron";
-import { getAgent } from "@/lib/firestore";
+import { getCronJob, getAgent } from "@/lib/firestore-admin";
 import { recordCronExecution, type AgentExecutionResult } from "@/lib/cron-history";
 import { getWalletAddress } from "@/lib/auth-guard";
 

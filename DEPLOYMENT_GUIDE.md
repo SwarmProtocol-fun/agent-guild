@@ -2,12 +2,13 @@
 
 ## Table of Contents
 1. [Architecture Overview](#architecture-overview)
-2. [Load Balancer Configuration](#load-balancer-configuration)
-3. [Sticky Sessions for WebSocket](#sticky-sessions-for-websocket)
-4. [Environment Configuration](#environment-configuration)
-5. [Firestore Setup](#firestore-setup)
-6. [Cloud Pub/Sub Setup](#cloud-pubsub-setup-optional)
-7. [Monitoring & Health Checks](#monitoring--health-checks)
+2. [Railway Deployment](#railway-deployment)
+3. [Load Balancer Configuration](#load-balancer-configuration)
+4. [Sticky Sessions for WebSocket](#sticky-sessions-for-websocket)
+5. [Environment Configuration](#environment-configuration)
+6. [Firestore Setup](#firestore-setup)
+7. [Cloud Pub/Sub Setup](#cloud-pubsub-setup-optional)
+8. [Monitoring & Health Checks](#monitoring--health-checks)
 
 ---
 
@@ -40,6 +41,37 @@
 2. **Shared State via Firestore**: Sessions, rate limits, nonces stored in Firestore
 3. **Cross-Instance Messaging**: Cloud Pub/Sub broadcasts messages between instances
 4. **Stateful Connections**: In-memory connection tracking (can't be shared)
+
+---
+
+## Railway Deployment
+
+Railway auto-deploys `hub/` from GitHub, provisions Redis, and terminates HTTPS for you — a much lighter path than the AWS/GCP setup below. It covers a **single hub instance**; if you outgrow that, see [Sticky Sessions for WebSocket](#sticky-sessions-for-websocket) and "Scaling beyond one instance" further down.
+
+### Setup
+
+1. Create a [Railway](https://railway.com) project and connect the `swarm-core` GitHub repo.
+2. Add a **Redis** database: "+ New" → "Database" → "Add Redis". Railway exposes it as reference variable `${{Redis.REDIS_URL}}`.
+3. Add a service from the same repo:
+   - **Root Directory**: `hub`
+   - Railway reads `hub/railway.json` automatically — Dockerfile builder, health check on `/health`, restart-on-failure, and `sleepApplication: false` (idle WebSocket connections would otherwise get dropped if Railway put the service to sleep).
+4. Set env vars in the Railway dashboard:
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `FIREBASE_SERVICE_ACCOUNT` | Yes | Base64-encoded Firebase service account JSON (`base64 -w0 service-account.json`) — used by the Admin SDK for Firestore access |
+| `REDIS_URL` | Yes | Set to `${{Redis.REDIS_URL}}` (reference to the Redis service added above) |
+| `ALLOWED_ORIGINS` | Recommended | Comma-separated origins, e.g. `https://swarmprotocol.ai`; falls back to that + `localhost:3000` if unset |
+| `PORT` | No | Railway injects this automatically — the hub reads `process.env.PORT` |
+| `INSTANCE_ID` | No | Defaults to `hub-<pid>`; set explicitly once you run more than one instance |
+| `HUB_REGION` | No | Defaults to `us-east` |
+| `GCP_PROJECT_ID`, `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`, `GOOGLE_APPLICATION_CREDENTIALS` | Only for multi-instance | Enables cross-instance broadcast via [Cloud Pub/Sub](#cloud-pubsub-setup-optional) — a single Railway instance doesn't need these |
+
+5. **Custom domain**: add one under the service's Settings → Networking (e.g. `hub.swarmprotocol.ai`), then point `SwarmApp`'s hub URL env var at it.
+
+### Scaling beyond one instance
+
+Bumping `numReplicas` in `hub/railway.json` isn't enough by itself: this hub keeps per-connection state in memory, and Railway's router doesn't pin a WebSocket connection to a specific replica the way [sticky sessions](#sticky-sessions-for-websocket) do. Configure Cloud Pub/Sub first so instances can broadcast to each other, and treat the [Load Balancer Configuration](#load-balancer-configuration) section below as the fully worked-out version of what true multi-instance HA needs.
 
 ---
 
@@ -345,13 +377,11 @@ INSTANCE_ID=hub-us-east-1a
 HUB_REGION=us-east
 HUB_GATEWAY_ID=gateway-prod-1
 
-# Firebase (shared across instances)
-FIREBASE_API_KEY=your-firebase-api-key
-FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-FIREBASE_PROJECT_ID=your-project-id
-FIREBASE_STORAGE_BUCKET=your-project.appspot.com
-FIREBASE_MESSAGING_SENDER_ID=123456789
-FIREBASE_APP_ID=1:123456789:web:abc123
+# Redis (shared across instances)
+REDIS_URL=redis://:password@redis-host:6379
+
+# Firebase Admin SDK (shared across instances — base64-encoded service account JSON)
+FIREBASE_SERVICE_ACCOUNT=your-base64-encoded-service-account-json
 
 # Security
 ALLOWED_ORIGINS=https://swarmprotocol.ai,https://app.swarmprotocol.ai

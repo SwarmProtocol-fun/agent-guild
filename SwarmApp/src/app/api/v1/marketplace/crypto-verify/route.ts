@@ -13,7 +13,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
-import { subscribeToItem, type SubscriptionPlan } from "@/lib/skills";
+import type { SubscriptionPlan } from "@/lib/skills";
+import { subscribeToItem } from "@/lib/firestore-admin";
 import { getMarketplaceSettings } from "@/lib/marketplace-settings";
 import { CHAIN_CONFIGS } from "@/lib/chains";
 

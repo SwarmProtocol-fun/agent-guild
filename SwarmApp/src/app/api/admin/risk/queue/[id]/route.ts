@@ -10,7 +10,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { requirePlatformAdmin, getWalletAddress } from "@/lib/auth-guard";
 import { recordAuditEntry } from "@/lib/audit-log";
-import { logActivity } from "@/lib/activity";
+import { logActivity } from "@/lib/firestore-admin";
 import {
   getFraudReviewCase,
   updateFraudReviewCase,

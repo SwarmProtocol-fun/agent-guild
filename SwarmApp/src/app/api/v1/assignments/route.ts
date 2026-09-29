@@ -13,7 +13,7 @@ import {
   listAssignments,
   getAssignmentStats,
 } from "@/lib/assignments";
-import { getAgent } from "@/lib/firestore";
+import { getAgent } from "@/lib/firestore-admin";
 
 // ─── POST - Create Assignment ───────────────────────────────
 

@@ -212,7 +212,7 @@ export async function selectGateway(
  * Calculate gateway score (0-100)
  * Factors: distance, latency, load, error rate, uptime
  */
-function calculateGatewayScore(gateway: Gateway, distance: number): number {
+export function calculateGatewayScore(gateway: Gateway, distance: number): number {
     let score = 100;
 
     // Distance penalty (max 30 points)

@@ -3,10 +3,19 @@
  *
  * Reads `platformConfig/creditPolicy` and `orgPolicies/{orgId}` from Firestore.
  * Follows the same cache + defaults pattern as marketplace-settings.ts.
+ *
+ * NOTE: stays on the client SDK (not firebase-admin) even though it's mostly
+ * called from server code, because src/lib/firestore.ts::claimJob dynamically
+ * imports this module and claimJob is called directly from client dashboard
+ * pages — bundling firebase-admin (Node-only) into that client chunk breaks
+ * the build. platformConfig/orgPolicies aren't rule-locked, so this costs
+ * nothing security-wise; only recordPolicyEvent's target (creditPolicyLog) is
+ * locked, and it already fails open (see its own try/catch) when called from
+ * a context without write access.
  */
 
-import { adminDb } from "./firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
+import { db } from "./firebase";
 import type { PolicyTierName, OrgPolicyOverride } from "./credit-policy";
 
 // ═══════════════════════════════════════════════════════════════
@@ -64,8 +73,8 @@ export async function getCreditPolicyConfig(): Promise<CreditPolicyConfig> {
     }
 
     try {
-        const snap = await adminDb().collection("platformConfig").doc("creditPolicy").get();
-        const data = snap.exists ? snap.data() : {};
+        const snap = await getDoc(doc(db, "platformConfig", "creditPolicy"));
+        const data = snap.exists() ? snap.data() : {};
         const config = { ...CONFIG_DEFAULTS, ...data } as CreditPolicyConfig;
         configCache = { data: config, expiresAt: Date.now() + CACHE_TTL_MS };
         return config;
@@ -79,19 +88,19 @@ export async function setCreditPolicyConfig(
     update: Partial<CreditPolicyConfig>,
     updatedBy?: string,
 ): Promise<void> {
-    const ref = adminDb().collection("platformConfig").doc("creditPolicy");
-    const snap = await ref.get();
+    const ref = doc(db, "platformConfig", "creditPolicy");
+    const snap = await getDoc(ref);
 
     const payload = {
         ...update,
-        updatedAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
         ...(updatedBy ? { updatedBy } : {}),
     };
 
-    if (snap.exists) {
-        await ref.update(payload);
+    if (snap.exists()) {
+        await updateDoc(ref, payload);
     } else {
-        await ref.set({ ...CONFIG_DEFAULTS, ...payload });
+        await setDoc(ref, { ...CONFIG_DEFAULTS, ...payload });
     }
 
     // Bust cache
@@ -110,8 +119,8 @@ export async function getOrgPolicyOverride(orgId: string): Promise<OrgPolicyOver
     }
 
     try {
-        const snap = await adminDb().collection("orgPolicies").doc(orgId).get();
-        if (!snap.exists) {
+        const snap = await getDoc(doc(db, "orgPolicies", orgId));
+        if (!snap.exists()) {
             orgCache.set(orgId, { data: null, expiresAt: Date.now() + CACHE_TTL_MS });
             return null;
         }
@@ -130,13 +139,14 @@ export async function setOrgPolicyOverride(
     override: Partial<OrgPolicyOverride>,
     updatedBy?: string,
 ): Promise<void> {
-    const ref = adminDb().collection("orgPolicies").doc(orgId);
+    const ref = doc(db, "orgPolicies", orgId);
 
-    await ref.set(
+    await setDoc(
+        ref,
         {
             ...override,
             orgId,
-            updatedAt: FieldValue.serverTimestamp(),
+            updatedAt: serverTimestamp(),
             ...(updatedBy ? { updatedBy } : {}),
         },
         { merge: true },
@@ -176,9 +186,10 @@ export async function recordPolicyEvent(
     event: Omit<PolicyEnforcementEvent, "timestamp">,
 ): Promise<void> {
     try {
-        await adminDb().collection("creditPolicyLog").add({
+        const { addDoc, collection } = await import("firebase/firestore");
+        await addDoc(collection(db, "creditPolicyLog"), {
             ...event,
-            timestamp: FieldValue.serverTimestamp(),
+            timestamp: serverTimestamp(),
         });
     } catch (err) {
         console.error("Failed to record policy event:", err);

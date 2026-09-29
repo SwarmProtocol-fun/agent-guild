@@ -23,7 +23,7 @@ import { NextRequest } from "next/server";
 import { getWalletAddress, requireOrgMember } from "@/lib/auth-guard";
 import { registerWorker, getOrgWorkers } from "@/lib/gateway/store";
 import { verifyEd25519Proof, isTimestampFresh } from "../verify";
-import { getOrganization } from "@/lib/firestore";
+import { getOrganization } from "@/lib/firestore-admin";
 
 const MAX_WORKERS_PER_ORG = 50;
 

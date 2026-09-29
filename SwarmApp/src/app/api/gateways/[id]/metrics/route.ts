@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { updateGatewayMetrics } from "@/lib/gateways";
+import { updateGatewayMetrics } from "@/lib/firestore-admin";
 import { adminDb } from "@/lib/firebase-admin";
 import type { Gateway } from "@/lib/gateways";
 

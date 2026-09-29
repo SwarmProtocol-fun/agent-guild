@@ -95,6 +95,7 @@ export async function getMemoryEntries(orgId: string, agentId?: string, type?: M
             id: d.id, orgId: data.orgId, agentId: data.agentId, agentName: data.agentName,
             type: data.type, title: data.title, content: data.content,
             filePath: data.filePath, sizeBytes: data.sizeBytes, tags: data.tags || [],
+            subtype: data.subtype, structuredData: data.structuredData,
             createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null,
             updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate() : null,
         } as MemoryEntry;

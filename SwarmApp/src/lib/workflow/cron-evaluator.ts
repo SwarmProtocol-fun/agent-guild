@@ -12,7 +12,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import type { TriggerPolicy, CronTriggerConfig } from "./triggers";
 import { fireEvent } from "./triggers";
 import { getRedis } from "@/lib/redis";
-import { ensureAgentGroupChat, sendMessage, getAgent } from "@/lib/firestore";
+import { ensureAgentGroupChat, sendMessage, getAgent } from "@/lib/firestore-admin";
 import { generateDailySummary, getDailySummary, formatSummary } from "@/lib/daily-summary";
 import { recordCronExecution, type AgentExecutionResult } from "@/lib/cron-history";
 

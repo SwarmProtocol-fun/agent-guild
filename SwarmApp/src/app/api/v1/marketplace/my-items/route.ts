@@ -12,7 +12,7 @@
  */
 import { NextRequest } from "next/server";
 import { getWalletAddress } from "@/lib/auth-guard";
-import { getUserSubmissions, getCreatorPackages } from "@/lib/skills";
+import { getUserSubmissions, getCreatorPackages } from "@/lib/firestore-admin";
 
 export async function GET(req: NextRequest) {
     const wallet = getWalletAddress(req);

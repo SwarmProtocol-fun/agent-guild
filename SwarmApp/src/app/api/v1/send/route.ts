@@ -14,6 +14,11 @@ import { getRedis } from "@/lib/redis";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import crypto from "crypto";
+import { appendDailyNote } from "@/lib/agent-memory-server";
+
+function todayUTC(): string {
+    return new Date().toISOString().slice(0, 10);
+}
 
 // ── Replay Protection ────────────────────────────────────────────────────────
 // Primary: Upstash Redis (SET NX EX — atomic, shared across instances).
@@ -206,6 +211,19 @@ export async function POST(request: NextRequest) {
             },
             createdAt: FieldValue.serverTimestamp(),
         }).catch(() => { }); // non-blocking — don't fail the send if comms log fails
+
+        // Auto-capture: log this agent's own sent messages into its daily
+        // journal so context accumulates without the agent having to call
+        // `swarm memory append` itself. Non-blocking — never fail the send
+        // over a memory-write hiccup.
+        const activityEntry = text || (attachments?.length ? `[sent ${attachments.length} attachment(s)]` : "");
+        if (activityEntry) {
+            appendDailyNote(
+                { agentId: agentData.agentId, orgId: agentData.orgId, agentName: agentData.agentName },
+                todayUTC(),
+                `Sent in ${channelName}: ${activityEntry}`,
+            ).catch(() => { });
+        }
 
         return Response.json({
             ok: true,

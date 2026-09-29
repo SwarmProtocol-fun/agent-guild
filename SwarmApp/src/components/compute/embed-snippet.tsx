@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Copy, Check } from "lucide-react";
-import { buildEmbedSnippet } from "@/lib/compute/embed";
+import { buildEmbedSnippet } from "@/lib/compute/embed-snippet";
 import type { EmbedMode } from "@/lib/compute/types";
 
 interface EmbedSnippetProps {

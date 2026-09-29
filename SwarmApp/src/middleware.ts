@@ -157,8 +157,14 @@ export async function middleware(req: NextRequest) {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifyToken(token) : null;
 
-  // Inject session headers into the REQUEST so API route handlers can read them
+  // Inject session headers into the REQUEST so API route handlers can read them.
+  // Strip any client-supplied values first — otherwise an unauthenticated caller
+  // could set x-wallet-address themselves and impersonate any wallet.
   const requestHeaders = new Headers(req.headers);
+  requestHeaders.delete("x-wallet-address");
+  requestHeaders.delete("x-session-address");
+  requestHeaders.delete("x-session-role");
+  requestHeaders.delete("x-session-id");
   if (session) {
     requestHeaders.set("x-wallet-address", session.sub);
     requestHeaders.set("x-session-address", session.sub);

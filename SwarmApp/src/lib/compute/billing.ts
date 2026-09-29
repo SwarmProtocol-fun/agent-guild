@@ -8,6 +8,7 @@
 import type {
   SizeKey,
   Region,
+  ProviderKey,
   UsageSummary,
   ProfitabilitySummary,
   BillingLedgerEntry,

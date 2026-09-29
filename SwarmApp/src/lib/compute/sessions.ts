@@ -7,7 +7,8 @@
 
 import type { ControllerType, ModelKey } from "./types";
 import { createSession, endSession, getSession, getSessions as getSessionsDb, addHoursUsed } from "./firestore";
-import { estimateHourlyCost, recordComputeHours } from "./billing";
+import { estimateHourlyCost } from "./pricing";
+import { recordComputeHours } from "./billing";
 import { getComputer } from "./firestore";
 
 export async function startComputeSession(

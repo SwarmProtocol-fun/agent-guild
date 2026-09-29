@@ -3,7 +3,7 @@ import {
   estimateProviderHourlyCost,
   estimateHourlyCost,
   estimateMonthlyCost,
-} from "../billing";
+} from "../pricing";
 import {
   PROVIDER_SIZE_MAP,
   PROVIDER_REGION_MAP,

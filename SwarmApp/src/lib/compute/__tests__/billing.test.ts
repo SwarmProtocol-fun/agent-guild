@@ -5,7 +5,7 @@ import {
   estimateMonthlyCost,
   resolveMarkupPercent,
   calculateCustomerPrice,
-} from "../billing";
+} from "../pricing";
 import type { PricingSettings, SizeKey } from "../types";
 
 // ─── Helper ──────────────────────────────────────────────

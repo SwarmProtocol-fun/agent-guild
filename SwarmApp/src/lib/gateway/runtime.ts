@@ -293,15 +293,13 @@ export async function reportTaskFailed(
 export async function reapTimedOutTasks(orgId: string): Promise<number> {
   // This is a simplified version — in production, use a Firestore query
   // with a composite index on status + claimedAt
-  const { getDocs, collection, query, where } = await import("firebase/firestore");
-  const { db } = await import("@/lib/firebase");
+  const { adminDb } = await import("@/lib/firebase-admin");
 
-  const q = query(
-    collection(db, "gatewayTaskQueue"),
-    where("orgId", "==", orgId),
-    where("status", "in", ["claimed", "running"]),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("gatewayTaskQueue")
+    .where("orgId", "==", orgId)
+    .where("status", "in", ["claimed", "running"])
+    .get();
   const now = Date.now();
   let reaped = 0;
 
@@ -345,8 +343,8 @@ export async function moveToDeadLetter(
   task: QueuedTask,
   reason: string,
 ): Promise<string> {
-  const { addDoc, collection, serverTimestamp } = await import("firebase/firestore");
-  const { db } = await import("@/lib/firebase");
+  const { adminDb } = await import("@/lib/firebase-admin");
+  const { FieldValue } = await import("firebase-admin/firestore");
 
   const entry = {
     taskId: task.id,
@@ -357,9 +355,9 @@ export async function moveToDeadLetter(
     retriesUsed: task.retriesUsed || 0,
     maxRetries: task.maxRetries || 0,
     originalCreatedAt: task.createdAt,
-    movedAt: serverTimestamp(),
+    movedAt: FieldValue.serverTimestamp(),
   };
-  const ref = await addDoc(collection(db, DLQ_COLLECTION), entry);
+  const ref = await adminDb().collection(DLQ_COLLECTION).add(entry);
   return ref.id;
 }
 
@@ -378,16 +376,14 @@ export async function reapStaleWorkers(
   orgId: string,
   heartbeatThresholdMs = 180_000, // 3 minutes (3x default 60s heartbeat)
 ): Promise<{ markedOffline: number; tasksReassigned: number }> {
-  const { getDocs, collection, query, where } = await import("firebase/firestore");
-  const { db } = await import("@/lib/firebase");
+  const { adminDb } = await import("@/lib/firebase-admin");
 
   // 1. Query workers that should be alive (idle or busy) for this org
-  const q = query(
-    collection(db, "gatewayWorkers"),
-    where("orgId", "==", orgId),
-    where("status", "in", ["idle", "busy"]),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("gatewayWorkers")
+    .where("orgId", "==", orgId)
+    .where("status", "in", ["idle", "busy"])
+    .get();
   const now = Date.now();
   let markedOffline = 0;
   let tasksReassigned = 0;

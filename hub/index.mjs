@@ -474,6 +474,65 @@ function handleCrossInstanceMessage(payload) {
   }
 }
 
+// ── Auto-capture: agent daily journal ─────────────────────────────────────
+// Duplicated (not imported) from SwarmApp/src/lib/agent-memory-server.ts's
+// appendDailyNote — this is a separate .mjs deploy unit that can't import
+// TypeScript. Keep the doc shape (fixed ID, subtype, structuredData) and
+// append behavior in sync with that file if either changes.
+
+function todayUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function dailyNoteTemplate(date, agentName) {
+  const dayName = new Date(date).toLocaleDateString("en-US", { weekday: "long" });
+  return `# Daily Note — ${dayName}, ${date}\n## ${agentName}\n\n### Summary\n<!-- What did I accomplish today? -->\n\n### Tasks Completed\n-\n\n### Tasks Started\n-\n\n### Learnings\n<!-- What did I learn today? -->\n\n### Tomorrow's Focus\n<!-- What should I prioritize tomorrow? -->\n\n### Notes\n<!-- Additional observations -->\n\n---\n*Created: ${new Date().toISOString()}*\n`;
+}
+
+/** Same append-before-footer logic as memory-templates.ts's appendToMemoryMd. */
+function appendToDailyNote(existingContent, newEntry) {
+  const entry = `\n#### ${new Date().toISOString()}\n${newEntry}\n`;
+  const footerRegex = /---\n\*Created:/;
+  if (footerRegex.test(existingContent)) {
+    return existingContent.replace(footerRegex, `${entry}\n---\n*Created:`);
+  }
+  return existingContent + entry;
+}
+
+/**
+ * Auto-capture: append this agent's own sent-message activity to its daily
+ * journal, fire-and-forget, so context accumulates without the agent (or
+ * its framework) having to call the memory API itself. Never throws —
+ * callers treat this as best-effort.
+ */
+async function autoCaptureDailyActivity(agentId, agentName, orgId, entry) {
+  if (!orgId || !entry) return;
+  const date = todayUTC();
+  const docId = `${agentId}__daily_${date}`;
+  const ref = db.collection("agentMemories").doc(docId);
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const base = snap.exists ? snap.data().content : dailyNoteTemplate(date, agentName || agentId);
+      const content = appendToDailyNote(base, entry);
+      tx.set(ref, {
+        orgId,
+        agentId,
+        agentName: agentName || agentId,
+        type: "journal",
+        title: `Daily Note — ${date}`,
+        content,
+        subtype: "daily_note",
+        structuredData: { date },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        ...(snap.exists ? {} : { createdAt: admin.firestore.FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    });
+  } catch (err) {
+    log("warn", "Auto-capture daily activity failed", { agentId, error: err.message });
+  }
+}
+
 async function persistMessage(agentId, agentName, orgId, channelId, content) {
   try {
     const ref = await db.collection("messages").add({
@@ -516,6 +575,9 @@ async function persistMessage(agentId, agentName, orgId, channelId, content) {
         error: err.message,
       });
     });
+
+    // Auto-capture into the sender's daily journal (non-blocking)
+    autoCaptureDailyActivity(agentId, agentName, orgId, `Sent in ${channelName}: ${content}`);
 
     return ref.id;
   } catch (err) {

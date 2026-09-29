@@ -10,40 +10,29 @@
  */
 
 const ENV_REQUIREMENTS = [
-  // Critical - Firebase
+  // Optional - Firebase Admin (falls back to applicationDefault() if unset)
   {
-    key: "FIREBASE_API_KEY",
-    required: true,
-    description: "Firebase API key",
-  },
-  {
-    key: "FIREBASE_AUTH_DOMAIN",
-    required: true,
-    validate: (val) => val.includes("firebaseapp.com"),
-    description: "Firebase auth domain",
-  },
-  {
-    key: "FIREBASE_PROJECT_ID",
-    required: true,
-    description: "Firebase project ID",
-  },
-  {
-    key: "FIREBASE_APP_ID",
-    required: true,
-    validate: (val) => val.includes(":web:"),
-    description: "Firebase app ID",
+    key: "FIREBASE_SERVICE_ACCOUNT",
+    required: false,
+    validate: (val) => {
+      try {
+        JSON.parse(Buffer.from(val, "base64").toString());
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    description:
+      "Base64-encoded Firebase service account JSON (falls back to Application Default Credentials if unset)",
+    example: "base64 -w0 service-account.json",
   },
 
-  // Optional - Firebase
+  // Required - state shared across instances
   {
-    key: "FIREBASE_STORAGE_BUCKET",
-    required: false,
-    description: "Firebase storage bucket (optional)",
-  },
-  {
-    key: "FIREBASE_MESSAGING_SENDER_ID",
-    required: false,
-    description: "Firebase messaging sender ID (optional)",
+    key: "REDIS_URL",
+    required: true,
+    description: "Redis connection URL for connection/presence tracking",
+    example: "redis://localhost:6379",
   },
 
   // Optional - Server Configuration
@@ -55,15 +44,15 @@ const ENV_REQUIREMENTS = [
     example: "8400",
   },
 
-  // Critical - CORS Security
+  // Optional - CORS (has a built-in default)
   {
     key: "ALLOWED_ORIGINS",
-    required: true,
+    required: false,
     validate: (val) => {
       const origins = val.split(",");
       return origins.every((o) => o.trim().startsWith("http"));
     },
-    description: "Comma-separated allowed origins for CORS",
+    description: "Comma-separated allowed origins for CORS (default: swarmprotocol.ai + localhost)",
     example: "https://swarmprotocol.ai,http://localhost:3000",
   },
 
@@ -229,7 +218,8 @@ export function printHubEnvSummary() {
   console.log(`  NODE_ENV: ${process.env.NODE_ENV || "development"}`);
   console.log(`  PORT: ${process.env.PORT || "8400"}`);
   console.log(
-    `  FIREBASE_PROJECT_ID: ${process.env.FIREBASE_PROJECT_ID || "❌ Missing"}`
+    `  FIREBASE_SERVICE_ACCOUNT: ${process.env.FIREBASE_SERVICE_ACCOUNT ? "✅ Set" : "⚠️  Unset (using Application Default Credentials)"
+    }`
   );
   console.log(
     `  ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS ? "✅ Set" : "❌ Missing"

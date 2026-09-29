@@ -11,14 +11,13 @@ import { NextRequest } from "next/server";
 import { getWalletAddress, requirePlatformAdmin } from "@/lib/auth-guard";
 import { enforceCreditPolicy } from "@/lib/credit-enforcement";
 import { adminDb } from "@/lib/firebase-admin";
-import {
-    submitMarketItem,
-    publishAgentPackage,
-    type MarketItemType,
-    type MarketPricing,
-    type AgentDistribution,
-    type PermissionScope,
+import type {
+    MarketItemType,
+    MarketPricing,
+    AgentDistribution,
+    PermissionScope,
 } from "@/lib/skills";
+import { submitMarketItem, publishAgentPackage } from "@/lib/firestore-admin";
 import {
     runIntakeValidation,
     runSecurityScan,

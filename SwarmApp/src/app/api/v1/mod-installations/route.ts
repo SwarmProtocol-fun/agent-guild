@@ -5,7 +5,8 @@
  * Query params: orgId (required)
  */
 import { NextRequest } from "next/server";
-import { getModInstallations, getModById } from "@/lib/skills";
+import { getModById } from "@/lib/skills";
+import { getModInstallations } from "@/lib/firestore-admin";
 import { requireOrgMember, forbidden } from "@/lib/auth-guard";
 
 export async function GET(req: NextRequest) {
