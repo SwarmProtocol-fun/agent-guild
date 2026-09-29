@@ -174,7 +174,7 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
 
   // ── Credit Policy: derive capacity ceiling from tier ──
   try {
-    const { resolveAgentPolicy } = await import("@/lib/auth-guard");
+    const { resolveAgentPolicy } = await import("@/lib/agent-policy");
     const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
     const config = await getCreditPolicyConfig();
     if (config.enforcementEnabled && config.enforceConcurrentLimits) {

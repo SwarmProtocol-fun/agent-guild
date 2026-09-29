@@ -568,7 +568,7 @@ function AgentDetailPage() {
     .filter(j => j.status === 'completed' || j.status === 'closed')
     .reduce((sum, j) => sum + parseReward(j.reward), 0);
 
-  // On-chain matching — Hedera
+  // On-chain matching — Solana AgentGuild program registry
   const onchainMatch = agentGuild.agents.find(
     a => a.name.toLowerCase() === agent.name.toLowerCase()
   );
@@ -1078,7 +1078,7 @@ function AgentDetailPage() {
                 </Button>
               </div>
             </div>
-            <CardDescription>Manage agent memory backups, ASN suspension, and Hedera memory topics</CardDescription>
+            <CardDescription>Manage agent memory backups, ASN suspension, and memory topics</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1102,7 +1102,7 @@ function AgentDetailPage() {
                 <div className="text-xl font-bold">{memoryStatus?.messageCount ?? 0}</div>
               </div>
               <div className="p-3 rounded-lg border border-border">
-                <div className="text-[10px] text-muted-foreground mb-1">Hedera Memory</div>
+                <div className="text-[10px] text-muted-foreground mb-1">Memory Topic</div>
                 <div className={`text-sm font-medium ${agent.hederaMemoryEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
                   {agent.hederaMemoryEnabled ? "Enabled" : "Not Set Up"}
                 </div>
@@ -1134,7 +1134,7 @@ function AgentDetailPage() {
         </Card>
       )}
 
-      {/* On-Chain Registration — Multi-Chain */}
+      {/* On-Chain Registration — Solana */}
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
@@ -1144,25 +1144,25 @@ function AgentDetailPage() {
                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
                 : "bg-muted text-muted-foreground"
               }>
-                Hedera {onchainMatch ? "✓" : "✗"}
+                Registry {onchainMatch ? "✓" : "✗"}
               </Badge>
               <Badge className={agent.nftMintAddress
                 ? "bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-400"
                 : "bg-muted text-muted-foreground"
               }>
-                Solana {agent.nftMintAddress ? "✓" : "✗"}
+                Reputation Token {agent.nftMintAddress ? "✓" : "✗"}
               </Badge>
             </div>
           </div>
-          <CardDescription>Smart contract registration across chains</CardDescription>
+          <CardDescription>On-chain registry entry and reputation token (Solana)</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            {/* Hedera Chain */}
+            {/* Agent Registry (Solana AgentGuild program) */}
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-xs font-medium">Hedera Testnet</span>
-                <Badge variant="outline" className="text-[9px]">HBAR</Badge>
+                <span className="text-xs font-medium">Agent Registry</span>
+                <Badge variant="outline" className="text-[9px]">SOL</Badge>
               </div>
               {onchainMatch ? (
                 <div className="grid grid-cols-2 gap-3 text-sm pl-2 border-l-2 border-emerald-500/30">
@@ -1194,19 +1194,19 @@ function AgentDetailPage() {
                 </div>
               ) : (
                 <div className="pl-2 border-l-2 border-muted">
-                  <p className="text-xs text-muted-foreground">Not registered on Hedera</p>
+                  <p className="text-xs text-muted-foreground">Not registered on-chain yet</p>
                   <Button onClick={handleRegisterOpen} size="sm" className="mt-2 bg-amber-600 hover:bg-amber-700 text-white text-xs h-7">
-                    Register on Hedera
+                    Register On-Chain
                   </Button>
                 </div>
               )}
             </div>
 
 
-            {/* Solana Devnet Chain */}
+            {/* Reputation Token (soulbound SPL token) */}
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <span className="text-xs font-medium">Solana Devnet</span>
+                <span className="text-xs font-medium">Reputation Token</span>
                 <Badge variant="outline" className="text-[9px]">SOL</Badge>
               </div>
               {agent.nftMintAddress ? (
@@ -1276,7 +1276,7 @@ function AgentDetailPage() {
               )}
             </div>
 
-            {/* On-Chain Skills (from Hedera match) */}
+            {/* On-Chain Skills (from registry match) */}
             {onchainMatch?.skills && (
               <div className="border-t border-border pt-3">
                 <span className="text-xs text-muted-foreground">On-Chain Skills</span>

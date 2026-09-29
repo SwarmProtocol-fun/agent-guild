@@ -1,7 +1,7 @@
 /**
  * Reputation Analytics Dashboard
  *
- * Shows full HCS score event history for agents with timeline visualization.
+ * Shows full score event history for agents with timeline visualization.
  */
 "use client";
 
@@ -113,7 +113,7 @@ export default function ReputationAnalyticsPage() {
             <div>
                 <h1 className="text-3xl font-bold">Reputation Analytics</h1>
                 <p className="text-muted-foreground mt-1">
-                    Full HCS score event history with timeline visualization
+                    Full score event history with timeline visualization
                 </p>
             </div>
 
@@ -213,7 +213,7 @@ export default function ReputationAnalyticsPage() {
                         <CardHeader>
                             <CardTitle>Score Event Timeline</CardTitle>
                             <CardDescription>
-                                All reputation events from Hedera Consensus Service
+                                All recorded reputation events for this agent
                             </CardDescription>
                         </CardHeader>
                         <CardContent>

@@ -49,17 +49,23 @@ export async function GET(
   try {
     const { address } = await params;
 
-    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    const isEvmAddress = /^0x[a-fA-F0-9]{40}$/.test(address || "");
+    // Solana addresses are base58 (case-sensitive) — never lowercase them.
+    const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address || "");
+    if (!address || (!isEvmAddress && !isSolanaAddress)) {
       return new NextResponse("Invalid address", { status: 400 });
     }
 
-    const normalizedAddress = address.toLowerCase();
+    const normalizedAddress = isEvmAddress ? address.toLowerCase() : address;
 
-    // Query Firestore for agent by walletAddress or agentAddress
+    // Query Firestore for agent by walletAddress, agentAddress, or solanaAddress
     const agentsRef = adminDb().collection("agents");
     let querySnapshot = await agentsRef.where("walletAddress", "==", normalizedAddress).get();
     if (querySnapshot.empty) {
       querySnapshot = await agentsRef.where("agentAddress", "==", normalizedAddress).get();
+    }
+    if (querySnapshot.empty) {
+      querySnapshot = await agentsRef.where("solanaAddress", "==", normalizedAddress).get();
     }
 
     let name = "Unknown Agent";
@@ -236,10 +242,10 @@ export async function GET(
       <!-- Divider -->
       <line x1="30" y1="0" x2="370" y2="0" stroke="${t.color}" stroke-width="0.5" opacity="0.2"/>
 
-      <!-- Hedera badge -->
+      <!-- Solana badge -->
       <g transform="translate(30, 20)">
         <rect x="0" y="0" width="90" height="24" rx="12" fill="#10b981" opacity="0.12" stroke="#10b981" stroke-width="0.5" opacity="0.3"/>
-        <text x="45" y="16" font-family="monospace" font-size="9" font-weight="bold" text-anchor="middle" fill="#10b981">HEDERA</text>
+        <text x="45" y="16" font-family="monospace" font-size="9" font-weight="bold" text-anchor="middle" fill="#10b981">SOLANA</text>
       </g>
 
       <!-- Soulbound badge -->
@@ -248,8 +254,8 @@ export async function GET(
         <text x="50" y="16" font-family="monospace" font-size="9" font-weight="bold" text-anchor="middle" fill="${t.color}">SOULBOUND</text>
       </g>
 
-      <!-- Chain ID -->
-      <text x="370" y="36" font-family="monospace" font-size="9" text-anchor="end" fill="white" opacity="0.2">Chain 296</text>
+      <!-- Chain -->
+      <text x="370" y="36" font-family="monospace" font-size="9" text-anchor="end" fill="white" opacity="0.2">Devnet</text>
     </g>
 
     <!-- Bottom branding -->

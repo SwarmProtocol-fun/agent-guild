@@ -78,7 +78,8 @@ export interface ScoreHistoryPoint {
 // Mirror Node Helpers
 // ═══════════════════════════════════════════════════════════════
 
-const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "https://testnet.mirrornode.hedera.com";
+// Dead unless a mod supplies a real getReputationTopicId() — see the stub note above.
+const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "";
 
 interface MirrorMessage {
     consensus_timestamp: string;

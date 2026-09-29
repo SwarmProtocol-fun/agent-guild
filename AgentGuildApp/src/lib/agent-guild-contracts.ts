@@ -169,6 +169,7 @@ export enum TaskStatus {
   Completed = 2,
   Expired = 3,
   Disputed = 4,
+  Resolved = 5,
 }
 
 export const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; bg: string }> = {
@@ -177,6 +178,7 @@ export const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; b
   [TaskStatus.Completed]: { label: "Completed", color: "text-blue-400", bg: "bg-blue-500/20" },
   [TaskStatus.Expired]: { label: "Expired", color: "text-gray-400", bg: "bg-gray-500/20" },
   [TaskStatus.Disputed]: { label: "Disputed", color: "text-red-400", bg: "bg-red-500/20" },
+  [TaskStatus.Resolved]: { label: "Resolved", color: "text-purple-400", bg: "bg-purple-500/20" },
 };
 
 // ============================================================

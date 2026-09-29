@@ -1,33 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
-  toHbar,
   shortAddr,
   timeRemaining,
   TaskStatus,
   STATUS_CONFIG,
   TASK_BOARD_ABI,
   AGENT_REGISTRY_ABI,
-  HEDERA_AGENT_REGISTRY_ABI,
 } from "../agent-guild-contracts";
-
-describe("toHbar", () => {
-  it("converts tinybars to HBAR", () => {
-    // 1 HBAR = 100,000,000 tinybars
-    expect(toHbar(100_000_000)).toBe(1);
-  });
-
-  it("handles zero", () => {
-    expect(toHbar(0)).toBe(0);
-  });
-
-  it("handles fractional HBAR", () => {
-    expect(toHbar(50_000_000)).toBeCloseTo(0.5);
-  });
-
-  it("handles bigint input", () => {
-    expect(toHbar(BigInt(200_000_000))).toBe(2);
-  });
-});
 
 describe("shortAddr", () => {
   it("shortens a standard Ethereum address", () => {
@@ -77,10 +56,11 @@ describe("TaskStatus", () => {
     expect(TaskStatus.Completed).toBe(2);
     expect(TaskStatus.Expired).toBe(3);
     expect(TaskStatus.Disputed).toBe(4);
+    expect(TaskStatus.Resolved).toBe(5);
   });
 
   it("STATUS_CONFIG covers all statuses", () => {
-    for (const status of [0, 1, 2, 3, 4]) {
+    for (const status of [0, 1, 2, 3, 4, 5]) {
       expect(STATUS_CONFIG[status as TaskStatus]).toBeDefined();
       expect(STATUS_CONFIG[status as TaskStatus].label).toBeTruthy();
     }
@@ -90,14 +70,6 @@ describe("TaskStatus", () => {
 describe("ABI consistency", () => {
   it("primary AGENT_REGISTRY_ABI has registerAgent with asn param", () => {
     const registerFn = AGENT_REGISTRY_ABI.find((s: string) =>
-      s.includes("function registerAgent(")
-    );
-    expect(registerFn).toBeDefined();
-    expect(registerFn).toContain("string asn");
-  });
-
-  it("HEDERA_AGENT_REGISTRY_ABI matches primary ABI (unified)", () => {
-    const registerFn = HEDERA_AGENT_REGISTRY_ABI.find((s: string) =>
       s.includes("function registerAgent(")
     );
     expect(registerFn).toBeDefined();

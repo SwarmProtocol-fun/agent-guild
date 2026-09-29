@@ -2,20 +2,20 @@
  * GET /api/admin/gas-sponsor
  *
  * Returns the platform gas-sponsor wallet status:
- *  - address (derived from HEDERA_PLATFORM_KEY)
- *  - HBAR balance
+ *  - address (derived from SOLANA_PLATFORM_KEYPAIR)
+ *  - SOL balance
  *  - total registrations sponsored
  *  - estimated registrations remaining
  */
 import { NextRequest, NextResponse } from "next/server";
-import { ethers } from "ethers";
+import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { adminDb } from "@/lib/firebase-admin";
 import { requirePlatformAdmin } from "@/lib/auth-guard";
+import { getConnection } from "@/lib/solana/client";
+import { getPlatformKeypair } from "@/lib/solana/platform";
 
-const HEDERA_RPC = "https://testnet.hashio.io/api";
-
-/** Average gas cost for a registerAgentFor tx on Hedera Testnet (in HBAR) */
-const AVG_REGISTRATION_COST_HBAR = 0.15;
+/** Average fee for a register_agent_for tx on Solana devnet (in SOL) */
+const AVG_REGISTRATION_COST_SOL = 0.001;
 
 export async function GET(_req: NextRequest) {
   const adminCheck = requirePlatformAdmin(_req);
@@ -23,22 +23,20 @@ export async function GET(_req: NextRequest) {
     return NextResponse.json({ error: adminCheck.error }, { status: 403 });
   }
 
-  const privateKey = process.env.HEDERA_PLATFORM_KEY;
-  if (!privateKey) {
+  const keypair = getPlatformKeypair();
+  if (!keypair) {
     return NextResponse.json(
-      { error: "HEDERA_PLATFORM_KEY not configured" },
+      { error: "SOLANA_PLATFORM_KEYPAIR not configured" },
       { status: 500 },
     );
   }
 
   try {
-    const wallet = new ethers.Wallet(privateKey);
-    const address = wallet.address;
+    const address = keypair.publicKey.toBase58();
 
-    // Get balance from Hedera Testnet
-    const provider = new ethers.JsonRpcProvider(HEDERA_RPC);
-    const balanceWei = await provider.getBalance(address);
-    const balanceHbar = Number(ethers.formatUnits(balanceWei, 8)); // Hedera uses 8 decimals (tinybars)
+    const connection = getConnection();
+    const balanceLamports = await connection.getBalance(keypair.publicKey);
+    const balanceSol = balanceLamports / LAMPORTS_PER_SOL;
 
     // Count agents that have been on-chain registered
     let totalSponsored = 0;
@@ -50,20 +48,20 @@ export async function GET(_req: NextRequest) {
     }
 
     // Estimate remaining registrations
-    const estimatedRemaining = balanceHbar > 0
-      ? Math.floor(balanceHbar / AVG_REGISTRATION_COST_HBAR)
+    const estimatedRemaining = balanceSol > 0
+      ? Math.floor(balanceSol / AVG_REGISTRATION_COST_SOL)
       : 0;
 
     return NextResponse.json({
       address,
-      balanceHbar: Math.round(balanceHbar * 100) / 100,
-      balanceTinybar: balanceWei.toString(),
+      balanceSol: Math.round(balanceSol * 10000) / 10000,
+      balanceLamports: balanceLamports.toString(),
       totalSponsored,
       estimatedRemaining,
-      avgCostHbar: AVG_REGISTRATION_COST_HBAR,
-      chain: "hedera-testnet",
-      chainId: 296,
-      explorerUrl: `https://hashscan.io/testnet/account/${address}`,
+      avgCostSol: AVG_REGISTRATION_COST_SOL,
+      chain: "solana-devnet",
+      chainId: 0,
+      explorerUrl: `https://solscan.io/account/${address}?cluster=devnet`,
     });
   } catch (err: unknown) {
     console.error("Gas sponsor status error:", err);

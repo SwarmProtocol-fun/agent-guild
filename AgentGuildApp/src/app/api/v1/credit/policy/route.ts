@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { resolveAgentPolicy } from "@/lib/auth-guard";
+import { resolveAgentPolicy } from "@/lib/agent-policy";
 
 export async function GET(req: NextRequest) {
     const agentId = req.nextUrl.searchParams.get("agentId");

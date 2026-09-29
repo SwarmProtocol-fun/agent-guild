@@ -791,7 +791,7 @@ export async function getOpenJobs(orgId: string): Promise<Job[]> {
 
 export async function claimJob(jobId: string, agentId: string, orgId: string, projectId: string): Promise<string> {
   // ── Credit Policy Enforcement ──────────────────────────────
-  const { resolveAgentPolicy } = await import("@/lib/auth-guard");
+  const { resolveAgentPolicy } = await import("@/lib/agent-policy");
   const { canClaimJob } = await import("@/lib/credit-policy");
   const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
 

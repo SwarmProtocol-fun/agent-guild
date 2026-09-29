@@ -75,10 +75,10 @@ interface Submission {
 
 interface GasSponsor {
   address: string;
-  balanceHbar: number;
+  balanceSol: number;
   totalSponsored: number;
   estimatedRemaining: number;
-  avgCostHbar: number;
+  avgCostSol: number;
   explorerUrl: string;
 }
 
@@ -265,7 +265,7 @@ export default function AdminPage() {
               <Fuel className="h-5 w-5 text-emerald-400" />
               <h3 className="font-semibold">Gas Sponsor Wallet</h3>
               <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">
-                Hedera Testnet
+                Solana Devnet
               </span>
             </div>
             <a
@@ -274,7 +274,7 @@ export default function AdminPage() {
               rel="noopener noreferrer"
               className="text-xs text-muted-foreground hover:text-emerald-400 flex items-center gap-1 transition-colors"
             >
-              HashScan <ExternalLink className="h-3 w-3" />
+              Solscan <ExternalLink className="h-3 w-3" />
             </a>
           </div>
 
@@ -297,8 +297,8 @@ export default function AdminPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="rounded-lg border border-border bg-card/50 p-3">
               <p className="text-xs text-muted-foreground">Balance</p>
-              <p className={`text-xl font-bold ${gasSponsor.balanceHbar < 5 ? "text-red-400" : gasSponsor.balanceHbar < 20 ? "text-amber-400" : "text-emerald-400"}`}>
-                {gasSponsor.balanceHbar.toLocaleString()} <span className="text-sm font-normal">HBAR</span>
+              <p className={`text-xl font-bold ${gasSponsor.balanceSol < 0.05 ? "text-red-400" : gasSponsor.balanceSol < 0.2 ? "text-amber-400" : "text-emerald-400"}`}>
+                {gasSponsor.balanceSol.toLocaleString()} <span className="text-sm font-normal">SOL</span>
               </p>
             </div>
             <div className="rounded-lg border border-border bg-card/50 p-3">
@@ -314,22 +314,22 @@ export default function AdminPage() {
             <div className="rounded-lg border border-border bg-card/50 p-3">
               <p className="text-xs text-muted-foreground">Cost per Agent</p>
               <p className="text-xl font-bold">
-                ~{gasSponsor.avgCostHbar} <span className="text-sm font-normal">HBAR</span>
+                ~{gasSponsor.avgCostSol} <span className="text-sm font-normal">SOL</span>
               </p>
             </div>
           </div>
 
           {/* Low balance warning */}
-          {gasSponsor.balanceHbar < 10 && (
+          {gasSponsor.balanceSol < 0.1 && (
             <div className="flex items-center gap-2 text-amber-400 bg-amber-500/10 rounded-lg px-3 py-2 text-sm">
               <AlertTriangle className="h-4 w-4 shrink-0" />
-              <span>Low balance — send HBAR to the address above to continue sponsoring agent registrations.</span>
+              <span>Low balance — send SOL to the address above to continue sponsoring agent registrations.</span>
             </div>
           )}
 
           <p className="text-xs text-muted-foreground">
-            This wallet pays gas fees so every agent that registers gets their ASN on-chain automatically.
-            Send HBAR to the address above to refill.
+            This wallet pays transaction fees so every agent that registers gets their ASN on-chain automatically.
+            Send SOL to the address above to refill.
           </p>
         </div>
       )}

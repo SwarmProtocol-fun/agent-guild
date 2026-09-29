@@ -5,53 +5,27 @@
  *   - Increments credit score by +5 (capped at 900)
  *   - Increments trust score by +1 (capped at 100)
  *   - Updates Firestore
- *   - Calls updateCredit on Hedera Testnet AgentRegistry
+ *   - Calls updateCredit on the Solana AgentGuild program
  *
  * Body: { agentId, volumeUsd? }
  */
 import { NextRequest } from "next/server";
-import { ethers } from "ethers";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import {
-    HEDERA_CONTRACTS,
-    HEDERA_GAS_LIMIT,
-} from "@/lib/agent-guild-contracts";
-import { AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
+import { updateCreditOnChain as updateCreditOnSolana } from "@/lib/solana/platform";
 import { requirePlatformAdminOrAgent, unauthorized } from "@/lib/auth-guard";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
 import { fireWebhooks } from "@/lib/credit-webhooks";
 import { invalidateCache } from "@/lib/credit-cache";
 
-const HEDERA_RPC = "https://testnet.hashio.io/api";
-
-/** Update credit scores on-chain via platform wallet (Hedera Testnet) */
+/** Update credit scores on-chain via the platform authority (Solana AgentGuild program) */
 async function updateCreditOnChain(
     agentAddr: string,
     creditScore: number,
     trustScore: number,
 ): Promise<{ txHash?: string }> {
-    const privateKey = process.env.HEDERA_PLATFORM_KEY;
-    if (!privateKey || !agentAddr) return {};
-
-    try {
-        const provider = new ethers.JsonRpcProvider(HEDERA_RPC);
-        const wallet = new ethers.Wallet(privateKey, provider);
-        const registry = new ethers.Contract(
-            HEDERA_CONTRACTS.AGENT_REGISTRY,
-            AGENT_REGISTRY_ABI,
-            wallet,
-        );
-        const tx = await registry.updateCredit(agentAddr, creditScore, trustScore, {
-            gasLimit: HEDERA_GAS_LIMIT,
-            type: 0,
-        });
-        const receipt = await tx.wait();
-        return { txHash: receipt.hash };
-    } catch (err) {
-        console.error("updateCredit on Hedera AgentRegistry failed:", err);
-        return {};
-    }
+    const result = await updateCreditOnSolana(agentAddr, creditScore, trustScore);
+    return { txHash: result.txSignature };
 }
 
 export async function POST(request: NextRequest) {
@@ -130,7 +104,7 @@ export async function POST(request: NextRequest) {
     let feeMultiplier = 1.0;
     let resolvedTier: string | undefined;
     try {
-        const { resolveAgentPolicy } = await import("@/lib/auth-guard");
+        const { resolveAgentPolicy } = await import("@/lib/agent-policy");
         const { calculateFeeWithMultiplier } = await import("@/lib/credit-policy");
         const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
 
@@ -165,7 +139,7 @@ export async function POST(request: NextRequest) {
         console.warn("[credit/task-complete] Fee multiplier calc failed (non-blocking):", err);
     }
 
-    // Update on-chain credit (Hedera Testnet)
+    // Update on-chain credit (Solana)
     const creditResult = await updateCreditOnChain(
         agentData.walletAddress || "",
         newCredit,
@@ -180,7 +154,7 @@ export async function POST(request: NextRequest) {
         delta: { credit: newCredit - currentCredit, trust: newTrust - currentTrust },
         ...(resolvedTier ? { policyTier: resolvedTier, feeMultiplier } : {}),
         onChain: {
-            chain: "hedera-testnet",
+            chain: "solana-devnet",
             txHash: creditResult.txHash || null,
         },
     });

@@ -17,6 +17,24 @@ export const AGENT_GUILD_PROGRAM_ID = new PublicKey(
 export const SOLANA_RPC_URL =
     process.env.NEXT_PUBLIC_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
 
+/**
+ * Extracts the raw 32-byte Ed25519 public key from a PEM SubjectPublicKeyInfo
+ * block and returns it as a base58 Solana address. Solana pubkeys ARE raw
+ * Ed25519 public keys, so an agent's existing CLI-generated Ed25519 identity
+ * key doubles as its real, self-custodied Solana address — no separate
+ * derivation/hashing needed (unlike the old EVM shim, which keccak256-hashed
+ * the key into an address the agent never actually held the private key for).
+ */
+export function solanaAddressFromEd25519Pem(publicKeyPem: string): string {
+    const pemContent = publicKeyPem
+        .replace(/-----BEGIN PUBLIC KEY-----/, "")
+        .replace(/-----END PUBLIC KEY-----/, "")
+        .replace(/\s/g, "");
+    const derBytes = Buffer.from(pemContent, "base64");
+    const rawKey = derBytes.subarray(derBytes.length - 32);
+    return new PublicKey(rawKey).toBase58();
+}
+
 export function getConnection(): Connection {
     return new Connection(SOLANA_RPC_URL, "confirmed");
 }

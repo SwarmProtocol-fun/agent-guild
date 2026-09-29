@@ -122,7 +122,8 @@ export interface SimulationResult {
 // Constants
 // ═══════════════════════════════════════════════════════════════
 
-const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "https://testnet.mirrornode.hedera.com";
+// Dead unless a mod supplies a real getReputationTopicId() — see the stub note above.
+const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "";
 const DEFAULT_CREDIT_SCORE = 680;
 const DEFAULT_TRUST_SCORE = 50;
 const CREDIT_MIN = 300;

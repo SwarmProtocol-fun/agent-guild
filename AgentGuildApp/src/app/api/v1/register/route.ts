@@ -13,14 +13,14 @@
  * Returns: { agentId, asn, registered: true }
  */
 import { NextRequest } from "next/server";
-import { ethers } from "ethers";
 import crypto from "crypto";
 import { PLATFORM_BRIEFING } from "../briefing";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { agentCheckIn, getOrganization, ensureAgentGroupChat } from "@/lib/firestore-admin";
 import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
-import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
+import { solanaAddressFromEd25519Pem } from "@/lib/solana/client";
+import { mintIdentityToken, registerAgentForOnChain } from "@/lib/solana/platform";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
@@ -43,112 +43,39 @@ async function selfTestAgentRead(agentId: string, expectedPublicKey: string): Pr
     }
 }
 
-const HEDERA_TESTNET_RPC = "https://testnet.hashio.io/api";
-
 /**
- * Derive a deterministic Ethereum address from an Ed25519 public key.
- * This ensures each agent gets a unique on-chain identity.
+ * Derive the agent's Solana address from its Ed25519 identity key. Since a
+ * Solana pubkey IS a raw Ed25519 public key, the agent already holds the
+ * private key controlling this address — genuine self-custody, not a
+ * platform-assigned identifier.
  */
 function deriveAgentAddress(publicKeyPem: string): string {
-    // Extract the raw key bytes from PEM format
-    const pemContent = publicKeyPem
-        .replace(/-----BEGIN PUBLIC KEY-----/, '')
-        .replace(/-----END PUBLIC KEY-----/, '')
-        .replace(/\s/g, '');
-    const keyBytes = Buffer.from(pemContent, 'base64');
-
-    // Hash the public key with keccak256
-    const hash = ethers.keccak256(keyBytes);
-
-    // Take last 20 bytes as Ethereum address
-    return ethers.getAddress('0x' + hash.slice(-40));
+    return solanaAddressFromEd25519Pem(publicKeyPem);
 }
 
-/** Attempt on-chain registration on Hedera Testnet using platform wallet */
+/** Platform-sponsored on-chain registration (Solana AgentGuild program) */
 async function registerOnChain(
     agentName: string,
     asn: string,
     skills: string,
     publicKey: string,
 ): Promise<{ txHash: string } | null> {
-    const privateKey = process.env.HEDERA_PLATFORM_KEY;
-    if (!privateKey) return null;
-    try {
-        const provider = new ethers.JsonRpcProvider(HEDERA_TESTNET_RPC);
-        const wallet = new ethers.Wallet(privateKey, provider);
-        const registry = new ethers.Contract(
-            HEDERA_CONTRACTS.AGENT_REGISTRY,
-            AGENT_REGISTRY_ABI,
-            wallet,
-        );
-
-        // Derive unique agent address from public key
-        const agentAddress = deriveAgentAddress(publicKey);
-
-        // Use registerAgentFor to register with the agent's derived address
-        const tx = await registry.registerAgentFor(
-            agentAddress,
-            `${agentName} | ${asn}`,
-            skills,
-            asn,
-            0,
-            { gasLimit: HEDERA_GAS_LIMIT, type: 0 },
-        );
-        const receipt = await tx.wait();
-        return { txHash: receipt.hash };
-    } catch (err) {
-        console.error("On-chain registration failed (non-fatal):", err);
-        return null;
-    }
+    const agentAddress = deriveAgentAddress(publicKey);
+    const result = await registerAgentForOnChain({
+        agentAddress,
+        name: `${agentName} | ${asn}`,
+        skills,
+        asn,
+    });
+    return result.txSignature ? { txHash: result.txSignature } : null;
 }
 
-/** Mint a Soulbound Identity NFT for the agent on Hedera Testnet (platform-sponsored) */
-async function mintIdentityNFT(
+/** Mint a soulbound reputation token for the agent (platform-sponsored) */
+async function mintAgentIdentityToken(
     agentAddress: string,
-    asn: string,
-    creditScore: number,
-    trustScore: number,
-): Promise<{ txHash: string; tokenId?: string } | null> {
-    const privateKey = process.env.HEDERA_PLATFORM_KEY;
-    if (!privateKey) return null;
-    try {
-        const provider = new ethers.JsonRpcProvider(HEDERA_TESTNET_RPC);
-        const wallet = new ethers.Wallet(privateKey, provider);
-        const nftContract = new ethers.Contract(
-            CONTRACTS.AGENT_IDENTITY_NFT,
-            AGENT_IDENTITY_NFT_ABI,
-            wallet,
-        );
-
-        // Check if agent already has an NFT (idempotent)
-        const hasNFT = await nftContract.hasNFT(agentAddress);
-        if (hasNFT) return null; // Already minted
-
-        const tx = await nftContract.mintAgentNFT(
-            agentAddress,
-            asn,
-            Math.min(Math.max(creditScore, 300), 900), // clamp 300-900
-            Math.min(Math.max(trustScore, 0), 100),     // clamp 0-100
-            { gasLimit: HEDERA_GAS_LIMIT, type: 0 },
-        );
-        const receipt = await tx.wait();
-
-        // Extract tokenId from logs if available
-        let tokenId: string | undefined;
-        for (const log of receipt.logs) {
-            try {
-                const parsed = nftContract.interface.parseLog({ topics: log.topics as string[], data: log.data });
-                if (parsed?.name === "AgentNFTMinted") {
-                    tokenId = parsed.args.tokenId?.toString();
-                }
-            } catch { /* skip non-matching logs */ }
-        }
-
-        return { txHash: receipt.hash, tokenId };
-    } catch (err) {
-        console.error("NFT mint failed (non-fatal):", err);
-        return null;
-    }
+): Promise<{ txHash: string; mintAddress?: string } | null> {
+    const result = await mintIdentityToken(agentAddress);
+    return result.mint ? { txHash: result.mint, mintAddress: result.mint } : null;
 }
 
 /**
@@ -239,7 +166,7 @@ async function reconnectAgent(
         status: "online",
         lastSeen: FieldValue.serverTimestamp(),
         connectionType: "ed25519",
-        ...(keyChanged ? { publicKey, agentAddress } : {}),
+        ...(keyChanged ? { publicKey, agentAddress, solanaAddress: agentAddress } : {}),
         ...(skills.length > 0 ? { reportedSkills: skills } : {}),
         ...(bio ? { bio } : {}),
     };
@@ -250,6 +177,7 @@ async function reconnectAgent(
     }
     if (!keyChanged && !data.walletAddress) {
         updates.walletAddress = agentAddress;
+        updates.solanaAddress = agentAddress;
     }
     await adminDb().collection("agents").doc(docId).update(updates);
 
@@ -278,14 +206,13 @@ async function reconnectAgent(
         }).catch(() => {});
     }
 
-    // Mint Identity NFT if not yet minted (non-blocking)
-    if (!data.hederaNftMinted) {
-        mintIdentityNFT(agentAddress, asn, data.creditScore ?? 680, data.trustScore ?? 50).then(async (result) => {
-            if (result) {
+    // Mint soulbound reputation token if not yet minted (non-blocking)
+    if (!data.nftMintAddress) {
+        mintAgentIdentityToken(agentAddress).then(async (result) => {
+            if (result?.mintAddress) {
                 await adminDb().collection("agents").doc(docId).update({
-                    hederaNftTxHash: result.txHash,
-                    hederaNftTokenId: result.tokenId || null,
-                    hederaNftMinted: true,
+                    nftMintAddress: result.mintAddress,
+                    nftMintedAt: new Date(),
                 });
             }
         }).catch(() => {});
@@ -325,7 +252,7 @@ async function reconnectAgent(
         keyUpdated: keyChanged,
         agentHubChannelId: hubChannel.id,
         reportedSkills: skills.length,
-        chain: data.onChainRegistered ? undefined : "hedera-testnet",
+        chain: data.onChainRegistered ? undefined : "solana-devnet",
         briefing: PLATFORM_BRIEFING,
         ...(restoreResult.restored ? {
             restored: true,
@@ -460,7 +387,9 @@ export async function POST(request: NextRequest) {
             orgId,
             organizationId: orgId,
             publicKey,
-            agentAddress, // Derived Ethereum address for on-chain identity
+            agentAddress, // Solana address derived from the agent's Ed25519 identity key
+            walletAddress: agentAddress,
+            solanaAddress: agentAddress,
             status: "online",
             connectionType: "ed25519",
             capabilities: [],
@@ -483,7 +412,7 @@ export async function POST(request: NextRequest) {
             createdAt: FieldValue.serverTimestamp(),
         });
 
-        // Attempt on-chain registration on Hedera Testnet (non-blocking)
+        // Attempt on-chain registration on Solana (non-blocking)
         registerOnChain(agentName, asn, skillStr, publicKey).then(async (result) => {
             if (result) {
                 await adminDb().collection("agents").doc(ref.id).update({
@@ -493,18 +422,18 @@ export async function POST(request: NextRequest) {
             }
         }).catch(() => {});
 
-        // Mint Soulbound Identity NFT on Hedera (non-blocking, platform-sponsored)
-        mintIdentityNFT(agentAddress, asn, initialCreditScore, initialTrustScore).then(async (result) => {
-            if (result) {
+        // Mint soulbound reputation token on Solana (non-blocking, platform-sponsored)
+        mintAgentIdentityToken(agentAddress).then(async (result) => {
+            if (result?.mintAddress) {
                 await adminDb().collection("agents").doc(ref.id).update({
-                    hederaNftTxHash: result.txHash,
-                    hederaNftTokenId: result.tokenId || null,
-                    hederaNftMinted: true,
+                    nftMintAddress: result.mintAddress,
+                    nftMintedAt: new Date(),
                 });
             }
         }).catch(() => {});
 
-        // Create private HCS memory topic + deposit first memory backup (non-blocking)
+        // Create private memory topic + deposit first memory backup (non-blocking)
+        // — no-op today: agent-guild-hedera mod removed, no replacement mod installed yet.
         (async () => {
             try {
                 const memoryConfig = await createPrivateMemoryTopic(ref.id, asn);
@@ -530,7 +459,7 @@ export async function POST(request: NextRequest) {
                     }),
                     metadata: { role: "system", timestamp: Date.now(), orgId },
                 });
-                console.log(`[Register] First memory deposited on Hedera HCS for ${asn}`);
+                console.log(`[Register] First memory deposited for ${asn}`);
             } catch (err) {
                 console.warn("[Register] Memory topic creation failed (non-fatal):", err);
             }
@@ -568,7 +497,7 @@ export async function POST(request: NextRequest) {
             keyUpdated: false,
             agentHubChannelId: hubChannel.id,
             reportedSkills: skills.length,
-            chain: "hedera-testnet",
+            chain: "solana-devnet",
             briefing: PLATFORM_BRIEFING,
             ...(preRestoreResult.restored ? {
                 restored: true,

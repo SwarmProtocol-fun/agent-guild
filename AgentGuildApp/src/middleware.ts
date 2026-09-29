@@ -115,7 +115,6 @@ const PROTECTED_PAGE_PREFIXES = [
   "/cron",
   "/doctor",
   "/gateways",
-  "/hbar",
   "/kanban",
   "/logs",
   "/market",

@@ -4,7 +4,6 @@
  * Production-grade operator view focused on:
  * - System health & status
  * - Actionable alerts
- * - Hedera activity visibility
  * - Agent fleet status
  *
  * Design philosophy: Truth, not features. What do I need to know and do right now?
@@ -24,12 +23,10 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
-  Zap,
   Shield,
   Users,
   TrendingUp,
   Loader2,
-  ExternalLink,
   AlertCircle,
   Wifi,
   WifiOff,
@@ -45,19 +42,12 @@ interface SystemHealth {
   details: { label: string; value: string; status: 'ok' | 'warning' | 'error' }[];
 }
 
-interface HederaActivity {
-  recentEvents: { type: string; asn: string; timestamp: string; txHash: string }[];
-  lastSync: string;
-  messageCount: number;
-}
-
 export default function CommandCenterPage() {
   const { currentOrg } = useOrg();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
-  const [hederaActivity, setHederaActivity] = useState<HederaActivity | null>(null);
 
   useEffect(() => {
     if (!currentOrg?.id) return;
@@ -111,17 +101,6 @@ export default function CommandCenterPage() {
               status: completionRate >= 70 ? 'ok' : completionRate >= 50 ? 'warning' : 'error',
             },
           ],
-        });
-
-        // Mock Hedera activity (replace with real HCS subscription)
-        setHederaActivity({
-          recentEvents: [
-            { type: 'TASK_COMPLETE', asn: 'ASN-SWM-2026-0001-0042-01', timestamp: '2 minutes ago', txHash: '0.0.123456@1234567890.123456789' },
-            { type: 'AGENT_REGISTER', asn: 'ASN-SWM-2026-0001-0043-02', timestamp: '15 minutes ago', txHash: '0.0.123456@1234567890.123456788' },
-            { type: 'SCORE_UPDATE', asn: 'ASN-SWM-2026-0001-0042-01', timestamp: '1 hour ago', txHash: '0.0.123456@1234567890.123456787' },
-          ],
-          lastSync: 'Just now',
-          messageCount: 847,
         });
 
       } catch (error) {
@@ -215,71 +194,6 @@ export default function CommandCenterPage() {
     );
   };
 
-  const HederaActivityCard = () => {
-    if (!hederaActivity) return null;
-
-    return (
-      <Card className="border-2">
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Zap className="h-5 w-5 text-emerald-500" />
-              Hedera Activity
-              <Badge variant="outline" className="font-mono text-xs">
-                HCS
-              </Badge>
-            </CardTitle>
-            <div className="text-xs text-muted-foreground">
-              Last sync: {hederaActivity.lastSync}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="text-center p-3 rounded bg-emerald-500/10">
-              <div className="text-2xl font-bold text-emerald-600">{hederaActivity.messageCount}</div>
-              <div className="text-xs text-muted-foreground">Total HCS Messages</div>
-            </div>
-            <div className="text-center p-3 rounded bg-purple-500/10">
-              <div className="text-2xl font-bold text-purple-600">$0.0{(hederaActivity.messageCount * 0.0001).toFixed(2)}</div>
-              <div className="text-xs text-muted-foreground">Total Cost (HBAR)</div>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-sm font-medium">Recent Events</div>
-            {hederaActivity.recentEvents.map((event, i) => (
-              <div key={i} className="flex items-center justify-between p-2 rounded bg-muted/50 text-xs">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-[10px] px-1">
-                    {event.type}
-                  </Badge>
-                  <span className="font-mono text-muted-foreground">{event.asn}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-muted-foreground">{event.timestamp}</span>
-                  <a
-                    href={`https://hashscan.io/testnet/transaction/${event.txHash}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-emerald-500 hover:text-emerald-600"
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <Link href="/hbar">
-            <Button variant="outline" size="sm" className="w-full">
-              View Full Hedera Dashboard →
-            </Button>
-          </Link>
-        </CardContent>
-      </Card>
-    );
-  };
 
   const AgentFleetStatus = () => {
     const online = agents.filter(a => a.status === 'online').length;
@@ -395,10 +309,7 @@ export default function CommandCenterPage() {
           </Card>
 
           {/* Main Grid */}
-          <div className="grid lg:grid-cols-2 gap-6">
-            <ActionableItems />
-            <HederaActivityCard />
-          </div>
+          <ActionableItems />
 
           <div className="grid lg:grid-cols-2 gap-6">
             <AgentFleetStatus />
@@ -430,11 +341,6 @@ export default function CommandCenterPage() {
                 <Link href="/tasks">
                   <Button variant="outline" className="w-full" size="sm">
                     View Tasks
-                  </Button>
-                </Link>
-                <Link href="/hbar">
-                  <Button variant="outline" className="w-full" size="sm">
-                    Hedera Dashboard
                   </Button>
                 </Link>
                 <Link href="/doctor">
