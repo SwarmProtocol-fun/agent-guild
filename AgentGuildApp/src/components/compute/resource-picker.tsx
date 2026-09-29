@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { SIZE_PRESETS, REGION_LABELS, PROVIDER_LABELS, type SizeKey, type Region, type ProviderKey } from "@/lib/compute/types";
 import { estimateHourlyCost } from "@/lib/compute/pricing";
-import { getSwarmNodes, type SwarmNode } from "@/lib/firestore";
+import { getAgentGuildNodes, type AgentGuildNode } from "@/lib/firestore";
 
 interface ResourcePickerProps {
   provider: ProviderKey;
@@ -19,7 +19,7 @@ interface ResourcePickerProps {
 }
 
 /** Providers exposed in the UI (excludes stub) — Azure first */
-const UI_PROVIDERS: ProviderKey[] = ["azure", "e2b", "swarm-node", "aws", "gcp"];
+const UI_PROVIDERS: ProviderKey[] = ["azure", "e2b", "agent-guild-node", "aws", "gcp"];
 
 export function ResourcePicker({
   provider,
@@ -33,13 +33,13 @@ export function ResourcePicker({
   onAutoStopChange,
   onPersistenceChange,
 }: ResourcePickerProps) {
-  const [nodes, setNodes] = useState<SwarmNode[]>([]);
+  const [nodes, setNodes] = useState<AgentGuildNode[]>([]);
   const [loadingNodes, setLoadingNodes] = useState(false);
 
   useEffect(() => {
-    if (provider === "swarm-node") {
+    if (provider === "agent-guild-node") {
       setLoadingNodes(true);
-      getSwarmNodes()
+      getAgentGuildNodes()
         .then(setNodes)
         .catch(console.error)
         .finally(() => setLoadingNodes(false));
@@ -88,10 +88,10 @@ export function ResourcePicker({
         </div>
       </div>
 
-      {/* Swarm Nodes */}
-      {provider === "swarm-node" && (
+      {/* Agent Guild Nodes */}
+      {provider === "agent-guild-node" && (
         <div>
-          <label className="text-sm font-medium text-muted-foreground mb-2 block">Available Swarm Nodes</label>
+          <label className="text-sm font-medium text-muted-foreground mb-2 block">Available Agent Guild Nodes</label>
           <div className="grid grid-cols-1 gap-3">
             {loadingNodes ? (
               <div className="text-sm text-muted-foreground p-4 border rounded-xl bg-muted/20">Finding nodes...</div>
@@ -138,7 +138,7 @@ export function ResourcePicker({
       )}
 
       {/* Size */}
-      {provider !== "swarm-node" && (
+      {provider !== "agent-guild-node" && (
         <>
           {/* Size */}
           <div>

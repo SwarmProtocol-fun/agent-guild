@@ -2,8 +2,8 @@ import type { ComputeProvider } from "../provider";
 import type { InstanceConfig, ProviderResult, ActionEnvelope, ActionResult } from "../types";
 import { createLease, updateLease } from "../../firestore";
 
-export class SwarmNodeProvider implements ComputeProvider {
-  readonly name = "swarm-node";
+export class AgentGuildNodeProvider implements ComputeProvider {
+  readonly name = "agent-guild-node";
 
   async createInstance(config: InstanceConfig): Promise<ProviderResult> {
     const orgId = config.providerMetadata?.orgId as string;
@@ -11,7 +11,7 @@ export class SwarmNodeProvider implements ComputeProvider {
     const nodeId = config.providerRegion; // We hijack region picker to select the specific node id
 
     if (!orgId || !nodeId) {
-      throw new Error("Swarm Node provider requires orgId and nodeId in config.");
+      throw new Error("Agent Guild Node provider requires orgId and nodeId in config.");
     }
 
     // Create a new lease for the node to pick up
@@ -76,10 +76,10 @@ export class SwarmNodeProvider implements ComputeProvider {
   }
 
   async createSnapshot(providerInstanceId: string, label: string): Promise<string> {
-    throw new Error("Snapshots are not supported on swarm-node containers");
+    throw new Error("Snapshots are not supported on agent-guild-node containers");
   }
 
   async cloneInstance(providerInstanceId: string, newName: string): Promise<string> {
-    throw new Error("Cloning is not supported on swarm-node containers");
+    throw new Error("Cloning is not supported on agent-guild-node containers");
   }
 }

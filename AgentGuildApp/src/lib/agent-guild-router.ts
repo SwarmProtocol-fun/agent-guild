@@ -1,10 +1,10 @@
 /**
- * SwarmRouter — Meta-router that auto-selects the optimal orchestration pattern
+ * AgentGuildRouter — Meta-router that auto-selects the optimal orchestration pattern
  * for a given task based on its characteristics.
  *
  * This is the "brain" that sits above the existing workflow executor, agent hierarchy,
  * and message router. Instead of a human choosing "sequential" or "parallel" in the
- * visual builder, SwarmRouter analyzes the task and picks the right pattern.
+ * visual builder, AgentGuildRouter analyzes the task and picks the right pattern.
  *
  * Patterns:
  *   - sequential:    Linear chain — each agent's output feeds the next
@@ -23,14 +23,14 @@
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-export type SwarmPattern =
+export type AgentGuildPattern =
   | "sequential"
   | "concurrent"
   | "hierarchical"
   | "debate"
   | "router";
 
-export interface SwarmTask {
+export interface AgentGuildTask {
   /** Task description */
   description: string;
   /** Required skills/capabilities */
@@ -42,12 +42,12 @@ export interface SwarmTask {
   /** Quality level — higher values favor consensus patterns */
   qualityLevel?: "draft" | "standard" | "high" | "critical";
   /** Explicit pattern override (bypass auto-selection) */
-  forcePattern?: SwarmPattern;
+  forcePattern?: AgentGuildPattern;
   /** Additional context for the task */
   context?: Record<string, unknown>;
 }
 
-export interface SwarmAgent {
+export interface AgentGuildAgent {
   id: string;
   name: string;
   skills: string[];
@@ -62,14 +62,14 @@ export interface SwarmAgent {
 }
 
 export interface PatternScore {
-  pattern: SwarmPattern;
+  pattern: AgentGuildPattern;
   score: number;
   reasons: string[];
 }
 
-export interface SwarmPlan {
+export interface AgentGuildPlan {
   /** Selected orchestration pattern */
-  pattern: SwarmPattern;
+  pattern: AgentGuildPattern;
   /** Why this pattern was selected */
   reasoning: string[];
   /** Agents assigned to this task, in execution order */
@@ -141,7 +141,7 @@ export interface RouterConfig {
 
 // ── Pattern Scoring ──────────────────────────────────────────────────────────
 
-function scoreSequential(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
+function scoreSequential(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore {
   const reasons: string[] = [];
   let score = 50; // Base score
 
@@ -173,7 +173,7 @@ function scoreSequential(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
   return { pattern: "sequential", score: Math.max(0, score), reasons };
 }
 
-function scoreConcurrent(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
+function scoreConcurrent(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore {
   const reasons: string[] = [];
   let score = 50;
 
@@ -205,7 +205,7 @@ function scoreConcurrent(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
   return { pattern: "concurrent", score: Math.max(0, score), reasons };
 }
 
-function scoreHierarchical(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
+function scoreHierarchical(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore {
   const reasons: string[] = [];
   let score = 45;
 
@@ -234,7 +234,7 @@ function scoreHierarchical(task: SwarmTask, agents: SwarmAgent[]): PatternScore 
   return { pattern: "hierarchical", score: Math.max(0, score), reasons };
 }
 
-function scoreDebate(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
+function scoreDebate(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore {
   const reasons: string[] = [];
   let score = 30; // Lower base — debate is expensive
 
@@ -273,7 +273,7 @@ function scoreDebate(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
   return { pattern: "debate", score: Math.max(0, score), reasons };
 }
 
-function scoreRouter(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
+function scoreRouter(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore {
   const reasons: string[] = [];
   let score = 40;
 
@@ -308,10 +308,10 @@ function scoreRouter(task: SwarmTask, agents: SwarmAgent[]): PatternScore {
 // ── Agent Selection ──────────────────────────────────────────────────────────
 
 function selectAgentsForSkills(
-  agents: SwarmAgent[],
+  agents: AgentGuildAgent[],
   skills: string[],
   count: number,
-): SwarmAgent[] {
+): AgentGuildAgent[] {
   // Score each agent by skill match, quality, and availability
   const scored = agents
     .filter(a => a.load < 0.95)
@@ -326,24 +326,24 @@ function selectAgentsForSkills(
   return scored.slice(0, count).map(s => s.agent);
 }
 
-function selectCoordinator(agents: SwarmAgent[]): SwarmAgent | null {
+function selectCoordinator(agents: AgentGuildAgent[]): AgentGuildAgent | null {
   const candidates = agents
     .filter(a => a.canCoordinate && a.load < 0.8)
     .sort((a, b) => b.qualityScore - a.qualityScore);
   return candidates[0] || null;
 }
 
-// ── SwarmRouter ──────────────────────────────────────────────────────────────
+// ── AgentGuildRouter ──────────────────────────────────────────────────────────────
 
-export class SwarmRouter {
+export class AgentGuildRouter {
   /**
    * Analyze a task and available agents, then produce an execution plan
    * with the optimal orchestration pattern.
    */
-  route(task: SwarmTask, agents: SwarmAgent[]): SwarmPlan {
+  route(task: AgentGuildTask, agents: AgentGuildAgent[]): AgentGuildPlan {
     // Guard: need at least one agent
     if (agents.length === 0) {
-      throw new Error("SwarmRouter requires at least one agent");
+      throw new Error("AgentGuildRouter requires at least one agent");
     }
 
     // Force pattern if specified
@@ -379,7 +379,7 @@ export class SwarmRouter {
   /**
    * Score all patterns and return the full breakdown (for debugging/UI).
    */
-  scoreAll(task: SwarmTask, agents: SwarmAgent[]): PatternScore[] {
+  scoreAll(task: AgentGuildTask, agents: AgentGuildAgent[]): PatternScore[] {
     return [
       scoreSequential(task, agents),
       scoreConcurrent(task, agents),
@@ -390,11 +390,11 @@ export class SwarmRouter {
   }
 
   private buildPlan(
-    task: SwarmTask,
-    agents: SwarmAgent[],
-    pattern: SwarmPattern,
+    task: AgentGuildTask,
+    agents: AgentGuildAgent[],
+    pattern: AgentGuildPattern,
     reasoning: string[],
-  ): SwarmPlan {
+  ): AgentGuildPlan {
     switch (pattern) {
       case "sequential":
         return this.planSequential(task, agents, reasoning);
@@ -409,7 +409,7 @@ export class SwarmRouter {
     }
   }
 
-  private planSequential(task: SwarmTask, agents: SwarmAgent[], reasoning: string[]): SwarmPlan {
+  private planSequential(task: AgentGuildTask, agents: AgentGuildAgent[], reasoning: string[]): AgentGuildPlan {
     const subtasks = task.subtasks || [task.description];
     const selected = selectAgentsForSkills(agents, task.requiredSkills, subtasks.length);
 
@@ -430,14 +430,14 @@ export class SwarmRouter {
     };
   }
 
-  private planConcurrent(task: SwarmTask, agents: SwarmAgent[], reasoning: string[]): SwarmPlan {
+  private planConcurrent(task: AgentGuildTask, agents: AgentGuildAgent[], reasoning: string[]): AgentGuildPlan {
     const subtasks = task.subtasks || [task.description];
     const workers = selectAgentsForSkills(agents, task.requiredSkills, subtasks.length);
     const synthesizer = selectCoordinator(agents);
 
     const mergeStrategy = synthesizer ? "synthesize" as const : "concatenate" as const;
 
-    const agentAssignments: SwarmPlan["agents"] = workers.map((a, i) => ({
+    const agentAssignments: AgentGuildPlan["agents"] = workers.map((a, i) => ({
       agentId: a.id,
       role: "worker",
       subtask: subtasks[i] || subtasks[subtasks.length - 1],
@@ -468,12 +468,12 @@ export class SwarmRouter {
     };
   }
 
-  private planHierarchical(task: SwarmTask, agents: SwarmAgent[], reasoning: string[]): SwarmPlan {
+  private planHierarchical(task: AgentGuildTask, agents: AgentGuildAgent[], reasoning: string[]): AgentGuildPlan {
     const director = selectCoordinator(agents);
     const workerPool = agents.filter(a => a.id !== director?.id);
     const workers = selectAgentsForSkills(workerPool, task.requiredSkills, 4);
 
-    const agentAssignments: SwarmPlan["agents"] = [];
+    const agentAssignments: AgentGuildPlan["agents"] = [];
 
     if (director) {
       agentAssignments.push({
@@ -514,7 +514,7 @@ export class SwarmRouter {
     };
   }
 
-  private planDebate(task: SwarmTask, agents: SwarmAgent[], reasoning: string[]): SwarmPlan {
+  private planDebate(task: AgentGuildTask, agents: AgentGuildAgent[], reasoning: string[]): AgentGuildPlan {
     // Fall back to all agents if none pass quality filter
     const highQuality = agents
       .filter(a => a.qualityScore > 0.5)
@@ -527,7 +527,7 @@ export class SwarmRouter {
     const synthesizer = pool.find(a => !proposers.includes(a)) || proposers[0];
     const reviewers = proposers; // In debate, proposers also review
 
-    const agentAssignments: SwarmPlan["agents"] = [
+    const agentAssignments: AgentGuildPlan["agents"] = [
       ...proposers.map(a => ({
         agentId: a.id,
         role: "worker",
@@ -558,7 +558,7 @@ export class SwarmRouter {
     };
   }
 
-  private planRouter(task: SwarmTask, agents: SwarmAgent[], reasoning: string[]): SwarmPlan {
+  private planRouter(task: AgentGuildTask, agents: AgentGuildAgent[], reasoning: string[]): AgentGuildPlan {
     const classifier = selectCoordinator(agents) || agents[0];
     const specialists = agents
       .filter(a => a.id !== classifier.id)

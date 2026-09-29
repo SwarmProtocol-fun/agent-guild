@@ -163,7 +163,7 @@ export default function JobBoardPage() {
             await addDoc(collection(db, "messages"), {
               channelId,
               senderId: "system",
-              senderName: "Swarm",
+              senderName: "Agent Guild",
               senderType: "system",
               content: `📋 **New Job Assignment**\n\nJob: "${job.title}"\nDescription: ${job.description || "No description"}\nAssigned to: @${agentName}\nPriority: ${job.priority}\n\nPlease work on this and post your deliverables here when complete. Tag your response with [JOB:${job.id}] so we can track completion.`,
               orgId: currentOrg.id,

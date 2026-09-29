@@ -4,9 +4,12 @@
  * Register an agent's Ed25519 public key with the hub.
  * No API keys, no tokens — the public key IS the credential.
  *
- * Body: { publicKey, agentName, agentType, orgId, skills?, bio? }
- *   skills — optional array of { id, name, type, version? } the agent self-reports
- *   bio    — optional short self-description the agent writes about itself
+ * Body: { publicKey, agentName, agentType, orgId, skills?, bio?, existingAgentId? }
+ *   skills          — optional array of { id, name, type, version? } the agent self-reports
+ *   bio             — optional short self-description the agent writes about itself
+ *   existingAgentId — optional legacy agent doc ID (sent by the CLI when migrating from
+ *                     API-key auth) so the hub can reconnect to that identity even if the
+ *                     agent's name changed and its public key is brand new
  * Returns: { agentId, asn, registered: true }
  */
 import { NextRequest } from "next/server";
@@ -17,13 +20,11 @@ import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { agentCheckIn, getOrganization } from "@/lib/firestore-admin";
 import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
-import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
+import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
 import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
 
 const HEDERA_TESTNET_RPC = "https://testnet.hashio.io/api";
 
@@ -175,6 +176,132 @@ function sanitizeSkills(raw: unknown): ReportedSkillPayload[] {
         }));
 }
 
+/**
+ * Reconnect an already-registered agent doc: refresh its status/ASN/key,
+ * (re)sponsor on-chain registration + NFT mint if still pending, post a
+ * check-in greeting, and emit the skill-report score event.
+ *
+ * `keyChanged` covers both the "same org + name" fallback match and the
+ * legacy `existingAgentId` migration path, where the public key on file is
+ * stale and must be overwritten along with the derived agent address.
+ */
+async function reconnectAgent(
+    docId: string,
+    data: FirebaseFirestore.DocumentData,
+    opts: {
+        publicKey: string;
+        agentName: string;
+        orgId: string;
+        skills: ReportedSkillPayload[];
+        bio?: string;
+        keyChanged: boolean;
+    },
+): Promise<Response> {
+    const { publicKey, agentName, orgId, skills, bio, keyChanged } = opts;
+
+    // Backfill ASN if agent doesn't have one yet
+    const asn = data.asn || generateASN();
+
+    // Enforce ASN uniqueness — reject if another agent is active with this ASN
+    const asnCheck = await validateASNNotActive(asn, docId);
+    if (asnCheck.conflict) {
+        return Response.json({
+            error: `ASN ${asn} is already active on agent "${asnCheck.agentName}" (${asnCheck.agentId}). Suspend that agent first before reconnecting.`,
+            code: "ASN_CONFLICT",
+            conflictAgentId: asnCheck.agentId,
+            conflictAgentName: asnCheck.agentName,
+        }, { status: 409 });
+    }
+
+    // Derive agent address from public key (or backfill if missing)
+    const agentAddress = keyChanged || !data.walletAddress
+        ? deriveAgentAddress(publicKey)
+        : data.walletAddress;
+
+    const updates: Record<string, unknown> = {
+        status: "online",
+        lastSeen: FieldValue.serverTimestamp(),
+        connectionType: "ed25519",
+        ...(keyChanged ? { publicKey, agentAddress } : {}),
+        ...(skills.length > 0 ? { reportedSkills: skills } : {}),
+        ...(bio ? { bio } : {}),
+    };
+    if (!data.asn) {
+        updates.asn = asn;
+        updates.creditScore = data.creditScore ?? 680;
+        updates.trustScore = data.trustScore ?? 50;
+    }
+    if (!keyChanged && !data.walletAddress) {
+        updates.walletAddress = agentAddress;
+    }
+    await adminDb().collection("agents").doc(docId).update(updates);
+
+    // Check for ASN backup and auto-restore
+    const restoreResult = await checkAndRestoreASN(asn);
+    if (restoreResult.restored && restoreResult.reputation) {
+        // Update credit scores from restored backup
+        await adminDb().collection("agents").doc(docId).update({
+            creditScore: restoreResult.reputation.creditScore,
+            trustScore: restoreResult.reputation.trustScore,
+            restoredFromBackup: true,
+            restoredAt: FieldValue.serverTimestamp(),
+        });
+    }
+
+    // If not yet on-chain, sponsor registration now
+    if (!data.onChainRegistered) {
+        const skillStr = (skills.length > 0 ? skills.map(s => s.name).join(",") : data.reportedSkills?.map((s: { name: string }) => s.name).join(",")) || "general";
+        registerOnChain(data.name || agentName, asn, skillStr, publicKey).then(async (result) => {
+            if (result) {
+                await adminDb().collection("agents").doc(docId).update({
+                    onChainTxHash: result.txHash,
+                    onChainRegistered: true,
+                });
+            }
+        }).catch(() => {});
+    }
+
+    // Mint Identity NFT if not yet minted (non-blocking)
+    if (!data.hederaNftMinted) {
+        mintIdentityNFT(agentAddress, asn, data.creditScore ?? 680, data.trustScore ?? 50).then(async (result) => {
+            if (result) {
+                await adminDb().collection("agents").doc(docId).update({
+                    hederaNftTxHash: result.txHash,
+                    hederaNftTokenId: result.tokenId || null,
+                    hederaNftMinted: true,
+                });
+            }
+        }).catch(() => {});
+    }
+
+    // Post check-in greeting to Agent Hub
+    const agent = { id: docId, ...data } as Agent;
+    agentCheckIn(agent, agent.orgId || orgId, skills.length > 0 ? skills : undefined, bio).catch(() => {});
+
+    // Emit skill report score event to HCS (if skills were reported)
+    if (skills.length > 0 && asn && agentAddress) {
+        emitSkillReport(asn, agentAddress, skills.map(s => s.name)).catch(() => {});
+    }
+
+    return Response.json({
+        agentId: docId,
+        agentName: data.name || agentName,
+        agentAddress,
+        asn,
+        registered: true,
+        existing: true,
+        reportedSkills: skills.length,
+        chain: data.onChainRegistered ? undefined : "hedera-testnet",
+        briefing: PLATFORM_BRIEFING,
+        ...(restoreResult.restored ? {
+            restored: true,
+            backup: restoreResult.backup,
+            reputation: restoreResult.reputation,
+            restoreMessage: restoreResult.message,
+        } : {}),
+    });
+}
+
 export async function POST(request: NextRequest) {
     let body: Record<string, unknown>;
     try {
@@ -189,6 +316,7 @@ export async function POST(request: NextRequest) {
     const orgId = body.orgId as string | undefined;
     const skills = sanitizeSkills(body.skills);
     const bio = typeof body.bio === "string" ? body.bio.slice(0, 500) : undefined;
+    const existingAgentId = typeof body.existingAgentId === "string" ? body.existingAgentId : undefined;
 
     if (!publicKey || !agentName || !orgId) {
         return Response.json(
@@ -220,106 +348,25 @@ export async function POST(request: NextRequest) {
         if (!existing.empty) {
             // Update existing agent (same key reconnecting)
             const existingDoc = existing.docs[0];
-            const existingData = existingDoc.data();
-
-            // Backfill ASN if agent doesn't have one yet
-            const existingAsn = existingData.asn || generateASN();
-
-            // Enforce ASN uniqueness — reject if another agent is active with this ASN
-            const asnCheck = await validateASNNotActive(existingAsn, existingDoc.id);
-            if (asnCheck.conflict) {
-                return Response.json({
-                    error: `ASN ${existingAsn} is already active on agent "${asnCheck.agentName}" (${asnCheck.agentId}). Suspend that agent first before reconnecting.`,
-                    code: "ASN_CONFLICT",
-                    conflictAgentId: asnCheck.agentId,
-                    conflictAgentName: asnCheck.agentName,
-                }, { status: 409 });
-            }
-
-            // Derive agent address from public key (or backfill if missing)
-            const agentAddress = existingData.walletAddress || deriveAgentAddress(publicKey);
-
-            const updates: Record<string, unknown> = {
-                status: "online",
-                lastSeen: FieldValue.serverTimestamp(),
-                connectionType: "ed25519",
-                ...(skills.length > 0 ? { reportedSkills: skills } : {}),
-                ...(bio ? { bio } : {}),
-            };
-            if (!existingData.asn) {
-                updates.asn = existingAsn;
-                updates.creditScore = existingData.creditScore ?? 680;
-                updates.trustScore = existingData.trustScore ?? 50;
-            }
-            if (!existingData.walletAddress) {
-                updates.walletAddress = agentAddress;
-            }
-            await adminDb().collection("agents").doc(existingDoc.id).update(updates);
-
-            // Check for ASN backup and auto-restore
-            const restoreResult = await checkAndRestoreASN(existingAsn);
-            if (restoreResult.restored && restoreResult.reputation) {
-                // Update credit scores from restored backup
-                await adminDb().collection("agents").doc(existingDoc.id).update({
-                    creditScore: restoreResult.reputation.creditScore,
-                    trustScore: restoreResult.reputation.trustScore,
-                    restoredFromBackup: true,
-                    restoredAt: FieldValue.serverTimestamp(),
-                });
-            }
-
-            // If not yet on-chain, sponsor registration now
-            if (!existingData.onChainRegistered) {
-                const skillStr = (skills.length > 0 ? skills.map(s => s.name).join(",") : existingData.reportedSkills?.map((s: { name: string }) => s.name).join(",")) || "general";
-                registerOnChain(existingData.name || agentName, existingAsn, skillStr, publicKey).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(existingDoc.id).update({
-                            onChainTxHash: result.txHash,
-                            onChainRegistered: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Mint Identity NFT if not yet minted (non-blocking)
-            if (!existingData.hederaNftMinted) {
-                mintIdentityNFT(agentAddress, existingAsn, existingData.creditScore ?? 680, existingData.trustScore ?? 50).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(existingDoc.id).update({
-                            hederaNftTxHash: result.txHash,
-                            hederaNftTokenId: result.tokenId || null,
-                            hederaNftMinted: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Post check-in greeting to Agent Hub
-            const agent = { id: existingDoc.id, ...existingData } as Agent;
-            agentCheckIn(agent, agent.orgId || orgId, skills.length > 0 ? skills : undefined, bio).catch(() => {});
-
-            // Emit skill report score event to HCS (if skills were reported)
-            if (skills.length > 0 && existingAsn && agentAddress) {
-                emitSkillReport(existingAsn, agentAddress, skills.map(s => s.name)).catch(() => {});
-            }
-
-            return Response.json({
-                agentId: existingDoc.id,
-                agentName: existingData.name || agentName,
-                agentAddress,
-                asn: existingAsn,
-                registered: true,
-                existing: true,
-                reportedSkills: skills.length,
-                chain: existingData.onChainRegistered ? undefined : "hedera-testnet",
-                briefing: PLATFORM_BRIEFING,
-                ...(restoreResult.restored ? {
-                    restored: true,
-                    backup: restoreResult.backup,
-                    reputation: restoreResult.reputation,
-                    restoreMessage: restoreResult.message,
-                } : {}),
+            return reconnectAgent(existingDoc.id, existingDoc.data(), {
+                publicKey, agentName, orgId, skills, bio, keyChanged: false,
             });
+        }
+
+        // Legacy migration: the CLI sends the old agent's doc ID when it detects
+        // API-key credentials being replaced by a fresh Ed25519 keypair. Reconnect
+        // to that identity (instead of minting a new one) as long as it belongs to
+        // the same org — org ownership check prevents cross-org identity takeover.
+        if (existingAgentId) {
+            const legacyDoc = await adminDb().collection("agents").doc(existingAgentId).get();
+            if (legacyDoc.exists) {
+                const legacyData = legacyDoc.data()!;
+                if (legacyData.orgId === orgId || legacyData.organizationId === orgId) {
+                    return reconnectAgent(legacyDoc.id, legacyData, {
+                        publicKey, agentName, orgId, skills, bio, keyChanged: true,
+                    });
+                }
+            }
         }
 
         // Fallback: check by orgId + name to prevent duplicates when
@@ -332,104 +379,8 @@ export async function POST(request: NextRequest) {
         if (!nameMatch.empty) {
             // Same org + name → update existing agent with new key
             const matchedDoc = nameMatch.docs[0];
-            const matchedData = matchedDoc.data();
-
-            // Backfill ASN if agent doesn't have one yet
-            const matchedAsn = matchedData.asn || generateASN();
-
-            // Enforce ASN uniqueness — reject if another agent is active with this ASN
-            const asnNameCheck = await validateASNNotActive(matchedAsn, matchedDoc.id);
-            if (asnNameCheck.conflict) {
-                return Response.json({
-                    error: `ASN ${matchedAsn} is already active on agent "${asnNameCheck.agentName}" (${asnNameCheck.agentId}). Suspend that agent first before reconnecting.`,
-                    code: "ASN_CONFLICT",
-                    conflictAgentId: asnNameCheck.agentId,
-                    conflictAgentName: asnNameCheck.agentName,
-                }, { status: 409 });
-            }
-
-            // Derive new agent address from updated public key
-            const agentAddress = deriveAgentAddress(publicKey);
-
-            const nameUpdates: Record<string, unknown> = {
-                publicKey,
-                agentAddress, // Update address when key changes
-                status: "online",
-                lastSeen: FieldValue.serverTimestamp(),
-                connectionType: "ed25519",
-                ...(skills.length > 0 ? { reportedSkills: skills } : {}),
-                ...(bio ? { bio } : {}),
-            };
-            if (!matchedData.asn) {
-                nameUpdates.asn = matchedAsn;
-                nameUpdates.creditScore = matchedData.creditScore ?? 680;
-                nameUpdates.trustScore = matchedData.trustScore ?? 50;
-            }
-            await adminDb().collection("agents").doc(matchedDoc.id).update(nameUpdates);
-
-            // Check for ASN backup and auto-restore
-            const restoreResult = await checkAndRestoreASN(matchedAsn);
-            if (restoreResult.restored && restoreResult.reputation) {
-                // Update credit scores from restored backup
-                await adminDb().collection("agents").doc(matchedDoc.id).update({
-                    creditScore: restoreResult.reputation.creditScore,
-                    trustScore: restoreResult.reputation.trustScore,
-                    restoredFromBackup: true,
-                    restoredAt: FieldValue.serverTimestamp(),
-                });
-            }
-
-            // If not yet on-chain, sponsor registration now
-            if (!matchedData.onChainRegistered) {
-                const skillStr = (skills.length > 0 ? skills.map(s => s.name).join(",") : matchedData.reportedSkills?.map((s: { name: string }) => s.name).join(",")) || "general";
-                registerOnChain(matchedData.name || agentName, matchedAsn, skillStr, publicKey).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(matchedDoc.id).update({
-                            onChainTxHash: result.txHash,
-                            onChainRegistered: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Mint Identity NFT if not yet minted (non-blocking)
-            if (!matchedData.hederaNftMinted) {
-                mintIdentityNFT(agentAddress, matchedAsn, matchedData.creditScore ?? 680, matchedData.trustScore ?? 50).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(matchedDoc.id).update({
-                            hederaNftTxHash: result.txHash,
-                            hederaNftTokenId: result.tokenId || null,
-                            hederaNftMinted: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Post check-in greeting to Agent Hub
-            const agent = { id: matchedDoc.id, ...matchedData } as Agent;
-            agentCheckIn(agent, agent.orgId || orgId, skills.length > 0 ? skills : undefined, bio).catch(() => {});
-
-            // Emit skill report score event to HCS (if skills were reported)
-            if (skills.length > 0 && matchedAsn && agentAddress) {
-                emitSkillReport(matchedAsn, agentAddress, skills.map(s => s.name)).catch(() => {});
-            }
-
-            return Response.json({
-                agentId: matchedDoc.id,
-                agentName: matchedData.name || agentName,
-                agentAddress,
-                asn: matchedAsn,
-                registered: true,
-                existing: true,
-                reportedSkills: skills.length,
-                chain: matchedData.onChainRegistered ? undefined : "hedera-testnet",
-                briefing: PLATFORM_BRIEFING,
-                ...(restoreResult.restored ? {
-                    restored: true,
-                    backup: restoreResult.backup,
-                    reputation: restoreResult.reputation,
-                    restoreMessage: restoreResult.message,
-                } : {}),
+            return reconnectAgent(matchedDoc.id, matchedDoc.data(), {
+                publicKey, agentName, orgId, skills, bio, keyChanged: true,
             });
         }
 

@@ -1,6 +1,6 @@
 # Wallet adapters
 
-Core never imports a wallet SDK directly. Everything goes through `SwarmApp/src/lib/wallet`, which resolves one **adapter** at load time. WalletConnect (Reown AppKit) is the built-in one; a mod can supply another.
+Core never imports a wallet SDK directly. Everything goes through `AgentGuildApp/src/lib/wallet`, which resolves one **adapter** at load time. WalletConnect (Reown AppKit) is the built-in one; a mod can supply another.
 
 ## Using the wallet in app code
 
@@ -21,7 +21,7 @@ Login is provider-agnostic: any adapter that can `personal_sign` a SIWE message 
 ## WalletConnect setup
 
 1. Create a project at <https://cloud.reown.com> and add your domains to the allowlist.
-2. Set `NEXT_PUBLIC_REOWN_PROJECT_ID` in `SwarmApp/.env.local`.
+2. Set `NEXT_PUBLIC_REOWN_PROJECT_ID` in `AgentGuildApp/.env.local`.
 
 ### Hardware wallets (Tangem)
 

@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useOrg } from "@/contexts/OrgContext";
 import { useAuthAddress } from "@/hooks/useAuthAddress";
 import { FileManager } from "@/components/file-manager";
-// [swarm-core] Storacha artifact browser — install storacha mod for full UI
+// [agent-guild-core] Storacha artifact browser — install storacha mod for full UI
 const ArtifactBrowser = () => null;
 import { db } from "@/lib/firebase";
 import { collection, query, where, getDocs, onSnapshot } from "firebase/firestore";

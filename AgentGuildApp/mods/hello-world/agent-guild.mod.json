@@ -3,8 +3,8 @@
   "name": "Hello World",
   "version": "1.0.0",
   "description": "Reference mod: a sidebar panel, an API route, and a core-event subscription.",
-  "author": "Swarm",
-  "swarmApi": 1,
+  "author": "Agent Guild",
+  "agentGuildApi": 1,
   "permissions": ["events:subscribe"],
   "entry": { "client": "./client", "server": "./server" },
   "panels": [{ "id": "hello", "title": "Hello World", "icon": "Sparkles" }]

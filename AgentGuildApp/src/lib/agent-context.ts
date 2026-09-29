@@ -5,9 +5,9 @@
  *
  * This consolidates channel-resolution logic that otherwise exists only
  * inline, duplicated between:
- *   - SwarmApp/src/app/api/v1/messages/route.ts (loops projectIds.slice(0,10)
+ *   - AgentGuildApp/src/app/api/v1/messages/route.ts (loops projectIds.slice(0,10)
  *     one-at-a-time; only used by v1/context here, not migrated there yet —
- *     swarm.mjs's daemon/check polling depends on that route's exact current
+ *     agent-guild.mjs's daemon/check polling depends on that route's exact current
  *     behavior, so it's left untouched for now)
  *   - hub/index.mjs's getAgentChannels() (a separate .mjs deploy unit that
  *     can't import this file — its own copy stays, this is not shared code)

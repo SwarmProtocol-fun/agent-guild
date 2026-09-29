@@ -87,7 +87,7 @@ export function Header() {
   const [newOrgDescription, setNewOrgDescription] = useState('');
   const [creatingOrg, setCreatingOrg] = useState(false);
 
-  const projectMatch = pathname.match(/\/swarms\/([^/]+)/);
+  const projectMatch = pathname.match(/\/agent-guilds\/([^/]+)/);
   const currentProjectId = projectMatch?.[1] || '';
 
   const fetchProjects = useCallback(async () => {
@@ -138,7 +138,7 @@ export function Header() {
       setNewProjectName('');
       setShowCreateProject(false);
       await fetchProjects();
-      router.push(`/swarms/${id}`);
+      router.push(`/agent-guilds/${id}`);
     } catch (err) {
       console.error('Failed to create project:', err);
     } finally {
@@ -152,8 +152,8 @@ export function Header() {
         <div className="flex h-16 items-center justify-between px-4">
           <div className="flex items-center gap-4">
             <Link href="/" className="flex items-center gap-2">
-              <Image src="/Logo.jpg" alt="Swarm Logo" width={32} height={32} />
-              <GradientText colors={SKINS.find(s => s.id === skin)?.colors ?? ['#FFD700', '#FFA500', '#FF8C00']} animationSpeed={4} className="text-lg font-bold text-glow-gold">Swarm</GradientText>
+              <Image src="/Logo.jpg" alt="Agent Guild Logo" width={32} height={32} />
+              <GradientText colors={SKINS.find(s => s.id === skin)?.colors ?? ['#FFD700', '#FFA500', '#FF8C00']} animationSpeed={4} className="text-lg font-bold text-glow-gold">Agent Guild</GradientText>
             </Link>
           </div>
           <div className="flex items-center gap-2">
@@ -190,7 +190,7 @@ export function Header() {
                       setShowCreateProject(true);
                       e.target.value = currentProjectId;
                     } else if (e.target.value) {
-                      router.push(`/swarms/${e.target.value}`);
+                      router.push(`/agent-guilds/${e.target.value}`);
                     }
                   }}
                   title="Switch Project"

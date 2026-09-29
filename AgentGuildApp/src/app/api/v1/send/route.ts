@@ -214,7 +214,7 @@ export async function POST(request: NextRequest) {
 
         // Auto-capture: log this agent's own sent messages into its daily
         // journal so context accumulates without the agent having to call
-        // `swarm memory append` itself. Non-blocking — never fail the send
+        // `agent-guild memory append` itself. Non-blocking — never fail the send
         // over a memory-write hiccup.
         const activityEntry = text || (attachments?.length ? `[sent ${attachments.length} attachment(s)]` : "");
         if (activityEntry) {

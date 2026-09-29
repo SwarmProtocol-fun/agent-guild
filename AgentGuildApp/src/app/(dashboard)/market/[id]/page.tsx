@@ -67,7 +67,7 @@ export default function MarketItemPage() {
         try {
             await acquireItem(currentOrg.id, item.id, account.address);
             await loadInventory();
-            window.dispatchEvent(new Event("swarm-inventory-changed"));
+            window.dispatchEvent(new Event("agent-guild-inventory-changed"));
             // If this is a skin, refresh installed skins
             if (item.type === "skin") {
                 const updated = await getOwnedItems(currentOrg.id);
@@ -82,7 +82,7 @@ export default function MarketItemPage() {
         try {
             await removeFromInventory(owned.id);
             await loadInventory();
-            window.dispatchEvent(new Event("swarm-inventory-changed"));
+            window.dispatchEvent(new Event("agent-guild-inventory-changed"));
             // If this is a skin, refresh installed skins
             if (item?.type === "skin") {
                 const updated = await getOwnedItems(currentOrg!.id);

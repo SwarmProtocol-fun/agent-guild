@@ -1,10 +1,10 @@
 /**
- * Swarm Mod SDK — the public contract between core and mods.
+ * Agent Guild Mod SDK — the public contract between core and mods.
  *
- * Mods import from "@swarm/sdk". Core owns this file; changing it is an
- * API change (bump SWARM_API_VERSION). A mod is a folder in `mods/<id>/`:
+ * Mods import from "@agent-guild/sdk". Core owns this file; changing it is an
+ * API change (bump AGENT_GUILD_API_VERSION). A mod is a folder in `mods/<id>/`:
  *
- *   swarm.mod.json   manifest (id, permissions, panels, entry files)
+ *   agent-guild.mod.json   manifest (id, permissions, panels, entry files)
  *   server.ts        default export: defineServerMod({ routes, events, setup })
  *   client.tsx       default export: defineClientMod({ panels })
  *
@@ -16,12 +16,12 @@
 import type { ComponentType } from "react";
 import permissions from "./permissions.json";
 
-export const SWARM_API_VERSION = 1;
+export const AGENT_GUILD_API_VERSION = 1;
 
 export type Permission = keyof typeof permissions;
 export const PERMISSIONS = Object.keys(permissions) as Permission[];
 
-// ── Manifest (swarm.mod.json) ────────────────────────────────────────────
+// ── Manifest (agent-guild.mod.json) ────────────────────────────────────────────
 
 export interface PanelDecl {
   /** Unique within the mod; becomes the route /mods/<modId>/<id>. */
@@ -38,8 +38,8 @@ export interface ModManifest {
   version: string;
   description?: string;
   author?: string;
-  /** SWARM_API_VERSION this mod was written against. */
-  swarmApi: number;
+  /** AGENT_GUILD_API_VERSION this mod was written against. */
+  agentGuildApi: number;
   permissions: Permission[];
   /** Paths relative to the mod folder, extension optional. */
   entry: { client?: string; server?: string };
@@ -51,15 +51,15 @@ export interface ModManifest {
 /**
  * Core events. Mods can add their own for other mods:
  *
- *   declare module "@swarm/sdk" {
- *     interface SwarmEventMap { "my-mod.thing": { id: string } }
+ *   declare module "@agent-guild/sdk" {
+ *     interface AgentGuildEventMap { "my-mod.thing": { id: string } }
  *   }
  */
-export interface SwarmEventMap {
+export interface AgentGuildEventMap {
   "auth.login": { address: string; role: string };
 }
 
-export type EventName = keyof SwarmEventMap & string;
+export type EventName = keyof AgentGuildEventMap & string;
 
 // ── Server side ──────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ export interface ModContext {
   modId: string;
   log: ModLogger;
   /** Requires "events:emit". */
-  emit<E extends EventName>(event: E, payload: SwarmEventMap[E]): Promise<void>;
+  emit<E extends EventName>(event: E, payload: AgentGuildEventMap[E]): Promise<void>;
 }
 
 export interface ModSession {
@@ -97,7 +97,7 @@ export interface ServerMod {
   /** "METHOD /path/:param" → handler, mounted at /api/mods/<modId>/… (signed-in users only unless `public`). */
   routes?: Record<string, RouteDef>;
   /** Event subscriptions. Requires "events:subscribe". */
-  events?: { [E in EventName]?: (payload: SwarmEventMap[E], ctx: ModContext) => void | Promise<void> };
+  events?: { [E in EventName]?: (payload: AgentGuildEventMap[E], ctx: ModContext) => void | Promise<void> };
   /** Runs once when the mod loads. */
   setup?(ctx: ModContext): void | Promise<void>;
 }

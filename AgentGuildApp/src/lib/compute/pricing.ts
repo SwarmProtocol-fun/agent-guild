@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Pure Pricing Math
+ * Agent Guild Compute — Pure Pricing Math
  *
  * No Firestore dependency — safe to import from client components.
  * Split out of billing.ts because billing.ts also pulls in the

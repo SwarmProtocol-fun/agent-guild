@@ -35,8 +35,8 @@ const ROLE_CONFIG: Record<string, { icon: string; color: string; bg: string; bor
   // Creative
   designer: { icon: "🎨", color: "text-rose-400", bg: "bg-rose-500/10", border: "border-rose-500", glow: "shadow-rose-500/20", title: "Designer" },
   writer: { icon: "✍️", color: "text-rose-400", bg: "bg-rose-500/10", border: "border-rose-500", glow: "shadow-rose-500/20", title: "Writer" },
-  // Swarm
-  swarm: { icon: "🐝", color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500", glow: "shadow-yellow-500/20", title: "Swarm" },
+  // Agent Guild
+  agent-guild: { icon: "🐝", color: "text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500", glow: "shadow-yellow-500/20", title: "Agent Guild" },
 };
 
 const DEFAULT_ROLE = { icon: "🤖", color: "text-amber-400", bg: "bg-amber-500/10", border: "border-amber-600", glow: "shadow-amber-500/20", title: "Agent" };

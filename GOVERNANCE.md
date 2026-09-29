@@ -1,4 +1,4 @@
-# Swarm Project Governance
+# Agent Guild Project Governance
 
 **Effective Date:** April 7, 2026
 
@@ -6,7 +6,7 @@
 
 ## 1. Overview
 
-Swarm is an open-source project with structured ownership and guided development.
+Agent Guild is an open-source project with structured ownership and guided development.
 This document defines how decisions are made, who holds authority, and how
 proceeds from the project are distributed.
 
@@ -30,7 +30,7 @@ These shares apply to:
 
 ## 3. DAO Hierarchy & Ranking System
 
-The Swarm DAO operates under a tiered hierarchy designed to preserve proper
+The Agent Guild DAO operates under a tiered hierarchy designed to preserve proper
 conduct, reward merit, and maintain operational integrity. The DAO reserves
 the right to define, modify, and enforce this ranking system at its sole
 discretion.
@@ -247,5 +247,5 @@ American Arbitration Association (or equivalent in the relevant jurisdiction).
 
 ---
 
-_This document is part of the Swarm project and is subject to the terms of
-the Swarm Open Source License v1.0._
+_This document is part of the Agent Guild project and is subject to the terms of
+the Agent Guild Open Source License v1.0._

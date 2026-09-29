@@ -16,7 +16,7 @@ import type {
 import { SOURCE_EVENT_MAP } from "./types";
 import { validateCreditEvent, computeIdempotencyKey } from "./validation";
 import { isDuplicate, storeCreditEvent } from "./store";
-// [swarm-core] Hedera HCS removed — install swarm-hedera mod
+// [agent-guild-core] Hedera HCS removed — install agent-guild-hedera mod
 import type { ScoreEvent } from "@/lib/credit-types";
 const isHCSConfigured = () => false;
 const submitScoreEvent = async (..._args: unknown[]) => ({});
@@ -130,7 +130,7 @@ function mapToScoreEventType(eventType: CreditEventType): ScoreEvent["type"] {
 // Normalizers — Convert source system events to CreditEventInput
 // ═══════════════════════════════════════════════════════════════
 
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
+// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
 export function normalizeScoreEvent(
   scoreEvent: ScoreEvent,
   agentId: string,

@@ -23,7 +23,7 @@ export function PromptWidget({ onDispatch, agents }: PromptWidgetProps) {
   const [isDispatching, setIsDispatching] = useState(false);
 
   // Find the task coordinator
-  const coordinatorSlot = currentOrg?.swarmSlots?.["task-coordinator"];
+  const coordinatorSlot = (currentOrg?.agentSlots ?? currentOrg?.swarmSlots)?.["task-coordinator"];
   const coordinatorAgent = coordinatorSlot?.agentId 
     ? agents.find(a => a.id === coordinatorSlot.agentId)
     : null;
@@ -53,7 +53,7 @@ export function PromptWidget({ onDispatch, agents }: PromptWidgetProps) {
       <CardHeader className="flex flex-row items-center justify-between px-4 pt-4 pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
           <Bot className="h-4 w-4 text-amber-500" />
-          <DecryptedText text="Prompt Swarm" speed={30} maxIterations={6} animateOn="view" sequential className="font-semibold" encryptedClassName="text-amber-500/40" />
+          <DecryptedText text="Prompt Agent Guild" speed={30} maxIterations={6} animateOn="view" sequential className="font-semibold" encryptedClassName="text-amber-500/40" />
         </CardTitle>
         {coordinatorAgent && (
           <div className="flex items-center gap-2 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-500/20">
@@ -75,11 +75,11 @@ export function PromptWidget({ onDispatch, agents }: PromptWidgetProps) {
             <div>
               <p className="text-sm font-medium text-foreground">Task Coordinator Required</p>
               <p className="text-xs text-muted-foreground mt-1 max-w-[250px] mx-auto">
-                Assign an agent to the Task Coordinator role in the Swarm tab to dispatch prompts from here.
+                Assign an agent to the Task Coordinator role in the Agent Guild tab to dispatch prompts from here.
               </p>
             </div>
             <Button asChild size="sm" variant="outline" className="mt-2 border-amber-500/20 hover:border-amber-500/40">
-              <Link href="/swarm">Assign Coordinator</Link>
+              <Link href="/agent-guild">Assign Coordinator</Link>
             </Button>
           </div>
         ) : (

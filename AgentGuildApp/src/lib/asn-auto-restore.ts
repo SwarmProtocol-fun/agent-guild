@@ -6,7 +6,7 @@
  */
 
 import { adminDb } from "@/lib/firebase-admin";
-// [swarm-core] Storage and Hedera removed
+// [agent-guild-core] Storage and Hedera removed
 const retrieveContent = async (_cid: string): Promise<Response> => {
     throw new Error("Storage mod not installed");
 };

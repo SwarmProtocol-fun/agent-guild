@@ -21,14 +21,14 @@ describe("router", () => {
 
 describe("manifest validation", () => {
   const ok = {
-    id: "demo", name: "Demo", version: "1.0.0", swarmApi: 1, permissions: [],
+    id: "demo", name: "Demo", version: "1.0.0", agentGuildApi: 1, permissions: [],
     entry: { server: "./server" }, panels: [],
   };
   it("accepts a valid manifest", () => expect(validateManifest(ok, "demo", null)).toEqual([]));
   it("rejects id/folder mismatch, bad api, unknown permission", () => {
-    const errs = validateManifest({ ...ok, swarmApi: 2, permissions: ["root"] }, "other", null).join(" | ");
+    const errs = validateManifest({ ...ok, agentGuildApi: 2, permissions: ["root"] }, "other", null).join(" | ");
     expect(errs).toMatch(/must equal folder name/);
-    expect(errs).toMatch(/swarmApi must be 1/);
+    expect(errs).toMatch(/agentGuildApi must be 1/);
     expect(errs).toMatch(/unknown permission "root"/);
   });
   it("requires client entry for panels", () => {
@@ -37,11 +37,11 @@ describe("manifest validation", () => {
 });
 
 describe("runtime isolation", () => {
-  beforeEach(() => { vi.resetModules(); (globalThis as { __swarmMods?: unknown }).__swarmMods = undefined; });
+  beforeEach(() => { vi.resetModules(); (globalThis as { __agentGuildMods?: unknown }).__agentGuildMods = undefined; });
 
   async function runtimeWith(mods: Record<string, unknown>, permissions: string[] = ["events:subscribe"]) {
     vi.doMock("../generated/manifests", () => ({
-      MOD_MANIFESTS: Object.keys(mods).map((id) => ({ id, name: id, version: "1.0.0", swarmApi: 1, permissions, entry: { server: "./server" } })),
+      MOD_MANIFESTS: Object.keys(mods).map((id) => ({ id, name: id, version: "1.0.0", agentGuildApi: 1, permissions, entry: { server: "./server" } })),
     }));
     vi.doMock("../generated/server", () => ({
       serverMods: Object.fromEntries(Object.entries(mods).map(([id, m]) => [id, async () => ({ default: m })])),

@@ -2,7 +2,7 @@
  * Next.js Middleware — Server-side session validation.
  *
  * Runs on every matched route BEFORE rendering.
- * Validates the `swarm_session` JWT cookie and injects session headers
+ * Validates the `agent_guild_session` JWT cookie and injects session headers
  * for downstream API routes and server components.
  *
  * Protected dashboard routes redirect to "/" if no valid session.
@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 
-const SESSION_COOKIE = "swarm_session";
+const SESSION_COOKIE = "agent_guild_session";
 
 // ── Security Headers ──────────────────────────────────────
 // Applied to all SSR responses. Netlify [[headers]] only cover
@@ -52,7 +52,7 @@ function getSecret(): Uint8Array {
 const PROTECTED_PAGE_PREFIXES = [
   "/dashboard",
   "/agents",
-  "/swarms",
+  "/agent-guilds",
   "/jobs",
   "/missions",
   "/chat",
@@ -75,7 +75,7 @@ const PROTECTED_PAGE_PREFIXES = [
   "/onboarding",
   "/operators",
   "/organizations",
-  "/swarm",
+  "/agent-guild",
   "/usage",
   "/compute",
 ];
@@ -148,18 +148,17 @@ export async function middleware(req: NextRequest) {
     }
   }
 
-  // Check if this is a public API route — pass through
-  if (PUBLIC_API_PREFIXES.some((p) => pathname.startsWith(p))) {
-    return withSecurityHeaders(NextResponse.next());
-  }
-
   // Read session cookie
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifyToken(token) : null;
 
   // Inject session headers into the REQUEST so API route handlers can read them.
   // Strip any client-supplied values first — otherwise an unauthenticated caller
-  // could set x-wallet-address themselves and impersonate any wallet.
+  // could set x-wallet-address themselves and impersonate any wallet. This MUST
+  // run before the public-route early-return below: /api/v1/* is public (agents
+  // authenticate via their own signature scheme) but its route handlers still
+  // read these headers for session-based operator auth, so spoofed headers must
+  // never reach them.
   const requestHeaders = new Headers(req.headers);
   requestHeaders.delete("x-wallet-address");
   requestHeaders.delete("x-session-address");
@@ -171,6 +170,15 @@ export async function middleware(req: NextRequest) {
     requestHeaders.set("x-session-role", session.role);
     requestHeaders.set("x-session-id", session.sid);
   }
+
+  // Check if this is a public API route — pass through, but with the
+  // sanitized/re-signed headers computed above, not the raw client headers.
+  if (PUBLIC_API_PREFIXES.some((p) => pathname.startsWith(p))) {
+    return withSecurityHeaders(
+      NextResponse.next({ request: { headers: requestHeaders } })
+    );
+  }
+
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   // Also mirror to response headers for client-side consumption
   if (session) {

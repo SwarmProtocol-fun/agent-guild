@@ -473,7 +473,7 @@ export default function PublisherPage() {
                     <DialogHeader>
                         <DialogTitle>Submit to Marketplace</DialogTitle>
                         <DialogDescription>
-                            Submit a new mod, plugin, skill, skin, or agent to the Swarm marketplace.
+                            Submit a new mod, plugin, skill, skin, or agent to the Agent Guild marketplace.
                             All submissions are reviewed before approval.
                         </DialogDescription>
                     </DialogHeader>

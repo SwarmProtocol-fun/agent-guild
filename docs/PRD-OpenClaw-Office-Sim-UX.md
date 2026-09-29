@@ -1,7 +1,7 @@
 # OpenClaw Office Sim Studio — UX/UI PRD
 
 > **Mod ID:** `openclaw-office-sim`
-> **Type:** Premium Swarm Marketplace Mod
+> **Type:** Premium Agent Guild Marketplace Mod
 > **Version:** 0.1.0-draft
 > **Date:** 2026-03-24
 > **Status:** Draft
@@ -10,7 +10,7 @@
 
 ## 1. Vision
 
-OpenClaw Office Sim Studio transforms the Swarm agent monitoring experience from static dashboards and log streams into a living, breathing virtual headquarters. Every agent becomes a visible employee — sitting at a desk, walking to a meeting, blocked at a whiteboard, or sprinting through a tool call. Two synchronized views serve distinct purposes: a **2D command-center map** for operational clarity, and a **3D immersive simulation** for cinematic explainability and agent storytelling.
+OpenClaw Office Sim Studio transforms the Agent Guild agent monitoring experience from static dashboards and log streams into a living, breathing virtual headquarters. Every agent becomes a visible employee — sitting at a desk, walking to a meeting, blocked at a whiteboard, or sprinting through a tool call. Two synchronized views serve distinct purposes: a **2D command-center map** for operational clarity, and a **3D immersive simulation** for cinematic explainability and agent storytelling.
 
 Beyond observation, the mod introduces a **generative design studio** where users create custom office environments. ComfyUI powers visual concept generation — office themes, avatar portraits, scene styles, VFX concepts, and texture ideation. Meshy converts approved concepts into production-ready 3D assets — agent avatars, furniture, office decorations, themed rooms, props, and environmental set pieces. The result is an office that looks the way _you_ designed it.
 
@@ -36,7 +36,7 @@ The result is a mod that makes multi-agent systems *legible* to operators, *impr
 - Wants to **see** what each agent is doing without reading logs
 - Needs quick context switches: "which agent is stuck?" → click → inspect → unblock
 - Cares about speed, keyboard shortcuts, and minimal chrome
-- Likely discovers the mod from the Swarm marketplace, installs via one click
+- Likely discovers the mod from the Agent Guild marketplace, installs via one click
 
 ### P2 — Ops/Admin ("The Operator")
 - Manages 10–50+ agents across an organization
@@ -58,7 +58,7 @@ The result is a mod that makes multi-agent systems *legible* to operators, *impr
 - Explores multiple style directions before committing (cyberpunk, cozy startup, space station)
 - May be a designer on the team, or a solo dev with visual ambitions
 - Values rapid iteration: prompt → generate → preview → approve → place
-- Shares custom themes with the team or publishes them to the Swarm marketplace
+- Shares custom themes with the team or publishes them to the Agent Guild marketplace
 
 ---
 
@@ -66,7 +66,7 @@ The result is a mod that makes multi-agent systems *legible* to operators, *impr
 
 ### Flow 1: Solo Developer — Morning Check-in
 ```
-1. Opens Swarm dashboard → clicks "Office Sim" in sidebar (Modifications section)
+1. Opens Agent Guild dashboard → clicks "Office Sim" in sidebar (Modifications section)
 2. Lands on Home Dashboard (overview cards: agents active, tasks in flight, errors)
 3. Clicks "Open 2D Office" → sees floor plan with 5 agent desks
 4. Notices Agent-03 desk is flashing red (error state)
@@ -252,7 +252,7 @@ The `[2D ↔ 3D]` toggle button is present in the toolbar of both views. Transit
 
 ## 6. Studio Mode UX
 
-Studio mode is the generative design workspace. It bridges two external tools — **ComfyUI** (image generation) and **Meshy** (3D model generation) — into a unified creative pipeline within the Swarm UI.
+Studio mode is the generative design workspace. It bridges two external tools — **ComfyUI** (image generation) and **Meshy** (3D model generation) — into a unified creative pipeline within the Agent Guild UI.
 
 ### 6.1 Architecture Overview
 
@@ -463,7 +463,7 @@ Studio mode is the generative design workspace. It bridges two external tools �
 - Click placed asset → selection gizmo appears (translate, rotate, scale)
 - Undo/Redo stack (Ctrl+Z/Ctrl+Y) for all placement operations
 - "Save" persists the theme to user storage (Firestore)
-- "Publish" opens a dialog to submit the theme to the Swarm marketplace
+- "Publish" opens a dialog to submit the theme to the Agent Guild marketplace
 
 ---
 
@@ -1018,14 +1018,14 @@ Every state uses **triple encoding**: color + icon + label. Color is never the s
 2. **Premium cinematic feel**: Glass morphism, subtle gradients, smooth 60fps animations. No janky transitions
 3. **Information density without clutter**: Show everything that matters, hide everything that doesn't. Progressive disclosure
 4. **AI company headquarters vibe**: The office should feel like a premium tech HQ — sleek, organized, impressive. Not a toy or a game
-5. **Consistent with Swarm**: Inherits Swarm's amber primary (`#fbbf24`), dark blue backgrounds (`hsl(222, 84%, 5%)`), and shadcn/ui component patterns
+5. **Consistent with Agent Guild**: Inherits Agent Guild's amber primary (`#fbbf24`), dark blue backgrounds (`hsl(222, 84%, 5%)`), and shadcn/ui component patterns
 6. **Modular panels**: Every section of the UI is a resizable, collapsible panel. Users control information density
 7. **Multiplayer feel**: The office should feel like a shared space — activity feed, presence indicators, and real-time updates reinforce this
 
 ### 10.2 Color Palette
 
 ```
-Primary:       hsl(48, 100%, 50%)   — Amber/Gold (Swarm accent)
+Primary:       hsl(48, 100%, 50%)   — Amber/Gold (Agent Guild accent)
 Background:    hsl(222, 84%, 5%)    — Deep navy
 Card:          hsl(222, 50%, 10%)   — Dark blue card
 Border:        hsl(217, 33%, 18%)   — Subtle edge
@@ -1041,7 +1041,7 @@ Studio:        hsl(280, 65%, 55%)   — Violet (Studio mode indicator)
 
 ### 10.3 Typography
 
-- **Font**: Inter (matches Swarm app)
+- **Font**: Inter (matches Agent Guild app)
 - **Headers**: `font-bold`, `text-lg` to `text-2xl`
 - **Body**: `text-sm` (14px)
 - **Labels/badges**: `text-xs` (12px) or `text-[10px]`
@@ -1053,7 +1053,7 @@ Studio:        hsl(280, 65%, 55%)   — Violet (Studio mode indicator)
 - **Badges**: Colored backgrounds at 10% opacity, matching text color, `text-[10px]` with icon
 - **Buttons**: Primary amber (`bg-amber-500 text-black`), secondary outline (`border-amber-500/30`), Studio actions use purple variant
 - **Drawer**: `w-[400px]` slide from right, backdrop blur, `z-50`
-- **Tabs**: Bottom-border style matching Swarm marketplace tabs
+- **Tabs**: Bottom-border style matching Agent Guild marketplace tabs
 - **Modular Panels**: Every section of the office view is a resizable panel. Users can collapse/expand side panels, bottom trays, and the toolbar
 - **Generation Progress**: Indeterminate shimmer bar for ComfyUI, percentage bar for Meshy (API provides progress)
 - **Concept Board**: 2x2 image grid with rounded corners, hover-to-enlarge, action buttons on overlay
@@ -1170,7 +1170,7 @@ Studio:        hsl(280, 65%, 55%)   — Violet (Studio mode indicator)
 - [ ] 2D Office view with desk zones, meeting rooms, queue, and error bay
 - [ ] Agent states: idle, active, error, blocked, offline (5 of 10)
 - [ ] Agent Detail Drawer with current task, recent activity, and basic actions
-- [ ] Real-time WebSocket updates from Swarm hub
+- [ ] Real-time WebSocket updates from Agent Guild hub
 - [ ] Hover tooltips and click-to-inspect on all agents
 - [ ] Filter by status
 - [ ] Search agents by name
@@ -1232,7 +1232,7 @@ Studio:        hsl(280, 65%, 55%)   — Violet (Studio mode indicator)
 ### v1.3 — Studio Maturity
 
 - Studio: Theme Manager with local library
-- Studio: Publish custom themes to Swarm marketplace
+- Studio: Publish custom themes to Agent Guild marketplace
 - Studio: Community theme browser (install one-click)
 - Studio: Avatar Generator — per-agent character models from portrait concepts
 - Studio: VFX Generator — custom particle effects from vfx-concept references
@@ -1252,4 +1252,4 @@ Studio:        hsl(280, 65%, 55%)   — Violet (Studio mode indicator)
 
 ---
 
-*This document is a living specification. All wireframes are structural — final visual design will follow the Swarm design system with adaptations for spatial rendering and generative design.*
+*This document is a living specification. All wireframes are structural — final visual design will follow the Agent Guild design system with adaptations for spatial rendering and generative design.*

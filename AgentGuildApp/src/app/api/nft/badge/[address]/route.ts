@@ -1,9 +1,9 @@
 /**
  * Dynamic NFT Card Image API — Agent Identity NFT
  *
- * Generates a card-shaped SVG with dynamic agent status for SwarmAgentIdentityNFT.
+ * Generates a card-shaped SVG with dynamic agent status for AgentGuildAgentIdentityNFT.
  * Card displays credit score, trust score, tier badge, status indicator,
- * skills, and Swarm branding with animated glow effects.
+ * skills, and Agent Guild branding with animated glow effects.
  *
  * Endpoint: GET /api/nft/badge/{agentAddress}
  * Returns: SVG image (card aspect ratio)
@@ -141,8 +141,8 @@ export async function GET(
     <circle cx="340" cy="60" r="50" fill="${t.color}" opacity="0.06"/>
     <circle cx="340" cy="60" r="25" fill="${t.color}" opacity="0.08"/>
 
-    <!-- SWARM PROTOCOL header -->
-    <text x="24" y="38" font-family="monospace" font-size="10" fill="white" opacity="0.35" letter-spacing="3">SWARM PROTOCOL</text>
+    <!-- AGENT GUILD header -->
+    <text x="24" y="38" font-family="monospace" font-size="10" fill="white" opacity="0.35" letter-spacing="3">AGENT GUILD</text>
 
     <!-- Tier badge (top right) -->
     <g transform="translate(340, 34)" filter="url(#glow)">
@@ -157,7 +157,7 @@ export async function GET(
       <!-- Inner circle -->
       <circle cx="0" cy="0" r="40" fill="${t.bg1}" stroke="${t.color}" stroke-width="1.5" opacity="0.8"/>
       <!-- Agent type icon -->
-      <text x="0" y="8" font-size="28" text-anchor="middle" fill="${t.color}" font-weight="bold">${agentType === "swarm" ? "S" : agentType === "coordinator" ? "C" : "A"}</text>
+      <text x="0" y="8" font-size="28" text-anchor="middle" fill="${t.color}" font-weight="bold">${agentType === "agent-guild" ? "S" : agentType === "coordinator" ? "C" : "A"}</text>
       <!-- Status indicator dot -->
       <circle cx="30" cy="30" r="8" fill="${statusColor}" stroke="${t.bg2}" stroke-width="3"/>
     </g>
@@ -253,7 +253,7 @@ export async function GET(
     </g>
 
     <!-- Bottom branding -->
-    <text x="200" y="542" font-family="monospace" font-size="9" text-anchor="middle" fill="white" opacity="0.15" letter-spacing="4">SWARM AGENT IDENTITY</text>
+    <text x="200" y="542" font-family="monospace" font-size="9" text-anchor="middle" fill="white" opacity="0.15" letter-spacing="4">AGENT GUILD AGENT IDENTITY</text>
 
     <!-- Card border -->
     <rect x="1" y="1" width="398" height="558" rx="20" fill="none" stroke="${t.color}" stroke-width="1" opacity="0.15"/>
@@ -270,7 +270,7 @@ export async function GET(
     console.error("NFT badge API error:", error);
     const fallbackSvg = `<svg width="400" height="560" viewBox="0 0 400 560" xmlns="http://www.w3.org/2000/svg">
   <rect width="400" height="560" rx="20" fill="#0f172a" stroke="#334155" stroke-width="1"/>
-  <text x="200" y="270" font-size="18" text-anchor="middle" fill="white" opacity="0.5">Swarm Agent Card</text>
+  <text x="200" y="270" font-size="18" text-anchor="middle" fill="white" opacity="0.5">Agent Guild Agent Card</text>
   <text x="200" y="295" font-size="12" text-anchor="middle" fill="white" opacity="0.3">Loading...</text>
 </svg>`;
     return new NextResponse(fallbackSvg, {

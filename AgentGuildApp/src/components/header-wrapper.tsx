@@ -9,7 +9,7 @@ const Header = dynamic(
     ssr: false,
     loading: () => (
       <header className="sticky top-0 z-50 w-full border-b bg-card/95 backdrop-blur h-16 flex items-center px-6">
-        <span className="text-xl font-bold text-amber-600 dark:text-amber-400">⚡ Swarm</span>
+        <span className="text-xl font-bold text-amber-600 dark:text-amber-400">⚡ Agent Guild</span>
       </header>
     ),
   }

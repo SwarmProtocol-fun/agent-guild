@@ -33,12 +33,12 @@ export function useAutoSiwe() {
   const triggerLogin = useCallback(
     async (walletAddress: string, walletChainId: number | null) => {
       if (signingRef.current) {
-        debug.log("[Swarm:autoLogin] Already signing, skipping");
+        debug.log("[Agent Guild:autoLogin] Already signing, skipping");
         return;
       }
 
       signingRef.current = true;
-      debug.log("[Swarm:autoLogin] Triggering auto-login for", walletAddress);
+      debug.log("[Agent Guild:autoLogin] Triggering auto-login for", walletAddress);
 
       try {
         // 1. Get SIWE payload + message from server
@@ -57,7 +57,7 @@ export function useAutoSiwe() {
 
         // 2. Sign the SIWE message with the connected wallet
         const signature = await signMessage(message);
-        debug.log("[Swarm:autoLogin] Message signed");
+        debug.log("[Agent Guild:autoLogin] Message signed");
 
         // 3. Verify signature and create session
         const verifyRes = await fetch("/api/auth/verify", {
@@ -79,14 +79,14 @@ export function useAutoSiwe() {
           try {
             await signInWithCustomToken(auth, firebaseToken);
           } catch (err) {
-            debug.error("[Swarm:autoLogin] Firebase sign-in failed:", err);
+            debug.error("[Agent Guild:autoLogin] Firebase sign-in failed:", err);
           }
         }
 
         // 5. Refresh session context to pick up the new cookie
         await refresh();
       } catch (err) {
-        debug.error("[Swarm:autoLogin] Login failed:", err);
+        debug.error("[Agent Guild:autoLogin] Login failed:", err);
       } finally {
         signingRef.current = false;
       }
@@ -103,7 +103,7 @@ export function useAutoSiwe() {
       // Don't treat an in-flight reconnect as a disconnect
       if (status === "connecting") return;
       if (lastAddressRef.current && authenticated) {
-        debug.log("[Swarm:autoLogin] Wallet disconnected, logging out");
+        debug.log("[Agent Guild:autoLogin] Wallet disconnected, logging out");
         lastAddressRef.current = null;
         logout();
       }

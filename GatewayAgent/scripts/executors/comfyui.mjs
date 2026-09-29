@@ -13,9 +13,25 @@
 import http from "node:http";
 
 const DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188";
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 let activePromptId = null;
 let running = false;
 let cancelRequested = false;
+
+/**
+ * ComfyUI always runs on the gateway machine itself — comfyuiUrl is job-
+ * controlled input, so without this check a task could point the gateway at
+ * an internal-network host or the cloud metadata endpoint (169.254.169.254)
+ * and use it as an SSRF proxy.
+ */
+function assertLoopbackUrl(url) {
+  const parsed = new URL(url);
+  if (!LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
+    throw new Error(
+      `comfyuiUrl must point to the local ComfyUI instance (loopback only), got host "${parsed.hostname}"`,
+    );
+  }
+}
 
 /**
  * Simple HTTP request helper (no external deps).
@@ -65,11 +81,12 @@ export async function execute(task, logCallback) {
   const {
     workflow,
     comfyuiUrl = DEFAULT_COMFYUI_URL,
-    clientId = `swarm-gw-${Date.now()}`,
+    clientId = `agent-guild-gw-${Date.now()}`,
     pollIntervalMs = 2000,
   } = payload;
 
   if (!workflow) throw new Error("ComfyUI task missing 'workflow' in payload");
+  assertLoopbackUrl(comfyuiUrl);
 
   running = true;
   cancelRequested = false;

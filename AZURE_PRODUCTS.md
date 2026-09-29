@@ -1,6 +1,6 @@
 # Azure Product Offerings - Complete Guide
 
-Swarm now supports **5 different Azure compute products**, each optimized for specific workloads. Choose the right product based on your needs, budget, and performance requirements.
+Agent Guild now supports **5 different Azure compute products**, each optimized for specific workloads. Choose the right product based on your needs, budget, and performance requirements.
 
 ## Product Overview
 
@@ -406,7 +406,7 @@ Is it a parallel/HPC workload?
 ```bash
 # Required for all Azure products
 export AZURE_SUBSCRIPTION_ID="your-subscription-id"
-export AZURE_RESOURCE_GROUP="swarm-compute"
+export AZURE_RESOURCE_GROUP="agent-guild-compute"
 
 # Authentication (choose one)
 export AZURE_CLIENT_ID="your-client-id"
@@ -425,17 +425,17 @@ provider "azurerm" {
   features {}
 }
 
-resource "azurerm_resource_group" "swarm" {
-  name     = "swarm-compute"
+resource "azurerm_resource_group" "agent-guild" {
+  name     = "agent-guild-compute"
   location = "eastus"
 }
 
 # Pre-create VNet for VMs (optional)
-resource "azurerm_virtual_network" "swarm" {
-  name                = "swarm-vnet"
+resource "azurerm_virtual_network" "agent-guild" {
+  name                = "agent-guild-vnet"
   address_space       = ["10.0.0.0/16"]
-  location            = azurerm_resource_group.swarm.location
-  resource_group_name = azurerm_resource_group.swarm.name
+  location            = azurerm_resource_group.agent-guild.location
+  resource_group_name = azurerm_resource_group.agent-guild.name
 }
 ```
 
@@ -450,7 +450,7 @@ Store Azure product type in `providerMetadata`:
   provider: "azure",
   providerMetadata: {
     azureProduct: "aci", // vm, aci, spot, avd, batch
-    resourceGroup: "swarm-compute",
+    resourceGroup: "agent-guild-compute",
     subscription: "abc-123",
   }
 }
@@ -502,7 +502,7 @@ All products send metrics to Azure Monitor:
 ```typescript
 // Query CPU usage
 az monitor metrics list \
-  --resource /subscriptions/{sub}/resourceGroups/swarm-compute/providers/Microsoft.Compute/virtualMachines/{vmName} \
+  --resource /subscriptions/{sub}/resourceGroups/agent-guild-compute/providers/Microsoft.Compute/virtualMachines/{vmName} \
   --metric "Percentage CPU" \
   --start-time 2025-01-01T00:00:00Z \
   --end-time 2025-01-01T23:59:59Z
@@ -515,7 +515,7 @@ az monitor metrics list \
 az consumption usage list \
   --start-date 2025-01-01 \
   --end-date 2025-01-31 \
-  --query "[?contains(tags.'swarm:product', 'aci')]"
+  --query "[?contains(tags.'agent-guild:product', 'aci')]"
 ```
 
 ### Alerts
@@ -567,8 +567,8 @@ Set up alerts for:
 
 ### Getting Help
 - Azure Support: portal.azure.com
-- Swarm Discord: discord.gg/swarm
-- Documentation: docs.swarmprotocol.fun
+- Agent Guild Discord: discord.gg/agent-guild
+- Documentation: docs.agent-guild.com
 
 ---
 

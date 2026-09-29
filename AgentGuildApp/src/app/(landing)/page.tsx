@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { RobotSwarm3D } from "@/components/hero/robot-swarm-3d";
+import { RobotAgentGuild3D } from "@/components/hero/robot-agent-guild-3d";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -80,9 +80,9 @@ export default function LandingPage() {
               </div>
             </div>
 
-            {/* Right: 3D Robot Swarm */}
+            {/* Right: 3D Robot Agent Guild */}
             <div className="relative">
-              <RobotSwarm3D />
+              <RobotAgentGuild3D />
             </div>
           </div>
         </div>
@@ -94,7 +94,7 @@ export default function LandingPage() {
           <div className="text-center mb-12">
             <h2 className="text-4xl font-bold mb-4">Why Hedera?</h2>
             <p className="text-xl text-muted-foreground max-w-3xl mx-auto">
-              Swarm is built on Hedera because AI agents need immutable reputation logs,
+              Agent Guild is built on Hedera because AI agents need immutable reputation logs,
               fast finality, and micro-payment economics.
             </p>
           </div>

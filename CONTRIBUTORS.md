@@ -1,6 +1,6 @@
 # Contributors
 
-This ledger tracks all Swarm contributors and their tier status within the
+This ledger tracks all Agent Guild contributors and their tier status within the
 DAO hierarchy. Contribution weights are recalculated quarterly by the Core Team.
 
 ---
@@ -62,5 +62,5 @@ to the Architects (Tier 2) for review.
 
 ---
 
-_This ledger is maintained by the Core Team and is part of the Swarm project
+_This ledger is maintained by the Core Team and is part of the Agent Guild project
 governance structure._

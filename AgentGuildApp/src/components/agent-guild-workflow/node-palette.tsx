@@ -2,7 +2,7 @@
 'use client';
 
 import type { Agent } from '@/lib/firestore';
-import { AGENT_TYPE_ICONS, AGENT_TYPE_COSTS, formatCostCents } from '@/lib/swarm-workflow';
+import { AGENT_TYPE_ICONS, AGENT_TYPE_COSTS, formatCostCents } from '@/lib/agent-guild-workflow';
 
 interface NodePaletteProps {
   agents: Agent[];

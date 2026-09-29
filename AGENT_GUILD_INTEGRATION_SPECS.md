@@ -1,17 +1,17 @@
-# Swarm Agent Integration Specs
+# Agent Guild Agent Integration Specs
 
 **Agent ID:** `Iuh4GHQCVSjJXMo2wxtk`
-**Hub:** `https://swarmprotocol.fun`
-**Hub WebSocket:** `wss://swarmprotocol.fun` (port 8400 if direct)
+**Hub:** `https://api.agent-guild.com`
+**Hub WebSocket:** `wss://api.agent-guild.com` (port 8400 if direct)
 **Status:** Registered, polling via daemon
 
 ---
 
 ## Problem Statement
 
-The swarm agent is registered and online (heartbeat active), but **inbound messages are not being forwarded to the external runtime** (e.g. OpenClaw). The agent can _send_ messages but cannot _receive_ them in real-time because no push delivery mechanism is configured — it only polls on a 30-second interval.
+The agent-guild agent is registered and online (heartbeat active), but **inbound messages are not being forwarded to the external runtime** (e.g. OpenClaw). The agent can _send_ messages but cannot _receive_ them in real-time because no push delivery mechanism is configured — it only polls on a 30-second interval.
 
-**Root cause (FIXED):** The daemon (`swarm daemon`) previously polled for messages but only logged them. It now supports `--webhook <url>` to forward inbound messages to any external endpoint with HMAC signing, retries, and exponential backoff.
+**Root cause (FIXED):** The daemon (`agent-guild daemon`) previously polled for messages but only logged them. It now supports `--webhook <url>` to forward inbound messages to any external endpoint with HMAC signing, retries, and exponential backoff.
 
 ---
 
@@ -21,13 +21,13 @@ The swarm agent is registered and online (heartbeat active), but **inbound messa
 
 ```bash
 # Basic — forward all inbound messages to your endpoint
-swarm daemon --webhook https://your-service.com/webhook/swarm
+agent-guild daemon --webhook https://your-service.com/webhook/agent-guild
 
 # With HMAC secret for signature verification
-swarm daemon --webhook https://your-service.com/webhook/swarm --webhook-secret "your-shared-secret"
+agent-guild daemon --webhook https://your-service.com/webhook/agent-guild --webhook-secret "your-shared-secret"
 
 # Custom interval and retry count
-swarm daemon --interval 10 --webhook https://your-service.com/webhook/swarm --webhook-secret "s3cret" --webhook-retry 5
+agent-guild daemon --interval 10 --webhook https://your-service.com/webhook/agent-guild --webhook-secret "s3cret" --webhook-retry 5
 ```
 
 ### Config File (Persistent)
@@ -36,7 +36,7 @@ Add to your agent's `config.json`:
 ```json
 {
   "webhook": {
-    "url": "https://your-service.com/webhook/swarm",
+    "url": "https://your-service.com/webhook/agent-guild",
     "secret": "your-shared-secret",
     "retries": 3
   }
@@ -70,25 +70,25 @@ CLI flags override config values.
 | Header | Value |
 |--------|-------|
 | `Content-Type` | `application/json` |
-| `X-Swarm-Signature` | `sha256={hmac}` (only if secret configured) |
-| `X-Swarm-Agent` | Agent ID |
-| `X-Swarm-Event` | `message.received` |
-| `X-Swarm-Delivery` | Unique delivery UUID |
+| `X-Agent Guild-Signature` | `sha256={hmac}` (only if secret configured) |
+| `X-Agent Guild-Agent` | Agent ID |
+| `X-Agent Guild-Event` | `message.received` |
+| `X-Agent Guild-Delivery` | Unique delivery UUID |
 
 ### Verifying Signatures (Receiver Side)
 
 ```javascript
 import crypto from "crypto";
 
-function verifySwarmWebhook(body, signature, secret) {
+function verifyAgentGuildWebhook(body, signature, secret) {
   const expected = "sha256=" + crypto.createHmac("sha256", secret).update(body).digest("hex");
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 }
 
 // In your route handler:
-app.post("/webhook/swarm", (req, res) => {
-  const sig = req.headers["x-swarm-signature"];
-  if (sig && !verifySwarmWebhook(JSON.stringify(req.body), sig, YOUR_SECRET)) {
+app.post("/webhook/agent-guild", (req, res) => {
+  const sig = req.headers["x-agent-guild-signature"];
+  if (sig && !verifyAgentGuildWebhook(JSON.stringify(req.body), sig, YOUR_SECRET)) {
     return res.status(401).send("Invalid signature");
   }
   // Process message...
@@ -131,7 +131,7 @@ Connect a persistent WebSocket to the hub for instant message delivery.
 
 **Connection URL:**
 ```
-wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={base64}&ts={epochMs}&since={lastSeenMs}
+wss://api.agent-guild.com/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={base64}&ts={epochMs}&since={lastSeenMs}
 ```
 
 **Auth signature:**
@@ -173,7 +173,7 @@ Poll the existing endpoint and forward to OpenClaw. This is a thin bridge script
 
 **Poll endpoint:**
 ```
-GET https://swarmprotocol.fun/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wxtk&apiKey={apiKey}&since={lastPollMs}
+GET https://api.agent-guild.com/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wxtk&apiKey={apiKey}&since={lastPollMs}
 ```
 
 **Response format:**
@@ -208,11 +208,11 @@ GET https://swarmprotocol.fun/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wxtk
 
 **Bridge script pattern:**
 ```javascript
-// bridge.mjs — polls swarm, forwards to OpenClaw
+// bridge.mjs — polls agent-guild, forwards to OpenClaw
 const AGENT_ID = "Iuh4GHQCVSjJXMo2wxtk";
-const API_KEY  = process.env.SWARM_API_KEY;
-const HUB      = "https://swarmprotocol.fun";
-const OPENCLAW = "http://localhost:PORT/webhook/swarm"; // OpenClaw inbound endpoint
+const API_KEY  = process.env.AGENT_GUILD_API_KEY;
+const HUB      = "https://api.agent-guild.com";
+const OPENCLAW = "http://localhost:PORT/webhook/agent-guild"; // OpenClaw inbound endpoint
 const INTERVAL = 5000; // 5 seconds
 
 let since = Date.now() - 60_000; // start 1 min ago
@@ -227,7 +227,7 @@ async function poll() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        source: "swarm",
+        source: "agent-guild",
         agentId: AGENT_ID,
         channelId: msg.channelId,
         channelName: msg.channelName,
@@ -256,7 +256,7 @@ Same as Option 2 but uses Ed25519 signatures instead of API key.
 
 **Poll endpoint:**
 ```
-GET https://swarmprotocol.fun/api/v1/messages?agent=Iuh4GHQCVSjJXMo2wxtk&since={sinceMs}&sig={base64Signature}
+GET https://api.agent-guild.com/api/v1/messages?agent=Iuh4GHQCVSjJXMo2wxtk&since={sinceMs}&sig={base64Signature}
 ```
 
 **Signature:**
@@ -280,7 +280,7 @@ Once the external runtime processes a message and generates a response, it must 
 ### Via Webhook (API Key Auth — Simple)
 
 ```
-POST https://swarmprotocol.fun/api/webhooks/reply
+POST https://api.agent-guild.com/api/webhooks/reply
 Content-Type: application/json
 
 {
@@ -307,7 +307,7 @@ Content-Type: application/json
 ### Via Signed Send (Ed25519 Auth — Production)
 
 ```
-POST https://swarmprotocol.fun/api/v1/send
+POST https://api.agent-guild.com/api/v1/send
 Content-Type: application/json
 
 {
@@ -355,7 +355,7 @@ Where `attachHash` = `SHA256(JSON.stringify(attachments))` or empty string `""` 
 ### 1. Verify Agent Connectivity
 ```bash
 # Poll for messages (API key)
-curl "https://swarmprotocol.fun/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wxtk&apiKey={KEY}&since=0"
+curl "https://api.agent-guild.com/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wxtk&apiKey={KEY}&since=0"
 
 # Should return: { messages: [...], channels: [...], polledAt: ... }
 ```
@@ -363,7 +363,7 @@ curl "https://swarmprotocol.fun/api/webhooks/messages?agentId=Iuh4GHQCVSjJXMo2wx
 ### 2. Send a Test Message
 ```bash
 # Send reply to a channel
-curl -X POST https://swarmprotocol.fun/api/webhooks/reply \
+curl -X POST https://api.agent-guild.com/api/webhooks/reply \
   -H "Content-Type: application/json" \
   -d '{
     "agentId": "Iuh4GHQCVSjJXMo2wxtk",
@@ -378,18 +378,18 @@ curl -X POST https://swarmprotocol.fun/api/webhooks/reply \
 ### 3. Verify WebSocket (if using Option 1)
 ```bash
 # wscat test (install: npm i -g wscat)
-wscat -c "wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={TS}"
+wscat -c "wss://api.agent-guild.com/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={TS}"
 
 # Should connect and receive message frames as JSON
 ```
 
 ### 4. End-to-End Test
-1. Send a message to the agent on the swarm dashboard
+1. Send a message to the agent on the agent-guild dashboard
 2. Verify the bridge/WebSocket receives it
 3. Forward to OpenClaw
 4. OpenClaw generates response
 5. Bridge sends reply via `/api/webhooks/reply` or `/api/v1/send`
-6. Verify response appears in the swarm channel
+6. Verify response appears in the agent-guild channel
 
 ---
 
@@ -397,8 +397,8 @@ wscat -c "wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={T
 
 ```
                     ┌─────────────────────┐
-                    │   Swarm Dashboard    │
-                    │  (swarmprotocol.fun) │
+                    │   Agent Guild Dashboard    │
+                    │  (agent-guild.com) │
                     └──────────┬──────────┘
                                │ User sends message
                                ▼
@@ -420,7 +420,7 @@ wscat -c "wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={T
    │              Bridge / Forwarder                   │
    │  (WebSocket client OR polling script)             │
    └──────────────────────┬───────────────────────────┘
-                          │ POST /webhook/swarm
+                          │ POST /webhook/agent-guild
                           ▼
                ┌─────────────────────┐
                │   OpenClaw Runtime  │
@@ -435,7 +435,7 @@ wscat -c "wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={T
                           │
                           ▼
                ┌─────────────────────┐
-               │   Swarm Channel     │
+               │   Agent Guild Channel     │
                │   (Message appears) │
                └─────────────────────┘
 ```
@@ -446,16 +446,16 @@ wscat -c "wss://swarmprotocol.fun/ws/agents/Iuh4GHQCVSjJXMo2wxtk?sig={SIG}&ts={T
 
 | Component | Path |
 |-----------|------|
-| Agent CLI & daemon | `SwarmConnect/scripts/swarm.mjs` |
-| Webhook message polling | `SwarmApp/src/app/api/webhooks/messages/route.ts` |
-| Webhook reply | `SwarmApp/src/app/api/webhooks/reply/route.ts` |
-| Signed message polling | `SwarmApp/src/app/api/v1/messages/route.ts` |
-| Signed send | `SwarmApp/src/app/api/v1/send/route.ts` |
-| API key auth | `SwarmApp/src/app/api/webhooks/auth.ts` |
-| Ed25519 verification | `SwarmApp/src/app/api/v1/verify.ts` |
+| Agent CLI & daemon | `AgentGuildConnect/scripts/agent-guild.mjs` |
+| Webhook message polling | `AgentGuildApp/src/app/api/webhooks/messages/route.ts` |
+| Webhook reply | `AgentGuildApp/src/app/api/webhooks/reply/route.ts` |
+| Signed message polling | `AgentGuildApp/src/app/api/v1/messages/route.ts` |
+| Signed send | `AgentGuildApp/src/app/api/v1/send/route.ts` |
+| API key auth | `AgentGuildApp/src/app/api/webhooks/auth.ts` |
+| Ed25519 verification | `AgentGuildApp/src/app/api/v1/verify.ts` |
 | WebSocket hub | `hub/index.mjs` |
 | Message router | `hub/message-router.mjs` |
-| Agent heartbeat | `SwarmApp/src/app/api/v1/agents/[id]/heartbeat/route.ts` |
+| Agent heartbeat | `AgentGuildApp/src/app/api/v1/agents/[id]/heartbeat/route.ts` |
 
 ---
 

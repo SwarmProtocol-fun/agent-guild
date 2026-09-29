@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 /**
- * Deploy Swarm contracts to Hedera Testnet
+ * Deploy Agent Guild contracts to Hedera Testnet
  *
  * Hedera Testnet:
  * - Chain ID: 296
@@ -18,7 +18,7 @@ async function main() {
   const network = await ethers.provider.getNetwork();
 
   console.log("=".repeat(60));
-  console.log("🚀 Deploying Swarm to Hedera Testnet");
+  console.log("🚀 Deploying Agent Guild to Hedera Testnet");
   console.log("=".repeat(60));
   console.log("Deployer:   ", deployer.address);
   console.log("Chain ID:   ", network.chainId.toString());
@@ -42,46 +42,46 @@ async function main() {
   const linkAddr = await mockLink.getAddress();
   console.log("✅ MockLINK deployed to:", linkAddr);
 
-  // 1. SwarmASNRegistry
-  console.log("\n[1/5] Deploying SwarmASNRegistry...");
-  const ASNRegistry = await ethers.getContractFactory("SwarmASNRegistry");
+  // 1. AgentGuildASNRegistry
+  console.log("\n[1/5] Deploying AgentGuildASNRegistry...");
+  const ASNRegistry = await ethers.getContractFactory("AgentGuildASNRegistry");
   const asnRegistry = await ASNRegistry.deploy(gasOverrides);
   await asnRegistry.waitForDeployment();
   const asnAddr = await asnRegistry.getAddress();
-  console.log("✅ SwarmASNRegistry deployed to:", asnAddr);
+  console.log("✅ AgentGuildASNRegistry deployed to:", asnAddr);
 
-  // 2. SwarmAgentRegistryLink (includes credit & trust scores)
-  console.log("\n[2/5] Deploying SwarmAgentRegistryLink...");
-  const AgentRegistry = await ethers.getContractFactory("SwarmAgentRegistryLink");
+  // 2. AgentGuildAgentRegistryLink (includes credit & trust scores)
+  console.log("\n[2/5] Deploying AgentGuildAgentRegistryLink...");
+  const AgentRegistry = await ethers.getContractFactory("AgentGuildAgentRegistryLink");
   const agentRegistry = await AgentRegistry.deploy(gasOverrides);
   await agentRegistry.waitForDeployment();
   const agentAddr = await agentRegistry.getAddress();
-  console.log("✅ SwarmAgentRegistryLink deployed to:", agentAddr);
+  console.log("✅ AgentGuildAgentRegistryLink deployed to:", agentAddr);
 
-  // 3. SwarmTaskBoardLink
-  console.log("\n[3/5] Deploying SwarmTaskBoardLink...");
-  const TaskBoard = await ethers.getContractFactory("SwarmTaskBoardLink");
+  // 3. AgentGuildTaskBoardLink
+  console.log("\n[3/5] Deploying AgentGuildTaskBoardLink...");
+  const TaskBoard = await ethers.getContractFactory("AgentGuildTaskBoardLink");
   const taskBoard = await TaskBoard.deploy(linkAddr, gasOverrides);
   await taskBoard.waitForDeployment();
   const taskAddr = await taskBoard.getAddress();
-  console.log("✅ SwarmTaskBoardLink deployed to:", taskAddr);
+  console.log("✅ AgentGuildTaskBoardLink deployed to:", taskAddr);
 
-  // 4. SwarmTreasuryLink
-  console.log("\n[4/5] Deploying SwarmTreasuryLink...");
-  const Treasury = await ethers.getContractFactory("SwarmTreasuryLink");
+  // 4. AgentGuildTreasuryLink
+  console.log("\n[4/5] Deploying AgentGuildTreasuryLink...");
+  const Treasury = await ethers.getContractFactory("AgentGuildTreasuryLink");
   const treasury = await Treasury.deploy(linkAddr, gasOverrides);
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
-  console.log("✅ SwarmTreasuryLink deployed to:", treasuryAddr);
+  console.log("✅ AgentGuildTreasuryLink deployed to:", treasuryAddr);
 
-  // 5. SwarmAgentIdentityNFT (Dynamic NFT for agent reputation)
-  console.log("\n[5/5] Deploying SwarmAgentIdentityNFT...");
-  const metadataBaseURI = "https://swarmprotocol.fun/api/nft/agent";
-  const AgentNFT = await ethers.getContractFactory("SwarmAgentIdentityNFT");
+  // 5. AgentGuildAgentIdentityNFT (Dynamic NFT for agent reputation)
+  console.log("\n[5/5] Deploying AgentGuildAgentIdentityNFT...");
+  const metadataBaseURI = "https://agent-guild.com/api/nft/agent";
+  const AgentNFT = await ethers.getContractFactory("AgentGuildAgentIdentityNFT");
   const agentNFT = await AgentNFT.deploy(metadataBaseURI, gasOverrides);
   await agentNFT.waitForDeployment();
   const agentNFTAddr = await agentNFT.getAddress();
-  console.log("✅ SwarmAgentIdentityNFT deployed to:", agentNFTAddr);
+  console.log("✅ AgentGuildAgentIdentityNFT deployed to:", agentNFTAddr);
 
   // ── Output Summary ──
   console.log("\n" + "=".repeat(60));
@@ -124,7 +124,7 @@ async function main() {
   // ── Output .env snippet ──
   const envSnippet = [
     "",
-    "# ── Swarm Hedera Contracts (Testnet) ── deployed " + new Date().toISOString(),
+    "# ── Agent Guild Hedera Contracts (Testnet) ── deployed " + new Date().toISOString(),
     `NEXT_PUBLIC_HEDERA_MOCK_LINK=${linkAddr}`,
     `NEXT_PUBLIC_HEDERA_AGENT_REGISTRY=${agentAddr}`,
     `NEXT_PUBLIC_HEDERA_TASK_BOARD=${taskAddr}`,
@@ -138,13 +138,13 @@ async function main() {
   ].join("\n");
 
   console.log("\n" + "=".repeat(60));
-  console.log("📝 ADD TO SwarmApp/.env.local");
+  console.log("📝 ADD TO AgentGuildApp/.env.local");
   console.log("=".repeat(60));
   console.log(envSnippet);
   console.log("=".repeat(60));
 
   // Auto-append to .env.local if it exists
-  const envLocalPath = path.join(__dirname, "..", "..", "SwarmApp", ".env.local");
+  const envLocalPath = path.join(__dirname, "..", "..", "AgentGuildApp", ".env.local");
   if (fs.existsSync(envLocalPath)) {
     const existing = fs.readFileSync(envLocalPath, "utf-8");
     // Remove old Hedera contract vars if present
@@ -158,7 +158,7 @@ async function main() {
     fs.writeFileSync(envLocalPath, cleaned.trimEnd() + "\n" + envSnippet);
     console.log("\n✅ Auto-appended to", envLocalPath);
   } else {
-    console.log("\n⚠️  Create SwarmApp/.env.local and paste the snippet above");
+    console.log("\n⚠️  Create AgentGuildApp/.env.local and paste the snippet above");
   }
 
   console.log("\n" + "=".repeat(60));

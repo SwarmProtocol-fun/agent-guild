@@ -3,7 +3,7 @@
  *
  * Computes a deterministic hash of a mod's manifest content so that
  * integrity can be verified at install time and during runtime audits.
- * Community/third-party mods can be signed by a Swarm review key after
+ * Community/third-party mods can be signed by a Agent Guild review key after
  * approval, enabling trust-chain verification.
  */
 

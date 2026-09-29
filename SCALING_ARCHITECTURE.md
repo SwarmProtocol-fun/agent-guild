@@ -1,8 +1,8 @@
-# Swarm Multi-Instance Scaling Architecture
+# Agent Guild Multi-Instance Scaling Architecture
 
 ## Executive Summary
 
-Swarm is designed to scale horizontally across multiple instances while maintaining **state consistency** through **Firestore** as the shared data layer and **Cloud Pub/Sub** for cross-instance communication.
+Agent Guild is designed to scale horizontally across multiple instances while maintaining **state consistency** through **Firestore** as the shared data layer and **Cloud Pub/Sub** for cross-instance communication.
 
 ### Key Design Decisions
 
@@ -170,11 +170,11 @@ rateLimits/{ipPrefix}_{timestamp_bucket}
 **Purpose**: Cross-instance real-time communication
 
 **Topics**:
-- `swarm-broadcast` - Channel messages, agent notifications
+- `agent-guild-broadcast` - Channel messages, agent notifications
 
 **Subscriptions** (one per hub instance):
-- `swarm-broadcast-hub-1`
-- `swarm-broadcast-hub-2`
+- `agent-guild-broadcast-hub-1`
+- `agent-guild-broadcast-hub-2`
 - ...
 
 **Message Flow**:
@@ -446,10 +446,10 @@ Bottleneck: Memory (4GB / 3MB ≈ 1,300 connections)
 **Example Grafana Query**:
 ```promql
 # Connection distribution across instances
-sum(swarm_hub_connections_total) by (instance)
+sum(agent_guild_hub_connections_total) by (instance)
 
 # Rate limit effectiveness
-rate(swarm_rate_limit_rejections_total[5m])
+rate(agent_guild_rate_limit_rejections_total[5m])
 
 # Firestore latency
 histogram_quantile(0.99, rate(firestore_operation_duration_bucket[5m]))
@@ -462,7 +462,7 @@ histogram_quantile(0.99, rate(firestore_operation_duration_bucket[5m]))
 **Firestore Backups**:
 ```bash
 # Daily automated backup
-gcloud firestore export gs://swarm-backups/$(date +%Y%m%d) \
+gcloud firestore export gs://agent-guild-backups/$(date +%Y%m%d) \
   --collection-ids=sessions,organizations,agents,messages
 ```
 
@@ -531,7 +531,7 @@ gcloud firestore export gs://swarm-backups/$(date +%Y%m%d) \
 
 ## Summary
 
-Swarm achieves **horizontal scalability** through:
+Agent Guild achieves **horizontal scalability** through:
 1. ✅ **Firestore as shared state** - Sessions, rate limits, persistent data
 2. ✅ **Sticky sessions** - Route WebSocket connections to same instance
 3. ✅ **Pub/Sub broadcasting** - Propagate messages across instances

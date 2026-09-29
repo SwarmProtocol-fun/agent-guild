@@ -20,7 +20,7 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-// [swarm-core] Hedera removed
+// [agent-guild-core] Hedera removed
 import type { ScoreEvent } from "@/lib/credit-types";
 import { getScoreBand, type ScoreBand } from "./credit-scoring";
 

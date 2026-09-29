@@ -127,7 +127,7 @@ function useHistory() {
 
 // ─── Workflow Persistence ────────────────────────────────────────────────────
 
-const WORKFLOW_STORAGE_KEY = "swarm-agent-map-workflow";
+const WORKFLOW_STORAGE_KEY = "agent-guild-agent-map-workflow";
 
 function saveWorkflow(nodes: Node[], edges: Edge[]) {
   try {

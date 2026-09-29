@@ -2,7 +2,7 @@
 "use client";
 
 import { use, useCallback, useEffect, useState, type ComponentType } from "react";
-import type { PanelProps } from "@swarm/sdk";
+import type { PanelProps } from "@agent-guild/sdk";
 import { MOD_MANIFESTS } from "@/lib/mods/generated/manifests";
 import { clientMods } from "@/lib/mods/generated/client";
 import { PanelErrorBoundary } from "@/components/panel-error-boundary";

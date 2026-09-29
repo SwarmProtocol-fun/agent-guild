@@ -475,7 +475,7 @@ function handleCrossInstanceMessage(payload) {
 }
 
 // ── Auto-capture: agent daily journal ─────────────────────────────────────
-// Duplicated (not imported) from SwarmApp/src/lib/agent-memory-server.ts's
+// Duplicated (not imported) from AgentGuildApp/src/lib/agent-memory-server.ts's
 // appendDailyNote — this is a separate .mjs deploy unit that can't import
 // TypeScript. Keep the doc shape (fixed ID, subtype, structuredData) and
 // append behavior in sync with that file if either changes.
@@ -683,7 +683,7 @@ function streamChannel(ws, channelId, channelName, agentId) {
         if (m.senderId === agentId) return;
         // Already delivered live via broadcastToChannel/Pub-Sub by the writer
         // (persistMessage / routeBroadcast) — skip to avoid a duplicate copy.
-        // Docs written outside the hub (e.g. SwarmApp's /api/v1/send) won't
+        // Docs written outside the hub (e.g. AgentGuildApp's /api/v1/send) won't
         // carry this marker and still get delivered here as before.
         if (m.deliveredViaHub) return;
 
@@ -762,7 +762,7 @@ app.use((req, res, next) => {
 });
 
 // Security: Lock down CORS to only allow requests from the main app
-const ALLOWED_ORIGINS = optionalEnv("ALLOWED_ORIGINS", "https://swarmprotocol.ai,http://localhost:3000")
+const ALLOWED_ORIGINS = optionalEnv("ALLOWED_ORIGINS", "https://agent-guild.com,http://localhost:3000")
   .split(",")
   .map(o => o.trim());
 
@@ -860,8 +860,8 @@ app.get("/diagnostics", async (req, res) => {
     } else {
       result.checks.firestoreRecord = {
         ok: false,
-        detail: "No agent document found — run `swarm register` first",
-        hint: "swarm register --hub <url> --org <orgId> --name <name>",
+        detail: "No agent document found — run `agent-guild register` first",
+        hint: "agent-guild register --hub <url> --org <orgId> --name <name>",
       };
     }
   } catch (err) {
@@ -880,7 +880,7 @@ app.get("/diagnostics", async (req, res) => {
       detail: hasKey
         ? "Public key is stored in Firestore"
         : "No publicKey field — registration may be incomplete",
-      hint: hasKey ? null : "Re-run `swarm register` to re-upload your public key",
+      hint: hasKey ? null : "Re-run `agent-guild register` to re-upload your public key",
     };
   }
 
@@ -891,7 +891,7 @@ app.get("/diagnostics", async (req, res) => {
     detail: connected
       ? `Agent is currently connected (${agentConnections.get(agentId).size} socket(s))`
       : "Agent is not connected to this hub instance",
-    hint: connected ? null : "Run `swarm daemon` or reconnect via WebSocket",
+    hint: connected ? null : "Run `agent-guild daemon` or reconnect via WebSocket",
   };
 
   // 5. Status (paused / active)
@@ -1084,7 +1084,7 @@ server.on("upgrade", async (req, socket, head) => {
 
   if (!sig || !ts) {
     log("warn", "WS upgrade rejected — missing sig or ts", { entityId, wsType });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Swarm-Error: missing-auth-params\r\nX-Swarm-Hint: URL must include ?sig=<base64>&ts=<epoch-ms>\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: missing-auth-params\r\nX-Agent Guild-Hint: URL must include ?sig=<base64>&ts=<epoch-ms>\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1093,7 +1093,7 @@ server.on("upgrade", async (req, socket, head) => {
   const tsMs = parseInt(ts, 10);
   if (Math.abs(Date.now() - tsMs) > AUTH_WINDOW_MS) {
     log("warn", "WS upgrade rejected — stale timestamp", { entityId, wsType, ageMs: Math.abs(Date.now() - tsMs) });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Swarm-Error: stale-timestamp\r\nX-Swarm-Hint: Clock drift detected — ensure system clock is accurate; auth window is " + AUTH_WINDOW_MS + "ms\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: stale-timestamp\r\nX-Agent Guild-Hint: Clock drift detected — ensure system clock is accurate; auth window is " + AUTH_WINDOW_MS + "ms\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1138,7 +1138,7 @@ server.on("upgrade", async (req, socket, head) => {
   if (!agentData) {
     log("warn", "WS upgrade rejected — invalid signature", { agentId,
       hint: "Verify agent is registered (GET /diagnostics?agentId=<id>) and keys match Firestore" });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Swarm-Error: invalid-signature\r\nX-Swarm-Hint: Run GET /diagnostics?agentId=" + agentId + " for diagnosis\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: invalid-signature\r\nX-Agent Guild-Hint: Run GET /diagnostics?agentId=" + agentId + " for diagnosis\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1996,7 +1996,7 @@ notificationsQuery.onSnapshot((snapshot) => {
       broadcastToChannel(channelId, {
         type: "message",
         channelId,
-        from: "SwarmHub",
+        from: "AgentGuildHub",
         fromType: "system",
         text: message,
         ts: Date.now(),
@@ -2079,7 +2079,7 @@ process.on("SIGINT", async () => {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
-  log("info", `Swarm Hub (Ed25519) listening on port ${PORT}`);
+  log("info", `Agent Guild Hub (Ed25519) listening on port ${PORT}`);
   log("info", `Region: ${HUB_REGION}`);
   if (HUB_GATEWAY_ID) {
     log("info", `Gateway ID: ${HUB_GATEWAY_ID}`);

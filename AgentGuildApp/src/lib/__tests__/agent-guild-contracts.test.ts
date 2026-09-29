@@ -8,7 +8,7 @@ import {
   TASK_BOARD_ABI,
   AGENT_REGISTRY_ABI,
   HEDERA_AGENT_REGISTRY_ABI,
-} from "../swarm-contracts";
+} from "../agent-guild-contracts";
 
 describe("toHbar", () => {
   it("converts tinybars to HBAR", () => {

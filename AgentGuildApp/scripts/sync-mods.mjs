@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * sync-mods — scans mods/<id>/swarm.mod.json, validates each manifest, and
+ * sync-mods — scans mods/<id>/agent-guild.mod.json, validates each manifest, and
  * generates the static registries core imports (src/lib/mods/generated/*).
  *
  * Next.js bundles code at build time, so "installing" a mod = drop a folder
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODS_DIR = path.join(APP_ROOT, "mods");
 const OUT_DIR = path.join(APP_ROOT, "src/lib/mods/generated");
-const SWARM_API_VERSION = 1;
+const AGENT_GUILD_API_VERSION = 1;
 const PERMISSIONS = Object.keys(
   JSON.parse(fs.readFileSync(path.join(APP_ROOT, "src/lib/mods/permissions.json"), "utf8")),
 );
@@ -32,7 +32,7 @@ export function validateManifest(m, folderName, modDir) {
   else if (m.id !== folderName) errors.push(`id "${m.id}" must equal folder name "${folderName}"`);
   if (typeof m.name !== "string" || !m.name.trim()) errors.push("name is required");
   if (typeof m.version !== "string" || !SEMVER_RE.test(m.version)) errors.push("version must be semver (1.0.0)");
-  if (m.swarmApi !== SWARM_API_VERSION) errors.push(`swarmApi must be ${SWARM_API_VERSION} (got ${JSON.stringify(m.swarmApi)})`);
+  if (m.agentGuildApi !== AGENT_GUILD_API_VERSION) errors.push(`agentGuildApi must be ${AGENT_GUILD_API_VERSION} (got ${JSON.stringify(m.agentGuildApi)})`);
   if (!Array.isArray(m.permissions)) errors.push("permissions must be an array (use [] for none)");
   else for (const p of m.permissions) if (!PERMISSIONS.includes(p)) errors.push(`unknown permission "${p}" (known: ${PERMISSIONS.join(", ")})`);
 
@@ -76,16 +76,16 @@ function scan() {
   for (const dirent of fs.readdirSync(MODS_DIR, { withFileTypes: true })) {
     if (!dirent.isDirectory() || dirent.name.startsWith(".") || dirent.name.startsWith("_")) continue;
     const modDir = path.join(MODS_DIR, dirent.name);
-    const manifestPath = path.join(modDir, "swarm.mod.json");
+    const manifestPath = path.join(modDir, "agent-guild.mod.json");
     if (!fs.existsSync(manifestPath)) {
-      problems.push(`${dirent.name}: no swarm.mod.json`);
+      problems.push(`${dirent.name}: no agent-guild.mod.json`);
       continue;
     }
     let manifest;
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     } catch (e) {
-      problems.push(`${dirent.name}: swarm.mod.json is not valid JSON (${e.message})`);
+      problems.push(`${dirent.name}: agent-guild.mod.json is not valid JSON (${e.message})`);
       continue;
     }
     const errors = validateManifest(manifest, dirent.name, modDir);
@@ -110,15 +110,15 @@ function generate(mods) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(
     path.join(OUT_DIR, "manifests.ts"),
-    `${header}import type { ModManifest } from "@swarm/sdk";\n\nexport const MOD_MANIFESTS: ModManifest[] = ${JSON.stringify(mods.map((m) => m.manifest), null, 2)};\n`,
+    `${header}import type { ModManifest } from "@agent-guild/sdk";\n\nexport const MOD_MANIFESTS: ModManifest[] = ${JSON.stringify(mods.map((m) => m.manifest), null, 2)};\n`,
   );
   fs.writeFileSync(
     path.join(OUT_DIR, "server.ts"),
-    `${header}import type { ServerMod } from "@swarm/sdk";\n\nexport const serverMods: Record<string, () => Promise<{ default: ServerMod }>> = {\n${loaders("server")}\n};\n`,
+    `${header}import type { ServerMod } from "@agent-guild/sdk";\n\nexport const serverMods: Record<string, () => Promise<{ default: ServerMod }>> = {\n${loaders("server")}\n};\n`,
   );
   fs.writeFileSync(
     path.join(OUT_DIR, "client.ts"),
-    `${header}import type { ClientMod } from "@swarm/sdk";\n\nexport const clientMods: Record<string, () => Promise<{ default: ClientMod }>> = {\n${loaders("client")}\n};\n`,
+    `${header}import type { ClientMod } from "@agent-guild/sdk";\n\nexport const clientMods: Record<string, () => Promise<{ default: ClientMod }>> = {\n${loaders("client")}\n};\n`,
   );
 }
 

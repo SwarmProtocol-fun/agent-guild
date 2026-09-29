@@ -16,10 +16,10 @@ import * as fs from "fs";
 import * as path from "path";
 
 interface DeployedAddresses {
-  SwarmASNRegistry: string;
-  SwarmAgentRegistryLink: string;
-  SwarmTaskBoardLink: string;
-  SwarmTreasuryLink: string;
+  AgentGuildASNRegistry: string;
+  AgentGuildAgentRegistryLink: string;
+  AgentGuildTaskBoardLink: string;
+  AgentGuildTreasuryLink: string;
   network: string;
   deployedAt: string;
 }
@@ -39,7 +39,7 @@ function check(label: string, condition: boolean, detail = "") {
 
 async function main() {
   console.log("\n═══════════════════════════════════════════════");
-  console.log("  Swarm Contract Post-Deploy Smoke Check");
+  console.log("  Agent Guild Contract Post-Deploy Smoke Check");
   console.log("═══════════════════════════════════════════════\n");
 
   // Load deployed addresses
@@ -71,12 +71,12 @@ async function main() {
     check(`${name} has bytecode at ${addr}`, code !== "0x" && code.length > 2);
   }
 
-  // ── 2. SwarmASNRegistry ────────────────────────────────────────────────────
+  // ── 2. AgentGuildASNRegistry ────────────────────────────────────────────────────
 
-  console.log("\n2. SwarmASNRegistry");
+  console.log("\n2. AgentGuildASNRegistry");
 
   try {
-    const asn = await ethers.getContractAt("SwarmASNRegistry", addresses.SwarmASNRegistry);
+    const asn = await ethers.getContractAt("AgentGuildASNRegistry", addresses.AgentGuildASNRegistry);
     const owner = await asn.owner();
     check("owner() returns an address", ethers.isAddress(owner));
     check("owner is non-zero", owner !== ethers.ZeroAddress);
@@ -84,15 +84,15 @@ async function main() {
     const count = await asn.asnCount();
     check(`asnCount() returns a number (${count})`, typeof count === "bigint");
   } catch (err: any) {
-    check("SwarmASNRegistry read calls", false, err.message);
+    check("AgentGuildASNRegistry read calls", false, err.message);
   }
 
-  // ── 3. SwarmAgentRegistryLink ──────────────────────────────────────────────
+  // ── 3. AgentGuildAgentRegistryLink ──────────────────────────────────────────────
 
-  console.log("\n3. SwarmAgentRegistryLink");
+  console.log("\n3. AgentGuildAgentRegistryLink");
 
   try {
-    const registry = await ethers.getContractAt("SwarmAgentRegistryLink", addresses.SwarmAgentRegistryLink);
+    const registry = await ethers.getContractAt("AgentGuildAgentRegistryLink", addresses.AgentGuildAgentRegistryLink);
     const owner = await registry.owner();
     check("owner() returns an address", ethers.isAddress(owner));
     check("owner is non-zero", owner !== ethers.ZeroAddress);
@@ -104,15 +104,15 @@ async function main() {
     const result = await registry.isRegistered(ethers.ZeroAddress);
     check("isRegistered(zero) returns false", result === false);
   } catch (err: any) {
-    check("SwarmAgentRegistryLink read calls", false, err.message);
+    check("AgentGuildAgentRegistryLink read calls", false, err.message);
   }
 
-  // ── 4. SwarmTaskBoardLink ──────────────────────────────────────────────────
+  // ── 4. AgentGuildTaskBoardLink ──────────────────────────────────────────────────
 
-  console.log("\n4. SwarmTaskBoardLink");
+  console.log("\n4. AgentGuildTaskBoardLink");
 
   try {
-    const board = await ethers.getContractAt("SwarmTaskBoardLink", addresses.SwarmTaskBoardLink);
+    const board = await ethers.getContractAt("AgentGuildTaskBoardLink", addresses.AgentGuildTaskBoardLink);
     const linkAddr = await board.linkToken();
     check("linkToken() returns an address", ethers.isAddress(linkAddr));
     check("linkToken is non-zero", linkAddr !== ethers.ZeroAddress);
@@ -123,20 +123,20 @@ async function main() {
     const openTasks = await board.getOpenTasks();
     check(`getOpenTasks() returns an array (${openTasks.length} open)`, Array.isArray(openTasks));
   } catch (err: any) {
-    check("SwarmTaskBoardLink read calls", false, err.message);
+    check("AgentGuildTaskBoardLink read calls", false, err.message);
   }
 
-  // ── 5. SwarmTreasuryLink ───────────────────────────────────────────────────
+  // ── 5. AgentGuildTreasuryLink ───────────────────────────────────────────────────
 
-  console.log("\n5. SwarmTreasuryLink");
+  console.log("\n5. AgentGuildTreasuryLink");
 
   try {
-    const treasury = await ethers.getContractAt("SwarmTreasuryLink", addresses.SwarmTreasuryLink);
+    const treasury = await ethers.getContractAt("AgentGuildTreasuryLink", addresses.AgentGuildTreasuryLink);
     const owner = await treasury.owner();
     check("owner() returns an address", ethers.isAddress(owner));
     check("owner is non-zero", owner !== ethers.ZeroAddress);
   } catch (err: any) {
-    check("SwarmTreasuryLink read calls", false, err.message);
+    check("AgentGuildTreasuryLink read calls", false, err.message);
   }
 
   // ── 6. Cross-contract consistency ─────────────────────────────────────────
@@ -144,8 +144,8 @@ async function main() {
   console.log("\n6. Cross-contract consistency");
 
   try {
-    const registry = await ethers.getContractAt("SwarmAgentRegistryLink", addresses.SwarmAgentRegistryLink);
-    const board = await ethers.getContractAt("SwarmTaskBoardLink", addresses.SwarmTaskBoardLink);
+    const registry = await ethers.getContractAt("AgentGuildAgentRegistryLink", addresses.AgentGuildAgentRegistryLink);
+    const board = await ethers.getContractAt("AgentGuildTaskBoardLink", addresses.AgentGuildTaskBoardLink);
 
     const registryOwner = await registry.owner();
     const boardOwner = await board.owner();

@@ -3,7 +3,7 @@
  * Verifies a signed SIWE payload and creates an authenticated session.
  * Body: { payload: LoginPayload, signature: string }
  * Returns: { success: true, session: { address, role } }
- * Sets: httpOnly cookie `swarm_session`
+ * Sets: httpOnly cookie `agent_guild_session`
  */
 import {
   resolveRole,

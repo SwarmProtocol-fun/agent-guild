@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Memory Service Helpers
+ * Agent Guild Compute — Memory Service Helpers
  */
 
 import type { MemoryScopeType, MemoryEntry } from "./types";

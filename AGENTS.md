@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **swarm-core** (16276 symbols, 33581 relationships, 559 execution flows).
+This project is indexed by GitNexus as **agent-guild-core** (16276 symbols, 33581 relationships, 559 execution flows).
 
 > Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 
@@ -25,10 +25,10 @@ This project is indexed by GitNexus as **swarm-core** (16276 symbols, 33581 rela
 
 | Resource | Use for |
 | --- | --- |
-| `gitnexus://repo/swarm-core/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/swarm-core/clusters` | All functional areas |
-| `gitnexus://repo/swarm-core/processes` | All execution flows |
-| `gitnexus://repo/swarm-core/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/agent-guild-core/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/agent-guild-core/clusters` | All functional areas |
+| `gitnexus://repo/agent-guild-core/processes` | All execution flows |
+| `gitnexus://repo/agent-guild-core/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

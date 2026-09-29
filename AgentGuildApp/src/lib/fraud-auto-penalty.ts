@@ -27,7 +27,7 @@ const MIN_TRUST_SCORE = 0;
  * Apply a credit/trust penalty directly to the agent's live scores.
  *
  * This is the actual score mutation for auto-detected fraud — separate from
- * emitPenalty(), which only notifies the (optional) swarm-hedera mod's score
+ * emitPenalty(), which only notifies the (optional) agent-guild-hedera mod's score
  * ledger and is non-blocking/best-effort.
  */
 async function applyCreditPenalty(
@@ -234,10 +234,10 @@ export async function applyAutoPenalties(
         await updateSignalStatus(signal.id!, "penalized");
       }
 
-      // Best-effort notify the optional swarm-hedera mod's score ledger.
+      // Best-effort notify the optional agent-guild-hedera mod's score ledger.
       // Non-blocking: the real score mutation above already happened.
       emitPenalty(agent.asn, agent.walletAddress, -rule.creditPenalty, reason).catch(() => {
-        /* swarm-hedera mod not installed — expected in core */
+        /* agent-guild-hedera mod not installed — expected in core */
       });
 
       penaltiesApplied++;

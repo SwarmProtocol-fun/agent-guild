@@ -5,7 +5,7 @@ import { Suspense } from "react";
 vi.mock("@/hooks/useAuthAddress", () => ({ useAuthAddress: () => "0xabc" }));
 vi.mock("@/lib/mods/generated/manifests", () => ({
   MOD_MANIFESTS: [{
-    id: "demo", name: "Demo", version: "1.0.0", swarmApi: 1, permissions: [],
+    id: "demo", name: "Demo", version: "1.0.0", agentGuildApi: 1, permissions: [],
     entry: { client: "./client" }, panels: [{ id: "main", title: "Main" }, { id: "ghost", title: "Ghost" }],
   }],
 }));

@@ -8,7 +8,7 @@
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue, type Query } from "firebase-admin/firestore";
 import { emitAdminOverride } from "@/lib/mod-stubs";
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
+// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
 import { recordCreditOpsAudit } from "./audit";
 import type { CreditOpsOverride, OverrideType } from "./types";
 

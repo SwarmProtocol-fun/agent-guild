@@ -15,12 +15,12 @@
 
 ### 1. Provider Files
 
-#### ✅ Azure Provider (`SwarmApp/src/lib/compute/providers/azure.ts`)
+#### ✅ Azure Provider (`AgentGuildApp/src/lib/compute/providers/azure.ts`)
 
 **File Header:**
 ```typescript
 /**
- * Swarm Compute — Azure Virtual Machines Provider
+ * Agent Guild Compute — Azure Virtual Machines Provider
  *
  * Uses Azure VMs for lifecycle, Run Command for script execution,
  * and Boot Diagnostics as a fallback screenshot source.
@@ -49,7 +49,7 @@
 
 ### 2. API Routes
 
-#### ✅ Clone API (`SwarmApp/src/app/api/compute/computers/[id]/clone/route.ts`)
+#### ✅ Clone API (`AgentGuildApp/src/app/api/compute/computers/[id]/clone/route.ts`)
 
 **Route Header:**
 ```typescript
@@ -76,7 +76,7 @@
 // ── Mark clone as failed ──
 ```
 
-#### ✅ Snapshot API (`SwarmApp/src/app/api/compute/computers/[id]/snapshot/route.ts`)
+#### ✅ Snapshot API (`AgentGuildApp/src/app/api/compute/computers/[id]/snapshot/route.ts`)
 
 **Route Header:**
 ```typescript
@@ -96,7 +96,7 @@
 // ── Record snapshot in Firestore ──
 ```
 
-#### ✅ Start API (`SwarmApp/src/app/api/compute/computers/[id]/start/route.ts`)
+#### ✅ Start API (`AgentGuildApp/src/app/api/compute/computers/[id]/start/route.ts`)
 
 **Route Header:**
 ```typescript
@@ -115,7 +115,7 @@
 - Entitlement checks documented
 - State validation commented
 
-#### ✅ Status API (`SwarmApp/src/app/api/compute/computers/[id]/status/route.ts`)
+#### ✅ Status API (`AgentGuildApp/src/app/api/compute/computers/[id]/status/route.ts`)
 
 **Route Header:**
 ```typescript
@@ -127,7 +127,7 @@
  */
 ```
 
-#### ✅ Force Reset API (`SwarmApp/src/app/api/compute/computers/[id]/force-reset/route.ts`)
+#### ✅ Force Reset API (`AgentGuildApp/src/app/api/compute/computers/[id]/force-reset/route.ts`)
 
 **Route Header:**
 ```typescript
@@ -143,7 +143,7 @@
 
 ### 3. Type Definitions
 
-#### ✅ Types File (`SwarmApp/src/lib/compute/types.ts`)
+#### ✅ Types File (`AgentGuildApp/src/lib/compute/types.ts`)
 
 **Comprehensive Type Documentation:**
 
@@ -186,7 +186,7 @@ export const PROVIDER_BASE_IMAGES = { /* ... */ };
 
 ### 4. Provider Interface
 
-#### ✅ Provider Interface (`SwarmApp/src/lib/compute/provider.ts`)
+#### ✅ Provider Interface (`AgentGuildApp/src/lib/compute/provider.ts`)
 
 **Interface Documentation:**
 ```typescript
@@ -194,7 +194,7 @@ export const PROVIDER_BASE_IMAGES = { /* ... */ };
  * ComputeProvider interface - all providers must implement this
  */
 export interface ComputeProvider {
-  /** Provider identifier (e.g., "azure", "e2b", "swarm-node") */
+  /** Provider identifier (e.g., "azure", "e2b", "agent-guild-node") */
   name: string;
 
   /** Create a new compute instance */
@@ -215,7 +215,7 @@ export interface ComputeProvider {
 /**
  * Get compute provider instance with optional caching
  *
- * @param providerKey - Provider type (azure, e2b, swarm-node, etc.)
+ * @param providerKey - Provider type (azure, e2b, agent-guild-node, etc.)
  * @param azureProduct - Azure product variant (aci, spot, vm)
  * @returns Provider instance implementing ComputeProvider interface
  */
@@ -260,7 +260,7 @@ export function getComputeProvider(
 - Fails cleanly with 400 if no provider instance exists
 - Returns 501 if provider doesn't support cloning
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/clone/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/clone/route.ts`
 ```
 
 ---
@@ -353,7 +353,7 @@ if (computer.status === "starting") {
 
 **Sections:**
 - Common Errors (ERR_BLOCKED_BY_CLIENT, 409 Conflict, 404, CSS warnings)
-- Provider-Specific Issues (Azure credentials, Swarm Node availability)
+- Provider-Specific Issues (Azure credentials, Agent Guild Node availability)
 - Performance Issues (Firestore queries, memory usage)
 - State Recovery (stuck instances)
 - Debugging Tools (status endpoint, browser DevTools, server logs)
@@ -376,12 +376,12 @@ Cannot start computer in "starting" state
 
 #### Step 1: Check instance status
 ```bash
-curl https://swarmprotocol.fun/api/compute/computers/{id}/status
+curl https://agent-guild.com/api/compute/computers/{id}/status
 ```
 
 #### Step 2: If stuck > 10 minutes, force reset
 ```bash
-curl -X POST https://swarmprotocol.fun/api/compute/computers/{id}/force-reset
+curl -X POST https://agent-guild.com/api/compute/computers/{id}/force-reset
 ```
 ```
 
@@ -532,7 +532,7 @@ return Response.json({
 ### Provider Files
 - Azure: ~50 inline comments across 690 lines (1 comment per 14 lines)
 - E2B: Similar density
-- Swarm Node: Well-commented
+- Agent Guild Node: Well-commented
 
 ### API Routes
 - Clone: ~10 section comments + validation explanations

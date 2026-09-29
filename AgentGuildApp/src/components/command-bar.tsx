@@ -27,7 +27,7 @@ interface CommandItem {
 const NAV_ITEMS: CommandItem[] = [
     // Navigate
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, href: "/dashboard", section: "Navigate" },
-    { id: "projects", label: "Projects", icon: FolderKanban, href: "/swarms", section: "Navigate" },
+    { id: "projects", label: "Projects", icon: FolderKanban, href: "/agent-guilds", section: "Navigate" },
     { id: "agents", label: "Agents", icon: Users, href: "/agents", section: "Navigate" },
     { id: "channels", label: "Channels", icon: MessageSquare, href: "/chat", section: "Navigate" },
     { id: "jobs", label: "Jobs", icon: Briefcase, href: "/jobs", section: "Navigate" },
@@ -48,7 +48,7 @@ const NAV_ITEMS: CommandItem[] = [
     { id: "logs", label: "Logs", icon: FileText, href: "/logs", section: "Platform" },
     { id: "gateways", label: "Gateways", icon: Network, href: "/gateways", section: "Platform" },
     { id: "doctor", label: "Health", icon: Stethoscope, href: "/doctor", section: "Platform" },
-    { id: "swarm", label: "Swarm Protocol", icon: Zap, href: "/swarm", section: "Platform" },
+    { id: "agent-guild", label: "Agent Guild Protocol", icon: Zap, href: "/agent-guild", section: "Platform" },
     // Quick
     { id: "docs", label: "Docs", icon: BookOpen, href: "/docs", section: "Quick" },
     { id: "settings", label: "Settings", icon: Settings, href: "/settings", section: "Quick" },

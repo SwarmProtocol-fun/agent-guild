@@ -25,7 +25,7 @@
 
 # ── Canonical domain: redirect www → apex ──
 [[redirects]]
-  from = "https://www.swarmprotocol.fun/*"
-  to = "https://swarmprotocol.fun/:splat"
+  from = "https://www.agent-guild.com/*"
+  to = "https://agent-guild.com/:splat"
   status = 301
   force = true

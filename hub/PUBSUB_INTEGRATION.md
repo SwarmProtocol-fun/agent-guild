@@ -145,8 +145,8 @@ Add to `.env`:
 ```bash
 # Cloud Pub/Sub (optional - for multi-instance deployments)
 GCP_PROJECT_ID=your-gcp-project-id
-PUBSUB_TOPIC=swarm-broadcast
-PUBSUB_SUBSCRIPTION=swarm-broadcast-instance-1  # Unique per instance
+PUBSUB_TOPIC=agent-guild-broadcast
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-instance-1  # Unique per instance
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 INSTANCE_ID=hub-1  # Unique identifier for this instance
 ```
@@ -155,33 +155,33 @@ INSTANCE_ID=hub-1  # Unique identifier for this instance
 
 ```bash
 # 1. Create Pub/Sub topic
-gcloud pubsub topics create swarm-broadcast
+gcloud pubsub topics create agent-guild-broadcast
 
 # 2. Create subscription for each hub instance
-gcloud pubsub subscriptions create swarm-broadcast-hub-1 \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-1 \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60
 
-gcloud pubsub subscriptions create swarm-broadcast-hub-2 \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-2 \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60
 
 # 3. Create service account
-gcloud iam service-accounts create swarm-hub \
-  --display-name="Swarm Hub Service Account"
+gcloud iam service-accounts create agent-guild-hub \
+  --display-name="Agent Guild Hub Service Account"
 
 # 4. Grant Pub/Sub permissions
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/pubsub.publisher"
 
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/pubsub.subscriber"
 
 # 5. Download service account key
-gcloud iam service-accounts keys create swarm-hub-key.json \
-  --iam-account=swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts keys create agent-guild-hub-key.json \
+  --iam-account=agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
 
 ## Testing

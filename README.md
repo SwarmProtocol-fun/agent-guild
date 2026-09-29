@@ -1,16 +1,16 @@
-# Swarm Core
+# Agent Guild Core
 
 > **Open-source platform for coordinating fleets of AI agents.**
 > Office simulator UI, multi-cloud compute orchestration, credit-based reputation system.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/SwarmProtocol-fun/swarm-core/actions/workflows/ci.yml/badge.svg)](https://github.com/SwarmProtocol-fun/swarm-core/actions)
+[![CI](https://github.com/SwarmProtocol-fun/agent-guild-core/actions/workflows/ci.yml/badge.svg)](https://github.com/SwarmProtocol-fun/agent-guild-core/actions)
 
 ---
 
 ## What this is
 
-Swarm Core is the **open foundation** of the Swarm Protocol — the parts you can run, fork, and extend yourself. Everything chain-specific, vendor-specific, or business-specific lives in [mods](#mods) you install on top.
+Agent Guild Core is the **open foundation** of the Agent Guild Protocol — the parts you can run, fork, and extend yourself. Everything chain-specific, vendor-specific, or business-specific lives in [mods](#mods) you install on top.
 
 **Built around three ideas:**
 
@@ -23,8 +23,8 @@ Swarm Core is the **open foundation** of the Swarm Protocol — the parts you ca
 ## Quick start
 
 ```bash
-git clone https://github.com/SwarmProtocol-fun/swarm-core.git
-cd swarm-core/SwarmApp
+git clone https://github.com/SwarmProtocol-fun/agent-guild-core.git
+cd agent-guild-core/AgentGuildApp
 cp .env.example .env.local   # fill in Firebase + Reown (WalletConnect) keys
 npm install
 npm run dev
@@ -40,10 +40,10 @@ The minimum to boot is **Firebase + a Reown (WalletConnect) project ID + a sessi
 
 | Module | Purpose |
 |--------|---------|
-| **`SwarmApp/`** | Next.js 16 app — UI, API routes, agent orchestration |
+| **`AgentGuildApp/`** | Next.js 16 app — UI, API routes, agent orchestration |
 | **`hub/`** | WebSocket coordination server (Redis + Pub/Sub) |
 | **`GatewayAgent/`** | Lightweight CLI for edge job execution |
-| **`SwarmConnect/`** | OpenClaw skill sandbox for stateless agent skills |
+| **`AgentGuildConnect/`** | OpenClaw skill sandbox for stateless agent skills |
 | **`contracts/`** | Solidity registry + task board contracts (Sepolia-ready) |
 | **`docs/`** | Event schemas, mod authoring guide, runbooks |
 
@@ -75,20 +75,20 @@ If you want any of these back, install the corresponding mod (or write your own)
 
 ## Mods
 
-Swarm Core is designed to be extended via **mods** — sandboxed packages that plug into well-defined integration points (sidebar, API, agent skills, marketplace).
+Agent Guild Core is designed to be extended via **mods** — sandboxed packages that plug into well-defined integration points (sidebar, API, agent skills, marketplace).
 
-A mod is a directory in `SwarmApp/mods/` with a `swarm.mod.json` manifest and optional `server.ts` / `client.tsx` entries. Core is the workspace; mods add panels, API routes and event handlers through the versioned `@swarm/sdk`. Mods are trusted, in-process code (not a security sandbox). See [`docs/mod-sdk.md`](docs/mod-sdk.md); wallet providers are swappable adapters ([`docs/wallet-adapters.md`](docs/wallet-adapters.md)). Marketplace listings are a separate concept: [`docs/creating-mods.md`](docs/creating-mods.md).
+A mod is a directory in `AgentGuildApp/mods/` with a `agent-guild.mod.json` manifest and optional `server.ts` / `client.tsx` entries. Core is the workspace; mods add panels, API routes and event handlers through the versioned `@agent-guild/sdk`. Mods are trusted, in-process code (not a security sandbox). See [`docs/mod-sdk.md`](docs/mod-sdk.md); wallet providers are swappable adapters ([`docs/wallet-adapters.md`](docs/wallet-adapters.md)). Marketplace listings are a separate concept: [`docs/creating-mods.md`](docs/creating-mods.md).
 
 Official mods (separate repos):
 
-- `@swarm/mod-hedera` — Hedera HCS reputation + memory
-- `@swarm/mod-flow` — Flow DeFi (bounties, staking, swaps)
-- `@swarm/mod-storacha` — Decentralized storage with UCAN auth
-- `@swarm/mod-libp2p` — P2P agent mesh
-- `@swarm/mod-bittensor` — GPU training subnet integration
-- `@swarm/mod-comfyui` — AI image generation
-- `@swarm/mod-github` — GitHub repo integration
-- `@swarm/mod-reactbits` — Animated UI components
+- `@agent-guild/mod-hedera` — Hedera HCS reputation + memory
+- `@agent-guild/mod-flow` — Flow DeFi (bounties, staking, swaps)
+- `@agent-guild/mod-storacha` — Decentralized storage with UCAN auth
+- `@agent-guild/mod-libp2p` — P2P agent mesh
+- `@agent-guild/mod-bittensor` — GPU training subnet integration
+- `@agent-guild/mod-comfyui` — AI image generation
+- `@agent-guild/mod-github` — GitHub repo integration
+- `@agent-guild/mod-reactbits` — Animated UI components
 
 ---
 
@@ -96,10 +96,10 @@ Official mods (separate repos):
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  SwarmApp (Next.js)                                     │
+│  AgentGuildApp (Next.js)                                     │
 │  ├─ Office UI ── Workspace, kanban, agents, market      │
 │  ├─ API routes ─ /api/v1/{agents,compute,credit,...}    │
-│  └─ Mod runtime ─ swarm.mod.json discovery, routes, events  │
+│  └─ Mod runtime ─ agent-guild.mod.json discovery, routes, events  │
 └────────────┬────────────────────────────────────────────┘
              │
        ┌─────┴──────┬─────────────┬────────────┐
@@ -130,7 +130,7 @@ Official mods (separate repos):
 
 ```bash
 # Run tests
-cd SwarmApp && npm test
+cd AgentGuildApp && npm test
 
 # Type-check (build skips this for memory)
 npx tsc --noEmit
@@ -155,4 +155,4 @@ For mod development, see [`docs/creating-mods.md`](docs/creating-mods.md) — th
 
 MIT — see [`LICENSE`](LICENSE).
 
-The Swarm name and logo are trademarks of SwarmProtocol; mods may use the protocol but should not present themselves as official without permission.
+The Agent Guild name and logo are trademarks of Agent Guild; mods may use the protocol but should not present themselves as official without permission.

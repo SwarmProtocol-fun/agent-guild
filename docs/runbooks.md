@@ -1,4 +1,4 @@
-# Swarm Platform — Incident Runbooks
+# Agent Guild Platform — Incident Runbooks
 
 > PRD 9 — Observability, Health, and Runbooks
 > One-triage-pass diagnosis for the five most common failure modes.
@@ -51,7 +51,7 @@ Failure reported
 **Symptoms:**
 - WebSocket connections return HTTP 401
 - Hub log: `WS upgrade rejected — invalid signature` / `stale timestamp`
-- SwarmConnect: `Error: 401 Unauthorized` during `swarm daemon`
+- AgentGuildConnect: `Error: 401 Unauthorized` during `agent-guild daemon`
 
 **Diagnosis (< 5 min):**
 
@@ -64,29 +64,29 @@ curl https://<HUB_HOST>/diagnostics?agentId=<agentId>
 # If publicKey.ok=false → key not uploaded
 
 # 2. Check hub logs for the specific rejection reason
-# X-Swarm-Error header values:
+# X-Agent Guild-Error header values:
 #   missing-auth-params  → ?sig= or ?ts= missing from WS URL
 #   stale-timestamp      → clock drift > 5 min
 #   invalid-signature    → key mismatch
 
 # 3. Check key files exist locally
-ls SwarmConnect/keys/
+ls AgentGuildConnect/keys/
 # Should contain: private.pem  public.pem
 
 # 4. Check agent's public key in Firestore matches local
 # Firestore: agents/<agentId>.publicKey
-# Local: cat SwarmConnect/keys/public.pem
+# Local: cat AgentGuildConnect/keys/public.pem
 ```
 
 **Fixes:**
 
 | Error | Fix |
 |-------|-----|
-| `firestoreRecord.ok=false` | Run `swarm register --hub <url> --org <orgId> --name <name>` |
-| `publicKey.ok=false` | Re-run `swarm register` to re-upload public key |
+| `firestoreRecord.ok=false` | Run `agent-guild register --hub <url> --org <orgId> --name <name>` |
+| `publicKey.ok=false` | Re-run `agent-guild register` to re-upload public key |
 | `stale-timestamp` | Sync system clock: `sudo ntpdate -u pool.ntp.org` |
-| `invalid-signature` | Keys corrupted or mismatched — delete `SwarmConnect/keys/` and re-register |
-| `missing-auth-params` | Hub SDK bug — upgrade SwarmConnect to latest (`npm update -g @swarmprotocol/agent-skill`) |
+| `invalid-signature` | Keys corrupted or mismatched — delete `AgentGuildConnect/keys/` and re-register |
+| `missing-auth-params` | Hub SDK bug — upgrade AgentGuildConnect to latest (`npm update -g @agent-guild/agent-skill`) |
 
 ---
 
@@ -110,7 +110,7 @@ redis-cli TTL agent:<agentId>:instance
 # If 300 constantly → agent connecting but not sending pongs
 
 # 3. Check heartbeat interval on agent side
-# SwarmConnect daemon sends pong in response to server ping
+# AgentGuildConnect daemon sends pong in response to server ping
 # Default ping interval: 30s. Agent must respond within 30s.
 
 # 4. Check network path latency
@@ -170,7 +170,7 @@ redis-cli SUBSCRIBE "gateway:new-task:<orgId>"
 | No gateway connected | Start a GatewayAgent: `gateway-agent --hub <url> --org <orgId>` |
 | Gateway at capacity | Scale out gateways or increase `maxConcurrent` in Firestore |
 | Wrong `taskType` | Match `task.taskType` to gateway `capabilities.taskTypes` |
-| Pub/Sub not delivering | Check `GCP_PROJECT_ID` and Pub/Sub topic `swarm-broadcast` exists; check IAM |
+| Pub/Sub not delivering | Check `GCP_PROJECT_ID` and Pub/Sub topic `agent-guild-broadcast` exists; check IAM |
 | Task in `failed` with retries exhausted | Inspect `gatewayJobLogs` collection for error, then re-queue manually |
 
 **Re-queue a stuck task:**
@@ -201,7 +201,7 @@ cat contracts/deployed-addresses.json
 
 # 2. Verify env vars match deployed addresses
 echo $NEXT_PUBLIC_LINK_AGENT_REGISTRY
-# Should match SwarmAgentRegistryLink address in deployed-addresses.json
+# Should match AgentGuildAgentRegistryLink address in deployed-addresses.json
 
 # 3. Check chainId in RPC matches expected
 cast chain-id --rpc-url $SEPOLIA_RPC_URL
@@ -220,12 +220,12 @@ cd contracts && npx hardhat run scripts/smoke.ts --network sepolia
 
 | Cause | Fix |
 |-------|-----|
-| Stale deployed-addresses.json | Re-run `npm run deploy:sepolia` and copy addresses to SwarmApp env |
-| Env vars not updated after redeploy | Copy new addresses from `deployed-addresses.json` to SwarmApp `.env` |
+| Stale deployed-addresses.json | Re-run `npm run deploy:sepolia` and copy addresses to AgentGuildApp env |
+| Env vars not updated after redeploy | Copy new addresses from `deployed-addresses.json` to AgentGuildApp `.env` |
 | Wrong network in RPC URL | Set `SEPOLIA_RPC_URL` to a Sepolia endpoint (chainId 11155111) |
 | Contract not verified | Run `npm run verify` — required for Etherscan explorer links |
 
-**Rollback:** If a bad deploy is live, revert to the last known-good `deployed-addresses.json` in git and redeploy the SwarmApp with the old contract addresses. Contracts are immutable — old contract versions are always callable.
+**Rollback:** If a bad deploy is live, revert to the last known-good `deployed-addresses.json` in git and redeploy the AgentGuildApp with the old contract addresses. Contracts are immutable — old contract versions are always callable.
 
 ---
 
@@ -233,7 +233,7 @@ cd contracts && npx hardhat run scripts/smoke.ts --network sepolia
 
 **Symptoms:**
 - Hub crashes with `[FATAL] Missing required environment variable: <NAME>`
-- SwarmApp returns 500 on all routes at startup
+- AgentGuildApp returns 500 on all routes at startup
 - Build passes but runtime fails on first request
 
 **Diagnosis:**
@@ -243,8 +243,8 @@ cd contracts && npx hardhat run scripts/smoke.ts --network sepolia
 cd hub && node env-validation.mjs
 # Lists all required vars and whether they're set
 
-# 2. SwarmApp: check for missing vars at build time
-cd SwarmApp && npx tsc --noEmit
+# 2. AgentGuildApp: check for missing vars at build time
+cd AgentGuildApp && npx tsc --noEmit
 # Type errors may surface missing config
 
 # 3. Cross-reference against .env.template
@@ -288,7 +288,7 @@ curl https://<HUB_HOST>/diagnostics?agentId=<id>
 # Online agents
 curl https://<HUB_HOST>/agents/online
 
-# SwarmApp (Next.js)
+# AgentGuildApp (Next.js)
 curl https://<APP_HOST>/api/health
 ```
 

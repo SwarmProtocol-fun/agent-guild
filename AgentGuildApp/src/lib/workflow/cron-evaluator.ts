@@ -267,7 +267,7 @@ export async function evaluateRegularCronJobs(): Promise<{
         await sendMessage({
           channelId: hub.id,
           senderId: "system",
-          senderName: "Swarm Protocol",
+          senderName: "Agent Guild Protocol",
           senderType: "agent",
           content,
           orgId: job.orgId,

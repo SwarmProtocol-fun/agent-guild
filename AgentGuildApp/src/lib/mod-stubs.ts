@@ -3,7 +3,7 @@
  *
  * The open-core split removed Hedera (HCS score events, governance, slashing,
  * private memory topics) from core. Core callers still reference these entry
- * points, so they live here as inert defaults until the swarm-hedera mod
+ * points, so they live here as inert defaults until the agent-guild-hedera mod
  * provides real implementations.
  *
  * Score emitters match the original behaviour when HCS was not configured:
@@ -11,7 +11,7 @@
  * (memory topics) throws instead, so callers can't persist fake IDs.
  */
 
-const MOD_MSG = "swarm-hedera mod not installed";
+const MOD_MSG = "agent-guild-hedera mod not installed";
 
 // ── Score events (were hedera-score-emitter.ts) ────────────────
 

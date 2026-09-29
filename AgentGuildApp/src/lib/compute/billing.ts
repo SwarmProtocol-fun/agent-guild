@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Usage Metering & Billing
+ * Agent Guild Compute — Usage Metering & Billing
  *
  * Cost estimation, usage recording, summary aggregation,
  * and markup-aware pricing with ledger tracking.

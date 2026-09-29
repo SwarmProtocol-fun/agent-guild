@@ -16,7 +16,7 @@ import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { getAuth, type Auth } from "firebase-admin/auth";
 
 function getAdminApp(): App {
-  const existing = getApps().find((a) => a.name === "swarm-admin");
+  const existing = getApps().find((a) => a.name === "agent-guild-admin");
   if (existing) return existing;
 
   const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
@@ -34,7 +34,7 @@ function getAdminApp(): App {
 
   return initializeApp(
     { credential: cert({ projectId, clientEmail, privateKey }) },
-    "swarm-admin"
+    "agent-guild-admin"
   );
 }
 

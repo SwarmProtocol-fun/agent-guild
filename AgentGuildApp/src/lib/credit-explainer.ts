@@ -10,7 +10,7 @@
  */
 
 import { adminDb } from "@/lib/firebase-admin";
-// [swarm-core] Hedera removed
+// [agent-guild-core] Hedera removed
 import type { ScoreEvent } from "@/lib/credit-types";
 const getReputationTopicId = (): string | null => null;
 import {

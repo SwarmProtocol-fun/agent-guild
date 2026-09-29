@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * @swarmprotocol/gateway-agent — Distributed execution node for Swarm.
+ * @agent-guild/gateway-agent — Distributed execution node for Agent Guild.
  *
  * Lightweight service that runs on gateway machines. Registers with the
- * Swarm hub, pulls jobs from the task queue, executes them locally
+ * Agent Guild hub, pulls jobs from the task queue, executes them locally
  * (shell / Docker / Node), streams logs back, and reports results.
  *
- * Uses Ed25519 keypair for authentication — same pattern as SwarmConnect.
+ * Uses Ed25519 keypair for authentication — same pattern as AgentGuildConnect.
  * Zero external dependencies — Node.js built-ins only.
  *
  * Commands:
@@ -643,7 +643,7 @@ async function apiReportStatus(config, taskId, status, data = {}) {
 // ---------------------------------------------------------------------------
 
 async function cmdRegister() {
-  const hubUrl = arg("--hub") || process.env.HUB_URL || "https://swarmprotocol.fun";
+  const hubUrl = arg("--hub") || process.env.HUB_URL || "https://api.agent-guild.com";
   const orgId = arg("--org") || process.env.ORG_ID;
   const name = arg("--name") || process.env.GATEWAY_WORKER_NAME;
   const region = arg("--region") || process.env.GATEWAY_REGION;
@@ -1208,22 +1208,22 @@ switch (command) {
     break;
   default:
     console.log(`
-  @swarmprotocol/gateway-agent — Distributed execution node for Swarm
+  @agent-guild/gateway-agent — Distributed execution node for Agent Guild
 
   Commands:
-    register    Register this gateway with the Swarm hub
+    register    Register this gateway with the Agent Guild hub
     status      Show gateway status and system info
     daemon      Start the daemon (polls for tasks, executes, reports)
     run         Execute a task locally (for testing)
 
   Examples:
-    gateway-agent register --hub https://swarmprotocol.fun --org myOrg --name my-gateway --secret <secret>
+    gateway-agent register --hub https://api.agent-guild.com --org myOrg --name my-gateway --secret <secret>
     gateway-agent daemon --interval 10
     gateway-agent run shell '{"command":"echo","args":["hello"]}'
     gateway-agent status
 
   Environment Variables:
-    HUB_URL                   Hub URL (default: https://swarmprotocol.fun)
+    HUB_URL                   Hub URL (default: https://api.agent-guild.com)
     ORG_ID                    Organization ID
     GATEWAY_WORKER_NAME       Worker name
     GATEWAY_REGION            Region (us-east, us-west, eu-west, etc.)

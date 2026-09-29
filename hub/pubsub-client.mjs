@@ -12,14 +12,14 @@
  * - Metrics: publish/receive counters, latency, error rates
  *
  * Setup Required:
- * 1. Create topic: `gcloud pubsub topics create swarm-broadcast --message-ordering`
- * 2. Create subscription: `gcloud pubsub subscriptions create swarm-broadcast-{instance} \
- *      --topic=swarm-broadcast --enable-message-ordering --ack-deadline=30`
+ * 1. Create topic: `gcloud pubsub topics create agent-guild-broadcast --message-ordering`
+ * 2. Create subscription: `gcloud pubsub subscriptions create agent-guild-broadcast-{instance} \
+ *      --topic=agent-guild-broadcast --enable-message-ordering --ack-deadline=30`
  * 3. Set GOOGLE_APPLICATION_CREDENTIALS for authentication
  *
  * Env:
  *   GCP_PROJECT_ID              — GCP project ID (required to enable)
- *   PUBSUB_TOPIC                — topic name (default: swarm-broadcast)
+ *   PUBSUB_TOPIC                — topic name (default: agent-guild-broadcast)
  *   PUBSUB_SUBSCRIPTION         — subscription name (default: auto per instance)
  *   INSTANCE_ID                 — unique instance identifier
  *   GOOGLE_APPLICATION_CREDENTIALS — service account JSON path
@@ -28,10 +28,10 @@ import { PubSub } from "@google-cloud/pubsub";
 import crypto from "crypto";
 
 const PROJECT_ID = process.env.GCP_PROJECT_ID;
-const TOPIC_NAME = process.env.PUBSUB_TOPIC || "swarm-broadcast";
+const TOPIC_NAME = process.env.PUBSUB_TOPIC || "agent-guild-broadcast";
 const INSTANCE_ID = process.env.INSTANCE_ID || `hub-${process.pid}`;
 const SUBSCRIPTION_NAME =
-  process.env.PUBSUB_SUBSCRIPTION || `swarm-broadcast-${INSTANCE_ID}`;
+  process.env.PUBSUB_SUBSCRIPTION || `agent-guild-broadcast-${INSTANCE_ID}`;
 
 let pubsubClient = null;
 let topic = null;

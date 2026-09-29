@@ -22,7 +22,7 @@ import {
 import type { ScoreEvent } from "@/lib/credit-types";
 import { getCached, setCache } from "@/lib/credit-cache";
 
-// [swarm-core] Hedera HCS removed — install swarm-hedera mod.
+// [agent-guild-core] Hedera HCS removed — install agent-guild-hedera mod.
 // No reputation topic is configured in core, so HCS history is always empty.
 const getReputationTopicId = (): string | null => null;
 

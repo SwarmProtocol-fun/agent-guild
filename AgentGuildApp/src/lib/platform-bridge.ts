@@ -1,7 +1,7 @@
 /**
  * Platform Bridge — Unified Interface for Multi-Platform Messaging
  *
- * Connects Telegram, Discord, and Slack to Swarm channels.
+ * Connects Telegram, Discord, and Slack to Agent Guild channels.
  * Enables agents to send/receive messages across all platforms.
  */
 
@@ -37,7 +37,7 @@ export interface PlatformConnection {
 export interface BridgedChannel {
   id: string;
   orgId: string;
-  swarmChannelId: string;
+  agentGuildChannelId: string;
   platformType: PlatformType;
   platformChannelId: string;
   platformMetadata?: {
@@ -51,7 +51,7 @@ export interface BridgedChannel {
 
 export interface BridgedMessage {
   id: string;
-  swarmMessageId?: string;
+  agentGuildMessageId?: string;
   platformMessageId: string;
   channelId: string;
   platform: PlatformType;
@@ -204,22 +204,22 @@ export async function deactivatePlatformConnection(connectionId: string): Promis
 
 export async function bridgeChannel(
   orgId: string,
-  swarmChannelId: string,
+  agentGuildChannelId: string,
   platformType: PlatformType,
   platformChannelId: string,
   platformMetadata?: Record<string, unknown>
 ): Promise<string> {
   const ref = await adminDb().collection("bridgedChannels").add({
     orgId,
-    swarmChannelId,
+    agentGuildChannelId,
     platformType,
     platformChannelId,
     platformMetadata: platformMetadata || {},
     createdAt: FieldValue.serverTimestamp(),
   });
 
-  // Update Swarm channel to indicate it's bridged
-  await adminDb().collection("channels").doc(swarmChannelId).set(
+  // Update Agent Guild channel to indicate it's bridged
+  await adminDb().collection("channels").doc(agentGuildChannelId).set(
     {
       platformType,
       platformChannelId,
@@ -232,12 +232,19 @@ export async function bridgeChannel(
 }
 
 export async function getBridgedChannel(
-  swarmChannelId: string
+  agentGuildChannelId: string
 ): Promise<BridgedChannel | null> {
-  const snap = await adminDb()
+  let snap = await adminDb()
     .collection("bridgedChannels")
-    .where("swarmChannelId", "==", swarmChannelId)
+    .where("agentGuildChannelId", "==", agentGuildChannelId)
     .get();
+  if (snap.empty) {
+    // Legacy field name from before the Swarm Protocol -> Agent Guild rename
+    snap = await adminDb()
+      .collection("bridgedChannels")
+      .where("swarmChannelId", "==", agentGuildChannelId)
+      .get();
+  }
   if (snap.empty) return null;
 
   const d = snap.docs[0];
@@ -245,7 +252,7 @@ export async function getBridgedChannel(
   return {
     id: d.id,
     orgId: data.orgId,
-    swarmChannelId: data.swarmChannelId,
+    agentGuildChannelId: data.agentGuildChannelId ?? data.swarmChannelId,
     platformType: data.platformType,
     platformChannelId: data.platformChannelId,
     platformMetadata: data.platformMetadata,
@@ -269,7 +276,7 @@ export async function getBridgedChannelByPlatform(
   return {
     id: d.id,
     orgId: data.orgId,
-    swarmChannelId: data.swarmChannelId,
+    agentGuildChannelId: data.agentGuildChannelId ?? data.swarmChannelId,
     platformType: data.platformType,
     platformChannelId: data.platformChannelId,
     platformMetadata: data.platformMetadata,
@@ -278,7 +285,7 @@ export async function getBridgedChannelByPlatform(
 }
 
 export async function unbridgeChannel(bridgeId: string): Promise<void> {
-  // Get the bridge record to find the Swarm channel ID
+  // Get the bridge record to find the Agent Guild channel ID
   const bridgeRef = adminDb().collection("bridgedChannels").doc(bridgeId);
   const bridgeDoc = await bridgeRef.get();
   const bridgeData = bridgeDoc.exists ? bridgeDoc.data() : null;
@@ -286,9 +293,10 @@ export async function unbridgeChannel(bridgeId: string): Promise<void> {
   // Deactivate the bridge
   await bridgeRef.set({ active: false }, { merge: true });
 
-  // Clear platform fields from the Swarm channel
-  if (bridgeData?.swarmChannelId) {
-    await adminDb().collection("channels").doc(bridgeData.swarmChannelId).update({
+  // Clear platform fields from the Agent Guild channel
+  const agentGuildChannelId = bridgeData?.agentGuildChannelId ?? bridgeData?.swarmChannelId;
+  if (agentGuildChannelId) {
+    await adminDb().collection("channels").doc(agentGuildChannelId).update({
       platformType: FieldValue.delete(),
       platformChannelId: FieldValue.delete(),
       platformMetadata: FieldValue.delete(),
@@ -308,11 +316,11 @@ export async function logBridgedMessage(
   senderName: string,
   content: string,
   direction: "inbound" | "outbound",
-  swarmMessageId?: string,
+  agentGuildMessageId?: string,
   attachments?: Array<{ url: string; type: string; name: string }>
 ): Promise<string> {
   const ref = await adminDb().collection("bridgedMessages").add({
-    swarmMessageId: swarmMessageId || null,
+    agentGuildMessageId: agentGuildMessageId || null,
     platformMessageId,
     channelId,
     platform,

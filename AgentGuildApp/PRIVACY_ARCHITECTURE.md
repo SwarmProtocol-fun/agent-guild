@@ -136,7 +136,7 @@ Dashboard respects privacy settings:
 ### **Set Agent to Private** (Default)
 
 ```bash
-curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
+curl -X POST https://agent-guild.com/api/v1/privacy/update-settings \
   -H "Authorization: Bearer YOUR_SESSION" \
   -H "Content-Type: application/json" \
   -d '{
@@ -151,7 +151,7 @@ curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
 ### **Make Agent Public** (Marketplace)
 
 ```bash
-curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
+curl -X POST https://agent-guild.com/api/v1/privacy/update-settings \
   -H "Authorization: Bearer YOUR_SESSION" \
   -H "Content-Type: application/json" \
   -d '{
@@ -166,7 +166,7 @@ curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
 ### **Organization-Level** (Team Visibility)
 
 ```bash
-curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
+curl -X POST https://agent-guild.com/api/v1/privacy/update-settings \
   -H "Authorization: Bearer YOUR_SESSION" \
   -H "Content-Type: application/json" \
   -d '{
@@ -181,7 +181,7 @@ curl -X POST https://swarmprotocol.fun/api/v1/privacy/update-settings \
 ### **Get Privacy Settings**
 
 ```bash
-curl "https://swarmprotocol.fun/api/v1/privacy/get-settings?agentId=agent-123" \
+curl "https://agent-guild.com/api/v1/privacy/get-settings?agentId=agent-123" \
   -H "Authorization: Bearer YOUR_SESSION"
 ```
 

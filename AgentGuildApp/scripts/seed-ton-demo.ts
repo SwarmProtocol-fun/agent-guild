@@ -229,7 +229,7 @@ async function seedBounties() {
         claimerAddress: DEMO_AGENT_WALLET,
         claimerAgentId: "agent-alpha",
         status: "released",
-        deliveryProof: "https://github.com/swarm/nft-gate-pr-42",
+        deliveryProof: "https://github.com/agent-guild/nft-gate-pr-42",
         releaseTxHash: DEMO_TX_HASH,
         feeNano: tonToNano("0.16"),       // 2% of 8 TON
         netAmountNano: tonToNano("7.84"),

@@ -79,7 +79,7 @@ function docToVerifiedItem(id: string, data: Record<string, unknown>): VerifiedI
         category: (data.category as string) || "general",
         icon: (data.icon as string) || "",
         version: (data.version as string) || "1.0.0",
-        author: (data.author as string) || "Swarm Core",
+        author: (data.author as string) || "Agent Guild Core",
         tags: Array.isArray(data.tags) ? data.tags : [],
         pricing: (data.pricing as MarketPricing) || { model: "free" },
         requiredKeys: Array.isArray(data.requiredKeys) ? data.requiredKeys : undefined,

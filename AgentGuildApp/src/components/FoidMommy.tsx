@@ -40,7 +40,7 @@ function FoidModel() {
 }
 
 // Single orbiting golden bot
-function SwarmBot({ index, total }: { index: number; total: number }) {
+function AgentGuildBot({ index, total }: { index: number; total: number }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const angle = (index / total) * Math.PI * 2;
   const radius = 2.8 + (index % 3) * 0.4; // Stagger radius slightly
@@ -80,7 +80,7 @@ function SwarmBot({ index, total }: { index: number; total: number }) {
   );
 }
 
-// Glow ring around the swarm
+// Glow ring around the agent-guild
 function GlowRing() {
   const ringRef = useRef<THREE.Mesh>(null);
 
@@ -128,9 +128,9 @@ export default function FoidMommy() {
       {/* Center: FoidMommy */}
       <FoidModel />
 
-      {/* Orbiting swarm bots */}
+      {/* Orbiting agent-guild bots */}
       {Array.from({ length: 10 }, (_, i) => (
-        <SwarmBot key={i} index={i} total={10} />
+        <AgentGuildBot key={i} index={i} total={10} />
       ))}
 
       {/* Subtle glow ring */}

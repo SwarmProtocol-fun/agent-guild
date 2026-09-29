@@ -1,4 +1,4 @@
-/** Organizations Directory — Your orgs + public directory of organizations on Swarm. */
+/** Organizations Directory — Your orgs + public directory of organizations on Agent Guild. */
 "use client";
 
 import { useState, useEffect } from "react";
@@ -75,7 +75,7 @@ export default function OrganizationsPage() {
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Organizations</h1>
                     <p className="text-muted-foreground mt-1">
-                        Browse and connect with organizations on Swarm.
+                        Browse and connect with organizations on Agent Guild.
                     </p>
                 </div>
                 <div className="relative w-full md:w-80">

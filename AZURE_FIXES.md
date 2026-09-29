@@ -53,15 +53,15 @@ networkProfile: {
 5. **VM Tags**
    ```typescript
    tags: {
-     "swarm:managed": "true",
-     "swarm:size": config.sizeKey,
-     "swarm:nic": nicName,       // For cleanup
-     "swarm:nsg": nsgName,       // For cleanup
-     "swarm:ip": publicIpName,   // For cleanup
+     "agent-guild:managed": "true",
+     "agent-guild:size": config.sizeKey,
+     "agent-guild:nic": nicName,       // For cleanup
+     "agent-guild:nsg": nsgName,       // For cleanup
+     "agent-guild:ip": publicIpName,   // For cleanup
    }
    ```
 
-**File:** `SwarmApp/src/lib/compute/providers/azure.ts:44-152`
+**File:** `AgentGuildApp/src/lib/compute/providers/azure.ts:44-152`
 
 ---
 
@@ -100,15 +100,15 @@ Source VM → Snapshot → Managed Disk → New VM
 **Tags on cloned VM:**
 ```typescript
 tags: {
-  "swarm:managed": "true",
-  "swarm:cloned-from": providerInstanceId, // Tracks origin
-  "swarm:nic": nicName,
-  "swarm:nsg": nsgName,
-  "swarm:ip": publicIpName,
+  "agent-guild:managed": "true",
+  "agent-guild:cloned-from": providerInstanceId, // Tracks origin
+  "agent-guild:nic": nicName,
+  "agent-guild:nsg": nsgName,
+  "agent-guild:ip": publicIpName,
 }
 ```
 
-**File:** `SwarmApp/src/lib/compute/providers/azure.ts:284-409`
+**File:** `AgentGuildApp/src/lib/compute/providers/azure.ts:284-409`
 
 ---
 
@@ -147,14 +147,14 @@ await networkClient.networkInterfaces.beginDeleteAndWait(...);
 await networkClient.networkSecurityGroups.beginDeleteAndWait(...);
 
 // Delete Public IP (only if dynamic or tagged for deletion)
-if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["swarm:delete-with-vm"] === "true") {
+if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["agent-guild:delete-with-vm"] === "true") {
   await networkClient.publicIPAddresses.beginDeleteAndWait(...);
 }
 ```
 
 **Fallback:** If VM is already gone, uses naming convention (`${vmName}-nic`, etc.)
 
-**File:** `SwarmApp/src/lib/compute/providers/azure.ts:180-239`
+**File:** `AgentGuildApp/src/lib/compute/providers/azure.ts:180-239`
 
 ---
 
@@ -175,7 +175,7 @@ if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["swarm:delete-with-vm
 ### What's Still Missing (Not Critical)
 
 1. **SSH Key Injection** - Still uses auto-generated passwords
-   - Current: `adminPassword: Swarm${Date.now()}!`
+   - Current: `adminPassword: Agent Guild${Date.now()}!`
    - Better: Generate SSH keypair, store in KMS
    - Impact: Medium (Run Command works, but SSH preferred)
 
@@ -194,7 +194,7 @@ if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["swarm:delete-with-vm
    - Better: Check current state, no-op if already in target state
    - Impact: Low (auto-recovery handles most cases)
 
-5. **VNet Customization** - Always uses `swarm-vnet`
+5. **VNet Customization** - Always uses `agent-guild-vnet`
    - Current: Single VNet for all VMs
    - Better: Support custom VNets, peering, private endpoints
    - Impact: Low (single VNet works for most use cases)
@@ -261,11 +261,11 @@ describe("Azure Provider - Networking", () => {
   it("should clone VM with new networking", async () => {
     const newVmId = await provider.cloneInstance("source-vm", "clone-vm");
     expect(newVmId).not.toBe("source-vm");
-    expect(newVmId).toMatch(/^swarm-clone-vm-\d+$/);
+    expect(newVmId).toMatch(/^agent-guild-clone-vm-\d+$/);
 
     // Verify new VM has its own NIC/NSG/IP
     const vm = await computeClient.virtualMachines.get(resourceGroup, newVmId);
-    expect(vm.tags?.["swarm:cloned-from"]).toBe("source-vm");
+    expect(vm.tags?.["agent-guild:cloned-from"]).toBe("source-vm");
   });
 
   it("should clean up all resources on delete", async () => {
@@ -290,8 +290,8 @@ describe("Azure Provider - Networking", () => {
 
 **Cleanup script:**
 ```bash
-# List all swarm-managed VMs
-az vm list --resource-group swarm-compute --query "[?tags.\"swarm:managed\"=='true'].name" -o tsv
+# List all agent-guild-managed VMs
+az vm list --resource-group agent-guild-compute --query "[?tags.\"agent-guild:managed\"=='true'].name" -o tsv
 
 # For each VM that doesn't exist in Firestore:
 az vm delete --name <vm-name> --yes
@@ -307,7 +307,7 @@ const azureVms = await computeClient.virtualMachines.list(resourceGroup);
 const firestoreVms = await db.collection("computers").where("provider", "==", "azure").get();
 
 for (const azureVm of azureVms) {
-  if (!azureVm.tags?.["swarm:managed"]) continue; // Skip non-Swarm VMs
+  if (!azureVm.tags?.["agent-guild:managed"]) continue; // Skip non-Agent Guild VMs
 
   const exists = firestoreVms.docs.some(doc => doc.data().providerInstanceId === azureVm.name);
   if (!exists) {
@@ -323,7 +323,7 @@ for (const azureVm of azureVms) {
 
 | File | Lines Changed | Description |
 |------|---------------|-------------|
-| `SwarmApp/src/lib/compute/providers/azure.ts` | ~200 | Complete networking, clone, cleanup rewrite |
+| `AgentGuildApp/src/lib/compute/providers/azure.ts` | ~200 | Complete networking, clone, cleanup rewrite |
 
 ---
 

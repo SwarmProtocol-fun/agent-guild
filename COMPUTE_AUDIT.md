@@ -42,7 +42,7 @@ Index Time: 8.1s
 
 ### ✅ 1. Clone API - Actually Clones VMs
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/clone/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/clone/route.ts`
 
 **Verified:**
 - ✅ Validates `providerInstanceId` exists (line 32-40)
@@ -69,7 +69,7 @@ POST /api/compute/computers/{id}/clone
 
 ### ✅ 2. Snapshot API - No Synthetic Fallbacks
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
 
 **Verified:**
 - ✅ Validates `providerInstanceId` exists (line 24-33)
@@ -98,7 +98,7 @@ POST /api/compute/computers/{id}/snapshot
 
 ### ✅ 3. Azure Provider - Production Networking
 
-**File:** `SwarmApp/src/lib/compute/providers/azure.ts`
+**File:** `AgentGuildApp/src/lib/compute/providers/azure.ts`
 
 #### Dynamic Networking (createInstance)
 
@@ -115,9 +115,9 @@ POST /api/compute/computers/{id}/snapshot
 
 **Networking Stack:**
 ```
-VNet: swarm-vnet (10.0.0.0/16)
+VNet: agent-guild-vnet (10.0.0.0/16)
   ↓
-Subnet: swarm-subnet (10.0.0.0/24)
+Subnet: agent-guild-subnet (10.0.0.0/24)
   ↓
 NSG: {vmName}-nsg (VNC 6080, SSH 22, VNC 5901)
   ↓
@@ -170,7 +170,7 @@ VM: {vmName} (tagged with NIC, NSG, IP names)
 **Cleanup Flow:**
 ```
 DELETE /api/compute/computers/{id}
-  → Read VM tags (swarm:nic, swarm:nsg, swarm:ip)
+  → Read VM tags (agent-guild:nic, agent-guild:nsg, agent-guild:ip)
   → Delete VM
   → Delete NIC
   → Delete NSG
@@ -182,7 +182,7 @@ DELETE /api/compute/computers/{id}
 
 ### ✅ 4. State Management - Auto-Recovery
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/start/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/start/route.ts`
 
 **Verified:**
 - ✅ Checks if already running (line 30-39)
@@ -216,7 +216,7 @@ if (computer.status === "starting") {
 
 ### ✅ 5. Provider Factory Integration
 
-**File:** `SwarmApp/src/lib/compute/provider.ts`
+**File:** `AgentGuildApp/src/lib/compute/provider.ts`
 
 **Verified:**
 - ✅ Azure provider case (line 365-375)
@@ -224,7 +224,7 @@ if (computer.status === "starting") {
 - ✅ Default VM provider (line 372-375)
 - ✅ Stub fallback with warning (line 329-331)
 - ✅ E2B, AWS, GCP cases
-- ✅ Swarm Node case (line 379-382)
+- ✅ Agent Guild Node case (line 379-382)
 
 **Provider Routing:**
 ```typescript
@@ -268,13 +268,13 @@ if (key === "azure" && !process.env.AZURE_SUBSCRIPTION_ID) {
 ### ⚠️ Known Security Considerations
 
 1. **Auto-generated passwords** (Azure VMs)
-   - Current: `Swarm${Date.now()}!`
+   - Current: `Agent Guild${Date.now()}!`
    - Recommendation: Use SSH key injection instead
    - Impact: Medium (Run Command works, but SSH preferred)
 
 2. **Public NSG rules** (Azure)
    - Current: Allows VNC/SSH from `*` (any IP)
-   - Recommendation: Restrict to Swarm IP ranges or use Tailscale
+   - Recommendation: Restrict to Agent Guild IP ranges or use Tailscale
    - Impact: Medium (VNC URLs have auth tokens)
 
 3. **No readiness checks**

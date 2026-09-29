@@ -1,6 +1,6 @@
-# Contributing to Swarm
+# Contributing to Agent Guild
 
-Thank you for your interest in contributing to Swarm! This document explains
+Thank you for your interest in contributing to Agent Guild! This document explains
 how to contribute and the terms that apply.
 
 ---
@@ -13,7 +13,7 @@ to the following:
 1. **License Grant.** You grant the project (and its stakeholders as defined
    in GOVERNANCE.md) a perpetual, worldwide, non-exclusive, royalty-free,
    irrevocable license to use, reproduce, modify, distribute, and sublicense
-   your contribution under the terms of the Swarm Open Source License.
+   your contribution under the terms of the Agent Guild Open Source License.
 
 2. **IP Disposition Rights.** You acknowledge that your contribution may be
    included in any IP Disposition as defined in the LICENSE, and that proceeds
@@ -78,5 +78,5 @@ part of the Community Contributors pool for revenue/proceeds distribution.
 
 ---
 
-_By contributing, you agree to the terms above and to the Swarm Open Source
+_By contributing, you agree to the terms above and to the Agent Guild Open Source
 License v1.0._

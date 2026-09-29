@@ -23,8 +23,8 @@ import { collection, query, where, onSnapshot } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import type { Agent } from "@/lib/firestore";
 import type { WorkflowDefinition } from "@/lib/workflow/types";
-import { SwarmCanvas } from "@/components/swarm-workflow/swarm-canvas";
-import { WorkflowRunsTab } from "@/components/swarm-workflow/workflow-runs-tab";
+import { AgentGuildCanvas } from "@/components/agent-guild-workflow/agent-guild-canvas";
+import { WorkflowRunsTab } from "@/components/agent-guild-workflow/workflow-runs-tab";
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -206,7 +206,7 @@ export default function WorkflowDetailPage() {
         </TabsList>
 
         <TabsContent value="builder">
-          <SwarmCanvas
+          <AgentGuildCanvas
             agents={agents}
             orgId={currentOrg?.id}
             workflowId={isNew ? undefined : workflowId}

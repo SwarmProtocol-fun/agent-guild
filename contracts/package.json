@@ -1,7 +1,7 @@
 {
-  "name": "swarm-contracts-link",
+  "name": "agent-guild-contracts-link",
   "version": "1.0.0",
-  "description": "Swarm Protocol smart contracts for Chainlink/LINK on Ethereum Sepolia",
+  "description": "Agent Guild Protocol smart contracts for Chainlink/LINK on Ethereum Sepolia",
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",

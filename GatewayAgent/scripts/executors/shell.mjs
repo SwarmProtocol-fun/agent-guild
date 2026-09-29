@@ -25,15 +25,20 @@ let activeProc = null;
  */
 export async function execute(task, logCallback) {
   const { payload, timeoutMs = 60000 } = task;
-  const { command, args = [], cwd, env } = payload;
+  const { command, args = [], cwd, env, shell = true } = payload;
 
   if (!command) throw new Error("Shell task missing 'command' in payload");
 
   const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
+    // shell:true joins command+args into one string for `/bin/sh -c` WITHOUT
+    // escaping individual array elements (Node's documented behavior) — only
+    // safe when `command`/`args` are trusted operator input, as with the
+    // "shell" task type. Callers building an argv from untrusted/structured
+    // fields (e.g. the docker executor) must pass `shell: false`.
     const proc = spawn(command, args, {
-      shell: true,
+      shell,
       cwd: cwd || AGENT_DIR,
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],

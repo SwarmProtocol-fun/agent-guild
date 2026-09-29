@@ -55,14 +55,14 @@ const wagmiAdapter = new WagmiAdapter({
 if (projectId) {
   const origin = typeof window !== "undefined"
     ? window.location.origin
-    : `https://${process.env.NEXT_PUBLIC_APP_DOMAIN || "swarmprotocol.fun"}`;
+    : `https://${process.env.NEXT_PUBLIC_APP_DOMAIN || "agent-guild.com"}`;
   createAppKit({
     adapters: [wagmiAdapter],
     projectId,
     networks,
     defaultNetwork,
     metadata: {
-      name: "Swarm",
+      name: "Agent Guild",
       description: "Enterprise AI fleet orchestration",
       url: origin,
       icons: [`${origin}/Logo.jpg`],

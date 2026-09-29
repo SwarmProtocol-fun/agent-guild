@@ -6,12 +6,12 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title SwarmTreasuryLink
+ * @title AgentGuildTreasuryLink
  * @notice Treasury contract tracking LINK token balances.
  *         Mirrors the Hedera AgentTreasury but uses LINK ERC-20.
  *         Revenue is split into compute, growth, and reserve buckets.
  */
-contract SwarmTreasuryLink is Ownable {
+contract AgentGuildTreasuryLink is Ownable {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable linkToken;

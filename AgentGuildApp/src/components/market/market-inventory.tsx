@@ -43,7 +43,7 @@ export function MarketInventory({
                 <Store className="h-12 w-12 mx-auto text-muted-foreground/30 mb-4" />
                 <h3 className="text-lg font-semibold mb-2">Your inventory is empty</h3>
                 <p className="text-sm text-muted-foreground mb-6">
-                    Browse the market to get mods, plugins, and skills for your swarm.
+                    Browse the market to get mods, plugins, and skills for your agent-guild.
                 </p>
                 <Button onClick={onBrowse} className="bg-amber-500 hover:bg-amber-600 text-black gap-2">
                     <Puzzle className="h-4 w-4" /> Browse Market

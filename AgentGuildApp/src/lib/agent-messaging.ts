@@ -2,7 +2,7 @@
  * Structured Agent Messaging System
  *
  * Hybrid approach combining Mission Control's typed messaging
- * with Swarm's scalable WebSocket + Pub/Sub infrastructure.
+ * with Agent Guild's scalable WebSocket + Pub/Sub infrastructure.
  *
  * Message Types:
  * - a2a (agent-to-agent): Direct 1:1 communication with guaranteed delivery

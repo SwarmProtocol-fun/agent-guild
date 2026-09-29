@@ -123,7 +123,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     collapsible: true,
     items: [
       { id: "agents", href: "/agents", label: "Fleet", icon: Users, maturity: "production" },
-      { id: "projects", href: "/swarms", label: "Projects", icon: FolderKanban, maturity: "production" },
+      { id: "projects", href: "/agent-guilds", label: "Projects", icon: FolderKanban, maturity: "production" },
       { id: "market", href: "/market", label: "Marketplace", icon: Store, maturity: "production" },
       { id: "operators", href: "/operators", label: "Team", icon: UserCog, maturity: "production" },
       { id: "compute-overview", href: "/compute", label: "Compute", icon: Monitor, maturity: "production" },
@@ -157,7 +157,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
       { id: "publisher", href: "/market/publisher", label: "Publisher", icon: Upload, maturity: "production" },
     ],
   },
-  // Panels contributed by installed runtime mods (mods/<id>/swarm.mod.json).
+  // Panels contributed by installed runtime mods (mods/<id>/agent-guild.mod.json).
   // Empty sections are hidden, so this only shows up once a mod adds a panel.
   {
     id: "modifications",
@@ -226,10 +226,10 @@ function applyAdminSection(sections: NavSection[], isAdmin: boolean): NavSection
   return sections;
 }
 
-const SECTION_ORDER_KEY = "swarm-sidebar-order-v2";
-const ITEM_ORDER_KEY = "swarm-sidebar-items-v2";
-const COLLAPSED_KEY = "swarm-sidebar-collapsed";
-const SECTION_COLLAPSED_KEY = "swarm-sidebar-sections-collapsed";
+const SECTION_ORDER_KEY = "agent-guild-sidebar-order-v2";
+const ITEM_ORDER_KEY = "agent-guild-sidebar-items-v2";
+const COLLAPSED_KEY = "agent-guild-sidebar-collapsed";
+const SECTION_COLLAPSED_KEY = "agent-guild-sidebar-sections-collapsed";
 
 // ═══════════════════════════════════════════════════════════════
 // Persistence Helpers
@@ -356,7 +356,7 @@ export function Sidebar() {
 
   // Favorites
   const [favorites, setFavorites] = useState<Set<string>>(() => {
-    const saved = loadJSON<string[]>("swarm-sidebar-favorites");
+    const saved = loadJSON<string[]>("agent-guild-sidebar-favorites");
     return saved ? new Set(saved) : new Set();
   });
   const toggleFavorite = useCallback((itemId: string) => {
@@ -364,7 +364,7 @@ export function Sidebar() {
       const next = new Set(prev);
       if (next.has(itemId)) next.delete(itemId);
       else next.add(itemId);
-      saveJSON("swarm-sidebar-favorites", [...next]);
+      saveJSON("agent-guild-sidebar-favorites", [...next]);
       return next;
     });
   }, []);
@@ -380,7 +380,7 @@ export function Sidebar() {
   // DnD onboarding hint
   const [dndHintSeen, setDndHintSeen] = useState(() => {
     if (typeof window === "undefined") return true;
-    return localStorage.getItem("swarm-sidebar-dnd-hint-seen") === "true";
+    return localStorage.getItem("agent-guild-sidebar-dnd-hint-seen") === "true";
   });
 
   // Section collapse state
@@ -535,8 +535,8 @@ export function Sidebar() {
     const handler = () => {
       if (orgIdRef.current) refreshModSidebar(orgIdRef.current);
     };
-    window.addEventListener("swarm-inventory-changed", handler);
-    return () => window.removeEventListener("swarm-inventory-changed", handler);
+    window.addEventListener("agent-guild-inventory-changed", handler);
+    return () => window.removeEventListener("agent-guild-inventory-changed", handler);
   }, [refreshModSidebar]);
 
   const toggleCollapsed = useCallback(() => {
@@ -788,7 +788,7 @@ export function Sidebar() {
             <button
               onClick={() => {
                 setDndHintSeen(true);
-                try { localStorage.setItem("swarm-sidebar-dnd-hint-seen", "true"); } catch {}
+                try { localStorage.setItem("agent-guild-sidebar-dnd-hint-seen", "true"); } catch {}
               }}
               className="ml-auto text-muted-foreground/60 hover:text-foreground"
             >

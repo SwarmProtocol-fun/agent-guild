@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — AWS EC2 Provider
+ * Agent Guild Compute — AWS EC2 Provider
  *
  * Uses EC2 for VM lifecycle, SSM Run Command for remote execution,
  * and SSM Session Manager for secure interactive access.
@@ -57,9 +57,9 @@ export class AwsComputeProvider implements ComputeProvider {
       TagSpecifications: [{
         ResourceType: "instance",
         Tags: [
-          { Key: "Name", Value: `swarm-${config.name}` },
-          { Key: "swarm:managed", Value: "true" },
-          { Key: "swarm:size", Value: config.sizeKey },
+          { Key: "Name", Value: `agent-guild-${config.name}` },
+          { Key: "agent-guild:managed", Value: "true" },
+          { Key: "agent-guild:size", Value: config.sizeKey },
         ],
       }],
       BlockDeviceMappings: [{
@@ -120,7 +120,7 @@ export class AwsComputeProvider implements ComputeProvider {
     // Use SSM Run Command to capture screenshot from in-guest VNC
     const result = await this.runSsmCommand(
       providerInstanceId,
-      "import -window root -quality 80 /tmp/swarm-screenshot.jpg && base64 /tmp/swarm-screenshot.jpg",
+      "import -window root -quality 80 /tmp/agent-guild-screenshot.jpg && base64 /tmp/agent-guild-screenshot.jpg",
     );
     if (result.success && result.data?.stdout) {
       const base64 = result.data.stdout as string;
@@ -185,7 +185,7 @@ export class AwsComputeProvider implements ComputeProvider {
     const client = await this.ec2(region);
     const result = await client.send(new CreateImageCommand({
       InstanceId: providerInstanceId,
-      Name: `swarm-snapshot-${label}-${Date.now()}`,
+      Name: `agent-guild-snapshot-${label}-${Date.now()}`,
       NoReboot: true,
     }));
     return result.ImageId || `snapshot-${providerInstanceId}`;
@@ -271,12 +271,12 @@ export class AwsComputeProvider implements ComputeProvider {
   private buildUserData(config: InstanceConfig): string {
     return `#!/bin/bash
 set -e
-# Install lightweight desktop + VNC + noVNC for Swarm desktop access
+# Install lightweight desktop + VNC + noVNC for Agent Guild desktop access
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify xdotool imagemagick
 # Configure VNC
 mkdir -p /root/.vnc
-echo "swarmvnc" | vncpasswd -f > /root/.vnc/passwd
+echo "agentguildvnc" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
 cat > /root/.vnc/xstartup << 'XSTARTUP'
 #!/bin/bash

@@ -16,14 +16,14 @@ import { QueryProvider } from "@/components/query-provider";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_BASE_URL || 'https://swarmprotocol.fun'),
-  title: "Swarm | Enterprise AI Fleet Orchestration",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_BASE_URL || 'https://agent-guild.com'),
+  title: "Agent Guild | Enterprise AI Fleet Orchestration",
   description: "Deploy, orchestrate, and scale enterprise-grade AI agent fleets. The ultimate command center for autonomous business operations.",
   icons: {
     icon: "/Logo.jpg",
   },
   openGraph: {
-    title: "Swarm | Enterprise AI Fleet Orchestration",
+    title: "Agent Guild | Enterprise AI Fleet Orchestration",
     description: "The ultimate command center for autonomous business operations.",
     images: ["/Logo.jpg"],
   }

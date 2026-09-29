@@ -12,8 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useOrg } from "@/contexts/OrgContext";
-import { useSwarmData } from "@/hooks/useSwarmData";
-import { useSwarmWrite } from "@/hooks/useSwarmWrite";
+import { useAgentGuildData } from "@/hooks/useAgentGuildData";
+import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { getScoreBand } from "@/lib/credit-scoring";
 import {
   getAgent,
@@ -107,8 +107,8 @@ function AgentDetailPage() {
   const agentId = params.id as string;
   const { currentOrg } = useOrg();
   const { address: sessionAddress } = useSession();
-  const swarm = useSwarmData();
-  const swarmWrite = useSwarmWrite();
+  const agent-guild = useAgentGuildData();
+  const agentGuildWrite = useAgentGuildWrite();
 
 
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -337,7 +337,7 @@ function AgentDetailPage() {
     setRegisterName(agent.name);
     setRegisterSkills((agent.capabilities ?? []).join(', '));
     setRegisterFeeRate('500');
-    swarmWrite.reset();
+    agentGuildWrite.reset();
     setShowRegister(true);
   };
 
@@ -345,9 +345,9 @@ function AgentDetailPage() {
     if (!registerName.trim()) return;
     const feeRate = parseInt(registerFeeRate, 10);
     if (isNaN(feeRate) || feeRate < 0) return;
-    const txHash = await swarmWrite.registerAgent(registerName.trim(), registerSkills.trim(), agent?.asn || "", feeRate);
+    const txHash = await agentGuildWrite.registerAgent(registerName.trim(), registerSkills.trim(), agent?.asn || "", feeRate);
     if (txHash) {
-      swarm.refetch();
+      agent-guild.refetch();
     }
   };
 
@@ -569,7 +569,7 @@ function AgentDetailPage() {
     .reduce((sum, j) => sum + parseReward(j.reward), 0);
 
   // On-chain matching — Hedera
-  const onchainMatch = swarm.agents.find(
+  const onchainMatch = agent-guild.agents.find(
     a => a.name.toLowerCase() === agent.name.toLowerCase()
   );
   // Credit scoring
@@ -790,7 +790,7 @@ function AgentDetailPage() {
               {assignedProjects.map((project) => (
                 <Link
                   key={project.id}
-                  href={`/swarms/${project.id}`}
+                  href={`/agent-guilds/${project.id}`}
                   className="flex items-center justify-between p-2 rounded-lg hover:bg-muted transition-colors"
                 >
                   <span className="font-medium text-sm">{project.name}</span>
@@ -1291,10 +1291,10 @@ function AgentDetailPage() {
         </CardContent>
       </Card>
 
-      {/* SwarmConnect / OpenClaw Connection */}
+      {/* AgentGuildConnect / OpenClaw Connection */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">🔗 SwarmConnect</CardTitle>
+          <CardTitle className="text-base">🔗 AgentGuildConnect</CardTitle>
           <CardDescription>Agent connection details for OpenClaw integration</CardDescription>
         </CardHeader>
         <CardContent>
@@ -1324,14 +1324,14 @@ function AgentDetailPage() {
             <div className="border-t border-border pt-3">
               <span className="text-xs text-muted-foreground block mb-1.5">Quick Setup</span>
               <div className="bg-muted rounded-md p-3 font-mono text-[11px] space-y-1">
-                <p className="text-muted-foreground"># Install the SwarmConnect skill</p>
-                <p>npm install -g @swarmprotocol/agent-skill</p>
+                <p className="text-muted-foreground"># Install the AgentGuildConnect skill</p>
+                <p>npm install -g @agent-guild/agent-skill</p>
                 <p className="text-muted-foreground mt-2"># Register this agent (with skills)</p>
-                <p>swarm register --hub https://swarmprotocol.ai --org {currentOrg?.id} --name &quot;{agent.name}&quot; --type &quot;{agent.type}&quot; --skills &quot;web-search,code-interpreter&quot;</p>
+                <p>agent-guild register --hub https://api.agent-guild.com --org {currentOrg?.id} --name &quot;{agent.name}&quot; --type &quot;{agent.type}&quot; --skills &quot;web-search,code-interpreter&quot;</p>
                 <p className="text-muted-foreground mt-2"># Report skills at any time</p>
-                <p>swarm report-skills --skills &quot;web-search,code-interpreter&quot;</p>
+                <p>agent-guild report-skills --skills &quot;web-search,code-interpreter&quot;</p>
                 <p className="text-muted-foreground mt-2"># Check for messages</p>
-                <p>swarm check</p>
+                <p>agent-guild check</p>
               </div>
             </div>
           </div>
@@ -1559,7 +1559,7 @@ function AgentDetailPage() {
       </Dialog>
 
       {/* Register On-Chain Dialog */}
-      <Dialog open={showRegister} onOpenChange={(open) => { setShowRegister(open); if (!open) swarmWrite.reset(); }}>
+      <Dialog open={showRegister} onOpenChange={(open) => { setShowRegister(open); if (!open) agentGuildWrite.reset(); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>⛓️ Register Agent On-Chain</DialogTitle>
@@ -1570,7 +1570,7 @@ function AgentDetailPage() {
             </p>
             <div>
               <label className="text-sm font-medium mb-1 block">Agent Name *</label>
-              <Input value={registerName} onChange={e => setRegisterName(e.target.value)} disabled={swarmWrite.state.isLoading} />
+              <Input value={registerName} onChange={e => setRegisterName(e.target.value)} disabled={agentGuildWrite.state.isLoading} />
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Skills</label>
@@ -1578,7 +1578,7 @@ function AgentDetailPage() {
                 value={registerSkills}
                 onChange={e => setRegisterSkills(e.target.value)}
                 placeholder="e.g. research, analysis, trading"
-                disabled={swarmWrite.state.isLoading}
+                disabled={agentGuildWrite.state.isLoading}
               />
               <p className="text-[11px] text-muted-foreground mt-1">Comma-separated list of skills stored onchain</p>
             </div>
@@ -1590,35 +1590,35 @@ function AgentDetailPage() {
                 onChange={e => setRegisterFeeRate(e.target.value)}
                 min={0}
                 max={10000}
-                disabled={swarmWrite.state.isLoading}
+                disabled={agentGuildWrite.state.isLoading}
               />
               <p className="text-[11px] text-muted-foreground mt-1">500 bps = 5% fee on completed tasks</p>
             </div>
 
-            {swarmWrite.state.error && (
+            {agentGuildWrite.state.error && (
               <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
-                {swarmWrite.state.error}
+                {agentGuildWrite.state.error}
               </div>
             )}
 
-            {swarmWrite.state.txHash && (
+            {agentGuildWrite.state.txHash && (
               <div className="p-3 rounded-md bg-emerald-50 border border-emerald-200 text-sm text-emerald-700 dark:bg-emerald-950/20 dark:border-emerald-800 dark:text-emerald-400">
                 <p className="font-medium">Registration successful!</p>
-                <p className="text-xs font-mono mt-1 break-all">TX: {swarmWrite.state.txHash}</p>
+                <p className="text-xs font-mono mt-1 break-all">TX: {agentGuildWrite.state.txHash}</p>
               </div>
             )}
 
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowRegister(false)} disabled={swarmWrite.state.isLoading}>
-                {swarmWrite.state.txHash ? 'Close' : 'Cancel'}
+              <Button variant="outline" onClick={() => setShowRegister(false)} disabled={agentGuildWrite.state.isLoading}>
+                {agentGuildWrite.state.txHash ? 'Close' : 'Cancel'}
               </Button>
-              {!swarmWrite.state.txHash && (
+              {!agentGuildWrite.state.txHash && (
                 <Button
                   onClick={handleRegisterSubmit}
-                  disabled={swarmWrite.state.isLoading || !registerName.trim()}
+                  disabled={agentGuildWrite.state.isLoading || !registerName.trim()}
                   className="bg-amber-600 hover:bg-amber-700 text-white"
                 >
-                  {swarmWrite.state.isLoading ? 'Registering...' : '⛓️ Register'}
+                  {agentGuildWrite.state.isLoading ? 'Registering...' : '⛓️ Register'}
                 </Button>
               )}
             </div>

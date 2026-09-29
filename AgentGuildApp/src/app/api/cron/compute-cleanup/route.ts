@@ -3,7 +3,7 @@
  *
  * Daily cleanup job for the compute platform:
  *
- * 1. Orphan detection — Compare Azure VMs (tagged swarm:managed) to Firestore
+ * 1. Orphan detection — Compare Azure VMs (tagged agent-guild:managed) to Firestore
  *    computeComputers. Delete Azure VMs that have no matching Firestore record.
  *
  * 2. Stuck instance recovery — Find instances stuck in transitional states
@@ -53,9 +53,9 @@ interface CleanupResults {
 // Azure Orphan Detection
 // ═══════════════════════════════════════════════════════════════
 
-async function listAzureSwarmVMs(): Promise<Array<{ name: string; tags: Record<string, string> }>> {
+async function listAzureAgentGuildVMs(): Promise<Array<{ name: string; tags: Record<string, string> }>> {
   const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID;
-  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
 
   if (!subscriptionId) return [];
 
@@ -67,8 +67,8 @@ async function listAzureSwarmVMs(): Promise<Array<{ name: string; tags: Record<s
 
     const vms: Array<{ name: string; tags: Record<string, string> }> = [];
     for await (const vm of client.virtualMachines.list(resourceGroup)) {
-      // Only consider VMs tagged as managed by Swarm
-      if (vm.tags?.["swarm:managed"] === "true" && vm.name) {
+      // Only consider VMs tagged as managed by Agent Guild
+      if (vm.tags?.["agent-guild:managed"] === "true" && vm.name) {
         vms.push({ name: vm.name, tags: vm.tags || {} });
       }
     }
@@ -81,7 +81,7 @@ async function listAzureSwarmVMs(): Promise<Array<{ name: string; tags: Record<s
 
 async function deleteAzureVM(vmName: string): Promise<void> {
   const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID!;
-  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
 
   const { ComputeManagementClient } = await import("@azure/arm-compute");
   const { NetworkManagementClient } = await import("@azure/arm-network");
@@ -97,9 +97,9 @@ async function deleteAzureVM(vmName: string): Promise<void> {
 
   try {
     const vm = await computeClient.virtualMachines.get(resourceGroup, vmName);
-    nicName = vm.tags?.["swarm:nic"];
-    nsgName = vm.tags?.["swarm:nsg"];
-    publicIpName = vm.tags?.["swarm:ip"];
+    nicName = vm.tags?.["agent-guild:nic"];
+    nsgName = vm.tags?.["agent-guild:nsg"];
+    publicIpName = vm.tags?.["agent-guild:ip"];
   } catch {
     nicName = `${vmName}-nic`;
     nsgName = `${vmName}-nsg`;
@@ -163,7 +163,7 @@ export async function POST(req: NextRequest) {
     // ── 1. Orphan Detection ──────────────────────────────
     // Compare Azure VMs to Firestore records
     const [azureVMs, firestoreComputers] = await Promise.all([
-      listAzureSwarmVMs(),
+      listAzureAgentGuildVMs(),
       getAllComputeComputers(),
     ]);
 

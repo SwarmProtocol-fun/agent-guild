@@ -27,7 +27,7 @@ const SECTIONS: DocSection[] = [
         content: (
             <div className="space-y-4">
                 <p>
-                    The <strong>Swarm Protocol</strong> is an enterprise-grade agent orchestration platform built on
+                    The <strong>Agent Guild Protocol</strong> is an enterprise-grade agent orchestration platform built on
                     web3 infrastructure. It enables teams to deploy, manage, and coordinate fleets of AI agents
                     across any business domain — all controlled through a unified command center.
                 </p>
@@ -75,7 +75,7 @@ const SECTIONS: DocSection[] = [
                 <p className="text-sm">Go to <strong>Projects</strong> in the sidebar. Click <strong>New Project</strong>, give it a name, and optionally add a description and agents.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">4. Connect Agents</h4>
-                <p className="text-sm">Use <strong>SwarmConnect</strong> to link your AI agents. Drop the Swarm Connect skill folder into your agent&apos;s skill directory, or use the API to register agents programmatically. You can find all platform-required files in the <code className="bg-muted px-1.5 py-0.5 rounded text-xs">.agents/skills</code> directory.</p>
+                <p className="text-sm">Use <strong>AgentGuildConnect</strong> to link your AI agents. Drop the Agent Guild Connect skill folder into your agent&apos;s skill directory, or use the API to register agents programmatically. You can find all platform-required files in the <code className="bg-muted px-1.5 py-0.5 rounded text-xs">.agents/skills</code> directory.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">5. Agent Briefings</h4>
                 <p className="text-sm">To provide your agents with context, drop markdown files into the <code className="bg-muted px-1.5 py-0.5 rounded text-xs">.agents/briefing</code> folder. Agents will read these instructions on startup to understand your organization&apos;s rules and goals.</p>
@@ -97,7 +97,7 @@ const SECTIONS: DocSection[] = [
         color: "text-blue-400",
         content: (
             <div className="space-y-4">
-                <p className="text-sm">Agents are AI workers that connect to the Swarm Protocol via <strong>SwarmConnect</strong>. Each agent has a unique ID, skill set, and can be assigned to one or more projects.</p>
+                <p className="text-sm">Agents are AI workers that connect to the Agent Guild Protocol via <strong>AgentGuildConnect</strong>. Each agent has a unique ID, skill set, and can be assigned to one or more projects.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Agent Lifecycle</h4>
                 <div className="space-y-2 text-sm">
@@ -129,7 +129,7 @@ const SECTIONS: DocSection[] = [
         color: "text-violet-400",
         content: (
             <div className="space-y-4">
-                <p className="text-sm">Projects (called <strong>Swarms</strong>) are the primary organizational unit. Each project groups agents, tasks, and resources together.</p>
+                <p className="text-sm">Projects (called <strong>Agent Guilds</strong>) are the primary organizational unit. Each project groups agents, tasks, and resources together.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Project Structure</h4>
                 <ul className="space-y-1 text-sm">
@@ -264,7 +264,7 @@ const SECTIONS: DocSection[] = [
         color: "text-cyan-400",
         content: (
             <div className="space-y-4">
-                <p className="text-sm">Swarm exposes REST API endpoints for programmatic access. All endpoints are under <code className="text-xs bg-muted/30 px-1 py-0.5 rounded">/api/v1/</code>.</p>
+                <p className="text-sm">Agent Guild exposes REST API endpoints for programmatic access. All endpoints are under <code className="text-xs bg-muted/30 px-1 py-0.5 rounded">/api/v1/</code>.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Authentication</h4>
                 <div className="bg-muted/20 rounded-lg p-3 font-mono text-xs">
@@ -292,12 +292,12 @@ const SECTIONS: DocSection[] = [
                     ))}
                 </div>
 
-                <h4 className="text-sm font-semibold mt-6 mb-2">SwarmConnect SDK</h4>
-                <p className="text-sm">The easiest way to connect agents is via the <strong>SwarmConnect</strong> skill package. Drop it into your agent&apos;s skill directory:</p>
+                <h4 className="text-sm font-semibold mt-6 mb-2">AgentGuildConnect SDK</h4>
+                <p className="text-sm">The easiest way to connect agents is via the <strong>AgentGuildConnect</strong> skill package. Drop it into your agent&apos;s skill directory:</p>
                 <div className="bg-muted/20 rounded-lg p-3 font-mono text-xs">
                     <p>your-agent/</p>
                     <p>  └── skills/</p>
-                    <p>      └── swarm-connect/</p>
+                    <p>      └── agent-guild-connect/</p>
                     <p>          ├── SKILL.md</p>
                     <p>          ├── package.json</p>
                     <p>          └── src/</p>
@@ -315,7 +315,7 @@ const SECTIONS: DocSection[] = [
         color: "text-red-400",
         content: (
             <div className="space-y-4">
-                <p className="text-sm">Security is a first-class concern in the Swarm Protocol. All sensitive operations go through explicit approval flows.</p>
+                <p className="text-sm">Security is a first-class concern in the Agent Guild Protocol. All sensitive operations go through explicit approval flows.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Authentication</h4>
                 <ul className="space-y-1 text-sm">
@@ -371,10 +371,10 @@ const SECTIONS: DocSection[] = [
         color: "text-emerald-400",
         content: (
             <div className="space-y-4">
-                <p className="text-sm">The Swarm Protocol features an open marketplace where creators can build, share, and monetize extensions that enhance the platform. Whether it&apos;s changing the look and feel or adding new functional capabilities, the entire platform is moddable.</p>
+                <p className="text-sm">The Agent Guild Protocol features an open marketplace where creators can build, share, and monetize extensions that enhance the platform. Whether it&apos;s changing the look and feel or adding new functional capabilities, the entire platform is moddable.</p>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2 flex items-center gap-2"><Palette className="w-4 h-4 text-emerald-400" /> Skins & Layouts</h4>
-                <p className="text-sm">Skins in the Swarm ecosystem are uniquely powerful. They do not just upgrade the color scheme; they empower users to redefine the <strong>entire layout of the frontend</strong>. You can shuffle elements, snap in completely new dashboard designs, format widgets uniquely, and completely redesign the user experience.</p>
+                <p className="text-sm">Skins in the Agent Guild ecosystem are uniquely powerful. They do not just upgrade the color scheme; they empower users to redefine the <strong>entire layout of the frontend</strong>. You can shuffle elements, snap in completely new dashboard designs, format widgets uniquely, and completely redesign the user experience.</p>
                 <div className="bg-muted/20 rounded-lg p-3 font-mono text-xs mt-2">
                     <p className="text-muted-foreground">// Example Skin Structure</p>
                     <p>my-custom-skin/</p>
@@ -430,7 +430,7 @@ export default function DocsPage() {
                     Documentation
                 </h1>
                 <p className="text-sm text-muted-foreground mt-2">
-                    Everything you need to know about the Swarm Protocol
+                    Everything you need to know about the Agent Guild Protocol
                 </p>
             </div>
 

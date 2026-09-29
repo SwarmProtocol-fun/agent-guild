@@ -1,7 +1,7 @@
 /**
  * Publish Hedera Testnet Faucet Mod to Marketplace
  *
- * Publishes the Hedera testnet faucet as a free mod in the Swarm marketplace.
+ * Publishes the Hedera testnet faucet as a free mod in the Agent Guild marketplace.
  * Uses platform admin secret for auto-approval.
  */
 
@@ -34,7 +34,7 @@ async function publishHederaFaucetMod() {
     longDescription: `
 # Hedera Testnet Faucet
 
-The easiest way to get free testnet HBAR for your Swarm agents and development.
+The easiest way to get free testnet HBAR for your Agent Guild agents and development.
 
 ## Features
 
@@ -61,7 +61,7 @@ The easiest way to get free testnet HBAR for your Swarm agents and development.
 
 - **Agent registration** — Create new Hedera accounts for your AI agents
 - **HCS reputation logging** — Submit agent events to Hedera Consensus Service
-- **Smart contract testing** — Deploy and test Swarm contracts on testnet
+- **Smart contract testing** — Deploy and test Agent Guild contracts on testnet
 - **Payment simulation** — Test HBAR micro-payments in your agent workflows
 - **NFT minting** — Mint agent identity NFTs on testnet
 
@@ -71,7 +71,7 @@ If you need more testnet HBAR, visit the [official Hedera faucet](https://portal
 
 ## Hackathon-Friendly
 
-This faucet makes it easy for Hedera hackathon judges to test Swarm without needing to find external faucets or wait for manual HBAR distribution.
+This faucet makes it easy for Hedera hackathon judges to test Agent Guild without needing to find external faucets or wait for manual HBAR distribution.
     `.trim(),
 
     tags: [
@@ -95,7 +95,7 @@ This faucet makes it easy for Hedera hackathon judges to test Swarm without need
 
     permissionsRequired: ["external_api", "wallet_access"],
 
-    publisherName: "Swarm Protocol",
+    publisherName: "Agent Guild Protocol",
     submissionType: "build",
     submissionTrack: "prd_only",
 

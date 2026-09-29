@@ -27,7 +27,7 @@ export default function DocsLayout({ children }: { children: React.ReactNode }) 
             <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl">
                 <div className="flex h-16 items-center justify-between px-6 max-w-7xl mx-auto">
                     <a href="/" className="flex items-center gap-2">
-                        <span className="text-xl font-bold text-[#FFD700]">Swarm</span>
+                        <span className="text-xl font-bold text-[#FFD700]">Agent Guild</span>
                         <span className="text-xs text-muted-foreground">/ Docs</span>
                     </a>
                     <a href="/" className="text-xs text-muted-foreground hover:text-foreground transition-colors">

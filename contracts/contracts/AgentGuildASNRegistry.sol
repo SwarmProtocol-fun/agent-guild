@@ -4,12 +4,12 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title SwarmASNRegistry
+ * @title AgentGuildASNRegistry
  * @notice On-chain Agent Social Number (ASN) identity + credit registry.
  *         Stores ASN records, credit scores, and task completion history.
  *         Format: ASN-SWM-YYYY-HHHH-HHHH-CC
  */
-contract SwarmASNRegistry is Ownable {
+contract AgentGuildASNRegistry is Ownable {
     struct ASNRecord {
         string asn;
         address owner;

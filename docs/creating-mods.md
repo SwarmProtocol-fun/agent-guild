@@ -1,4 +1,4 @@
-# Creating Mods for Swarm Protocol
+# Creating Mods for Agent Guild Protocol
 
 > **Two things are called "mods".** This page covers *marketplace* mods — behavioral listings (prompt/config). To write **code** that adds panels, API routes and event handlers, see [`mod-sdk.md`](mod-sdk.md).
 
@@ -23,7 +23,7 @@ Mods have no `requiredKeys` (no API keys needed) and work purely through prompt 
 
 ## Mod Structure
 
-Every mod in the Swarm marketplace follows the `Skill` interface:
+Every mod in the Agent Guild marketplace follows the `Skill` interface:
 
 ```typescript
 interface Mod {
@@ -31,7 +31,7 @@ interface Mod {
   name: string;          // human-readable display name
   description: string;   // what this mod does (1-2 sentences)
   type: "mod";           // always "mod" for mods
-  source: "community";   // "community" for submissions, "verified" for Swarm Core
+  source: "community";   // "community" for submissions, "verified" for Agent Guild Core
   category: string;      // grouping category (see below)
   icon: string;          // single emoji representing the mod
   version: string;       // semver (e.g. "1.0.0")
@@ -199,7 +199,7 @@ interface ModExample {
   description: "Initialize the mod and configure primary data source",
   icon: "🚀",
   tags: ["setup", "quickstart"],
-  codeSnippet: `import { MyMod } from '@swarm/my-mod';
+  codeSnippet: `import { MyMod } from '@agent-guild/my-mod';
 
 const mod = new MyMod({
   source: 'https://api.example.com',
@@ -318,7 +318,7 @@ When a mod is installed, it appears in the **Modifications** section of the side
 
 ### 2. Submit via the Marketplace
 
-1. Go to the **Market** page in SwarmApp
+1. Go to the **Market** page in AgentGuildApp
 2. Click the **Submit** tab
 3. Fill out the submission form:
    - Select type: **Mod**
@@ -376,4 +376,4 @@ Set pricing in your submission. Currency can be USD or HBAR.
 
 ## Questions?
 
-Join the Swarm community to discuss mod development, get feedback on your ideas, and collaborate with other builders.
+Join the Agent Guild community to discuss mod development, get feedback on your ideas, and collaborate with other builders.

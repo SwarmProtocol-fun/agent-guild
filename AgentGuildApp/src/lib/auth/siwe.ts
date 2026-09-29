@@ -12,7 +12,7 @@ import { createPublicClient, getAddress, http, isAddress, recoverMessageAddress,
 import { createSiweMessage } from "viem/siwe";
 import { getChainById } from "@/lib/chains";
 
-const STATEMENT = "Sign in to Swarm — this does not trigger a blockchain transaction or cost gas.";
+const STATEMENT = "Sign in to Agent Guild — this does not trigger a blockchain transaction or cost gas.";
 const EXPIRATION_SECONDS = 600;
 const CLOCK_SKEW_MS = 60_000;
 
@@ -140,7 +140,7 @@ export function getDomainFromRequest(req: Request): string {
     || req.headers.get("x-forwarded-host")
     || process.env.APP_DOMAIN
     || process.env.NEXT_PUBLIC_APP_DOMAIN
-    || "swarmprotocol.fun";
+    || "agent-guild.com";
   return host.replace(/:443$/, "").replace(/:80$/, "");
 }
 

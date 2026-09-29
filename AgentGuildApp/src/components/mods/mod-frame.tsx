@@ -37,7 +37,7 @@ export function ModFrame({ modSlug, serviceUrl, orgId, wallet, theme }: ModFrame
     if (!iframeRef.current || loading) return;
 
     const message = {
-      type: "swarm:auth",
+      type: "agent-guild:auth",
       orgId,
       wallet,
       theme: theme || "dark",
@@ -50,17 +50,17 @@ export function ModFrame({ modSlug, serviceUrl, orgId, wallet, theme }: ModFrame
   // Listen for messages from mod iframe
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (!event.data?.type?.startsWith("swarm:")) return;
+      if (!event.data?.type?.startsWith("agent-guild:")) return;
 
       switch (event.data.type) {
-        case "swarm:ready":
+        case "agent-guild:ready":
           // Mod UI confirmed ready — send auth
           iframeRef.current?.contentWindow?.postMessage(
-            { type: "swarm:auth", orgId, wallet, theme: theme || "dark", modSlug },
+            { type: "agent-guild:auth", orgId, wallet, theme: theme || "dark", modSlug },
             "*",
           );
           break;
-        case "swarm:navigate":
+        case "agent-guild:navigate":
           // Mod wants to navigate the parent
           if (event.data.href) window.location.href = event.data.href;
           break;

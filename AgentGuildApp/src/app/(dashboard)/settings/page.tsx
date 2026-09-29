@@ -11,7 +11,7 @@ import { useWalletAccount } from "@/lib/wallet";
 import { updateOrganization, getProfile, setProfile, removeMemberFromOrganization } from '@/lib/firestore';
 
 import { Badge } from '@/components/ui/badge';
-// [swarm-core] GitHub + ReactBits extracted to mods
+// [agent-guild-core] GitHub + ReactBits extracted to mods
 const GitHubIcon = ({ className }: { className?: string }) => <span className={className}>GH</span>;
 const SpotlightCard = ({ children, className, ...props }: { children: React.ReactNode; className?: string; [k: string]: unknown }) => <div className={className}>{children}</div>;
 import { Switch } from '@/components/ui/switch';
@@ -241,7 +241,7 @@ export default function SettingsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Appearance</CardTitle>
-            <CardDescription>Customize the look and feel of Swarm. Get more skins from the <Link href="/market" className="text-primary underline underline-offset-2 hover:opacity-80">Marketplace</Link>.</CardDescription>
+            <CardDescription>Customize the look and feel of Agent Guild. Get more skins from the <Link href="/market" className="text-primary underline underline-offset-2 hover:opacity-80">Marketplace</Link>.</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-3">

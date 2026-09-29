@@ -102,7 +102,7 @@ gcloud firestore fields ttls update expiresAt \
   --async
 ```
 
-**Note**: Swarm currently uses JWT-only sessions stored in cookies, so this collection may not exist. Add it if you implement server-side session storage.
+**Note**: Agent Guild currently uses JWT-only sessions stored in cookies, so this collection may not exist. Add it if you implement server-side session storage.
 
 ---
 

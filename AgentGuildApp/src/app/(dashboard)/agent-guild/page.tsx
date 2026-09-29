@@ -1,4 +1,4 @@
-/** Swarm — Diablo-style agent inventory for the Swarm Protocol. */
+/** Agent Guild — Diablo-style agent inventory for the Agent Guild Protocol. */
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
@@ -11,7 +11,7 @@ import { useOrg } from "@/contexts/OrgContext";
 import { getAgentsByOrg, getOrganization, updateOrganization, ensureAgentGroupChat, sendMessage, type Agent } from "@/lib/firestore";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { cn } from "@/lib/utils";
-// [swarm-core] ReactBits + Slots extracted to mods
+// [agent-guild-core] ReactBits + Slots extracted to mods
 const SpotlightCard = ({ children, className, ...props }: { children: React.ReactNode; className?: string; spotlightColor?: string; [k: string]: unknown }) => <div className={className} {...props}>{children}</div>;
 const SlotPolicyBuilder = () => null;
 const SlotExecutionHistory = () => null;
@@ -66,7 +66,7 @@ const GRID_ORDER = [0, -1, 1, 2, -2, 3, 4, -1, 5]; // -2 = emblem, -1 = spacer
 // Component
 // ═══════════════════════════════════════════════════════════════
 
-export default function SwarmPage() {
+export default function AgentGuildPage() {
   const { currentOrg } = useOrg();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [assignments, setAssignments] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
@@ -111,7 +111,7 @@ export default function SwarmPage() {
       getOrganization(currentOrg.id),
     ]).then(([agentList, freshOrg]) => {
       setAgents(agentList);
-      setAssignments(freshOrg?.swarmSlots || {});
+      setAssignments(freshOrg?.agentSlots || freshOrg?.swarmSlots || {});
     }).finally(() => setLoading(false));
 
     fetchPolicies();
@@ -137,7 +137,7 @@ export default function SwarmPage() {
     setSaving(true);
     const updated = { ...assignments, [slotId]: { agentId, assignedAt: new Date() } };
     try {
-      await updateOrganization(currentOrg.id, { swarmSlots: updated } as Partial<typeof currentOrg>);
+      await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
 
       // Notify Agent Hub about the new assignment
@@ -148,9 +148,9 @@ export default function SwarmPage() {
           sendMessage({
             channelId: hub.id,
             senderId: "system",
-            senderName: "Swarm Protocol",
+            senderName: "Agent Guild Protocol",
             senderType: "agent",
-            content: `⚡ **@${agent.name}** has been assigned to **${slot.name}**.\n\n${slot.description}.\n\nYou are now responsible for this role within the Swarm Protocol. Begin operations when ready.`,
+            content: `⚡ **@${agent.name}** has been assigned to **${slot.name}**.\n\n${slot.description}.\n\nYou are now responsible for this role within the Agent Guild Protocol. Begin operations when ready.`,
             orgId: currentOrg.id,
             createdAt: new Date(),
           });
@@ -171,7 +171,7 @@ export default function SwarmPage() {
       updated[slot.id] = { agentId, assignedAt: new Date() };
     }
     try {
-      await updateOrganization(currentOrg.id, { swarmSlots: updated } as Partial<typeof currentOrg>);
+      await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
 
       const agent = agents.find(a => a.id === agentId);
@@ -180,9 +180,9 @@ export default function SwarmPage() {
           sendMessage({
             channelId: hub.id,
             senderId: "system",
-            senderName: "Swarm Protocol",
+            senderName: "Agent Guild Protocol",
             senderType: "agent",
-            content: `⚡ **@${agent.name}** has been assigned to **all ${PROTOCOL_SLOTS.length} protocol roles**.\n\nThis agent is now responsible for: ${PROTOCOL_SLOTS.map(s => s.name).join(", ")}.\n\nFull swarm operations active.`,
+            content: `⚡ **@${agent.name}** has been assigned to **all ${PROTOCOL_SLOTS.length} protocol roles**.\n\nThis agent is now responsible for: ${PROTOCOL_SLOTS.map(s => s.name).join(", ")}.\n\nFull agent-guild operations active.`,
             orgId: currentOrg.id,
             createdAt: new Date(),
           });
@@ -200,7 +200,7 @@ export default function SwarmPage() {
     setSaving(true);
     const updated = { ...assignments, [slotId]: null };
     try {
-      await updateOrganization(currentOrg.id, { swarmSlots: updated } as Partial<typeof currentOrg>);
+      await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
     } catch (err) {
       console.error("Failed to unassign agent:", err);
@@ -234,10 +234,10 @@ export default function SwarmPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
             <Zap className={cn("h-6 w-6", allEquipped ? "text-amber-400" : "text-muted-foreground")} />
-            Swarm Protocol
+            Agent Guild Protocol
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Equip agents to protocol roles. Fill all slots to fully activate the swarm.
+            Equip agents to protocol roles. Fill all slots to fully activate the agent-guild.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -280,7 +280,7 @@ export default function SwarmPage() {
                     "text-[10px] font-bold uppercase tracking-[0.2em] transition-colors",
                     allEquipped ? "text-amber-400" : "text-muted-foreground/30"
                   )}>
-                    Swarm
+                    Agent Guild
                   </span>
                   <span className={cn(
                     "text-[10px] uppercase tracking-widest transition-colors mt-0.5",

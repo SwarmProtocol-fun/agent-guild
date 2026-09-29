@@ -68,16 +68,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Debug: log session state changes
   useEffect(() => {
-    debug.log("[Swarm:Session] State updated:", session);
+    debug.log("[Agent Guild:Session] State updated:", session);
   }, [session]);
 
   const fetchSession = useCallback(async () => {
-    debug.log("[Swarm:Session] Fetching session...");
+    debug.log("[Agent Guild:Session] Fetching session...");
     try {
       const res = await fetch("/api/auth/session", { credentials: "include" });
-      debug.log("[Swarm:Session] Session response:", res.status);
+      debug.log("[Agent Guild:Session] Session response:", res.status);
       if (!res.ok) {
-        debug.log("[Swarm:Session] Not authenticated");
+        debug.log("[Agent Guild:Session] Not authenticated");
         setSession({
           authenticated: false,
           address: null,
@@ -88,17 +88,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
 
       const data = await res.json();
-      debug.log("[Swarm:Session] Session data:", data);
+      debug.log("[Agent Guild:Session] Session data:", data);
       const newSession = {
         authenticated: data.authenticated ?? false,
         address: data.address ?? null,
         role: data.role ?? null,
         sessionId: data.sessionId ?? null,
       };
-      debug.log("[Swarm:Session] Setting session state to:", newSession);
+      debug.log("[Agent Guild:Session] Setting session state to:", newSession);
       setSession(newSession);
     } catch (err) {
-      debug.error("[Swarm:Session] Fetch error:", err);
+      debug.error("[Agent Guild:Session] Fetch error:", err);
       setSession({
         authenticated: false,
         address: null,
@@ -107,7 +107,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       });
     } finally {
       setLoading(false);
-      debug.log("[Swarm:Session] Loading complete");
+      debug.log("[Agent Guild:Session] Loading complete");
     }
   }, []);
 
@@ -128,7 +128,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     if (loading || session.authenticated || cleanedRef.current) return;
     cleanedRef.current = true;
     const removed = clearWalletStorage();
-    if (removed > 0) debug.log("[Swarm:Session] Not authenticated — cleared stale wallet state:", removed, "keys");
+    if (removed > 0) debug.log("[Agent Guild:Session] Not authenticated — cleared stale wallet state:", removed, "keys");
   }, [loading, session.authenticated]);
 
   const logout = useCallback(async () => {

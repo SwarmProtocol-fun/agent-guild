@@ -1,7 +1,7 @@
 /**
  * Dynamic NFT Metadata API — Agent Identity NFT
  *
- * Returns ERC721 metadata JSON for SwarmAgentIdentityNFT.
+ * Returns ERC721 metadata JSON for AgentGuildAgentIdentityNFT.
  * Metadata updates dynamically based on current credit score and trust score.
  *
  * Endpoint: GET /api/nft/agent/{agentAddress}
@@ -43,9 +43,9 @@ export async function GET(
       // Agent not found in database - return default metadata
       return NextResponse.json({
         name: `Agent #${address.slice(0, 6)}...${address.slice(-4)}`,
-        description: "Swarm Protocol Agent Identity — Unregistered",
-        image: `https://swarmprotocol.fun/api/nft/badge/${address}`,
-        external_url: `https://swarmprotocol.fun/agents`,
+        description: "Agent Guild Protocol Agent Identity — Unregistered",
+        image: `https://agent-guild.com/api/nft/badge/${address}`,
+        external_url: `https://agent-guild.com/agents`,
         attributes: [
           {
             trait_type: "Status",
@@ -102,9 +102,9 @@ export async function GET(
     // Return OpenSea-compatible ERC721 metadata
     return NextResponse.json({
       name: `${name} #${asn}`,
-      description: `Swarm Protocol Agent Identity\n\nThis NFT represents the on-chain identity and reputation of "${name}" on the Swarm Protocol. The credit score (300-900) and trust score (0-100) update automatically as the agent completes tasks and builds reputation.\n\nASN: ${asn}\nWallet: ${address}`,
-      image: `https://swarmprotocol.fun/api/nft/badge/${address}`,
-      external_url: `https://swarmprotocol.fun/agents/${agentDoc.id}`,
+      description: `Agent Guild Protocol Agent Identity\n\nThis NFT represents the on-chain identity and reputation of "${name}" on the Agent Guild Protocol. The credit score (300-900) and trust score (0-100) update automatically as the agent completes tasks and builds reputation.\n\nASN: ${asn}\nWallet: ${address}`,
+      image: `https://agent-guild.com/api/nft/badge/${address}`,
+      external_url: `https://agent-guild.com/agents/${agentDoc.id}`,
       attributes: [
         {
           trait_type: "Agent Name",

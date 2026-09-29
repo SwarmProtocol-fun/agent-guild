@@ -1,5 +1,5 @@
 /** Route matching for mod servers: "METHOD /path/:param" keys. Pure, no Next imports. */
-import type { RouteDef } from "@swarm/sdk";
+import type { RouteDef } from "@agent-guild/sdk";
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type HttpMethod = (typeof METHODS)[number];

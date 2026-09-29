@@ -38,7 +38,7 @@ export function MarketHero({
                             Marketplace
                         </h1>
                         <p className="text-sm text-muted-foreground">
-                            Discover agents, mods, plugins, and skills for your swarm
+                            Discover agents, mods, plugins, and skills for your agent-guild
                         </p>
                     </div>
                     <Badge className="bg-amber-500/10 text-amber-500 border-amber-500/20 text-sm shrink-0">

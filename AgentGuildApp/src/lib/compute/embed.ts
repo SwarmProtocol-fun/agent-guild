@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Embed Token Helpers
+ * Agent Guild Compute — Embed Token Helpers
  */
 
 import type { EmbedMode } from "./types";

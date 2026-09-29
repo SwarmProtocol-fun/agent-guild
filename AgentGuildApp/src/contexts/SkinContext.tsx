@@ -16,7 +16,7 @@ export interface SkinMeta {
 
 /** All known skins. Classic is builtin (always available). Others map to marketplace items. */
 export const SKINS: SkinMeta[] = [
-  { id: "classic", name: "Classic", description: "Amber & gold — the original Swarm look", colors: ["#FFD700", "#FFA500", "#FF8C00"], builtin: true },
+  { id: "classic", name: "Classic", description: "Amber & gold — the original Agent Guild look", colors: ["#FFD700", "#FFA500", "#FF8C00"], builtin: true },
   { id: "hedera", name: "⚡ HBAR Hashgraph", description: "Emerald & purple — Built on Hedera", colors: ["#10b981", "#a855f7", "#059669"], builtin: true, marketId: "skin-hedera" },
   { id: "futuristic", name: "Futuristic", description: "Cyan & magenta — Arwes-inspired sci-fi", colors: ["#26dafd", "#fc26fa", "#be26fc"], builtin: true, marketId: "skin-futuristic" },
   { id: "retro-terminal", name: "Retro Terminal", description: "CRT phosphor amber with scanlines & vignette", colors: ["#ff6a00", "#994400", "#331a00"], builtin: true, marketId: "skin-retro-terminal" },
@@ -28,8 +28,8 @@ export const SKINS: SkinMeta[] = [
   { id: "mecha", name: "Mecha LaunchPad", description: "Industrial mech hangar — 3D robot agents on a launchpad", colors: ["#58a6ff", "#3fb950", "#d29922"], builtin: true, marketId: "skin-mecha" },
 ];
 
-const STORAGE_KEY = "swarm-skin";
-const SCANLINES_KEY = "swarm-scanlines";
+const STORAGE_KEY = "agent-guild-skin";
+const SCANLINES_KEY = "agent-guild-scanlines";
 const DEFAULT_SKIN = "classic";
 
 interface SkinContextValue {

@@ -1,4 +1,4 @@
-# Swarm Troubleshooting Guide
+# Agent Guild Troubleshooting Guide
 
 ## Common Errors
 
@@ -19,13 +19,13 @@ Add these to your ad blocker whitelist:
 - `*.firebaseio.com`
 - `firestore.googleapis.com`
 
-#### Option B: Disable ad blocker for Swarm domain
+#### Option B: Disable ad blocker for Agent Guild domain
 Add exception for:
-- `swarmprotocol.fun`
-- `swarm-protocol.xyz`
+- `agent-guild.com`
+- `agent-guild-protocol.xyz`
 
 #### Option C: Use different browser profile
-Open Swarm in:
+Open Agent Guild in:
 - Chrome Incognito (with extensions disabled)
 - Firefox Private Window
 - Brave (disable shields for this site)
@@ -46,17 +46,17 @@ Cannot start computer in "starting" state
 
 #### Step 1: Check instance status
 ```bash
-curl https://swarmprotocol.fun/api/compute/computers/{id}/status
+curl https://agent-guild.com/api/compute/computers/{id}/status
 ```
 
 #### Step 2: If stuck > 10 minutes, force reset
 ```bash
-curl -X POST https://swarmprotocol.fun/api/compute/computers/{id}/force-reset
+curl -X POST https://agent-guild.com/api/compute/computers/{id}/force-reset
 ```
 
 #### Step 3: Retry start
 ```bash
-curl -X POST https://swarmprotocol.fun/api/compute/computers/{id}/start
+curl -X POST https://agent-guild.com/api/compute/computers/{id}/start
 ```
 
 **Prevention:**
@@ -70,7 +70,7 @@ curl -X POST https://swarmprotocol.fun/api/compute/computers/{id}/start
 
 **Error:**
 ```
-GET https://swarmprotocol.fun/logs 404 (Not Found)
+GET https://agent-guild.com/logs 404 (Not Found)
 ```
 
 **Cause:** Missing logs endpoint or incorrect route
@@ -79,7 +79,7 @@ GET https://swarmprotocol.fun/logs 404 (Not Found)
 
 #### Create logs API route:
 ```bash
-# See SwarmApp/src/app/api/logs/route.ts
+# See AgentGuildApp/src/app/api/logs/route.ts
 ```
 
 #### Or use /api/logs:
@@ -127,7 +127,7 @@ AZURE_SUBSCRIPTION_ID is missing. Falling back from 'azure' to 'stub' provider.
 **Solution:**
 ```bash
 export AZURE_SUBSCRIPTION_ID="your-sub-id"
-export AZURE_RESOURCE_GROUP="swarm-compute"
+export AZURE_RESOURCE_GROUP="agent-guild-compute"
 export AZURE_TENANT_ID="your-tenant-id"
 export AZURE_CLIENT_ID="your-client-id"
 export AZURE_CLIENT_SECRET="your-client-secret"
@@ -135,7 +135,7 @@ export AZURE_CLIENT_SECRET="your-client-secret"
 
 ---
 
-### Swarm Node: No Nodes Available
+### Agent Guild Node: No Nodes Available
 
 **Error:**
 ```
@@ -146,7 +146,7 @@ No nodes currently available
 
 1. **Start a node daemon:**
 ```bash
-cd packages/swarm-node
+cd packages/agent-guild-node
 npm run dev
 ```
 
@@ -263,7 +263,7 @@ POST /api/compute/computers/{id}/start
 
 ### 1. Status Endpoint
 ```bash
-curl https://swarmprotocol.fun/api/compute/computers/{id}/status
+curl https://agent-guild.com/api/compute/computers/{id}/status
 ```
 
 Returns:
@@ -297,22 +297,22 @@ Returns:
 npm run dev
 
 # Production (PM2)
-pm2 logs swarm-app
+pm2 logs agent-guild-app
 
 # Production (Docker)
-docker logs swarm-app -f --tail 100
+docker logs agent-guild-app -f --tail 100
 ```
 
-**Swarm Node logs:**
+**Agent Guild Node logs:**
 ```bash
 # Development
-cd packages/swarm-node && npm run dev
+cd packages/agent-guild-node && npm run dev
 
 # Production (systemd)
-sudo journalctl -u swarm-node -f
+sudo journalctl -u agent-guild-node -f
 
 # Production (Docker)
-docker logs swarm-node -f
+docker logs agent-guild-node -f
 ```
 
 ---
@@ -403,10 +403,10 @@ console.log(computer.name); // Safe
 
 ### Support Channels
 
-- **GitHub Issues:** https://github.com/swarm-protocol/swarm/issues
-- **Discord:** https://discord.gg/swarm
-- **Email:** support@swarmprotocol.fun
-- **Docs:** https://docs.swarmprotocol.fun
+- **GitHub Issues:** https://github.com/agent-guild-protocol/agent-guild/issues
+- **Discord:** https://discord.gg/agent-guild
+- **Email:** support@agent-guild.com
+- **Docs:** https://docs.agent-guild.com
 
 ---
 

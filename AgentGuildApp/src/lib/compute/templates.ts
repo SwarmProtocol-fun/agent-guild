@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Template Helpers
+ * Agent Guild Compute — Template Helpers
  */
 
 import type { ComputeTemplate, SizeKey, Region, ControllerType, ModelKey, ProviderKey } from "./types";

@@ -1,10 +1,10 @@
-# Building a Custom Reskin Mod for Swarm
+# Building a Custom Reskin Mod for Agent Guild
 
-This guide walks you through creating a full-platform reskin mod that changes the entire Swarm dashboard appearance — colors, fonts, layout chrome, labels, and effects. You can sell your reskin on the Swarm Marketplace.
+This guide walks you through creating a full-platform reskin mod that changes the entire Agent Guild dashboard appearance — colors, fonts, layout chrome, labels, and effects. You can sell your reskin on the Agent Guild Marketplace.
 
 ## Overview
 
-A reskin mod can range from a simple CSS-only color swap to a complete layout overhaul with custom components. The Swarm skin system supports both:
+A reskin mod can range from a simple CSS-only color swap to a complete layout overhaul with custom components. The Agent Guild skin system supports both:
 
 | Level | What it changes | Complexity |
 |-------|----------------|------------|
@@ -325,7 +325,7 @@ curl -X POST /api/v1/marketplace/publish \
 
 Community submissions go through review stages:
 1. **Intake** — Submitted, pending review
-2. **Review** — Swarm team reviews for quality and security
+2. **Review** — Agent Guild team reviews for quality and security
 3. **Approved** — Live on marketplace
 4. **Live** — Available for purchase/installation
 
@@ -354,7 +354,7 @@ For a **complete full reskin mod**, you'll touch these files:
 
 - **Start with CSS-only**: Get your colors and effects right before building custom components.
 - **Use the existing skin CSS as templates**: Each skin in `globals.css` follows the same ~25 override categories.
-- **Test with dark mode**: Swarm is dark-mode-first. Make sure your skin looks great in both modes.
+- **Test with dark mode**: Agent Guild is dark-mode-first. Make sure your skin looks great in both modes.
 - **Keep fonts small**: Use `font-display: swap` and `@font-face` inside your skin selector so fonts only load when active.
 - **Code-split components**: Always use `dynamic()` import in `DashboardShell` so your component code only loads for users with your skin.
 - **Don't modify page files**: Keep reskin changes in CSS, context providers, and layout chrome. This makes your mod non-invasive and easy to extract.

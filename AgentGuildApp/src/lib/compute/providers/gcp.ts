@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — GCP Compute Engine Provider
+ * Agent Guild Compute — GCP Compute Engine Provider
  *
  * Uses Compute Engine for VM lifecycle, OS Login for IAM-based SSH,
  * and the instances.getScreenshot API for provider-side screenshots.
@@ -40,7 +40,7 @@ export class GcpComputeProvider implements ComputeProvider {
     const zone = config.providerRegion ? `${config.providerRegion}-b` : this.resolveZone(config.region);
     const machineType = config.providerInstanceType || this.resolveMachineType(config.sizeKey);
     const sourceImage = config.providerImage || PROVIDER_BASE_IMAGES.gcp;
-    const instanceName = `swarm-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const instanceName = `agent-guild-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
     const [operation] = await instancesClient.insert({
       project: this.projectId,
@@ -63,14 +63,14 @@ export class GcpComputeProvider implements ComputeProvider {
         metadata: {
           items: [
             { key: "startup-script", value: this.buildStartupScript(config) },
-            { key: "swarm-managed", value: "true" },
-            { key: "swarm-size", value: config.sizeKey },
+            { key: "agent-guild-managed", value: "true" },
+            { key: "agent-guild-size", value: config.sizeKey },
             { key: "enable-oslogin", value: "TRUE" },
           ],
         },
         labels: {
-          "swarm-managed": "true",
-          "swarm-size": config.sizeKey,
+          "agent-guild-managed": "true",
+          "agent-guild-size": config.sizeKey,
         },
       },
     });
@@ -193,7 +193,7 @@ export class GcpComputeProvider implements ComputeProvider {
     if (!bootDisk) throw new Error("No boot disk found");
 
     const snapshotsClient = new compute.SnapshotsClient();
-    const snapshotName = `swarm-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const snapshotName = `agent-guild-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
     const disksClient = new compute.DisksClient();
     await disksClient.createSnapshot({
       project: this.projectId,
@@ -201,7 +201,7 @@ export class GcpComputeProvider implements ComputeProvider {
       disk: bootDisk,
       snapshotResource: {
         name: snapshotName,
-        labels: { "swarm-managed": "true" },
+        labels: { "agent-guild-managed": "true" },
       },
     });
     return snapshotName;
@@ -223,7 +223,7 @@ export class GcpComputeProvider implements ComputeProvider {
     // Placeholder — in production, use gcloud compute ssh or OS Login API
     return {
       success: false,
-      error: "SSH command execution not yet configured — install swarm-agent in guest",
+      error: "SSH command execution not yet configured — install agent-guild-agent in guest",
       durationMs: Date.now() - start,
     };
   }
@@ -247,7 +247,7 @@ set -e
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify xdotool imagemagick
 mkdir -p /root/.vnc
-echo "swarmvnc" | vncpasswd -f > /root/.vnc/passwd
+echo "agentguildvnc" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
 cat > /root/.vnc/xstartup << 'XSTARTUP'
 #!/bin/bash

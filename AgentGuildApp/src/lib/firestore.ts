@@ -42,7 +42,11 @@ export interface Organization {
   githubAccountType?: 'Organization' | 'User';
   githubAccountAvatarUrl?: string;
   githubConnectedAt?: unknown;
-  // Swarm Protocol inventory slots
+  // Agent Guild Protocol inventory slots
+  agentSlots?: {
+    [slotId: string]: { agentId: string; assignedAt: unknown } | null;
+  };
+  /** @deprecated legacy field name from before the Swarm Protocol -> Agent Guild rename; reads fall back to this for existing docs */
   swarmSlots?: {
     [slotId: string]: { agentId: string; assignedAt: unknown } | null;
   };
@@ -251,7 +255,7 @@ export interface Channel {
   createdAt: unknown;
 }
 
-export interface SwarmNode {
+export interface AgentGuildNode {
   id: string;
   providerAddress: string;
   status: 'online' | 'offline';
@@ -557,7 +561,7 @@ export async function updateTask(taskId: string, data: Partial<Task>): Promise<v
         const agent = agentDoc.data() as Agent;
 
         if (agent?.asn && agent?.walletAddress) {
-          // [swarm-core] Hedera score emitter removed — install swarm-hedera mod for on-chain scoring
+          // [agent-guild-core] Hedera score emitter removed — install agent-guild-hedera mod for on-chain scoring
           // Task completion events are a no-op in core
         }
       }
@@ -1220,18 +1224,18 @@ export async function getPlatformSnapshot(orgId: string) {
   };
 }
 
-// ─── Swarm Node & Leases ────────────────────────────────────────
+// ─── Agent Guild Node & Leases ────────────────────────────────────────
 
-export async function getSwarmNodes(): Promise<SwarmNode[]> {
+export async function getAgentGuildNodes(): Promise<AgentGuildNode[]> {
   const q = query(collection(db, "nodes"), orderBy("lastHeartbeat", "desc"));
   const snap = await getDocs(q);
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as SwarmNode);
+  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }) as AgentGuildNode);
 }
 
-export async function getSwarmNode(id: string): Promise<SwarmNode | null> {
+export async function getAgentGuildNode(id: string): Promise<AgentGuildNode | null> {
   const snap = await getDoc(doc(db, "nodes", id));
   if (!snap.exists()) return null;
-  return { id: snap.id, ...snap.data() } as SwarmNode;
+  return { id: snap.id, ...snap.data() } as AgentGuildNode;
 }
 
 export async function createLease(data: Omit<ComputeLease, "id" | "createdAt" | "status">): Promise<string> {

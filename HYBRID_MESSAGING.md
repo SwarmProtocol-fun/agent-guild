@@ -2,7 +2,7 @@
 
 ## Overview
 
-Swarm now features a **hybrid messaging architecture** that combines Mission Control's structured messaging patterns with Swarm's scalable WebSocket + Pub/Sub infrastructure.
+Agent Guild now features a **hybrid messaging architecture** that combines Mission Control's structured messaging patterns with Agent Guild's scalable WebSocket + Pub/Sub infrastructure.
 
 This system provides:
 - **Typed message formats** (a2a, coordinator, broadcast, session)
@@ -42,7 +42,7 @@ Direct peer-to-peer communication between agents.
 
 **CLI:**
 ```bash
-swarm send-a2a agent_123 '{"action":"analyze","file":"data.csv"}'
+agent-guild send-a2a agent_123 '{"action":"analyze","file":"data.csv"}'
 ```
 
 ---
@@ -72,7 +72,7 @@ Messages routed through a coordinator agent for orchestrated workflows.
 
 **CLI:**
 ```bash
-swarm send-coord --coordinator coord_123 --action execute '{"task":"process_data"}'
+agent-guild send-coord --coordinator coord_123 --action execute '{"task":"process_data"}'
 ```
 
 ---
@@ -124,13 +124,13 @@ Messages scoped to a multi-step workflow session.
 **CLI:**
 ```bash
 # Create session
-swarm create-session --coordinator coord_123 --participants agent_1,agent_2 --purpose "Data pipeline" --ttl 120
+agent-guild create-session --coordinator coord_123 --participants agent_1,agent_2 --purpose "Data pipeline" --ttl 120
 
 # List sessions
-swarm list-sessions --status active
+agent-guild list-sessions --status active
 
 # Close session
-swarm close-session session_123 --status completed
+agent-guild close-session session_123 --status completed
 ```
 
 ---
@@ -262,22 +262,22 @@ All commands use Ed25519 signature authentication.
 **Messaging:**
 ```bash
 # A2A message
-swarm send-a2a agent_123 '{"action":"analyze","data":"file.txt"}'
+agent-guild send-a2a agent_123 '{"action":"analyze","data":"file.txt"}'
 
 # Coordinator message
-swarm send-coord --coordinator coord_123 --action execute '{"task":"process"}'
+agent-guild send-coord --coordinator coord_123 --action execute '{"task":"process"}'
 ```
 
 **Session Management:**
 ```bash
 # Create workflow session
-swarm create-session --coordinator coord_123 --participants agent_1,agent_2
+agent-guild create-session --coordinator coord_123 --participants agent_1,agent_2
 
 # List sessions
-swarm list-sessions --status active
+agent-guild list-sessions --status active
 
 # Close session
-swarm close-session session_123 --status completed
+agent-guild close-session session_123 --status completed
 ```
 
 ---
@@ -392,9 +392,9 @@ swarm close-session session_123 --status completed
 
 ---
 
-## Comparison: Mission Control vs Swarm
+## Comparison: Mission Control vs Agent Guild
 
-| Feature | Mission Control | Swarm Hybrid |
+| Feature | Mission Control | Agent Guild Hybrid |
 |---------|----------------|--------------|
 | Message Types | Typed (a2a, coord, session) | Same + broadcast |
 | Delivery | Session-threaded | WebSocket + Pub/Sub |
@@ -406,7 +406,7 @@ swarm close-session session_123 --status completed
 
 **Key Advantages:**
 - ✅ Structured messaging patterns from Mission Control
-- ✅ Scalable WebSocket infrastructure from Swarm
+- ✅ Scalable WebSocket infrastructure from Agent Guild
 - ✅ Best of both worlds: type safety + real-time delivery
 
 ---
@@ -417,32 +417,32 @@ swarm close-session session_123 --status completed
 
 ```bash
 # 1. Register coordinator
-swarm register --name DataCoordinator --type coordinator
+agent-guild register --name DataCoordinator --type coordinator
 
 # 2. Create workflow session
-swarm create-session \
+agent-guild create-session \
   --coordinator coord_123 \
   --participants fetcher,processor,saver \
   --purpose "Data ETL Pipeline" \
   --ttl 180
 
 # 3. Coordinator sends tasks to participants
-swarm send-coord \
+agent-guild send-coord \
   --coordinator coord_123 \
   --action fetch \
   '{"source":"api.example.com/data","format":"json"}'
 
 # 4. Fetcher sends data to processor (a2a)
-swarm send-a2a processor_agent '{"data":"[...]","format":"json"}'
+agent-guild send-a2a processor_agent '{"data":"[...]","format":"json"}'
 
 # 5. Processor notifies coordinator when done
-swarm send-coord \
+agent-guild send-coord \
   --coordinator coord_123 \
   --action complete \
   '{"status":"success","rows":1000}'
 
 # 6. Close session
-swarm close-session session_123 --status completed
+agent-guild close-session session_123 --status completed
 ```
 
 ---
@@ -489,7 +489,7 @@ npm test src/app/api/v1/sessions/__tests__/sessions.test.ts
   - `/components/agent-messages-widget.tsx` - UI component
 
 - **API Docs**: See OpenAPI spec at `/api/v1/docs`
-- **Architecture**: Based on Mission Control patterns + Swarm scaling
+- **Architecture**: Based on Mission Control patterns + Agent Guild scaling
 
 ---
 

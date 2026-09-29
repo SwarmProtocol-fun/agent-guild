@@ -106,7 +106,7 @@ function renderMessageContent(content: string, agentNames: Set<string>): React.R
 /*  Channel Order Persistence                                         */
 /* ------------------------------------------------------------------ */
 
-const CHANNEL_ORDER_KEY = "swarm-channel-order";
+const CHANNEL_ORDER_KEY = "agent-guild-channel-order";
 
 function loadChannelOrder(): Record<string, string[]> | null {
   if (typeof window === "undefined") return null;

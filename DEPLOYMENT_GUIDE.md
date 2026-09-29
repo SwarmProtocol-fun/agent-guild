@@ -1,4 +1,4 @@
-# Swarm Production Deployment Guide
+# Agent Guild Production Deployment Guide
 
 ## Table of Contents
 1. [Architecture Overview](#architecture-overview)
@@ -50,7 +50,7 @@ Railway auto-deploys `hub/` from GitHub, provisions Redis, and terminates HTTPS 
 
 ### Setup
 
-1. Create a [Railway](https://railway.com) project and connect the `swarm-core` GitHub repo.
+1. Create a [Railway](https://railway.com) project and connect the `agent-guild-core` GitHub repo.
 2. Add a **Redis** database: "+ New" → "Database" → "Add Redis". Railway exposes it as reference variable `${{Redis.REDIS_URL}}`.
 3. Add a service from the same repo:
    - **Root Directory**: `hub`
@@ -61,13 +61,13 @@ Railway auto-deploys `hub/` from GitHub, provisions Redis, and terminates HTTPS 
 | --- | --- | --- |
 | `FIREBASE_SERVICE_ACCOUNT` | Yes | Base64-encoded Firebase service account JSON (`base64 -w0 service-account.json`) — used by the Admin SDK for Firestore access |
 | `REDIS_URL` | Yes | Set to `${{Redis.REDIS_URL}}` (reference to the Redis service added above) |
-| `ALLOWED_ORIGINS` | Recommended | Comma-separated origins, e.g. `https://swarmprotocol.ai`; falls back to that + `localhost:3000` if unset |
+| `ALLOWED_ORIGINS` | Recommended | Comma-separated origins, e.g. `https://agent-guild.com`; falls back to that + `localhost:3000` if unset |
 | `PORT` | No | Railway injects this automatically — the hub reads `process.env.PORT` |
 | `INSTANCE_ID` | No | Defaults to `hub-<pid>`; set explicitly once you run more than one instance |
 | `HUB_REGION` | No | Defaults to `us-east` |
 | `GCP_PROJECT_ID`, `PUBSUB_TOPIC`, `PUBSUB_SUBSCRIPTION`, `GOOGLE_APPLICATION_CREDENTIALS` | Only for multi-instance | Enables cross-instance broadcast via [Cloud Pub/Sub](#cloud-pubsub-setup-optional) — a single Railway instance doesn't need these |
 
-5. **Custom domain**: add one under the service's Settings → Networking (e.g. `hub.swarmprotocol.ai`), then point `SwarmApp`'s hub URL env var at it.
+5. **Custom domain**: add one under the service's Settings → Networking (e.g. `api.agent-guild.com`), then point `AgentGuildApp`'s hub URL env var at it.
 
 ### Scaling beyond one instance
 
@@ -89,8 +89,8 @@ Bumping `numReplicas` in `hub/railway.json` isn't enough by itself: this hub kee
 
 ```hcl
 # Target Group for Hub instances
-resource "aws_lb_target_group" "swarm_hub" {
-  name     = "swarm-hub-tg"
+resource "aws_lb_target_group" "agent_guild_hub" {
+  name     = "agent-guild-hub-tg"
   port     = 8400
   protocol = "HTTP"
   vpc_id   = var.vpc_id
@@ -118,8 +118,8 @@ resource "aws_lb_target_group" "swarm_hub" {
 }
 
 # Application Load Balancer
-resource "aws_lb" "swarm" {
-  name               = "swarm-alb"
+resource "aws_lb" "agent-guild" {
+  name               = "agent-guild-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
@@ -131,21 +131,21 @@ resource "aws_lb" "swarm" {
 
 # Listener for Hub WebSocket
 resource "aws_lb_listener" "hub" {
-  load_balancer_arn = aws_lb.swarm.arn
+  load_balancer_arn = aws_lb.agent-guild.arn
   port              = "8400"
   protocol          = "HTTP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.swarm_hub.arn
+    target_group_arn = aws_lb_target_group.agent_guild_hub.arn
   }
 }
 
 # Auto Scaling Group for Hub instances
-resource "aws_autoscaling_group" "swarm_hub" {
-  name                = "swarm-hub-asg"
+resource "aws_autoscaling_group" "agent_guild_hub" {
+  name                = "agent-guild-hub-asg"
   vpc_zone_identifier = var.private_subnet_ids
-  target_group_arns   = [aws_lb_target_group.swarm_hub.arn]
+  target_group_arns   = [aws_lb_target_group.agent_guild_hub.arn]
 
   min_size         = 2
   max_size         = 10
@@ -155,13 +155,13 @@ resource "aws_autoscaling_group" "swarm_hub" {
   health_check_grace_period = 300
 
   launch_template {
-    id      = aws_launch_template.swarm_hub.id
+    id      = aws_launch_template.agent_guild_hub.id
     version = "$Latest"
   }
 
   tag {
     key                 = "Name"
-    value               = "swarm-hub"
+    value               = "agent-guild-hub"
     propagate_at_launch = true
   }
 }
@@ -174,7 +174,7 @@ resource "aws_autoscaling_group" "swarm_hub" {
 **nginx.conf:**
 
 ```nginx
-upstream swarm_hub {
+upstream agent_guild_hub {
     # CRITICAL: IP hash for sticky sessions
     ip_hash;
 
@@ -189,7 +189,7 @@ upstream swarm_hub {
 server {
     listen 80;
     listen [::]:80;
-    server_name hub.swarm.example.com;
+    server_name hub.agent-guild.example.com;
 
     # Redirect HTTP to HTTPS
     return 301 https://$server_name$request_uri;
@@ -198,11 +198,11 @@ server {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name hub.swarm.example.com;
+    server_name hub.agent-guild.example.com;
 
     # SSL certificates
-    ssl_certificate /etc/letsencrypt/live/hub.swarm.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/hub.swarm.example.com/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/hub.agent-guild.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hub.agent-guild.example.com/privkey.pem;
 
     # SSL settings
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -211,7 +211,7 @@ server {
 
     # WebSocket proxy settings
     location / {
-        proxy_pass http://swarm_hub;
+        proxy_pass http://agent-guild_hub;
 
         # WebSocket upgrade headers
         proxy_http_version 1.1;
@@ -235,14 +235,14 @@ server {
 
     # Health check endpoint (no logging)
     location /health {
-        proxy_pass http://swarm_hub/health;
+        proxy_pass http://agent-guild_hub/health;
         access_log off;
     }
 
     # Rate limiting for REST API
     location /api/ {
         limit_req zone=api_limit burst=20 nodelay;
-        proxy_pass http://swarm_hub;
+        proxy_pass http://agent-guild_hub;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -261,8 +261,8 @@ limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
 
 ```hcl
 # Health check
-resource "google_compute_health_check" "swarm_hub" {
-  name                = "swarm-hub-health"
+resource "google_compute_health_check" "agent_guild_hub" {
+  name                = "agent-guild-hub-health"
   check_interval_sec  = 30
   timeout_sec         = 5
   healthy_threshold   = 2
@@ -275,12 +275,12 @@ resource "google_compute_health_check" "swarm_hub" {
 }
 
 # Backend service with session affinity
-resource "google_compute_backend_service" "swarm_hub" {
-  name                  = "swarm-hub-backend"
+resource "google_compute_backend_service" "agent_guild_hub" {
+  name                  = "agent-guild-hub-backend"
   protocol              = "HTTP"
   timeout_sec           = 3600
   enable_cdn            = false
-  health_checks         = [google_compute_health_check.swarm_hub.id]
+  health_checks         = [google_compute_health_check.agent_guild_hub.id]
   load_balancing_scheme = "EXTERNAL"
 
   # CRITICAL: Session affinity for WebSocket
@@ -288,21 +288,21 @@ resource "google_compute_backend_service" "swarm_hub" {
   affinity_cookie_ttl_sec = 86400
 
   backend {
-    group           = google_compute_instance_group_manager.swarm_hub.instance_group
+    group           = google_compute_instance_group_manager.agent_guild_hub.instance_group
     balancing_mode  = "UTILIZATION"
     max_utilization = 0.8
   }
 }
 
 # Managed instance group
-resource "google_compute_instance_group_manager" "swarm_hub" {
-  name               = "swarm-hub-igm"
-  base_instance_name = "swarm-hub"
+resource "google_compute_instance_group_manager" "agent_guild_hub" {
+  name               = "agent-guild-hub-igm"
+  base_instance_name = "agent-guild-hub"
   zone               = var.zone
   target_size        = 2
 
   version {
-    instance_template = google_compute_instance_template.swarm_hub.id
+    instance_template = google_compute_instance_template.agent_guild_hub.id
   }
 
   named_port {
@@ -311,7 +311,7 @@ resource "google_compute_instance_group_manager" "swarm_hub" {
   }
 
   auto_healing_policies {
-    health_check      = google_compute_health_check.swarm_hub.id
+    health_check      = google_compute_health_check.agent_guild_hub.id
     initial_delay_sec = 300
   }
 }
@@ -348,10 +348,10 @@ Test with curl:
 
 ```bash
 # Get initial instance ID from health check
-INSTANCE_1=$(curl -s https://hub.swarm.example.com/health | jq -r '.instanceId')
+INSTANCE_1=$(curl -s https://hub.agent-guild.example.com/health | jq -r '.instanceId')
 
 # Make second request (should route to same instance)
-INSTANCE_2=$(curl -s https://hub.swarm.example.com/health | jq -r '.instanceId')
+INSTANCE_2=$(curl -s https://hub.agent-guild.example.com/health | jq -r '.instanceId')
 
 # Verify they match
 if [ "$INSTANCE_1" == "$INSTANCE_2" ]; then
@@ -384,7 +384,7 @@ REDIS_URL=redis://:password@redis-host:6379
 FIREBASE_SERVICE_ACCOUNT=your-base64-encoded-service-account-json
 
 # Security
-ALLOWED_ORIGINS=https://swarmprotocol.ai,https://app.swarmprotocol.ai
+ALLOWED_ORIGINS=https://agent-guild.com,https://app.agent-guild.com
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=60
 MAX_CONNECTIONS_PER_AGENT=5
@@ -392,8 +392,8 @@ AUTH_WINDOW_MS=300000
 
 # Cloud Pub/Sub (for multi-instance)
 GCP_PROJECT_ID=your-gcp-project
-PUBSUB_TOPIC=swarm-broadcast
-PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-east-1a  # UNIQUE per instance
+PUBSUB_TOPIC=agent-guild-broadcast
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-hub-us-east-1a  # UNIQUE per instance
 GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
 
 # Monitoring
@@ -516,65 +516,65 @@ Required for multi-instance deployments with cross-instance broadcasting.
 
 ```bash
 # 1. Create topic
-gcloud pubsub topics create swarm-broadcast
+gcloud pubsub topics create agent-guild-broadcast
 
 # 2. Create subscription for each instance
-gcloud pubsub subscriptions create swarm-broadcast-hub-1 \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-1 \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60
 
-gcloud pubsub subscriptions create swarm-broadcast-hub-2 \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-2 \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60
 
 # 3. Create service account
-gcloud iam service-accounts create swarm-hub \
-  --display-name="Swarm Hub Service Account"
+gcloud iam service-accounts create agent-guild-hub \
+  --display-name="Agent Guild Hub Service Account"
 
 # 4. Grant permissions
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/pubsub.publisher"
 
 gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
   --role="roles/pubsub.subscriber"
 
 # 5. Download key
-gcloud iam service-accounts keys create swarm-hub-key.json \
-  --iam-account=swarm-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com
+gcloud iam service-accounts keys create agent-guild-hub-key.json \
+  --iam-account=agent-guild-hub@YOUR_PROJECT_ID.iam.gserviceaccount.com
 ```
 
 ### Terraform
 
 ```hcl
-resource "google_pubsub_topic" "swarm_broadcast" {
-  name = "swarm-broadcast"
+resource "google_pubsub_topic" "agent_guild_broadcast" {
+  name = "agent-guild-broadcast"
 }
 
-resource "google_pubsub_subscription" "swarm_hub_1" {
-  name  = "swarm-broadcast-hub-1"
-  topic = google_pubsub_topic.swarm_broadcast.name
+resource "google_pubsub_subscription" "agent_guild_hub_1" {
+  name  = "agent-guild-broadcast-hub-1"
+  topic = google_pubsub_topic.agent_guild_broadcast.name
 
   ack_deadline_seconds = 60
   message_retention_duration = "600s"
 }
 
-resource "google_service_account" "swarm_hub" {
-  account_id   = "swarm-hub"
-  display_name = "Swarm Hub Service Account"
+resource "google_service_account" "agent_guild_hub" {
+  account_id   = "agent-guild-hub"
+  display_name = "Agent Guild Hub Service Account"
 }
 
-resource "google_project_iam_member" "swarm_hub_pubsub_publisher" {
+resource "google_project_iam_member" "agent_guild_hub_pubsub_publisher" {
   project = var.project_id
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${google_service_account.swarm_hub.email}"
+  member  = "serviceAccount:${google_service_account.agent_guild_hub.email}"
 }
 
-resource "google_project_iam_member" "swarm_hub_pubsub_subscriber" {
+resource "google_project_iam_member" "agent_guild_hub_pubsub_subscriber" {
   project = var.project_id
   role    = "roles/pubsub.subscriber"
-  member  = "serviceAccount:${google_service_account.swarm_hub.email}"
+  member  = "serviceAccount:${google_service_account.agent_guild_hub.email}"
 }
 ```
 
@@ -592,32 +592,32 @@ resource "google_project_iam_member" "swarm_hub_pubsub_subscriber" {
 
 ### Key Metrics to Monitor
 
-- `swarm_hub_connections_total` - Total WebSocket connections
-- `swarm_hub_agents_total` - Connected agents
-- `swarm_hub_memory_heap_used_bytes` - Heap memory usage
-- `swarm_hub_uptime_seconds` - Instance uptime
+- `agent_guild_hub_connections_total` - Total WebSocket connections
+- `agent_guild_hub_agents_total` - Connected agents
+- `agent_guild_hub_memory_heap_used_bytes` - Heap memory usage
+- `agent_guild_hub_uptime_seconds` - Instance uptime
 
 ### Alerting Rules
 
 ```yaml
 # Prometheus alerting rules
 groups:
-  - name: swarm_hub
+  - name: agent_guild_hub
     rules:
       - alert: HighMemoryUsage
-        expr: swarm_hub_memory_heap_used_bytes / swarm_hub_memory_heap_total_bytes > 0.9
+        expr: agent_guild_hub_memory_heap_used_bytes / agent_guild_hub_memory_heap_total_bytes > 0.9
         for: 5m
         annotations:
           summary: "Hub instance {{ $labels.instance }} high memory usage"
 
       - alert: NoConnectedAgents
-        expr: swarm_hub_agents_total == 0
+        expr: agent_guild_hub_agents_total == 0
         for: 10m
         annotations:
           summary: "Hub instance {{ $labels.instance }} has no connected agents"
 
       - alert: HealthCheckFailing
-        expr: up{job="swarm_hub"} == 0
+        expr: up{job="agent_guild_hub"} == 0
         for: 2m
         annotations:
           summary: "Hub instance {{ $labels.instance }} is down"
@@ -653,19 +653,19 @@ groups:
 
 ```bash
 # Test health check
-curl https://hub.swarm.example.com/health | jq
+curl https://hub.agent-guild.example.com/health | jq
 
 # Test sticky sessions
 for i in {1..5}; do
-  curl -s https://hub.swarm.example.com/health | jq -r '.instanceId'
+  curl -s https://hub.agent-guild.example.com/health | jq -r '.instanceId'
 done
 
 # Test WebSocket connection
-wscat -c wss://hub.swarm.example.com
+wscat -c wss://hub.agent-guild.example.com
 
 # Test rate limiting
 for i in {1..100}; do
-  curl -s -w "%{http_code}\n" -o /dev/null https://app.swarm.example.com/api/auth/verify \
+  curl -s -w "%{http_code}\n" -o /dev/null https://app.agent-guild.example.com/api/auth/verify \
     -X POST -H "Content-Type: application/json" -d '{"address": "0x123"}'
 done
 ```

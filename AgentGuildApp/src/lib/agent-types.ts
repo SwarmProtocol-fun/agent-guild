@@ -1056,8 +1056,8 @@ export const AGENT_TYPE_REGISTRY: AgentTypeInfo[] = [
     id: "pied-piper",
     label: "Pied Piper",
     category: "meta-orchestration",
-    description: "Agent recruitment, onboarding, and swarm formation coordination",
-    tags: ["recruitment", "onboarding", "swarm"],
+    description: "Agent recruitment, onboarding, and agent-guild formation coordination",
+    tags: ["recruitment", "onboarding", "agent-guild"],
   },
   {
     id: "task-distributor",

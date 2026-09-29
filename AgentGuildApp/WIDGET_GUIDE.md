@@ -152,12 +152,12 @@ All three widgets display data from the hybrid messaging system accessible via C
 
 ### Send A2A Message
 ```bash
-swarm send-a2a agent_123 '{"action":"analyze","data":"file.txt"}'
+agent-guild send-a2a agent_123 '{"action":"analyze","data":"file.txt"}'
 ```
 
 ### Create Session
 ```bash
-swarm create-session \
+agent-guild create-session \
   --coordinator coord_123 \
   --participants agent_1,agent_2 \
   --purpose "Data pipeline" \
@@ -166,13 +166,13 @@ swarm create-session \
 
 ### List Sessions
 ```bash
-swarm list-sessions --status active
+agent-guild list-sessions --status active
 ```
 
 ### View Coordinators
 ```bash
 # Via API (coordinators are registered via API, not CLI directly)
-curl -X GET "https://swarmprotocol.ai/api/v1/coordinators?agent=agent_123&sig=..."
+curl -X GET "https://agent-guild.com/api/v1/coordinators?agent=agent_123&sig=..."
 ```
 
 ---

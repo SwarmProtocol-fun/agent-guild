@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Azure Multi-Product Provider
+ * Agent Guild Compute — Azure Multi-Product Provider
  *
  * Supports multiple Azure compute products:
  * - Virtual Machines (VMs)
@@ -34,7 +34,7 @@ abstract class BaseAzureProvider implements ComputeProvider {
   }
 
   protected get resourceGroup(): string {
-    return process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+    return process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
   }
 
   protected resolveLocation(region: Region): string {
@@ -81,7 +81,7 @@ export class AzureACIProvider extends BaseAzureProvider {
     const client = new ContainerInstanceManagementClient(credential, this.subscriptionId);
 
     const location = this.resolveLocation(config.region);
-    const containerName = `swarm-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 63);
+    const containerName = `agent-guild-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 63);
 
     // ACI uses Ubuntu container with systemd/VNC
     const image = config.providerImage || "ubuntu:22.04";
@@ -106,7 +106,7 @@ export class AzureACIProvider extends BaseAzureProvider {
           ],
           environmentVariables: [
             { name: "RESOLUTION", value: `${config.resolutionWidth}x${config.resolutionHeight}` },
-            { name: "VNC_PASSWORD", secureValue: `swarm${Date.now()}` },
+            { name: "VNC_PASSWORD", secureValue: `agent-guild${Date.now()}` },
           ],
           command: this.buildStartupCommand(config),
         }],
@@ -121,9 +121,9 @@ export class AzureACIProvider extends BaseAzureProvider {
           dnsNameLabel: containerName,
         },
         tags: {
-          "swarm:managed": "true",
-          "swarm:product": "aci",
-          "swarm:size": config.sizeKey,
+          "agent-guild:managed": "true",
+          "agent-guild:product": "aci",
+          "agent-guild:size": config.sizeKey,
         },
       }
     );
@@ -276,7 +276,7 @@ export class AzureSpotProvider extends BaseAzureProvider {
 
     const location = this.resolveLocation(config.region);
     const vmSize = this.resolveVmSize(config.sizeKey);
-    const vmName = `swarm-spot-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
+    const vmName = `agent-guild-spot-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
 
     // Same as regular VM but with spot pricing
     const imageRef = (config.providerImage || "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest").split(":");
@@ -291,8 +291,8 @@ export class AzureSpotProvider extends BaseAzureProvider {
       },
       osProfile: {
         computerName: vmName.slice(0, 15),
-        adminUsername: "swarm",
-        adminPassword: `Swarm${Date.now()}!`,
+        adminUsername: "agent-guild",
+        adminPassword: `Agent Guild${Date.now()}!`,
         customData: Buffer.from(this.buildCloudInit(config)).toString("base64"),
         linuxConfiguration: {
           disablePasswordAuthentication: false,
@@ -318,9 +318,9 @@ export class AzureSpotProvider extends BaseAzureProvider {
         }],
       },
       tags: {
-        "swarm:managed": "true",
-        "swarm:product": "spot",
-        "swarm:size": config.sizeKey,
+        "agent-guild:managed": "true",
+        "agent-guild:product": "spot",
+        "agent-guild:size": config.sizeKey,
       },
     });
 
@@ -424,14 +424,14 @@ export class AzureSpotProvider extends BaseAzureProvider {
     const osDiskId = vm.storageProfile?.osDisk?.managedDisk?.id;
     if (!osDiskId) throw new Error("No OS disk found on Spot VM");
 
-    const snapshotName = `swarm-spot-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 80);
+    const snapshotName = `agent-guild-spot-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 80);
     await client.snapshots.beginCreateOrUpdateAndWait(this.resourceGroup, snapshotName, {
       location: vm.location || "eastus",
       creationData: {
         createOption: "Copy",
         sourceResourceId: osDiskId,
       },
-      tags: { "swarm:managed": "true", "swarm:product": "spot" },
+      tags: { "agent-guild:managed": "true", "agent-guild:product": "spot" },
     });
 
     return snapshotName;
@@ -459,7 +459,7 @@ set -e
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify xdotool imagemagick
 mkdir -p /root/.vnc
-echo "swarmvnc" | vncpasswd -f > /root/.vnc/passwd
+echo "agentguildvnc" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
 cat > /root/.vnc/xstartup << 'XSTARTUP'
 #!/bin/bash

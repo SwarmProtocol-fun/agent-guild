@@ -1,7 +1,7 @@
 /**
  * ClawFlows workflow template catalog — types and an empty default.
  *
- * The community template catalog moved to the swarm-flow mod in the open-core
+ * The community template catalog moved to the agent-guild-flow mod in the open-core
  * split. The Workflows page still renders a "Templates" tab from these
  * exports, so core keeps the shapes and ships an empty catalog; the mod is
  * expected to supply the entries.

@@ -1,7 +1,7 @@
-# Swarm Event Schema & On-Chain / Off-Chain Mapping
+# Agent Guild Event Schema & On-Chain / Off-Chain Mapping
 
 > PRD 7 — Reputation and Payment Eventing
-> This document defines the canonical event types that flow through the Swarm platform, maps each to its on-chain and off-chain proof surfaces, and describes the reconciliation checks a tester can use to verify economic and reputation outcomes.
+> This document defines the canonical event types that flow through the Agent Guild platform, maps each to its on-chain and off-chain proof surfaces, and describes the reconciliation checks a tester can use to verify economic and reputation outcomes.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## 2. Canonical Event Payloads
 
-### 2.1 `AgentRegistered` (on-chain — SwarmAgentRegistryLink)
+### 2.1 `AgentRegistered` (on-chain — AgentGuildAgentRegistryLink)
 
 ```solidity
 event AgentRegistered(
@@ -51,7 +51,7 @@ event AgentRegistered(
 
 ---
 
-### 2.2 `TaskPosted` (on-chain — SwarmTaskBoardLink)
+### 2.2 `TaskPosted` (on-chain — AgentGuildTaskBoardLink)
 
 ```solidity
 event TaskPosted(
@@ -137,14 +137,14 @@ event DeliveryApproved(
 ```
 
 **Proof surfaces:**
-- Etherscan: `DeliveryApproved` event on `SwarmTaskBoardLink`
+- Etherscan: `DeliveryApproved` event on `AgentGuildTaskBoardLink`
 - Etherscan: ERC-20 `Transfer` from contract to `agent` address for `payout` LINK
 - Dashboard: `agentComms` collection shows task completion event
 - Reputation: triggers `CreditUpdated` (see 2.6)
 
 ---
 
-### 2.6 `CreditUpdated` (on-chain — SwarmAgentRegistryLink)
+### 2.6 `CreditUpdated` (on-chain — AgentGuildAgentRegistryLink)
 
 ```solidity
 event CreditUpdated(
@@ -197,7 +197,7 @@ Operator                  Platform                  Hub                    Chain
 5.                        Gateway runs task
 6.                        Gateway: job:status completed
                           Firestore (completed)◀──
-7. Platform approves ──▶  SwarmTaskBoardLink.approveDelivery()
+7. Platform approves ──▶  AgentGuildTaskBoardLink.approveDelivery()
                                                                         8. DeliveryApproved ✓
                                                                         9. LINK Transfer ✓
 10. Platform calls        registry.updateCredit()

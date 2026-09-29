@@ -1,5 +1,5 @@
 [build]
-  base = "SwarmApp"
+  base = "AgentGuildApp"
   ignore = "exit 1"
   command = "npm run build"
-  publish = "SwarmApp/.next"
+  publish = "AgentGuildApp/.next"

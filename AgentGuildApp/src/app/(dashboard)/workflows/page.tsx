@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-// [swarm-core] ClawFlows catalog removed — install swarm-flow mod (types + empty catalog remain)
+// [agent-guild-core] ClawFlows catalog removed — install agent-guild-flow mod (types + empty catalog remain)
 import { CLAWFLOW_CATEGORIES, TOTAL_FLOWS, type ClawFlow, type ClawFlowCategory } from "@/lib/clawflows";
 import { Search, ExternalLink, Clock, Zap, Play, ChevronDown, CheckCircle2, Loader2, Plus, Layers } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";

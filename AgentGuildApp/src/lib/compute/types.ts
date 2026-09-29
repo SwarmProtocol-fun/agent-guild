@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Core Types
+ * Agent Guild Compute — Core Types
  *
  * All interfaces, enums, and constants for the compute module.
  * Every other compute file depends on this.
@@ -24,7 +24,7 @@ export type ModelKey = "claude" | "openai" | "gemini" | "generic";
 
 export type SizeKey = "small" | "medium" | "large" | "xl";
 
-export type ProviderKey = "e2b" | "aws" | "gcp" | "azure" | "stub" | "swarm-node";
+export type ProviderKey = "e2b" | "aws" | "gcp" | "azure" | "stub" | "agent-guild-node";
 
 export type AzureProductType =
   | "vm"              // Virtual Machines (default)
@@ -123,7 +123,7 @@ export const PROVIDER_LABELS: Record<ProviderKey, { label: string; description: 
   e2b:   { label: "E2B Desktop",        description: "Managed cloud sandbox — fastest setup, built-in VNC" },
   aws:   { label: "AWS EC2",            description: "Amazon EC2 — widest region coverage, SSM integration", comingSoon: true },
   gcp:   { label: "GCP Compute Engine", description: "Google Compute Engine — strong ML/data tooling", comingSoon: true },
-  "swarm-node": { label: "Swarm Node",    description: "Decentralized worker nodes from the Swarm network" },
+  "agent-guild-node": { label: "Agent Guild Node",    description: "Decentralized worker nodes from the Agent Guild network" },
   stub:  { label: "Development",         description: "Local stub provider for development" },
 };
 
@@ -181,23 +181,23 @@ export const AZURE_PRODUCTS: Record<AzureProductType, {
   },
 };
 
-/** Maps Swarm regions to provider-native region identifiers */
+/** Maps Agent Guild regions to provider-native region identifiers */
 export const PROVIDER_REGION_MAP: Record<ProviderKey, Record<Region, string>> = {
   e2b:   { "us-east": "us-east-1", "us-west": "us-west-1", "eu-west": "eu-west-1", "ap-southeast": "ap-southeast-1" },
   aws:   { "us-east": "us-east-1", "us-west": "us-west-2", "eu-west": "eu-west-1", "ap-southeast": "ap-southeast-1" },
   gcp:   { "us-east": "us-east1",  "us-west": "us-west1",  "eu-west": "europe-west1", "ap-southeast": "asia-southeast1" },
   azure: { "us-east": "eastus",    "us-west": "westus2",   "eu-west": "westeurope",   "ap-southeast": "southeastasia" },
-  "swarm-node": { "us-east": "network", "us-west": "network", "eu-west": "network", "ap-southeast": "network" },
+  "agent-guild-node": { "us-east": "network", "us-west": "network", "eu-west": "network", "ap-southeast": "network" },
   stub:  { "us-east": "stub",      "us-west": "stub",      "eu-west": "stub",          "ap-southeast": "stub" },
 };
 
-/** Maps Swarm sizes to provider-native instance types */
+/** Maps Agent Guild sizes to provider-native instance types */
 export const PROVIDER_SIZE_MAP: Record<ProviderKey, Record<SizeKey, string>> = {
   e2b:   { small: "default", medium: "default", large: "default", xl: "default" },
   aws:   { small: "t3.medium", medium: "t3.xlarge", large: "m5.2xlarge", xl: "m5.4xlarge" },
   gcp:   { small: "e2-standard-2", medium: "e2-standard-4", large: "e2-standard-8", xl: "e2-standard-16" },
   azure: { small: "Standard_B2s", medium: "Standard_B4ms", large: "Standard_D8s_v3", xl: "Standard_D16s_v3" },
-  "swarm-node": { small: "preset", medium: "preset", large: "preset", xl: "preset" },
+  "agent-guild-node": { small: "preset", medium: "preset", large: "preset", xl: "preset" },
   stub:  { small: "stub-small", medium: "stub-medium", large: "stub-large", xl: "stub-xl" },
 };
 
@@ -207,7 +207,7 @@ export const PROVIDER_BASE_IMAGES: Record<ProviderKey, string> = {
   aws:   "ami-0c7217cdde317cfec", // Ubuntu 22.04 LTS in us-east-1
   gcp:   "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts",
   azure: "Canonical:0001-com-ubuntu-server-jammy:22_04-lts:latest",
-  "swarm-node": "ubuntu:22.04",
+  "agent-guild-node": "ubuntu:22.04",
   stub:  "ubuntu:22.04",
 };
 
@@ -217,7 +217,7 @@ export const PROVIDER_HOURLY_COSTS: Record<ProviderKey, Record<SizeKey, number>>
   aws:   { small: 4,   medium: 17,  large: 38,  xl: 77 },
   gcp:   { small: 5,   medium: 19,  large: 40,  xl: 80 },
   azure: { small: 5,   medium: 18,  large: 40,  xl: 79 },
-  "swarm-node": { small: 3, medium: 10, large: 20, xl: 40 },
+  "agent-guild-node": { small: 3, medium: 10, large: 20, xl: 40 },
   stub:  { small: 8,   medium: 16,  large: 32,  xl: 64 },
 };
 

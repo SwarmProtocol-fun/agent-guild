@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Action Runner
+ * Agent Guild Compute — Action Runner
  *
  * Builds action envelopes and executes them via the provider.
  * Records all actions to Firestore for audit.

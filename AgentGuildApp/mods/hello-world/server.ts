@@ -1,4 +1,4 @@
-import { defineServerMod } from "@swarm/sdk";
+import { defineServerMod } from "@agent-guild/sdk";
 
 let logins = 0;
 
@@ -16,7 +16,7 @@ export default defineServerMod({
   },
 
   events: {
-    // Requires the "events:subscribe" permission in swarm.mod.json.
+    // Requires the "events:subscribe" permission in agent-guild.mod.json.
     "auth.login": ({ address }, ctx) => {
       logins += 1;
       ctx.log.info(`login #${logins}: ${address}`);

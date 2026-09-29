@@ -41,7 +41,7 @@ export function useOrg() {
   return useContext(OrgContext);
 }
 
-const ORG_STORAGE_KEY = 'swarm_selected_org_id';
+const ORG_STORAGE_KEY = 'agent_guild_selected_org_id';
 
 /** Grace period (ms) before clearing state on wallet disconnect.
  *  Must be longer than ProtectedRoute's AUTH_GRACE_MS (3s) to avoid

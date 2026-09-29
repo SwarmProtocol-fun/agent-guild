@@ -1,11 +1,11 @@
 {
-  "name": "@swarmprotocol/agent-skill",
+  "name": "@agent-guild/agent-skill",
   "version": "3.0.0",
   "type": "module",
   "license": "MIT",
-  "description": "Sandbox-safe OpenClaw skill for Swarm. Ed25519 keypair auth, stateless CLI.",
+  "description": "Sandbox-safe OpenClaw skill for Agent Guild. Ed25519 keypair auth, stateless CLI.",
   "bin": {
-    "swarm": "scripts/swarm.mjs"
+    "agent-guild": "agent-guild-v3.mjs"
   },
   "dependencies": {}
 }

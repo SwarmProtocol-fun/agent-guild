@@ -6,8 +6,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
- * @title SwarmAgentIdentityNFT
- * @notice Dynamic NFT representing agent identity and reputation on Swarm Protocol
+ * @title AgentGuildAgentIdentityNFT
+ * @notice Dynamic NFT representing agent identity and reputation on Agent Guild
  *
  * Features:
  * - One NFT per agent address (soulbound to agent wallet)
@@ -18,14 +18,14 @@ import "@openzeppelin/contracts/utils/Strings.sol";
  *
  * For Hedera Hackathon 2026 — AI & Agents Track + OpenClaw Bounty
  */
-contract SwarmAgentIdentityNFT is ERC721, Ownable {
+contract AgentGuildAgentIdentityNFT is ERC721, Ownable {
     using Strings for uint256;
 
     // ══════════════════════════════════════════════════════════════════════
     // Storage
     // ══════════════════════════════════════════════════════════════════════
 
-    /// @notice Base URI for metadata API (points to Swarm backend)
+    /// @notice Base URI for metadata API (points to Agent Guild backend)
     string public baseURI;
 
     /// @notice Counter for token IDs
@@ -61,7 +61,7 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
     // Constructor
     // ══════════════════════════════════════════════════════════════════════
 
-    constructor(string memory initialBaseURI) ERC721("Swarm Agent Identity", "SWARM-AGENT") Ownable(msg.sender) {
+    constructor(string memory initialBaseURI) ERC721("Agent Guild Agent Identity", "AGENTGUILD-AGENT") Ownable(msg.sender) {
         baseURI = initialBaseURI;
         _tokenIdCounter = 1; // Start token IDs at 1
     }
@@ -203,13 +203,13 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
 
     /**
      * @notice Returns dynamic metadata URI
-     * @dev Points to Swarm API which returns real-time credit score data
+     * @dev Points to Agent Guild API which returns real-time credit score data
      */
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
         require(tokenIdToAgent[tokenId] != address(0), "Token does not exist");
 
         // Return API endpoint that generates dynamic metadata
-        // Format: https://swarmprotocol.fun/api/nft/agent/{agentAddress}/metadata.json
+        // Format: https://agent-guild.com/api/nft/agent/{agentAddress}/metadata.json
         address agent = tokenIdToAgent[tokenId];
         return string(abi.encodePacked(
             baseURI,
@@ -259,7 +259,7 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
         }
 
         // Block all user-to-user transfers (soulbound to agent wallet)
-        revert("SwarmAgentIdentityNFT: non-transferable");
+        revert("AgentGuildAgentIdentityNFT: non-transferable");
     }
 
     // ══════════════════════════════════════════════════════════════════════

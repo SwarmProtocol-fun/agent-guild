@@ -1,4 +1,4 @@
-/** Swarms/Projects — Create and manage projects that group agents, tasks, and resources. */
+/** Agent Guilds/Projects — Create and manage projects that group agents, tasks, and resources. */
 "use client";
 
 import { useState, useEffect } from "react";
@@ -232,7 +232,7 @@ export default function ProjectsPage() {
 
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {projects.map((project) => (
-              <Link key={project.id} href={`/swarms/${project.id}`}>
+              <Link key={project.id} href={`/agent-guilds/${project.id}`}>
                 <SpotlightCard className="p-0 hover:border-amber-300 transition-colors cursor-pointer h-full" spotlightColor="rgba(255, 191, 0, 0.08)">
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">

@@ -10,31 +10,31 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# ─── SwarmApp jobs ─────────────────────────────────────────────────────────────
+# ─── AgentGuildApp jobs ─────────────────────────────────────────────────────────────
 
 jobs:
   lint:
-    name: Lint (SwarmApp)
+    name: Lint (AgentGuildApp)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: SwarmApp
+        working-directory: AgentGuildApp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: SwarmApp/package-lock.json
+          cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
       - run: npm run lint || true
 
   test:
-    name: Test (SwarmApp)
+    name: Test (AgentGuildApp)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: SwarmApp
+        working-directory: AgentGuildApp
     env:
       PLATFORM_ADMIN_WALLETS: "0x723708273e811a07d90d2e81e799b9Ab27F0B549"
     steps:
@@ -43,17 +43,17 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: SwarmApp/package-lock.json
+          cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
       - run: npm run test:run
 
   build:
-    name: Build (SwarmApp)
+    name: Build (AgentGuildApp)
     needs: [lint, test]
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: SwarmApp
+        working-directory: AgentGuildApp
     env:
       # Minimal env vars to satisfy Next.js build (no real credentials)
       NEXT_PUBLIC_FIREBASE_API_KEY: "ci-placeholder"
@@ -69,7 +69,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: SwarmApp/package-lock.json
+          cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
       - run: npm run build
 
@@ -82,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: SwarmApp
+        working-directory: AgentGuildApp
     env:
       NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY }}
       NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
@@ -113,7 +113,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: SwarmApp/package-lock.json
+          cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
       - name: Build and Deploy to Netlify
         run: npx netlify-cli deploy --prod --build --site=${{ secrets.NETLIFY_SITE_ID }} --auth=${{ secrets.NETLIFY_AUTH_TOKEN }}
@@ -189,7 +189,7 @@ jobs:
     steps:
       - name: All checks passed
         run: |
-          echo "✓ SwarmApp: lint, typecheck, test, build"
+          echo "✓ AgentGuildApp: lint, typecheck, test, build"
           echo "✓ Hub: unit tests"
           echo "✓ Contracts: compile + test"
           echo "SHA: ${{ github.sha }}"

@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Firestore CRUD
+ * Agent Guild Compute — Firestore CRUD
  *
  * All Firestore operations for compute collections.
  * Follows the same patterns as src/lib/firestore.ts.

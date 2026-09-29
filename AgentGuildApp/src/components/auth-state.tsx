@@ -49,7 +49,7 @@ function InitializingState() {
     <>
       <Image
         src="/Logo.jpg"
-        alt="Swarm"
+        alt="Agent Guild"
         width={48}
         height={48}
         className="animate-pulse drop-shadow-[0_0_12px_rgba(255,215,0,0.3)]"
@@ -131,7 +131,7 @@ function NoOrgsState() {
         <Sparkles className="h-6 w-6 text-amber-400" />
       </div>
       <div className="text-center">
-        <h2 className="text-lg font-semibold text-foreground">Welcome to Swarm</h2>
+        <h2 className="text-lg font-semibold text-foreground">Welcome to Agent Guild</h2>
         <p className="text-sm text-muted-foreground mt-1">
           Create an organization to get started
         </p>

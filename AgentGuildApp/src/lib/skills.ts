@@ -250,7 +250,7 @@ export interface ResolvedCapability {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Agent Package Standard (SAP) — Swarm Agent Package
+// Agent Package Standard (SAP) — Agent Guild Agent Package
 // ═══════════════════════════════════════════════════════════════
 
 export type AgentCategory =
@@ -314,7 +314,7 @@ export interface AgentMemoryConfig {
     vectorStore?: boolean;
 }
 
-/** The Swarm Agent Package — full publishable agent definition */
+/** The Agent Guild Agent Package — full publishable agent definition */
 export interface AgentPackage {
     id: string;
     slug: string;
@@ -423,7 +423,7 @@ export const COMPUTE_CATEGORIES = [
 
 export const SKILL_REGISTRY: Skill[] = [
     // ── Mods are loaded dynamically from the mod gateway registry ──
-    // Install paid mods from the marketplace at swarmprotocol.fun
+    // Install paid mods from the marketplace at agent-guild.com
     // See: loadRemoteModRegistry() below
 
     // ── Plugins ── (free, included in core)
@@ -436,7 +436,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Developer",
         icon: "🐙",
         version: "1.3.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["GITHUB_TOKEN"],
         tags: ["github", "git", "code", "pr", "issues"],
         pricing: { model: "free" },
@@ -450,7 +450,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Communication",
         icon: "💬",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["SLACK_BOT_TOKEN"],
         tags: ["slack", "notifications", "messaging"],
         pricing: { model: "free" },
@@ -464,7 +464,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Communication",
         icon: "📧",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["SENDGRID_API_KEY"],
         tags: ["email", "smtp", "sendgrid", "notifications"],
         pricing: { model: "free" },
@@ -478,7 +478,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Productivity",
         icon: "📅",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["GOOGLE_CALENDAR_KEY"],
         tags: ["calendar", "events", "scheduling"],
         pricing: { model: "free" },
@@ -492,7 +492,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Web3",
         icon: "⛓️",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["blockchain", "web3", "ethereum", "transactions"],
         pricing: { model: "free" },
     },
@@ -507,7 +507,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Research",
         icon: "🔍",
         version: "1.2.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["TAVILY_API_KEY"],
         tags: ["search", "research", "web", "news"],
         pricing: { model: "free" },
@@ -521,7 +521,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Developer",
         icon: "💻",
         version: "2.0.1",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["code", "python", "javascript", "analysis"],
         pricing: { model: "free" },
     },
@@ -534,7 +534,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Developer",
         icon: "📁",
         version: "1.1.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["files", "filesystem", "csv", "json"],
         pricing: { model: "free" },
     },
@@ -547,7 +547,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Creative",
         icon: "🎨",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         requiredKeys: ["OPENAI_API_KEY"],
         tags: ["image", "art", "generation", "dalle"],
         pricing: { model: "free" },
@@ -561,7 +561,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Research",
         icon: "📄",
         version: "1.1.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["pdf", "documents", "text", "extraction"],
         pricing: { model: "free" },
     },
@@ -574,7 +574,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Analytics",
         icon: "📊",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["charts", "graphs", "data", "visualization"],
         pricing: { model: "free" },
     },
@@ -587,7 +587,7 @@ export const SKILL_REGISTRY: Skill[] = [
         category: "Core",
         icon: "🧠",
         version: "1.0.0",
-        author: "Swarm Core",
+        author: "Agent Guild Core",
         tags: ["memory", "storage", "context", "persistence"],
         pricing: { model: "free" },
     },
@@ -600,7 +600,7 @@ export const SKILL_REGISTRY: Skill[] = [
  * them with the static SKILL_REGISTRY. Returns Skill entries
  * for remote mods that aren't already in the static registry.
  */
-// [swarm-core] mod-gateway extracted — remote mod registry disabled
+// [agent-guild-core] mod-gateway extracted — remote mod registry disabled
 export async function loadRemoteModRegistry(): Promise<Skill[]> {
     return [];
 }

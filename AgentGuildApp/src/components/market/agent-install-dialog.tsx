@@ -25,7 +25,7 @@ import {
     installMarketplaceAgent,
     updateAgentInstallOnChain,
 } from "@/lib/skills";
-import { useSwarmWrite } from "@/hooks/useSwarmWrite";
+import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { db } from "@/lib/firebase";
 import { doc, updateDoc } from "firebase/firestore";
 
@@ -84,7 +84,7 @@ export function AgentInstallDialog({
     const [resultAin, setResultAin] = useState<string | null>(null);
     const [resultAgentId, setResultAgentId] = useState<string | null>(null);
     const [resultTxHash, setResultTxHash] = useState<string | null>(null);
-    const { registerAgent: registerOnChain } = useSwarmWrite();
+    const { registerAgent: registerOnChain } = useAgentGuildWrite();
 
     const updateStep = (id: string, status: StepStatus, detail?: string) => {
         setSteps(prev => prev.map(s => s.id === id ? { ...s, status, ...(detail ? { detail } : {}) } : s));

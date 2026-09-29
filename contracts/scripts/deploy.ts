@@ -10,33 +10,33 @@ async function main() {
   console.log("Deploying with:", deployer.address);
   console.log("Balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "ETH");
 
-  // 1. SwarmASNRegistry
-  const ASNRegistry = await ethers.getContractFactory("SwarmASNRegistry");
+  // 1. AgentGuildASNRegistry
+  const ASNRegistry = await ethers.getContractFactory("AgentGuildASNRegistry");
   const asnRegistry = await ASNRegistry.deploy();
   await asnRegistry.waitForDeployment();
   const asnAddr = await asnRegistry.getAddress();
-  console.log("SwarmASNRegistry deployed to:", asnAddr);
+  console.log("AgentGuildASNRegistry deployed to:", asnAddr);
 
-  // 2. SwarmAgentRegistryLink
-  const AgentRegistry = await ethers.getContractFactory("SwarmAgentRegistryLink");
+  // 2. AgentGuildAgentRegistryLink
+  const AgentRegistry = await ethers.getContractFactory("AgentGuildAgentRegistryLink");
   const agentRegistry = await AgentRegistry.deploy();
   await agentRegistry.waitForDeployment();
   const agentAddr = await agentRegistry.getAddress();
-  console.log("SwarmAgentRegistryLink deployed to:", agentAddr);
+  console.log("AgentGuildAgentRegistryLink deployed to:", agentAddr);
 
-  // 3. SwarmTaskBoardLink (needs LINK token address)
-  const TaskBoard = await ethers.getContractFactory("SwarmTaskBoardLink");
+  // 3. AgentGuildTaskBoardLink (needs LINK token address)
+  const TaskBoard = await ethers.getContractFactory("AgentGuildTaskBoardLink");
   const taskBoard = await TaskBoard.deploy(LINK_TOKEN_SEPOLIA);
   await taskBoard.waitForDeployment();
   const taskAddr = await taskBoard.getAddress();
-  console.log("SwarmTaskBoardLink deployed to:", taskAddr);
+  console.log("AgentGuildTaskBoardLink deployed to:", taskAddr);
 
-  // 4. SwarmTreasuryLink (needs LINK token address)
-  const Treasury = await ethers.getContractFactory("SwarmTreasuryLink");
+  // 4. AgentGuildTreasuryLink (needs LINK token address)
+  const Treasury = await ethers.getContractFactory("AgentGuildTreasuryLink");
   const treasury = await Treasury.deploy(LINK_TOKEN_SEPOLIA);
   await treasury.waitForDeployment();
   const treasuryAddr = await treasury.getAddress();
-  console.log("SwarmTreasuryLink deployed to:", treasuryAddr);
+  console.log("AgentGuildTreasuryLink deployed to:", treasuryAddr);
 
   // ── Output Summary ──
   console.log("\n=== Deployment Summary ===");
@@ -67,7 +67,7 @@ async function main() {
   // ── Output .env snippet ──
   const envSnippet = [
     "",
-    "# ── Swarm LINK Contracts (Sepolia) ── deployed " + new Date().toISOString(),
+    "# ── Agent Guild LINK Contracts (Sepolia) ── deployed " + new Date().toISOString(),
     `NEXT_PUBLIC_LINK_AGENT_REGISTRY=${agentAddr}`,
     `NEXT_PUBLIC_LINK_TASK_BOARD=${taskAddr}`,
     `NEXT_PUBLIC_LINK_ASN_REGISTRY=${asnAddr}`,
@@ -76,11 +76,11 @@ async function main() {
     "",
   ].join("\n");
 
-  console.log("\n=== Add to SwarmApp/.env.local ===");
+  console.log("\n=== Add to AgentGuildApp/.env.local ===");
   console.log(envSnippet);
 
   // Auto-append to .env.local if it exists
-  const envLocalPath = path.join(__dirname, "..", "..", "SwarmApp", ".env.local");
+  const envLocalPath = path.join(__dirname, "..", "..", "AgentGuildApp", ".env.local");
   if (fs.existsSync(envLocalPath)) {
     const existing = fs.readFileSync(envLocalPath, "utf-8");
     // Remove old LINK contract vars if present
@@ -91,7 +91,7 @@ async function main() {
     fs.writeFileSync(envLocalPath, cleaned.trimEnd() + "\n" + envSnippet);
     console.log("Auto-appended to", envLocalPath);
   } else {
-    console.log("(Create SwarmApp/.env.local and paste the snippet above)");
+    console.log("(Create AgentGuildApp/.env.local and paste the snippet above)");
   }
 }
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Compute instances in Swarm follow a **state machine** with automatic recovery for stuck states. This document outlines the state transitions, error handling, and debugging tools.
+Compute instances in Agent Guild follow a **state machine** with automatic recovery for stuck states. This document outlines the state transitions, error handling, and debugging tools.
 
 ---
 
@@ -191,7 +191,7 @@ GET /api/compute/computers/{id}/status
   "name": "dev-environment",
   "status": "starting",
   "provider": "azure",
-  "providerInstanceId": "swarm-dev-123",
+  "providerInstanceId": "agent-guild-dev-123",
 
   "timing": {
     "createdAt": "2026-03-23T10:00:00Z",
@@ -354,7 +354,7 @@ if (computer.status === "running") {
 
     // Provider-specific
     azureProduct: "vm" | "aci" | "spot",
-    resourceGroup: "swarm-compute",
+    resourceGroup: "agent-guild-compute",
     // ... etc
   }
 }
@@ -416,7 +416,7 @@ When instance state changes, broadcast to all connected clients:
 await updateComputer(id, { status: "running" });
 
 // Broadcast via Pub/Sub (see SCALING_ARCHITECTURE.md)
-await pubsub.topic("swarm-broadcast").publish({
+await pubsub.topic("agent-guild-broadcast").publish({
   type: "computer_status_changed",
   computerId: id,
   newStatus: "running",
@@ -443,16 +443,16 @@ hub.on("computer_status_changed", (msg) => {
 
 ```typescript
 // Prometheus metrics
-swarm_computer_state_transitions_total{from="starting", to="running"} 145
-swarm_computer_state_transitions_total{from="starting", to="error"} 3
+agent_guild_computer_state_transitions_total{from="starting", to="running"} 145
+agent_guild_computer_state_transitions_total{from="starting", to="error"} 3
 
-swarm_computer_auto_recoveries_total 3
-swarm_computer_force_resets_total 1
+agent_guild_computer_auto_recoveries_total 3
+agent_guild_computer_force_resets_total 1
 
-swarm_computer_state_duration_seconds{state="starting"} 120 // P99
-swarm_computer_state_duration_seconds{state="stopping"} 30  // P99
+agent_guild_computer_state_duration_seconds{state="starting"} 120 // P99
+agent_guild_computer_state_duration_seconds{state="stopping"} 30  // P99
 
-swarm_computer_stuck_instances{state="starting"} 0 // Current count
+agent_guild_computer_stuck_instances{state="starting"} 0 // Current count
 ```
 
 ### Alerts
@@ -460,7 +460,7 @@ swarm_computer_stuck_instances{state="starting"} 0 // Current count
 ```yaml
 # Alert: Instance stuck > 15 minutes
 - alert: ComputerStuckLong
-  expr: time() - swarm_computer_status_updated_timestamp > 900
+  expr: time() - agent_guild_computer_status_updated_timestamp > 900
   labels:
     severity: critical
   annotations:
@@ -468,7 +468,7 @@ swarm_computer_stuck_instances{state="starting"} 0 // Current count
 
 # Alert: High auto-recovery rate
 - alert: HighAutoRecoveryRate
-  expr: rate(swarm_computer_auto_recoveries_total[5m]) > 0.1
+  expr: rate(agent_guild_computer_auto_recoveries_total[5m]) > 0.1
   labels:
     severity: warning
   annotations:
@@ -568,7 +568,7 @@ describe("Computer state machine", () => {
 
 ## Summary
 
-Swarm's compute state management provides:
+Agent Guild's compute state management provides:
 
 - ✅ **Automatic recovery** from stuck states (10 min timeout)
 - ✅ **Force reset** for manual intervention

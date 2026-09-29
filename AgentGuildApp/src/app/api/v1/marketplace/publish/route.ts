@@ -2,7 +2,7 @@
  * POST /api/v1/marketplace/publish
  *
  * Unified publish endpoint for all marketplace item types.
- * Integrates Swarm Submission Protocol v1: intake validation, security scanning,
+ * Integrates Agent Guild Submission Protocol v1: intake validation, security scanning,
  * trust-tier-aware pipeline routing, and cooldown enforcement.
  *
  * Auth: x-wallet-address header (wallet-based) or platform admin secret (auto-approves).

@@ -1,5 +1,5 @@
 {
-  "name": "swarm-hub",
+  "name": "agent-guild-hub",
   "version": "2.0.0",
   "type": "module",
   "scripts": {
@@ -12,9 +12,11 @@
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
     "express": "^4.21.0",
-    "firebase": "^12.8.0",
     "firebase-admin": "^13.7.0",
     "ioredis": "^5.10.0",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "railway": "^3.12.0"
   }
 }

@@ -4,7 +4,7 @@
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Square } from 'lucide-react';
-import { type WorkflowValidation, formatCostCents } from '@/lib/swarm-workflow';
+import { type WorkflowValidation, formatCostCents } from '@/lib/agent-guild-workflow';
 
 interface PriceSummaryProps {
   validation: WorkflowValidation;
@@ -57,7 +57,7 @@ export function PriceSummary({ validation, agentCount, onExecute, executing, onC
               Executing...
             </span>
           ) : (
-            `Execute Swarm (${formatCostCents(validation.totalCostCents)})`
+            `Execute Agent Guild (${formatCostCents(validation.totalCostCents)})`
           )}
         </Button>
       </div>

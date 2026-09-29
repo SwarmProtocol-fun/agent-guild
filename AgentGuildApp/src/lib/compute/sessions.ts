@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Session Management
+ * Agent Guild Compute — Session Management
  *
  * Handles session lifecycle and wires billing/metering into
  * session end events automatically via recordComputeHours.

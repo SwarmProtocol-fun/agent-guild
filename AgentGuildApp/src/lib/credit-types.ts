@@ -2,7 +2,7 @@
  * Shared credit-event types.
  *
  * Restores the `ScoreEvent` shape that used to live in hedera-hcs-client.ts.
- * Hedera was extracted into the swarm-hedera mod, but the credit engine still
+ * Hedera was extracted into the agent-guild-hedera mod, but the credit engine still
  * produces and consumes events of this shape, so the type belongs in core.
  */
 

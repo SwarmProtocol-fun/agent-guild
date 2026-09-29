@@ -116,9 +116,9 @@ const jobStatusLabels: Record<string, string> = {
 /*  Persistence                                                        */
 /* ------------------------------------------------------------------ */
 
-const WIDGET_ORDER_KEY = "swarm-dashboard-widget-order-v6";
-const ACTIVE_WIDGETS_KEY = "swarm-dashboard-active-widgets-v6";
-const WIDGET_WIDTHS_KEY = "swarm-dashboard-widget-widths-v7";
+const WIDGET_ORDER_KEY = "agent-guild-dashboard-widget-order-v6";
+const ACTIVE_WIDGETS_KEY = "agent-guild-dashboard-active-widgets-v6";
+const WIDGET_WIDTHS_KEY = "agent-guild-dashboard-widget-widths-v7";
 
 function loadJSON<T>(key: string): T | null {
   if (typeof window === "undefined") return null;
@@ -155,7 +155,7 @@ interface WidgetCatalogEntry {
 
 const ALL_WIDGET_CATALOG: WidgetCatalogEntry[] = [
   // Widgets
-  { id: "widget-prompt", icon: "💬", label: "Swarm Prompt", description: "Directly prompt your task coordinator", colSpan: "lg:col-span-3", category: "widgets" },
+  { id: "widget-prompt", icon: "💬", label: "Agent Guild Prompt", description: "Directly prompt your task coordinator", colSpan: "lg:col-span-3", category: "widgets" },
   { id: "widget-daily-briefing", icon: "📋", label: "Daily Briefing", description: "Daily org summary from your briefing agent", colSpan: "lg:col-span-3", category: "widgets" },
   { id: "widget-recent-tasks", icon: "📋", label: "Recent Tasks", description: "Latest tasks with status and assignee", colSpan: "lg:col-span-2", category: "widgets" },
   { id: "widget-recent-jobs", icon: "💼", label: "Recent Jobs", description: "Latest posted jobs with rewards", colSpan: "lg:col-span-2", category: "widgets" },
@@ -351,7 +351,7 @@ export default function DashboardPage() {
   const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [activityAll, setActivityAll] = useState<ActivityEvent[]>([]);
   const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
-  const [swarmSlots, setSwarmSlots] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
+  const [agentSlots, setAgentSlots] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState(false);
@@ -419,7 +419,7 @@ export default function DashboardPage() {
         getOrganization(currentOrg.id),
       ]);
 
-      setSwarmSlots(freshOrg?.swarmSlots || {});
+      setAgentSlots(freshOrg?.agentSlots || freshOrg?.swarmSlots || {});
 
       setAgents(agentsData);
       setAllTasks(tasks);
@@ -562,7 +562,7 @@ export default function DashboardPage() {
           sendMessage({
             channelId: hub.id,
             senderId: "system",
-            senderName: "Swarm Protocol",
+            senderName: "Agent Guild Protocol",
             senderType: "agent",
             content: [
               `📋 **Daily Briefing ${action}** — assigned to **@${briefingAgent.name}**`,
@@ -594,12 +594,12 @@ export default function DashboardPage() {
       setBriefingPrompt(briefingCronJob.message);
       setBriefingAgentId(briefingCronJob.agentIds?.[0] || "");
     } else {
-      // Default to swarm slot agent if one is assigned
-      const slot = swarmSlots["daily-briefings"];
+      // Default to agent-guild slot agent if one is assigned
+      const slot = agentSlots["daily-briefings"];
       setBriefingAgentId(slot?.agentId || "");
     }
     setBriefingSetupMode(true);
-  }, [briefingCronJob, swarmSlots]);
+  }, [briefingCronJob, agentSlots]);
 
   // ── Dispatch handler — creates job, assigns agents, refreshes data ──
   const handleDispatch = useCallback(async (payload: DispatchPayload) => {
@@ -772,7 +772,7 @@ export default function DashboardPage() {
 
   const widgetRenderers: Record<string, { label: string; colSpan: string; render: () => React.ReactNode }> = {
     "widget-prompt": {
-      label: "Swarm Prompt",
+      label: "Agent Guild Prompt",
       colSpan: "lg:col-span-3",
       render: () => <PromptWidget onDispatch={handleDispatch} agents={agents} />,
     },
@@ -877,7 +877,7 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent className="space-y-1.5 px-4 pb-3">
             {[
-              { href: "/swarms", icon: "📁", label: "Create Project", color: "hover:border-blue-500/30 hover:bg-blue-500/5" },
+              { href: "/agent-guilds", icon: "📁", label: "Create Project", color: "hover:border-blue-500/30 hover:bg-blue-500/5" },
               { href: "/agents", icon: "🤖", label: "Register Agent", color: "hover:border-emerald-500/30 hover:bg-emerald-500/5" },
               { href: "/missions", icon: "📋", label: "Create Task", color: "hover:border-amber-500/30 hover:bg-amber-500/5" },
               { href: "/jobs", icon: "💼", label: "Post Job", color: "hover:border-purple-500/30 hover:bg-purple-500/5" },
@@ -941,7 +941,7 @@ export default function DashboardPage() {
             {activityFeed.length === 0 ? (
               <div className="text-center py-4 text-muted-foreground">
                 <p>No activity yet</p>
-                <p className="text-xs mt-1">Events will appear here as your swarm operates</p>
+                <p className="text-xs mt-1">Events will appear here as your agent-guild operates</p>
               </div>
             ) : (
               activityFeed.map((event, index) => {
@@ -1190,7 +1190,7 @@ export default function DashboardPage() {
       colSpan: "lg:col-span-3",
       render: () => {
         const cronAgentId = briefingCronJob?.agentIds?.[0];
-        const slot = swarmSlots["daily-briefings"];
+        const slot = agentSlots["daily-briefings"];
         const briefingAgent = cronAgentId
           ? agents.find(a => a.id === cronAgentId)
           : slot ? agents.find(a => a.id === slot.agentId) : null;
@@ -1324,12 +1324,12 @@ export default function DashboardPage() {
                   <p className="text-xs text-muted-foreground/60">
                     {briefingAgent
                       ? "Set up a schedule to start receiving automated briefings."
-                      : "Assign an agent in the Swarm inventory, then set up a schedule."}
+                      : "Assign an agent in the Agent Guild inventory, then set up a schedule."}
                   </p>
                   <div className="flex justify-center gap-2 mt-2">
                     {!briefingAgent && (
                       <Button asChild variant="outline" size="sm">
-                        <Link href="/swarm">Go to Swarm</Link>
+                        <Link href="/agent-guild">Go to Agent Guild</Link>
                       </Button>
                     )}
                     <Button
@@ -2034,7 +2034,7 @@ export default function DashboardPage() {
       <Tabs value={dashTab} onValueChange={setDashTab}>
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="swarm">Agent Map</TabsTrigger>
+          <TabsTrigger value="agent-guild">Agent Map</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="mt-1.5">
@@ -2117,7 +2117,7 @@ export default function DashboardPage() {
           </div>
         </TabsContent>
 
-        <TabsContent value="swarm">
+        <TabsContent value="agent-guild">
           <AgentMap
             projectName={currentOrg?.name || "Organization"}
             agents={agents.map((a) => {

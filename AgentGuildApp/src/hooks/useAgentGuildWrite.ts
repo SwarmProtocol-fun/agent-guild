@@ -14,8 +14,8 @@ import {
   HEDERA_CONTRACTS,
   HEDERA_TASK_BOARD_ABI,
   HEDERA_GAS_LIMIT,
-} from "@/lib/swarm-contracts";
-import { AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
+} from "@/lib/agent-guild-contracts";
+import { AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
 
 interface WriteState {
   isLoading: boolean;
@@ -23,7 +23,7 @@ interface WriteState {
   txHash: string | null;
 }
 
-interface SwarmWrite {
+interface AgentGuildWrite {
   claimTask: (taskId: number) => Promise<string | null>;
   submitDelivery: (taskId: number, deliveryHash: string) => Promise<string | null>;
   postTask: (vaultAddress: string, title: string, description: string, requiredSkills: string, deadlineUnix: number, budgetHbar: string) => Promise<string | null>;
@@ -82,7 +82,7 @@ async function getSigner(): Promise<ethers.Signer> {
   return provider.getSigner();
 }
 
-export function useSwarmWrite(): SwarmWrite {
+export function useAgentGuildWrite(): AgentGuildWrite {
   const [state, setState] = useState<WriteState>({
     isLoading: false,
     error: null,

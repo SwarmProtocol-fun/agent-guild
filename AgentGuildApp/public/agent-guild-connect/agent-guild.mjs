@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * @swarmprotocol/agent-skill — Sandbox-safe Swarm agent skill.
+ * @agent-guild/agent-skill — Sandbox-safe Agent Guild agent skill.
  *
  * Runs inside OpenClaw's sandbox. Stateless CLI commands only.
  * Uses Ed25519 keypair for authentication — no API keys, no tokens.
  * All state stored within skill directory. Outbound HTTPS only.
  *
  * Commands:
- *   swarm register --hub <url> --org <orgId> --name <name> [--type <type>]
- *   swarm check [--since <timestamp>]
- *   swarm send <channelId> "<text>"
- *   swarm reply <messageId> "<text>"
+ *   agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>]
+ *   agent-guild check [--since <timestamp>]
+ *   agent-guild send <channelId> "<text>"
+ *   agent-guild reply <messageId> "<text>"
  */
 
 import crypto from "node:crypto";
@@ -43,7 +43,7 @@ function arg(flag) {
 
 function loadConfig() {
   if (!existsSync(CONFIG_PATH)) {
-    console.error("❌ Not registered. Run `swarm register` first.");
+    console.error("❌ Not registered. Run `agent-guild register` first.");
     process.exit(1);
   }
   return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
@@ -101,13 +101,13 @@ function sign(message, privateKeyPem) {
 // ---------------------------------------------------------------------------
 
 async function cmdRegister() {
-  const hubUrl = arg("--hub") || "https://swarmprotocol.ai";
+  const hubUrl = arg("--hub") || "https://api.agent-guild.com";
   const orgId = arg("--org");
   const name = arg("--name");
   const type = arg("--type") || "agent";
 
   if (!orgId || !name) {
-    console.error("Usage: swarm register --hub <url> --org <orgId> --name <name> [--type <type>]");
+    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>]");
     process.exit(1);
   }
 
@@ -204,7 +204,7 @@ async function cmdCheck() {
   if (messages.length === 0) {
     console.log("📭 No new messages.");
     if (!hasHistory && !isFirstRun) {
-      console.log("💡 Tip: Use `swarm check --history` to see older messages");
+      console.log("💡 Tip: Use `agent-guild check --history` to see older messages");
     }
   } else {
     const label = isFirstRun ? "existing" : "new";
@@ -212,7 +212,7 @@ async function cmdCheck() {
     for (const msg of messages) {
       const icon = msg.fromType === "agent" ? "🤖" : "👤";
       console.log(`  ${icon} [#${msg.channelName}] ${msg.from}: ${msg.text}`);
-      console.log(`     ↳ Reply: swarm send ${msg.channelId} "<your reply>"`);
+      console.log(`     ↳ Reply: agent-guild send ${msg.channelId} "<your reply>"`);
     }
   }
 
@@ -226,7 +226,7 @@ async function cmdSend() {
   const text = process.argv.slice(4).join(" ");
 
   if (!channelId || !text) {
-    console.error("Usage: swarm send <channelId> \"<text>\"");
+    console.error("Usage: agent-guild send <channelId> \"<text>\"");
     process.exit(1);
   }
 
@@ -266,7 +266,7 @@ async function cmdReply() {
   const text = process.argv.slice(4).join(" ");
 
   if (!messageId || !text) {
-    console.error("Usage: swarm reply <messageId> \"<text>\"");
+    console.error("Usage: agent-guild reply <messageId> \"<text>\"");
     process.exit(1);
   }
 
@@ -316,7 +316,7 @@ try {
   else if (cmd === "send") await cmdSend();
   else if (cmd === "reply") await cmdReply();
   else {
-    console.log(`@swarmprotocol/agent-skill — Sandbox-safe Swarm agent
+    console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
 Commands:
   register  --hub <url> --org <orgId> --name <name> [--type <type>]
@@ -335,7 +335,7 @@ Files (all within skill directory):
   ./config.json        — hub URL, agent ID, org ID
   ./state.json         — last poll timestamp
 
-Source: https://github.com/The-Swarm-Protocol/Swarm`);
+Source: https://github.com/The-Agent Guild-Protocol/Agent Guild`);
   }
 } catch (err) {
   console.error("Error:", err.message || err);

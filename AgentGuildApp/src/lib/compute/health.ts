@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Provider Health Checks
+ * Agent Guild Compute — Provider Health Checks
  *
  * Polls cloud provider APIs until an instance reaches a healthy state,
  * then probes VNC/SSH connectivity. Times out after a configurable
@@ -209,7 +209,7 @@ export async function pollUntilHealthy(computerId: string): Promise<HealthCheckR
   }
 
   const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID || "";
-  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
 
   // ── Polling loop ──
   while (Date.now() - startTime < HEALTH_CHECK_TIMEOUT_MS) {
@@ -377,7 +377,7 @@ export async function probeInstanceHealth(computer: Computer): Promise<HealthChe
   }
 
   const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID || "";
-  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+  const resourceGroup = process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
 
   let providerState: string | null = null;
   let vncReachable = false;

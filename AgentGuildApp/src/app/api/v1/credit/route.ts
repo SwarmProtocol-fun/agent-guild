@@ -16,8 +16,8 @@ import { FieldValue } from "firebase-admin/firestore";
 import {
     HEDERA_CONTRACTS,
     HEDERA_GAS_LIMIT,
-} from "@/lib/swarm-contracts";
-import { AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
+} from "@/lib/agent-guild-contracts";
+import { AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
 import { requirePlatformAdmin, forbidden } from "@/lib/auth-guard";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
 import { fireWebhooks } from "@/lib/credit-webhooks";

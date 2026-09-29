@@ -7,7 +7,7 @@
  *   3. ConnectButton calls POST /api/auth/verify with { payload, signature }
  *   4. Server verifies via viem SIWE (lib/auth/siwe.ts), creates Firestore session, issues JWT cookie
  *
- * JWT is stored in an httpOnly cookie (`swarm_session`).
+ * JWT is stored in an httpOnly cookie (`agent_guild_session`).
  * Sessions are persisted in the Firestore `sessions` collection.
  */
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
@@ -17,7 +17,7 @@ import { Timestamp, FieldValue } from "firebase-admin/firestore";
 
 // ─── Constants ──────────────────────────────────────────
 
-export const SESSION_COOKIE = "swarm_session";
+export const SESSION_COOKIE = "agent_guild_session";
 const SESSION_MAX_AGE = 60 * 60 * 24; // 24 hours in seconds
 
 /** Roles in ascending privilege order */

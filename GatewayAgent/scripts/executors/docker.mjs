@@ -48,7 +48,7 @@ export async function execute(task, logCallback) {
   running = true;
 
   // Generate unique container name for cancellation
-  const containerName = `swarm-gw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const containerName = `agent-guild-gw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   activeContainerId = containerName;
 
   // Build docker run args
@@ -79,7 +79,10 @@ export async function execute(task, logCallback) {
 
   try {
     const dockerTask = {
-      payload: { command: "docker", args, cwd: undefined, env: undefined },
+      // shell: false — args come from job-controlled fields (image, volumes,
+      // envVars); running them through /bin/sh -c would let shell metacharacters
+      // in any field escape the `docker run` invocation onto the host.
+      payload: { command: "docker", args, cwd: undefined, env: undefined, shell: false },
       timeoutMs: timeoutMs + 10000, // Extra buffer over Docker's own timeout
     };
 
@@ -96,7 +99,7 @@ export async function cancel() {
     try {
       const { execute: exec } = await import("./shell.mjs");
       await exec(
-        { payload: { command: "docker", args: ["kill", activeContainerId] }, timeoutMs: 10000 },
+        { payload: { command: "docker", args: ["kill", activeContainerId], shell: false }, timeoutMs: 10000 },
         null,
       );
     } catch {

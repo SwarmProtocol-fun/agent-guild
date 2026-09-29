@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { defineClientMod, type PanelProps } from "@swarm/sdk";
+import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 
 function HelloPanel({ address, api }: PanelProps) {
   const [stats, setStats] = useState<{ logins: number } | null>(null);

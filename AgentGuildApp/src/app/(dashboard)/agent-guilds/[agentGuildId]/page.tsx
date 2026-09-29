@@ -1,4 +1,4 @@
-/** Swarm Detail — Individual project view with agents, tasks, activity, and agent comms tabs. */
+/** Agent Guild Detail — Individual project view with agents, tasks, activity, and agent comms tabs. */
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -9,7 +9,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 
 const AgentMap = dynamic(() => import("@/components/agent-map/agent-map"), { ssr: false });
-// [swarm-core] GitHub mod extracted
+// [agent-guild-core] GitHub mod extracted
 const GitHubIcon = ({ className }: { className?: string }) => <span className={className}>GH</span>;
 const GitHubPanel = (_props: Record<string, unknown>) => null;
 const RepoSelector = (_props: Record<string, unknown>) => null;
@@ -74,7 +74,7 @@ const PRIORITY_LABELS: Record<string, { label: string; color: string }> = {
 
 export default function ProjectDetailPage() {
   const params = useParams();
-  const projectId = params.swarmId as string;
+  const projectId = params.agentGuildId as string;
   const { currentOrg } = useOrg();
   const account = useWalletAccount();
   const { symbol: currencySymbol, fmt: fmtCurrency } = useChainCurrency();
@@ -607,7 +607,7 @@ export default function ProjectDetailPage() {
           <h2 className="text-xl font-bold mb-2">Project Not Found</h2>
           <p className="text-muted-foreground mb-4">{error}</p>
           <Button asChild variant="outline">
-            <Link href="/swarms">← Back to Projects</Link>
+            <Link href="/agent-guilds">← Back to Projects</Link>
           </Button>
         </div>
       </div>
@@ -619,7 +619,7 @@ export default function ProjectDetailPage() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-4">
-          <Link href="/swarms" className="text-muted-foreground hover:text-amber-600 transition-colors text-lg">
+          <Link href="/agent-guilds" className="text-muted-foreground hover:text-amber-600 transition-colors text-lg">
             ←
           </Link>
           <div>
@@ -1698,7 +1698,7 @@ export default function ProjectDetailPage() {
             <Button variant="outline" onClick={() => setShowDeleteProject(false)}>Cancel</Button>
             <Button className="bg-red-600 hover:bg-red-700 text-white" onClick={async () => {
               await deleteProject(projectId);
-              router.push('/swarms');
+              router.push('/agent-guilds');
             }}>Delete Project</Button>
           </div>
         </DialogContent>

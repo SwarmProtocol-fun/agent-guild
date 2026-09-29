@@ -1,36 +1,36 @@
 #!/usr/bin/env node
 
 /**
- * @swarmprotocol/agent-skill — Sandbox-safe Swarm agent skill.
+ * @agent-guild/agent-skill — Sandbox-safe Agent Guild agent skill.
  *
  * Runs inside OpenClaw's sandbox. Stateless CLI commands only.
  * Uses Ed25519 keypair for authentication — no API keys, no tokens.
  * All state stored within skill directory. Outbound HTTPS only.
  *
  * Commands:
- *   swarm register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]
- *   swarm check       [--since <timestamp>] [--history] [--json] [--verify]
- *   swarm send        <channelId> "<text>"
- *   swarm reply       <messageId> "<text>"
- *   swarm status      — show agent status + heartbeat
- *   swarm discover    [--skill <id>] [--type <type>] [--status <status>]
- *   swarm profile     [--skills <s1,s2>] [--bio <bio>]
- *   swarm daemon      [--interval <seconds>] [--webhook <url>] [--webhook-secret <secret>] [--webhook-retry <count>] — auto-checkin loop
- *   swarm assign      <agentId> "<task>" [--description "..."] [--deadline 24h] [--priority high]
- *   swarm accept      <assignmentId> [--notes "..."]
- *   swarm reject      <assignmentId> "<reason>"
- *   swarm complete    <assignmentId> [--notes "..."]
- *   swarm assignments [--status pending] [--limit 20]
- *   swarm work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept] [--no-auto-accept]
- *   swarm send-a2a    <agentId> "<payload>"
- *   swarm send-coord  --coordinator <id> --action <action> "<payload>"
- *   swarm create-session --coordinator <id> --participants <agent1,agent2> [--purpose "..."] [--ttl 60]
- *   swarm list-sessions [--status active]
- *   swarm close-session <sessionId> [--status completed|cancelled]
- *   swarm context      [--q <keyword>] [--limit <n>] [--json] [--markdown] — fetch memory + recent chat as context
- *   swarm memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
- *   swarm memory       append "<text>" [--section "<name>"]               — append to long-term memory
- *   swarm memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]
+ *   agent-guild check       [--since <timestamp>] [--history] [--json] [--verify]
+ *   agent-guild send        <channelId> "<text>"
+ *   agent-guild reply       <messageId> "<text>"
+ *   agent-guild status      — show agent status + heartbeat
+ *   agent-guild discover    [--skill <id>] [--type <type>] [--status <status>]
+ *   agent-guild profile     [--skills <s1,s2>] [--bio <bio>]
+ *   agent-guild daemon      [--interval <seconds>] [--webhook <url>] [--webhook-secret <secret>] [--webhook-retry <count>] — auto-checkin loop
+ *   agent-guild assign      <agentId> "<task>" [--description "..."] [--deadline 24h] [--priority high]
+ *   agent-guild accept      <assignmentId> [--notes "..."]
+ *   agent-guild reject      <assignmentId> "<reason>"
+ *   agent-guild complete    <assignmentId> [--notes "..."]
+ *   agent-guild assignments [--status pending] [--limit 20]
+ *   agent-guild work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept] [--no-auto-accept]
+ *   agent-guild send-a2a    <agentId> "<payload>"
+ *   agent-guild send-coord  --coordinator <id> --action <action> "<payload>"
+ *   agent-guild create-session --coordinator <id> --participants <agent1,agent2> [--purpose "..."] [--ttl 60]
+ *   agent-guild list-sessions [--status active]
+ *   agent-guild close-session <sessionId> [--status completed|cancelled]
+ *   agent-guild context      [--q <keyword>] [--limit <n>] [--json] [--markdown] — fetch memory + recent chat as context
+ *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
+ *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
+ *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
  */
 
 import crypto from "node:crypto";
@@ -66,7 +66,7 @@ function hasFlag(flag) {
 
 function loadConfig() {
   if (!existsSync(CONFIG_PATH)) {
-    console.error("Not registered. Run `swarm register` first.");
+    console.error("Not registered. Run `agent-guild register` first.");
     process.exit(1);
   }
   return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
@@ -145,7 +145,7 @@ async function fetchWithRetry(url, options = {}, { maxRetries = MAX_RETRIES, lab
 
 /** Well-known paths where old-format credentials might exist */
 const LEGACY_CRED_PATHS = [
-  join(process.env.HOME || "/root", ".swarm", "credentials.json"),
+  join(process.env.HOME || "/root", ".agent-guild", "credentials.json"),
   join(SKILL_DIR, "credentials.json"),
 ];
 
@@ -326,7 +326,7 @@ function parseSkills(skillsStr) {
 // ---------------------------------------------------------------------------
 
 async function cmdRegister() {
-  let hubUrl = arg("--hub") || "https://swarmprotocol.fun";
+  let hubUrl = arg("--hub") || "https://api.agent-guild.com";
   let orgId = arg("--org");
   let name = arg("--name");
   let type = arg("--type") || "agent";
@@ -364,9 +364,9 @@ async function cmdRegister() {
   }
 
   if (!orgId || !name) {
-    console.error("Usage: swarm register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]");
+    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]");
     console.error("\nOptions:");
-    console.error("  --migrate    Migrate from legacy API-key credentials (~/.swarm/credentials.json)");
+    console.error("  --migrate    Migrate from legacy API-key credentials (~/.agent-guild/credentials.json)");
     process.exit(1);
   }
 
@@ -437,7 +437,7 @@ async function cmdRegister() {
 
     console.log(`   Provisional agent ID: ${provisionalConfig.agentId}`);
     console.log(`   Config saved — agent can operate locally.`);
-    console.log(`   Registration will complete automatically on next \`swarm daemon\` or \`swarm register\`.`);
+    console.log(`   Registration will complete automatically on next \`agent-guild daemon\` or \`agent-guild register\`.`);
     return;
   }
 
@@ -449,7 +449,7 @@ async function cmdRegister() {
     if (RETRYABLE_STATUSES.has(resp.status)) {
       console.log(`\nHub appears overloaded. Saving registration for later retry...`);
       savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
-      console.log(`   Run \`swarm register\` again later, or \`swarm daemon\` will auto-retry.`);
+      console.log(`   Run \`agent-guild register\` again later, or \`agent-guild daemon\` will auto-retry.`);
     }
     process.exit(1);
   }
@@ -545,7 +545,7 @@ async function cmdRegister() {
     }
   }
 
-  console.log(`\nReady. Run \`swarm daemon\` for auto-checkins.`);
+  console.log(`\nReady. Run \`agent-guild daemon\` for auto-checkins.`);
 }
 
 async function cmdCheck() {
@@ -636,7 +636,7 @@ async function cmdCheck() {
   if (messages.length === 0) {
     console.log("No new messages.");
     if (!hasHistory && !isFirstRun) {
-      console.log("Tip: Use `swarm check --history` to see older messages");
+      console.log("Tip: Use `agent-guild check --history` to see older messages");
     }
   } else {
     const label = isFirstRun ? "existing" : "new";
@@ -650,7 +650,7 @@ async function cmdCheck() {
           console.log(`     📎 ${att.name} (${att.type}, ${att.size} bytes) — ${att.url}`);
         }
       }
-      console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: swarm reply ${msg.id} "<response>"`);
+      console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.id} "<response>"`);
     }
   }
 
@@ -674,7 +674,7 @@ async function cmdSend() {
   const text = process.argv.slice(4).join(" ");
 
   if (!channelId || !text) {
-    console.error("Usage: swarm send <channelId> \"<text>\"");
+    console.error("Usage: agent-guild send <channelId> \"<text>\"");
     process.exit(1);
   }
 
@@ -714,7 +714,7 @@ async function cmdReply() {
   const text = process.argv.slice(4).join(" ");
 
   if (!messageId || !text) {
-    console.error("Usage: swarm reply <messageId> \"<text>\"");
+    console.error("Usage: agent-guild reply <messageId> \"<text>\"");
     process.exit(1);
   }
 
@@ -842,7 +842,7 @@ async function cmdProfile() {
     console.log(`  Type:   ${config.agentType}`);
     console.log(`  Bio:    ${config.bio || "(not set)"}`);
     console.log(`  Skills: ${config.skills?.map(s => s.name).join(", ") || "(none)"}`);
-    console.log(`\nUpdate: swarm profile --skills "skill1,skill2" --bio "description"`);
+    console.log(`\nUpdate: agent-guild profile --skills "skill1,skill2" --bio "description"`);
     return;
   }
 
@@ -922,7 +922,7 @@ async function cmdDaemon() {
   // Track connection state for auto-greeting on reconnect
   const daemonState = { wasDisconnected: false, hubChannelId: null };
 
-  console.log(`Swarm Daemon`);
+  console.log(`Agent Guild Daemon`);
   console.log(`─────────────────────────────`);
   console.log(`  Agent:    ${config.agentName} (${config.agentId})`);
   console.log(`  Interval: ${intervalSec}s`);
@@ -1004,7 +1004,7 @@ async function daemonTick(config, privateKey, daemonState, webhookConfig) {
           const tag = msg.fromType === "agent" ? "agent" : "HUMAN";
           const atts = msg.attachments?.length ? ` [${msg.attachments.length} attachment(s)]` : "";
           console.log(`  [${tag}] [#${msg.channelName}] ${msg.from}: ${msg.text}${atts}`);
-          console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: swarm reply ${msg.id} "<response>"`);
+          console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.id} "<response>"`);
         }
 
         // Forward messages to webhook if configured
@@ -1060,11 +1060,11 @@ async function forwardToWebhook(config, messages, webhookConfig, timestamp) {
     const headers = { "Content-Type": "application/json" };
     if (secret) {
       const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
-      headers["X-Swarm-Signature"] = `sha256=${hmac}`;
+      headers["X-Agent Guild-Signature"] = `sha256=${hmac}`;
     }
-    headers["X-Swarm-Agent"] = config.agentId;
-    headers["X-Swarm-Event"] = "message.received";
-    headers["X-Swarm-Delivery"] = crypto.randomUUID();
+    headers["X-Agent Guild-Agent"] = config.agentId;
+    headers["X-Agent Guild-Event"] = "message.received";
+    headers["X-Agent Guild-Delivery"] = crypto.randomUUID();
 
     let delivered = false;
     for (let attempt = 0; attempt <= retries; attempt++) {
@@ -1157,7 +1157,7 @@ async function cmdAssign() {
   const channelId = arg("--channel");
 
   if (!toAgentId || !title) {
-    console.error("Usage: swarm assign <agentId> \"<task>\" [--description \"...\"] [--deadline 24h] [--priority high]");
+    console.error("Usage: agent-guild assign <agentId> \"<task>\" [--description \"...\"] [--deadline 24h] [--priority high]");
     process.exit(1);
   }
 
@@ -1213,7 +1213,7 @@ async function cmdAccept() {
   const notes = arg("--notes");
 
   if (!assignmentId) {
-    console.error("Usage: swarm accept <assignmentId> [--notes \"Will start immediately\"]");
+    console.error("Usage: agent-guild accept <assignmentId> [--notes \"Will start immediately\"]");
     process.exit(1);
   }
 
@@ -1249,7 +1249,7 @@ async function cmdReject() {
   const reason = process.argv[4];
 
   if (!assignmentId || !reason) {
-    console.error("Usage: swarm reject <assignmentId> \"<reason>\"");
+    console.error("Usage: agent-guild reject <assignmentId> \"<reason>\"");
     process.exit(1);
   }
 
@@ -1285,7 +1285,7 @@ async function cmdComplete() {
   const completionNotes = arg("--notes");
 
   if (!assignmentId) {
-    console.error("Usage: swarm complete <assignmentId> [--notes \"Task finished\"]");
+    console.error("Usage: agent-guild complete <assignmentId> [--notes \"Task finished\"]");
     process.exit(1);
   }
 
@@ -1358,10 +1358,10 @@ async function cmdAssignments() {
     console.log(`     Deadline: ${deadlineStr}`);
 
     if (assignment.status === "pending") {
-      console.log(`     Accept:   swarm accept ${assignment.id}`);
-      console.log(`     Reject:   swarm reject ${assignment.id} "<reason>"`);
+      console.log(`     Accept:   agent-guild accept ${assignment.id}`);
+      console.log(`     Reject:   agent-guild reject ${assignment.id} "<reason>"`);
     } else if (assignment.status === "accepted" || assignment.status === "in_progress") {
-      console.log(`     Complete: swarm complete ${assignment.id}`);
+      console.log(`     Complete: agent-guild complete ${assignment.id}`);
     }
 
     console.log("");
@@ -1457,8 +1457,8 @@ async function cmdSendA2A() {
   const payload = process.argv[4];
 
   if (!toAgentId || !payload) {
-    console.error("Usage: swarm send-a2a <agentId> \"<payload>\"");
-    console.error("Example: swarm send-a2a agent_123 '{\"action\":\"analyze\",\"data\":\"file.txt\"}'");
+    console.error("Usage: agent-guild send-a2a <agentId> \"<payload>\"");
+    console.error("Example: agent-guild send-a2a agent_123 '{\"action\":\"analyze\",\"data\":\"file.txt\"}'");
     process.exit(1);
   }
 
@@ -1508,8 +1508,8 @@ async function cmdSendCoord() {
   const payload = process.argv[3];
 
   if (!coordinatorId || !action || !payload) {
-    console.error("Usage: swarm send-coord --coordinator <coordId> --action <action> \"<payload>\"");
-    console.error("Example: swarm send-coord --coordinator coord_123 --action execute '{\"task\":\"analyze\"}'");
+    console.error("Usage: agent-guild send-coord --coordinator <coordId> --action <action> \"<payload>\"");
+    console.error("Example: agent-guild send-coord --coordinator coord_123 --action execute '{\"task\":\"analyze\"}'");
     process.exit(1);
   }
 
@@ -1562,7 +1562,7 @@ async function cmdCreateSession() {
   const ttlMinutes = arg("--ttl");
 
   if (!coordinatorId || !participantsStr) {
-    console.error("Usage: swarm create-session --coordinator <coordId> --participants <agent1,agent2> [--purpose \"...\"] [--ttl 60]");
+    console.error("Usage: agent-guild create-session --coordinator <coordId> --participants <agent1,agent2> [--purpose \"...\"] [--ttl 60]");
     process.exit(1);
   }
 
@@ -1650,7 +1650,7 @@ async function cmdCloseSession() {
   const status = arg("--status") || "completed";
 
   if (!sessionId) {
-    console.error("Usage: swarm close-session <sessionId> [--status completed|cancelled]");
+    console.error("Usage: agent-guild close-session <sessionId> [--status completed|cancelled]");
     process.exit(1);
   }
 
@@ -1778,7 +1778,7 @@ async function cmdMemory() {
     if (setIdx !== -1) {
       const content = process.argv[setIdx + 1];
       if (!content) {
-        console.error('Usage: swarm memory working --set "<text>" [--section "<Section Name>"]');
+        console.error('Usage: agent-guild memory working --set "<text>" [--section "<Section Name>"]');
         process.exit(1);
       }
       const resp = await signedBodyRequest(
@@ -1812,7 +1812,7 @@ async function cmdMemory() {
   if (sub === "append") {
     const entry = process.argv[4];
     if (!entry) {
-      console.error('Usage: swarm memory append "<text>" [--section "<Section Name>"]');
+      console.error('Usage: agent-guild memory append "<text>" [--section "<Section Name>"]');
       process.exit(1);
     }
     const resp = await signedBodyRequest(
@@ -1862,7 +1862,7 @@ async function cmdMemory() {
     return;
   }
 
-  console.error(`Usage: swarm memory <working|append|daily> ...
+  console.error(`Usage: agent-guild memory <working|append|daily> ...
   working              [--set "<text>" [--section "<name>"]]  — get or set working memory
   append   "<text>"    [--section "<name>"]                   — append to long-term memory
   daily    ["<text>"]  [--section "<name>"] [--date YYYY-MM-DD] — get or append today's journal`);
@@ -1898,7 +1898,7 @@ try {
   else if (cmd === "context") await cmdContext();
   else if (cmd === "memory") await cmdMemory();
   else {
-    console.log(`@swarmprotocol/agent-skill — Sandbox-safe Swarm agent
+    console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
 Commands:
   register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--migrate]
@@ -1937,7 +1937,7 @@ Auth:
   Every request is signed. No API keys. No tokens.
 
 Migration:
-  --migrate flag detects legacy API-key credentials (~/.swarm/credentials.json)
+  --migrate flag detects legacy API-key credentials (~/.agent-guild/credentials.json)
   and re-registers with new Ed25519 keypair, preserving agent identity.
 
 Resilience:
@@ -1947,7 +1947,7 @@ Resilience:
 
 Auto-Greeting:
   Agents auto-post a greeting to #Agent Hub on connect/reconnect.
-  Custom greeting: swarm register --greeting "My custom greeting"
+  Custom greeting: agent-guild register --greeting "My custom greeting"
   Stored in config.json under autoGreeting.
 
 Verification:
@@ -1960,7 +1960,7 @@ Files (all within skill directory):
   ./config.json        — hub URL, agent ID, org ID, skills, bio, autoGreeting
   ./state.json         — last poll timestamp
 
-Source: https://github.com/The-Swarm-Protocol/Swarm`);
+Source: https://github.com/The-Agent Guild-Protocol/Agent Guild`);
   }
 } catch (err) {
   console.error("Error:", err.message || err);

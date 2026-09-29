@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Azure Virtual Machines Provider
+ * Agent Guild Compute — Azure Virtual Machines Provider
  *
  * Uses Azure VMs for lifecycle, Run Command for script execution,
  * and Boot Diagnostics as a fallback screenshot source.
@@ -25,7 +25,7 @@ export class AzureComputeProvider implements ComputeProvider {
   }
 
   private get resourceGroup(): string {
-    return process.env.AZURE_RESOURCE_GROUP || "swarm-compute";
+    return process.env.AZURE_RESOURCE_GROUP || "agent-guild-compute";
   }
 
   private resolveLocation(region: Region): string {
@@ -50,14 +50,14 @@ export class AzureComputeProvider implements ComputeProvider {
 
     const location = config.providerRegion || this.resolveLocation(config.region);
     const vmSize = config.providerInstanceType || this.resolveVmSize(config.sizeKey);
-    const vmName = `swarm-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
+    const vmName = `agent-guild-${config.name}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
 
     // Parse image reference (publisher:offer:sku:version)
     const imageRef = (config.providerImage || PROVIDER_BASE_IMAGES.azure).split(":");
 
     // Create networking resources dynamically
-    const vnetName = "swarm-vnet";
-    const subnetName = "swarm-subnet";
+    const vnetName = "agent-guild-vnet";
+    const subnetName = "agent-guild-subnet";
     const nsgName = `${vmName}-nsg`;
     const publicIpName = `${vmName}-ip`;
     const nicName = `${vmName}-nic`;
@@ -74,7 +74,7 @@ export class AzureComputeProvider implements ComputeProvider {
           name: subnetName,
           addressPrefix: "10.0.0.0/24",
         }],
-        tags: { "swarm:managed": "true" },
+        tags: { "agent-guild:managed": "true" },
       });
     }
 
@@ -117,7 +117,7 @@ export class AzureComputeProvider implements ComputeProvider {
           direction: "Inbound",
         },
       ],
-      tags: { "swarm:managed": "true", "swarm:vm": vmName },
+      tags: { "agent-guild:managed": "true", "agent-guild:vm": vmName },
     });
 
     // 3. Create Public IP
@@ -129,7 +129,7 @@ export class AzureComputeProvider implements ComputeProvider {
         location,
         publicIPAllocationMethod: "Dynamic", // Static IPs require reserved IP addresses
         sku: { name: "Standard" },
-        tags: { "swarm:managed": "true", "swarm:vm": vmName },
+        tags: { "agent-guild:managed": "true", "agent-guild:vm": vmName },
       }
     );
 
@@ -152,7 +152,7 @@ export class AzureComputeProvider implements ComputeProvider {
         networkSecurityGroup: {
           id: `/subscriptions/${this.subscriptionId}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/networkSecurityGroups/${nsgName}`,
         },
-        tags: { "swarm:managed": "true", "swarm:vm": vmName },
+        tags: { "agent-guild:managed": "true", "agent-guild:vm": vmName },
       }
     );
 
@@ -163,8 +163,8 @@ export class AzureComputeProvider implements ComputeProvider {
       hardwareProfile: { vmSize },
       osProfile: {
         computerName: vmName.slice(0, 15),
-        adminUsername: "swarm",
-        adminPassword: `Swarm${Date.now()}!`, // Auto-generated, access via Run Command
+        adminUsername: "agent-guild",
+        adminPassword: `Agent Guild${Date.now()}!`, // Auto-generated, access via Run Command
         customData: Buffer.from(this.buildCloudInit(config)).toString("base64"),
         linuxConfiguration: {
           disablePasswordAuthentication: false,
@@ -194,11 +194,11 @@ export class AzureComputeProvider implements ComputeProvider {
         bootDiagnostics: { enabled: true },
       },
       tags: {
-        "swarm:managed": "true",
-        "swarm:size": config.sizeKey,
-        "swarm:nic": nicName,
-        "swarm:nsg": nsgName,
-        "swarm:ip": publicIpName,
+        "agent-guild:managed": "true",
+        "agent-guild:size": config.sizeKey,
+        "agent-guild:nic": nicName,
+        "agent-guild:nsg": nsgName,
+        "agent-guild:ip": publicIpName,
       },
     });
 
@@ -251,9 +251,9 @@ export class AzureComputeProvider implements ComputeProvider {
 
     try {
       const vm = await computeClient.virtualMachines.get(this.resourceGroup, providerInstanceId);
-      nicName = vm.tags?.["swarm:nic"];
-      nsgName = vm.tags?.["swarm:nsg"];
-      publicIpName = vm.tags?.["swarm:ip"];
+      nicName = vm.tags?.["agent-guild:nic"];
+      nsgName = vm.tags?.["agent-guild:nsg"];
+      publicIpName = vm.tags?.["agent-guild:ip"];
     } catch {
       // VM might already be deleted, continue with cleanup based on naming convention
       nicName = `${providerInstanceId}-nic`;
@@ -295,7 +295,7 @@ export class AzureComputeProvider implements ComputeProvider {
       try {
         const ip = await networkClient.publicIPAddresses.get(this.resourceGroup, publicIpName);
         // Only delete dynamic IPs or if explicitly tagged for deletion
-        if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["swarm:delete-with-vm"] === "true") {
+        if (ip.publicIPAllocationMethod === "Dynamic" || ip.tags?.["agent-guild:delete-with-vm"] === "true") {
           await networkClient.publicIPAddresses.beginDeleteAndWait(this.resourceGroup, publicIpName);
         } else {
           console.log(`[azure] Preserving static IP ${publicIpName}`);
@@ -385,14 +385,14 @@ export class AzureComputeProvider implements ComputeProvider {
     const osDiskId = vm.storageProfile?.osDisk?.managedDisk?.id;
     if (!osDiskId) throw new Error("No OS disk found on VM");
 
-    const snapshotName = `swarm-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 80);
+    const snapshotName = `agent-guild-${label}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 80);
     await client.snapshots.beginCreateOrUpdateAndWait(this.resourceGroup, snapshotName, {
       location: vm.location || "eastus",
       creationData: {
         createOption: "Copy",
         sourceResourceId: osDiskId,
       },
-      tags: { "swarm:managed": "true" },
+      tags: { "agent-guild:managed": "true" },
     });
 
     return snapshotName;
@@ -411,15 +411,15 @@ export class AzureComputeProvider implements ComputeProvider {
     const vmSize = sourceVm.hardwareProfile?.vmSize || "Standard_B2s";
 
     // Generate new VM name
-    const newVmName = `swarm-${newName}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
+    const newVmName = `agent-guild-${newName}-${Date.now()}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
 
     // Step 1: Create snapshot of source VM's OS disk
     console.log(`[azure] Creating snapshot for clone`);
     const snapshotName = await this.createSnapshot(providerInstanceId, "clone");
 
     // Step 2: Create networking resources for new VM
-    const vnetName = "swarm-vnet";
-    const subnetName = "swarm-subnet";
+    const vnetName = "agent-guild-vnet";
+    const subnetName = "agent-guild-subnet";
     const nsgName = `${newVmName}-nsg`;
     const publicIpName = `${newVmName}-ip`;
     const nicName = `${newVmName}-nic`;
@@ -463,7 +463,7 @@ export class AzureComputeProvider implements ComputeProvider {
           direction: "Inbound",
         },
       ],
-      tags: { "swarm:managed": "true", "swarm:vm": newVmName },
+      tags: { "agent-guild:managed": "true", "agent-guild:vm": newVmName },
     });
 
     // Create Public IP
@@ -475,7 +475,7 @@ export class AzureComputeProvider implements ComputeProvider {
         location,
         publicIPAllocationMethod: "Dynamic",
         sku: { name: "Standard" },
-        tags: { "swarm:managed": "true", "swarm:vm": newVmName },
+        tags: { "agent-guild:managed": "true", "agent-guild:vm": newVmName },
       }
     );
 
@@ -498,7 +498,7 @@ export class AzureComputeProvider implements ComputeProvider {
         networkSecurityGroup: {
           id: `/subscriptions/${this.subscriptionId}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/networkSecurityGroups/${nsgName}`,
         },
-        tags: { "swarm:managed": "true", "swarm:vm": newVmName },
+        tags: { "agent-guild:managed": "true", "agent-guild:vm": newVmName },
       }
     );
 
@@ -514,7 +514,7 @@ export class AzureComputeProvider implements ComputeProvider {
         sourceResourceId: snapshot.id,
       },
       sku: { name: "Premium_LRS" },
-      tags: { "swarm:managed": "true", "swarm:vm": newVmName },
+      tags: { "agent-guild:managed": "true", "agent-guild:vm": newVmName },
     });
 
     // Step 4: Create new VM from the disk
@@ -524,8 +524,8 @@ export class AzureComputeProvider implements ComputeProvider {
       hardwareProfile: { vmSize },
       osProfile: {
         computerName: newVmName.slice(0, 15),
-        adminUsername: "swarm",
-        adminPassword: `Swarm${Date.now()}!`,
+        adminUsername: "agent-guild",
+        adminPassword: `Agent Guild${Date.now()}!`,
         linuxConfiguration: {
           disablePasswordAuthentication: false,
         },
@@ -550,11 +550,11 @@ export class AzureComputeProvider implements ComputeProvider {
         bootDiagnostics: { enabled: true },
       },
       tags: {
-        "swarm:managed": "true",
-        "swarm:cloned-from": providerInstanceId,
-        "swarm:nic": nicName,
-        "swarm:nsg": nsgName,
-        "swarm:ip": publicIpName,
+        "agent-guild:managed": "true",
+        "agent-guild:cloned-from": providerInstanceId,
+        "agent-guild:nic": nicName,
+        "agent-guild:nsg": nsgName,
+        "agent-guild:ip": publicIpName,
       },
     });
 
@@ -628,7 +628,7 @@ set -e
 apt-get update -y
 DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-terminal tigervnc-standalone-server novnc websockify xdotool imagemagick
 mkdir -p /root/.vnc
-echo "swarmvnc" | vncpasswd -f > /root/.vnc/passwd
+echo "agentguildvnc" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
 cat > /root/.vnc/xstartup << 'XSTARTUP'
 #!/bin/bash

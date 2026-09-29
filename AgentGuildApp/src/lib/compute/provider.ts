@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Provider Abstraction
+ * Agent Guild Compute — Provider Abstraction
  *
  * Decouples all compute operations from any specific VM provider.
  * Supports E2B Desktop Sandbox as the primary real provider.
@@ -49,7 +49,7 @@ export function checkProviderAvailability(providerKey: string): ProviderAvailabi
     azure: "Microsoft Azure",
     aws: "AWS EC2",
     gcp: "GCP Compute Engine",
-    "swarm-node": "Swarm Node",
+    "agent-guild-node": "Agent Guild Node",
     stub: "Development (Stub)",
   };
 
@@ -85,7 +85,7 @@ export function checkProviderAvailability(providerKey: string): ProviderAvailabi
  * Check availability for all known providers.
  */
 export function getAllProviderAvailability(): ProviderAvailability[] {
-  return ["e2b", "azure", "aws", "gcp", "swarm-node", "stub"].map(checkProviderAvailability);
+  return ["e2b", "azure", "aws", "gcp", "agent-guild-node", "stub"].map(checkProviderAvailability);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -468,10 +468,10 @@ export function getComputeProvider(providerKey?: ProviderKey | string, azureProd
       }
       break;
     }
-    case "swarm-node": {
+    case "agent-guild-node": {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { SwarmNodeProvider } = require("./providers/swarm-node");
-      provider = new SwarmNodeProvider();
+      const { AgentGuildNodeProvider } = require("./providers/agent-guild-node");
+      provider = new AgentGuildNodeProvider();
       break;
     }
     default:

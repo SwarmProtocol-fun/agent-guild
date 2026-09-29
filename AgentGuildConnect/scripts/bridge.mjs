@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * Swarm Runtime Bridge — Universal message bridge between Swarm daemon and any agent runtime.
+ * Agent Guild Runtime Bridge — Universal message bridge between Agent Guild daemon and any agent runtime.
  *
- * Receives webhook POSTs from `swarm daemon --webhook`, forwards to the configured
+ * Receives webhook POSTs from `agent-guild daemon --webhook`, forwards to the configured
  * runtime adapter (OpenClaw, Eliza OS, Agent Zero, Hermes, etc.), and sends the
- * runtime's response back to the Swarm channel.
+ * runtime's response back to the Agent Guild channel.
  *
  * Usage:
  *   node bridge.mjs --runtime <type> --port <port> --runtime-url <url> [options]
@@ -21,10 +21,10 @@
  *   BRIDGE_PORT           — HTTP port (default: 3777)
  *   BRIDGE_RUNTIME        — Runtime type
  *   BRIDGE_RUNTIME_URL    — Runtime endpoint
- *   BRIDGE_WEBHOOK_SECRET — HMAC secret for verifying inbound swarm webhooks
- *   SWARM_HUB_URL         — Swarm hub URL (default: https://swarmprotocol.fun)
- *   SWARM_AGENT_ID        — Agent ID for replies
- *   SWARM_API_KEY         — API key for replies (simple auth)
+ *   BRIDGE_WEBHOOK_SECRET — HMAC secret for verifying inbound agent-guild webhooks
+ *   AGENT_GUILD_HUB_URL         — Agent Guild hub URL (default: https://api.agent-guild.com)
+ *   AGENT_GUILD_AGENT_ID        — Agent ID for replies
+ *   AGENT_GUILD_API_KEY         — API key for replies (simple auth)
  *   ELIZA_AGENT_ID        — Eliza OS agent ID
  *   RUNTIME_API_KEY       — API key for the runtime (if required)
  */
@@ -56,20 +56,20 @@ function hasFlag(flag) {
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-function loadSwarmConfig() {
+function loadAgentGuildConfig() {
   if (!existsSync(CONFIG_PATH)) return {};
   try { return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")); } catch { return {}; }
 }
 
-const swarmConfig = loadSwarmConfig();
+const agentGuildConfig = loadAgentGuildConfig();
 
 const PORT = parseInt(arg("--port") || process.env.BRIDGE_PORT || "3777", 10);
 const RUNTIME_TYPE = arg("--runtime") || process.env.BRIDGE_RUNTIME || "generic";
 const RUNTIME_URL = arg("--runtime-url") || process.env.BRIDGE_RUNTIME_URL;
-const WEBHOOK_SECRET = arg("--webhook-secret") || process.env.BRIDGE_WEBHOOK_SECRET || swarmConfig.webhook?.secret || null;
-const HUB_URL = arg("--hub") || process.env.SWARM_HUB_URL || swarmConfig.hubUrl || "https://swarmprotocol.fun";
-const AGENT_ID = arg("--agent-id") || process.env.SWARM_AGENT_ID || swarmConfig.agentId || null;
-const API_KEY = arg("--api-key") || process.env.SWARM_API_KEY || null;
+const WEBHOOK_SECRET = arg("--webhook-secret") || process.env.BRIDGE_WEBHOOK_SECRET || agentGuildConfig.webhook?.secret || null;
+const HUB_URL = arg("--hub") || process.env.AGENT_GUILD_HUB_URL || agentGuildConfig.hubUrl || "https://api.agent-guild.com";
+const AGENT_ID = arg("--agent-id") || process.env.AGENT_GUILD_AGENT_ID || agentGuildConfig.agentId || null;
+const API_KEY = arg("--api-key") || process.env.AGENT_GUILD_API_KEY || null;
 const ELIZA_AGENT_ID = arg("--eliza-agent-id") || process.env.ELIZA_AGENT_ID || null;
 const RUNTIME_API_KEY = arg("--runtime-api-key") || process.env.RUNTIME_API_KEY || null;
 const TIMEOUT_MS = parseInt(arg("--timeout") || process.env.BRIDGE_TIMEOUT || "120000", 10);
@@ -94,8 +94,8 @@ function sign(message) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Each adapter takes a swarm message payload and returns a response string.
- * Adapters handle the translation between Swarm's message format and the
+ * Each adapter takes a agent-guild message payload and returns a response string.
+ * Adapters handle the translation between Agent Guild's message format and the
  * runtime's expected input/output format.
  */
 
@@ -115,7 +115,7 @@ const adapters = {
           from: msg.from,
           fromType: msg.fromType,
           messageId: msg.id,
-          platform: "swarm",
+          platform: "agent-guild",
         },
       }),
     });
@@ -157,7 +157,7 @@ const adapters = {
       headers: runtimeHeaders(),
       body: JSON.stringify({
         message: msg.text,
-        context: `Swarm channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})`,
+        context: `Agent Guild channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})`,
       }),
     });
     const data = await resp.json();
@@ -176,7 +176,7 @@ const adapters = {
         messages: [
           {
             role: "system",
-            content: `You are an agent on the Swarm Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`,
+            content: `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`,
           },
           {
             role: "user",
@@ -194,7 +194,7 @@ const adapters = {
   },
 
   // ── Generic / Custom ─────────────────────────────────────────────────────
-  // POST with Swarm's native format — runtime echoes back { response: "text" }
+  // POST with Agent Guild's native format — runtime echoes back { response: "text" }
   // Works with any runtime that accepts JSON and returns a response field.
   async generic(msg) {
     const resp = await fetchRuntime(RUNTIME_URL, {
@@ -209,7 +209,7 @@ const adapters = {
         messageId: msg.id,
         timestamp: msg.timestamp,
         attachments: msg.attachments || [],
-        platform: "swarm",
+        platform: "agent-guild",
       }),
     });
     const data = await resp.json();
@@ -241,15 +241,15 @@ async function fetchRuntime(url, options) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Reply to Swarm
+// Reply to Agent Guild
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Send the runtime's response back to the Swarm channel.
+ * Send the runtime's response back to the Agent Guild channel.
  * Prefers Ed25519 signed /api/v1/send, falls back to API key /api/webhooks/reply.
  */
-async function replyToSwarm(channelId, text, replyToMessageId) {
-  if (!AGENT_ID) throw new Error("No agent ID configured — set --agent-id or SWARM_AGENT_ID");
+async function replyToAgentGuild(channelId, text, replyToMessageId) {
+  if (!AGENT_ID) throw new Error("No agent ID configured — set --agent-id or AGENT_GUILD_AGENT_ID");
 
   // Prefer Ed25519 signed send
   if (privateKey) {
@@ -333,12 +333,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Webhook endpoint
-  if (req.method === "POST" && (req.url === "/" || req.url === "/webhook" || req.url === "/webhook/swarm")) {
+  if (req.method === "POST" && (req.url === "/" || req.url === "/webhook" || req.url === "/webhook/agent-guild")) {
     let rawBody = "";
     for await (const chunk of req) rawBody += chunk;
 
     // Verify HMAC signature
-    const sig = req.headers["x-swarm-signature"];
+    const sig = req.headers["x-agent-guild-signature"];
     if (!verifySignature(rawBody, sig)) {
       console.error(`[bridge] Signature verification failed`);
       res.writeHead(401, { "Content-Type": "application/json" });
@@ -363,7 +363,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const deliveryId = req.headers["x-swarm-delivery"] || "unknown";
+    const deliveryId = req.headers["x-agent-guild-delivery"] || "unknown";
     const now = new Date().toISOString().replace("T", " ").slice(0, 19);
     console.log(`[${now}] received: [${msg.fromType}] ${msg.from} in #${msg.channelName}: ${msg.text.slice(0, 100)}`);
 
@@ -387,8 +387,8 @@ const server = http.createServer(async (req, res) => {
 
       console.log(`[${now}] runtime response: ${response.slice(0, 100)}${response.length > 100 ? "..." : ""}`);
 
-      const result = await replyToSwarm(msg.channelId, response, msg.id);
-      console.log(`[${now}] replied to swarm: ${result.messageId || "ok"}`);
+      const result = await replyToAgentGuild(msg.channelId, response, msg.id);
+      console.log(`[${now}] replied to agent-guild: ${result.messageId || "ok"}`);
     } catch (err) {
       console.error(`[${now}] error: ${err.message}`);
     }
@@ -420,18 +420,18 @@ if (!RUNTIME_URL) {
 }
 
 if (!AGENT_ID) {
-  console.error("Error: No agent ID found. Set --agent-id, SWARM_AGENT_ID, or register via `swarm register` first.");
+  console.error("Error: No agent ID found. Set --agent-id, AGENT_GUILD_AGENT_ID, or register via `agent-guild register` first.");
   process.exit(1);
 }
 
 const authMethod = privateKey ? "Ed25519" : API_KEY ? "API key" : "none";
 if (authMethod === "none") {
   console.error("Warning: No auth configured for replies. Need Ed25519 private key in ./keys/ or --api-key.");
-  console.error("Replies to swarm will fail.\n");
+  console.error("Replies to agent-guild will fail.\n");
 }
 
 server.listen(PORT, () => {
-  console.log(`Swarm Runtime Bridge`);
+  console.log(`Agent Guild Runtime Bridge`);
   console.log(`─────────────────────────────────────`);
   console.log(`  Port:       ${PORT}`);
   console.log(`  Runtime:    ${RUNTIME_TYPE}`);
@@ -444,9 +444,9 @@ server.listen(PORT, () => {
   if (RUNTIME_TYPE === "eliza" && ELIZA_AGENT_ID) {
     console.log(`  Eliza ID:   ${ELIZA_AGENT_ID}`);
   }
-  console.log(`\n  Webhook URL: http://localhost:${PORT}/webhook/swarm`);
+  console.log(`\n  Webhook URL: http://localhost:${PORT}/webhook/agent-guild`);
   console.log(`\n  Start daemon with:`);
-  console.log(`  swarm daemon --interval 10 --webhook http://localhost:${PORT}/webhook/swarm${WEBHOOK_SECRET ? " --webhook-secret <secret>" : ""}`);
+  console.log(`  agent-guild daemon --interval 10 --webhook http://localhost:${PORT}/webhook/agent-guild${WEBHOOK_SECRET ? " --webhook-secret <secret>" : ""}`);
   console.log(`\nListening...\n`);
 });
 

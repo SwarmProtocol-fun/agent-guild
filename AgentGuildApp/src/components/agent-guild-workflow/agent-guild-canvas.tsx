@@ -1,4 +1,4 @@
-/** Swarm Canvas — React Flow visual workflow editor with integrated execution. */
+/** Agent Guild Canvas — React Flow visual workflow editor with integrated execution. */
 'use client';
 
 import { useCallback, useRef, useState, useMemo } from 'react';
@@ -19,7 +19,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import type { Agent } from '@/lib/firestore';
-import { validateWorkflow } from '@/lib/swarm-workflow';
+import { validateWorkflow } from '@/lib/agent-guild-workflow';
 import { canvasToWorkflow, workflowToCanvas } from '@/lib/workflow/canvas-transform';
 import type { WorkflowNode, WorkflowEdge } from '@/lib/workflow/types';
 import { useWorkflowRun } from '@/hooks/useWorkflowRun';
@@ -28,7 +28,7 @@ import { NodePalette } from './node-palette';
 import { PriceSummary } from './price-summary';
 import { RunProgressOverlay } from './run-detail-panel';
 
-interface SwarmCanvasProps {
+interface AgentGuildCanvasProps {
   agents: Agent[];
   orgId?: string;
   /** Existing workflow ID (for edit mode) */
@@ -41,16 +41,16 @@ interface SwarmCanvasProps {
 }
 
 let nodeId = 0;
-const getNodeId = () => `swarm_node_${nodeId++}`;
+const getNodeId = () => `agent_guild_node_${nodeId++}`;
 
-function SwarmCanvasInner({
+function AgentGuildCanvasInner({
   agents,
   orgId,
   workflowId: existingWorkflowId,
   initialNodes,
   initialEdges,
   onSaved,
-}: SwarmCanvasProps) {
+}: AgentGuildCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
 
   // Convert initial engine data to RF format if provided
@@ -221,7 +221,7 @@ function SwarmCanvasInner({
               <Panel position="top-center">
                 <div className="bg-card/90 border border-border rounded-lg px-6 py-4 text-center shadow-sm mt-20">
                   <p className="text-muted-foreground font-medium">
-                    Drag nodes from the palette to build your swarm workflow
+                    Drag nodes from the palette to build your agent-guild workflow
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
                     Start with a Trigger, add Agents, and end with an Output
@@ -262,10 +262,10 @@ function SwarmCanvasInner({
   );
 }
 
-export function SwarmCanvas(props: SwarmCanvasProps) {
+export function AgentGuildCanvas(props: AgentGuildCanvasProps) {
   return (
     <ReactFlowProvider>
-      <SwarmCanvasInner {...props} />
+      <AgentGuildCanvasInner {...props} />
     </ReactFlowProvider>
   );
 }

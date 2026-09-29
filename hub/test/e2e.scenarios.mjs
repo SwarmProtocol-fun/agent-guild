@@ -7,7 +7,7 @@
  * Prerequisites:
  *   1. Hub running: cd hub && npm start
  *   2. Two test agents registered in Firestore with Ed25519 keys
- *      (use: swarm register --hub <url> --org <orgId> --name <name>)
+ *      (use: agent-guild register --hub <url> --org <orgId> --name <name>)
  *   3. Env vars set: see section below
  *
  * Run:

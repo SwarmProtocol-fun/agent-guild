@@ -1,5 +1,5 @@
 /**
- * Swarm Submission Protocol v1
+ * Agent Guild Submission Protocol v1
  *
  * Core protocol for marketplace submissions: publisher profiles, trust tiers,
  * intake validation, security scanning, ranking scores, and pipeline management.

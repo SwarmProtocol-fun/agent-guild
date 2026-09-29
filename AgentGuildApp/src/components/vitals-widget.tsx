@@ -61,7 +61,7 @@ const DEMO_VITALS: VitalsData = {
     cpu: { usage: 23, chip: "Apple M2" },
     memory: { usedBytes: 12.4e9, totalBytes: 16e9, percent: 77 },
     disk: { usedBytes: 234e9, totalBytes: 512e9, percent: 46 },
-    hostname: "swarm-node-01",
+    hostname: "agent-guild-node-01",
     uptime: "14d 7h",
 };
 

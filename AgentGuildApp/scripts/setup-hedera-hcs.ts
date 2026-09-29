@@ -89,7 +89,7 @@ async function createHCSTopic(): Promise<string> {
     console.log(`   Creating topic...\n`);
 
     const transaction = new TopicCreateTransaction()
-        .setTopicMemo("Swarm Agent Reputation Events (Private)")
+        .setTopicMemo("Agent Guild Agent Reputation Events (Private)")
         .setMaxTransactionFee(2); // 2 HBAR max
 
     const txResponse = await transaction.execute(client);
@@ -183,9 +183,9 @@ function printSummary(topicId: string): void {
     console.log("   - View analytics at /analytics/reputation\n");
 
     console.log("📚 Documentation:");
-    console.log("   - HCS Setup: SwarmApp/HCS_SETUP.md");
-    console.log("   - Privacy: SwarmApp/PRIVACY_ARCHITECTURE.md");
-    console.log("   - Features: SwarmApp/FUTURE_ENHANCEMENTS_COMPLETE.md\n");
+    console.log("   - HCS Setup: AgentGuildApp/HCS_SETUP.md");
+    console.log("   - Privacy: AgentGuildApp/PRIVACY_ARCHITECTURE.md");
+    console.log("   - Features: AgentGuildApp/FUTURE_ENHANCEMENTS_COMPLETE.md\n");
 
     console.log("═══════════════════════════════════════════════════════════\n");
 }

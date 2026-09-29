@@ -35,7 +35,7 @@ export async function GET(
   try {
     const url = await provider.getVncUrl(computer.providerInstanceId);
 
-    // Some providers (swarm-node, stub) don't support VNC
+    // Some providers (agent-guild-node, stub) don't support VNC
     if (!url) {
       return Response.json(
         { error: `VNC access is not supported for provider "${computer.provider}"` },

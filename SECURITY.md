@@ -36,7 +36,7 @@
 
 ## Bounty Program
 
-The Swarm project allocates **1% of all project proceeds** to the Security
+The Agent Guild project allocates **1% of all project proceeds** to the Security
 Bounty Reserve, as defined in the LICENSE and GOVERNANCE.md.
 
 ### Bounty Tiers
@@ -56,7 +56,7 @@ based on severity, impact, and quality of the report.
 ### Eligibility
 
 - You must follow the responsible disclosure process above
-- The vulnerability must be in Swarm project code (not third-party dependencies)
+- The vulnerability must be in Agent Guild project code (not third-party dependencies)
 - The vulnerability must not already be known or reported
 - You must not exploit the vulnerability beyond what is necessary to demonstrate it
 - You must not violate the privacy of users or disrupt production systems
@@ -66,7 +66,7 @@ based on severity, impact, and quality of the report.
 ### Scope
 
 **In scope:**
-- All code in the Swarm repository (excluding vendored/node_modules)
+- All code in the Agent Guild repository (excluding vendored/node_modules)
 - Smart contracts and blockchain integrations
 - API endpoints and authentication systems
 - Data storage and encryption implementations
@@ -115,5 +115,5 @@ For non-security issues, use GitHub Issues.
 
 ---
 
-_This policy is part of the Swarm project and is subject to the terms of
-the Swarm Open Source License v1.0._
+_This policy is part of the Agent Guild project and is subject to the terms of
+the Agent Guild Open Source License v1.0._

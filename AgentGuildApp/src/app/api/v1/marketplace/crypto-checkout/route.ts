@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { SKILL_REGISTRY, type SubscriptionPlan } from "@/lib/skills";
-// [swarm-core] mod-gateway extracted — remote mod lookup disabled
+// [agent-guild-core] mod-gateway extracted — remote mod lookup disabled
 const getModService = async (_id: string) => null;
 import { CHAIN_CONFIGS, PAYMENT_CHAINS, USDC_CONTRACTS, USDC_DECIMALS } from "@/lib/chains";
 

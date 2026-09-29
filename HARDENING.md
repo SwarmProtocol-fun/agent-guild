@@ -1,6 +1,6 @@
 # Backend Hardening Notes
 
-Status of production-readiness for the Swarm hub and API backend.
+Status of production-readiness for the Agent Guild hub and API backend.
 
 ---
 
@@ -20,13 +20,13 @@ Status of production-readiness for the Swarm hub and API backend.
 - Documented the in-memory limitation inline.
 
 ### 3. Rate limiting for REST API routes
-- Created `SwarmApp/src/app/api/v1/rate-limit.ts` — a sliding-window rate limiter (60 req/min per identifier).
+- Created `AgentGuildApp/src/app/api/v1/rate-limit.ts` — a sliding-window rate limiter (60 req/min per identifier).
 - Wired into `/api/v1/send`, `/api/v1/messages`, `/api/v1/agents`, `/api/v1/platform`.
 - Includes periodic sweep to prevent unbounded Map growth.
 - Returns proper `429` with `Retry-After` header.
 
 ### 4. Env var schema
-- Updated `SwarmApp/.env.example` with all 27 env vars across the app, grouped and annotated.
+- Updated `AgentGuildApp/.env.example` with all 27 env vars across the app, grouped and annotated.
 - Created `hub/.env.example` with hub-specific vars.
 
 ---
@@ -59,7 +59,7 @@ These patterns work correctly for a **single-process deployment** but will break
 3. **`wsState`** (Map) — per-connection metadata (agentId, orgId, channels, Firestore unsub handles)
 4. **`rateLimits`** (Map) — sliding-window rate limit timestamps per agent
 
-### API (`SwarmApp/src/app/api/v1/`)
+### API (`AgentGuildApp/src/app/api/v1/`)
 5. **`usedNonces`** (Map in `send/route.ts`) — replay protection nonce store
 6. **`store`** (Map in `rate-limit.ts`) — REST API rate limit state
 
@@ -96,12 +96,12 @@ These patterns work correctly for a **single-process deployment** but will break
 | `hub/index.mjs` | Replaced hardcoded Firebase config with env vars, added `requireEnv`/`optionalEnv` helpers, added `dotenv/config` |
 | `hub/.env.example` | **New** — hub env var schema |
 | `hub/package.json` | Added `dotenv` dependency |
-| `SwarmApp/src/app/api/v1/send/route.ts` | Upgraded nonce store from `Set` to `Map` with TTL sweep, added rate limiting |
-| `SwarmApp/src/app/api/v1/rate-limit.ts` | **New** — shared sliding-window rate limiter |
-| `SwarmApp/src/app/api/v1/messages/route.ts` | Added rate limiting |
-| `SwarmApp/src/app/api/v1/agents/route.ts` | Added rate limiting |
-| `SwarmApp/src/app/api/v1/platform/route.ts` | Added rate limiting |
-| `SwarmApp/.env.example` | Expanded to full 27-var schema with grouping |
+| `AgentGuildApp/src/app/api/v1/send/route.ts` | Upgraded nonce store from `Set` to `Map` with TTL sweep, added rate limiting |
+| `AgentGuildApp/src/app/api/v1/rate-limit.ts` | **New** — shared sliding-window rate limiter |
+| `AgentGuildApp/src/app/api/v1/messages/route.ts` | Added rate limiting |
+| `AgentGuildApp/src/app/api/v1/agents/route.ts` | Added rate limiting |
+| `AgentGuildApp/src/app/api/v1/platform/route.ts` | Added rate limiting |
+| `AgentGuildApp/.env.example` | Expanded to full 27-var schema with grouping |
 | `HARDENING.md` | **New** — this document |
 
 ---
@@ -164,7 +164,7 @@ These patterns work correctly for a **single-process deployment** but will break
 
 ### New Auth Infrastructure
 
-**New file: `SwarmApp/src/lib/auth-guard.ts`** — Shared authorization module with:
+**New file: `AgentGuildApp/src/lib/auth-guard.ts`** — Shared authorization module with:
 - `requirePlatformAdmin(req)` — validates `PLATFORM_ADMIN_SECRET` via Bearer token or `x-platform-secret` header
 - `requireInternalService(req)` — validates `INTERNAL_SERVICE_SECRET` via Bearer token or `x-service-secret` header
 - `requireOrgMember(req, orgId)` — validates `x-wallet-address` is org member or owner
@@ -178,25 +178,25 @@ These patterns work correctly for a **single-process deployment** but will break
 
 | File | Change |
 |---|---|
-| `SwarmApp/src/lib/auth-guard.ts` | **New** — shared auth guard module |
-| `SwarmApp/src/app/api/v1/credit/route.ts` | Added platform admin auth |
-| `SwarmApp/src/app/api/v1/credit/task-complete/route.ts` | Added agent/admin auth + self-only enforcement |
-| `SwarmApp/src/app/api/v1/mods/[slug]/install/route.ts` | Added org membership auth |
-| `SwarmApp/src/app/api/v1/mods/[slug]/uninstall/route.ts` | Added org membership auth, required orgId |
-| `SwarmApp/src/app/api/v1/mod-installations/route.ts` | Added org membership auth |
-| `SwarmApp/src/app/api/v1/agents/link-register/route.ts` | Added org membership auth |
-| `SwarmApp/src/app/api/v1/register/route.ts` | Added org validation + private org gate |
-| `SwarmApp/src/app/api/github/auth.ts` | Added org membership to `resolveGitHubOrg()` |
-| `SwarmApp/src/app/api/github/disconnect/route.ts` | Added org admin auth |
-| `SwarmApp/src/app/api/github/callback/route.ts` | Added installation validation |
-| `SwarmApp/src/app/api/github/repos/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/github/[owner]/[repo]/commits/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/github/[owner]/[repo]/branches/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/github/[owner]/[repo]/issues/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/github/[owner]/[repo]/pulls/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/github/[owner]/[repo]/comments/route.ts` | Passes req for auth |
-| `SwarmApp/src/app/api/cron-jobs/route.ts` | Added internal service / localhost auth |
-| `SwarmApp/src/app/api/workspace-files/route.ts` | Added internal service / localhost auth + path traversal guard |
+| `AgentGuildApp/src/lib/auth-guard.ts` | **New** — shared auth guard module |
+| `AgentGuildApp/src/app/api/v1/credit/route.ts` | Added platform admin auth |
+| `AgentGuildApp/src/app/api/v1/credit/task-complete/route.ts` | Added agent/admin auth + self-only enforcement |
+| `AgentGuildApp/src/app/api/v1/mods/[slug]/install/route.ts` | Added org membership auth |
+| `AgentGuildApp/src/app/api/v1/mods/[slug]/uninstall/route.ts` | Added org membership auth, required orgId |
+| `AgentGuildApp/src/app/api/v1/mod-installations/route.ts` | Added org membership auth |
+| `AgentGuildApp/src/app/api/v1/agents/link-register/route.ts` | Added org membership auth |
+| `AgentGuildApp/src/app/api/v1/register/route.ts` | Added org validation + private org gate |
+| `AgentGuildApp/src/app/api/github/auth.ts` | Added org membership to `resolveGitHubOrg()` |
+| `AgentGuildApp/src/app/api/github/disconnect/route.ts` | Added org admin auth |
+| `AgentGuildApp/src/app/api/github/callback/route.ts` | Added installation validation |
+| `AgentGuildApp/src/app/api/github/repos/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/github/[owner]/[repo]/commits/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/github/[owner]/[repo]/branches/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/github/[owner]/[repo]/issues/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/github/[owner]/[repo]/pulls/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/github/[owner]/[repo]/comments/route.ts` | Passes req for auth |
+| `AgentGuildApp/src/app/api/cron-jobs/route.ts` | Added internal service / localhost auth |
+| `AgentGuildApp/src/app/api/workspace-files/route.ts` | Added internal service / localhost auth + path traversal guard |
 
 ### Required Environment Variables (new)
 
@@ -210,7 +210,7 @@ INTERNAL_SERVICE_SECRET=<strong-random-secret>   # For /api/cron-jobs and /api/w
 1. **No server-side wallet signature verification** — `x-wallet-address` header can be spoofed by direct API callers. Full fix requires ThirdWeb server-side sig verification or session tokens.
 2. **API keys stored in plaintext** — Agent API keys in Firestore not hashed. Firestore breach exposes all credentials.
 3. **In-memory nonce tracking** — `/api/v1/send` nonce Map doesn't persist across cold starts or instances.
-4. **`/api/v1/register` open to public orgs** — Intentional for swarm model, but anyone can add agents to public orgs.
+4. **`/api/v1/register` open to public orgs** — Intentional for agent-guild model, but anyone can add agents to public orgs.
 5. **GitHub callback state param** — orgId not HMAC-signed. Attacker with GitHub App flow knowledge could target different org.
 6. **IP spoofing via `x-forwarded-for`** — Rate limiter trusts proxy headers without a trusted proxy allowlist.
 

@@ -1,4 +1,4 @@
-# Swarm Configuration Guide
+# Agent Guild Configuration Guide
 
 Complete guide to configuring environment variables for production deployment.
 
@@ -16,7 +16,7 @@ Complete guide to configuring environment variables for production deployment.
 
 ### `.env.local` File
 
-Create `/home/god/Desktop/Swarm/Swarm/SwarmApp/.env.local`:
+Create `/home/god/Desktop/Agent Guild/Agent Guild/AgentGuildApp/.env.local`:
 
 ```bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -98,7 +98,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ### `.env` File
 
-Create `/home/god/Desktop/Swarm/Swarm/hub/.env`:
+Create `/home/god/Desktop/Agent Guild/Agent Guild/hub/.env`:
 
 ```bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -136,7 +136,7 @@ FIREBASE_MESSAGING_SENDER_ID=123456789
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Comma-separated list of allowed origins (NO WILDCARDS)
-ALLOWED_ORIGINS=https://swarmprotocol.ai,https://app.swarmprotocol.ai,http://localhost:3000
+ALLOWED_ORIGINS=https://agent-guild.com,https://app.agent-guild.com,http://localhost:3000
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OPTIONAL - Cloud Pub/Sub (Multi-Instance Only)
@@ -147,10 +147,10 @@ ALLOWED_ORIGINS=https://swarmprotocol.ai,https://app.swarmprotocol.ai,http://loc
 GCP_PROJECT_ID=your-gcp-project-id
 
 # Pub/Sub topic (same for all instances)
-PUBSUB_TOPIC=swarm-broadcast
+PUBSUB_TOPIC=agent-guild-broadcast
 
 # Pub/Sub subscription (UNIQUE per instance)
-PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-east-1a
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-hub-us-east-1a
 
 # Path to service account JSON key
 GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
@@ -192,19 +192,19 @@ For **each hub instance**, you MUST set unique values:
 **Instance 1**:
 ```bash
 INSTANCE_ID=hub-us-east-1a
-PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-east-1a
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-hub-us-east-1a
 ```
 
 **Instance 2**:
 ```bash
 INSTANCE_ID=hub-us-east-1b
-PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-east-1b
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-hub-us-east-1b
 ```
 
 **Instance 3**:
 ```bash
 INSTANCE_ID=hub-us-west-1a
-PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-west-1a
+PUBSUB_SUBSCRIPTION=agent-guild-broadcast-hub-us-west-1a
 ```
 
 ---
@@ -215,7 +215,7 @@ PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-west-1a
 
 1. Go to [Firebase Console](https://console.firebase.google.com/)
 2. Click "Add project"
-3. Enter project name (e.g., "swarm-production")
+3. Enter project name (e.g., "agent-guild-production")
 4. Disable Google Analytics (optional)
 5. Click "Create project"
 
@@ -224,7 +224,7 @@ PUBSUB_SUBSCRIPTION=swarm-broadcast-hub-us-west-1a
 1. In Firebase Console, click gear icon → "Project settings"
 2. Scroll to "Your apps" section
 3. Click "Web" icon (</>) to add web app
-4. Register app with nickname (e.g., "Swarm App")
+4. Register app with nickname (e.g., "Agent Guild App")
 5. Copy the configuration values:
 
 ```javascript
@@ -321,28 +321,28 @@ gcloud firestore fields ttls update expiresAt \
 
 ```bash
 # Create service account
-gcloud iam service-accounts create swarm-hub \
-  --display-name="Swarm Hub Service Account" \
+gcloud iam service-accounts create agent-guild-hub \
+  --display-name="Agent Guild Hub Service Account" \
   --project=your-project-id
 
 # Grant Pub/Sub permissions
 gcloud projects add-iam-policy-binding your-project-id \
-  --member="serviceAccount:swarm-hub@your-project-id.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@your-project-id.iam.gserviceaccount.com" \
   --role="roles/pubsub.publisher"
 
 gcloud projects add-iam-policy-binding your-project-id \
-  --member="serviceAccount:swarm-hub@your-project-id.iam.gserviceaccount.com" \
+  --member="serviceAccount:agent-guild-hub@your-project-id.iam.gserviceaccount.com" \
   --role="roles/pubsub.subscriber"
 
 # Download service account key
-gcloud iam service-accounts keys create swarm-hub-key.json \
-  --iam-account=swarm-hub@your-project-id.iam.gserviceaccount.com
+gcloud iam service-accounts keys create agent-guild-hub-key.json \
+  --iam-account=agent-guild-hub@your-project-id.iam.gserviceaccount.com
 ```
 
 ### 2. Create Pub/Sub Topic
 
 ```bash
-gcloud pubsub topics create swarm-broadcast \
+gcloud pubsub topics create agent-guild-broadcast \
   --project=your-project-id
 ```
 
@@ -350,15 +350,15 @@ gcloud pubsub topics create swarm-broadcast \
 
 ```bash
 # Instance 1
-gcloud pubsub subscriptions create swarm-broadcast-hub-us-east-1a \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-us-east-1a \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60 \
   --message-retention-duration=10m \
   --project=your-project-id
 
 # Instance 2
-gcloud pubsub subscriptions create swarm-broadcast-hub-us-east-1b \
-  --topic=swarm-broadcast \
+gcloud pubsub subscriptions create agent-guild-broadcast-hub-us-east-1b \
+  --topic=agent-guild-broadcast \
   --ack-deadline=60 \
   --message-retention-duration=10m \
   --project=your-project-id
@@ -366,11 +366,11 @@ gcloud pubsub subscriptions create swarm-broadcast-hub-us-east-1b \
 
 ### 4. Deploy Service Account Key
 
-Store `swarm-hub-key.json` securely:
+Store `agent-guild-hub-key.json` securely:
 
 ```bash
 # Copy to server (use secrets manager in production)
-scp swarm-hub-key.json server:/app/service-account.json
+scp agent-guild-hub-key.json server:/app/service-account.json
 chmod 600 /app/service-account.json
 ```
 
@@ -414,7 +414,7 @@ my-secret-key
 
 ✅ **Good** (specific domains):
 ```
-ALLOWED_ORIGINS=https://swarmprotocol.ai,https://app.swarmprotocol.ai
+ALLOWED_ORIGINS=https://agent-guild.com,https://app.agent-guild.com
 ```
 
 ❌ **Bad** (wildcard):
@@ -428,13 +428,13 @@ Don't use production keys in development:
 
 **Development**:
 ```bash
-FIREBASE_PROJECT_ID=swarm-dev
+FIREBASE_PROJECT_ID=agent-guild-dev
 SESSION_SECRET=dev-secret-not-secure
 ```
 
 **Production**:
 ```bash
-FIREBASE_PROJECT_ID=swarm-production
+FIREBASE_PROJECT_ID=agent-guild-production
 SESSION_SECRET=$(openssl rand -hex 32)
 ```
 
@@ -481,7 +481,7 @@ printHubEnvSummary();
 📋 Hub Configuration:
   NODE_ENV: production
   PORT: 8400
-  FIREBASE_PROJECT_ID: swarm-production
+  FIREBASE_PROJECT_ID: agent-guild-production
   ALLOWED_ORIGINS: ✅ Set
   INSTANCE_ID: hub-12345 (auto)
   HUB_REGION: us-east (default)
@@ -521,7 +521,7 @@ Before deploying to production:
 
 ### Cloud Pub/Sub (if multi-instance)
 - [ ] Service account created with permissions
-- [ ] Topic created (`swarm-broadcast`)
+- [ ] Topic created (`agent-guild-broadcast`)
 - [ ] Subscriptions created (one per instance)
 - [ ] Service account key deployed
 
@@ -554,7 +554,7 @@ echo "SESSION_SECRET=$(openssl rand -hex 32)" >> .env.local
 **Solution**:
 ```bash
 # Add missing origin to hub .env
-ALLOWED_ORIGINS=https://swarmprotocol.ai,https://your-new-domain.com
+ALLOWED_ORIGINS=https://agent-guild.com,https://your-new-domain.com
 ```
 
 ### "Pub/Sub not initialized"

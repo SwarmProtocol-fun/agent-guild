@@ -1,5 +1,5 @@
 /**
- * Multi-Chain Registry — Swarm Protocol
+ * Multi-Chain Registry — Agent Guild Protocol
  *
  * Central config for all supported chains.
  * Import this everywhere instead of hardcoding chain IDs, RPCs, or currency symbols.

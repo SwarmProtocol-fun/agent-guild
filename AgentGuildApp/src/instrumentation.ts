@@ -20,7 +20,7 @@ import { requireValidEnv, printEnvSummary } from "@/lib/env-validation";
 export async function register() {
   // Only run on server (not in client bundles or Edge runtime)
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    console.log("🚀 Swarm server starting...\n");
+    console.log("🚀 Agent Guild server starting...\n");
 
     // Validate environment variables — warn if critical vars missing.
     // NOTE: Do NOT call process.exit() here. In serverless environments

@@ -127,8 +127,8 @@ db.collection("system").doc("health").set({
 ### AWS Application Load Balancer (ALB)
 
 ```hcl
-resource "aws_lb_target_group" "swarm_hub" {
-  name     = "swarm-hub-tg"
+resource "aws_lb_target_group" "agent_guild_hub" {
+  name     = "agent-guild-hub-tg"
   port     = 8400
   protocol = "HTTP"
   vpc_id   = var.vpc_id
@@ -155,7 +155,7 @@ resource "aws_lb_target_group" "swarm_hub" {
 ### NGINX
 
 ```nginx
-upstream swarm_hub {
+upstream agent_guild_hub {
     # Sticky sessions using IP hash
     ip_hash;
 
@@ -165,10 +165,10 @@ upstream swarm_hub {
 
 server {
     listen 80;
-    server_name hub.swarm.example.com;
+    server_name hub.agent-guild.example.com;
 
     location / {
-        proxy_pass http://swarm_hub;
+        proxy_pass http://agent-guild_hub;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -180,7 +180,7 @@ server {
 
     # Health check endpoint
     location /health {
-        proxy_pass http://swarm_hub/health;
+        proxy_pass http://agent-guild_hub/health;
         access_log off;
     }
 }
@@ -195,8 +195,8 @@ match hub_health {
 ### Google Cloud Load Balancer
 
 ```hcl
-resource "google_compute_health_check" "swarm_hub" {
-  name                = "swarm-hub-health-check"
+resource "google_compute_health_check" "agent_guild_hub" {
+  name                = "agent-guild-hub-health-check"
   check_interval_sec  = 30
   timeout_sec         = 5
   healthy_threshold   = 2
@@ -208,19 +208,19 @@ resource "google_compute_health_check" "swarm_hub" {
   }
 }
 
-resource "google_compute_backend_service" "swarm_hub" {
-  name                  = "swarm-hub-backend"
+resource "google_compute_backend_service" "agent_guild_hub" {
+  name                  = "agent-guild-hub-backend"
   protocol              = "HTTP"
   timeout_sec           = 3600
   enable_cdn            = false
-  health_checks         = [google_compute_health_check.swarm_hub.id]
+  health_checks         = [google_compute_health_check.agent_guild_hub.id]
   load_balancing_scheme = "EXTERNAL"
 
   # Session affinity for WebSocket
   session_affinity = "CLIENT_IP"
 
   backend {
-    group = google_compute_instance_group.swarm_hub.id
+    group = google_compute_instance_group.agent_guild_hub.id
   }
 }
 ```
@@ -240,25 +240,25 @@ app.get("/metrics", (req, res) => {
   );
 
   const metrics = `
-# HELP swarm_hub_connections_total Total WebSocket connections
-# TYPE swarm_hub_connections_total gauge
-swarm_hub_connections_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${totalConnections}
+# HELP agent_guild_hub_connections_total Total WebSocket connections
+# TYPE agent_guild_hub_connections_total gauge
+agent_guild_hub_connections_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${totalConnections}
 
-# HELP swarm_hub_agents_total Total connected agents
-# TYPE swarm_hub_agents_total gauge
-swarm_hub_agents_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${agentConnections.size}
+# HELP agent_guild_hub_agents_total Total connected agents
+# TYPE agent_guild_hub_agents_total gauge
+agent_guild_hub_agents_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${agentConnections.size}
 
-# HELP swarm_hub_channels_total Total active channels
-# TYPE swarm_hub_channels_total gauge
-swarm_hub_channels_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${channelSubscribers.size}
+# HELP agent_guild_hub_channels_total Total active channels
+# TYPE agent_guild_hub_channels_total gauge
+agent_guild_hub_channels_total{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${channelSubscribers.size}
 
-# HELP swarm_hub_memory_heap_used_bytes Heap memory used
-# TYPE swarm_hub_memory_heap_used_bytes gauge
-swarm_hub_memory_heap_used_bytes{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${usage.heapUsed}
+# HELP agent_guild_hub_memory_heap_used_bytes Heap memory used
+# TYPE agent_guild_hub_memory_heap_used_bytes gauge
+agent_guild_hub_memory_heap_used_bytes{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${usage.heapUsed}
 
-# HELP swarm_hub_uptime_seconds Server uptime
-# TYPE swarm_hub_uptime_seconds counter
-swarm_hub_uptime_seconds{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${process.uptime()}
+# HELP agent_guild_hub_uptime_seconds Server uptime
+# TYPE agent_guild_hub_uptime_seconds counter
+agent_guild_hub_uptime_seconds{instance="${INSTANCE_ID}",region="${HUB_REGION}"} ${process.uptime()}
   `.trim();
 
   res.set("Content-Type", "text/plain");

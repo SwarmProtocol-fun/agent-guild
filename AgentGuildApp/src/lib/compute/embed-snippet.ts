@@ -1,5 +1,5 @@
 /**
- * Swarm Compute — Embed Snippet Builder (pure)
+ * Agent Guild Compute — Embed Snippet Builder (pure)
  *
  * No Firestore dependency — safe to import from client components.
  * Split out of embed.ts because embed.ts also pulls in the
@@ -27,7 +27,7 @@ export function buildEmbedSnippet(
   sandbox="allow-scripts allow-same-origin"
 ></iframe>`;
 
-  const react = `export function SwarmComputer() {
+  const react = `export function AgentGuildComputer() {
   return (
     <iframe
       src="${src}"

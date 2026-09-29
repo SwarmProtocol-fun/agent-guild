@@ -13,7 +13,7 @@
 - Fails cleanly with 400 if no provider instance exists
 - Returns 501 if provider doesn't support cloning
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/clone/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/clone/route.ts`
 
 ### 2. ✅ Snapshot API - No More Synthetic Fallbacks
 
@@ -25,7 +25,7 @@
 - Fails with 400 if no provider instance
 - Returns 501 if provider doesn't support snapshots
 
-**File:** `SwarmApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
+**File:** `AgentGuildApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
 
 ### 3. ⏳ Azure Provider - Networking Started (Needs Completion)
 
@@ -36,7 +36,7 @@
 - VNet creation or discovery
 - Proper clone implementation (snapshot → new VM from snapshot)
 
-**File:** `SwarmApp/src/lib/compute/providers/azure.ts` (partial fix ready)
+**File:** `AgentGuildApp/src/lib/compute/providers/azure.ts` (partial fix ready)
 
 ---
 
@@ -164,7 +164,7 @@ if (key === "azure" && !process.env.AZURE_SUBSCRIPTION_ID) {
 4. [ ] Cleanup orphaned resources
    ```typescript
    // Daily job:
-   - Query provider for all VMs with tag "swarm:managed"
+   - Query provider for all VMs with tag "agent-guild:managed"
    - Compare to Firestore computers collection
    - If VM exists but no Firestore record → delete (orphaned)
    - If Firestore record but no VM → mark "error" (desync)
@@ -240,7 +240,7 @@ if (key === "azure" && !process.env.AZURE_SUBSCRIPTION_ID) {
 4. [ ] **Payout logic:**
    ```typescript
    // After successful transfer:
-   - Platform fee: 10% (to Swarm treasury)
+   - Platform fee: 10% (to Agent Guild treasury)
    - Seller payout: 90%
    - Record in billingLedger
    ```
@@ -296,7 +296,7 @@ if (key === "azure" && !process.env.AZURE_SUBSCRIPTION_ID) {
    - Rate limit (10 URLs/min per user)
 
    // NSG rules:
-   - Only allow VNC from Swarm IP ranges
+   - Only allow VNC from Agent Guild IP ranges
    - Block SSH from internet (use Azure Bastion or SSM)
    - No RDP (unless Windows)
    ```
@@ -350,25 +350,25 @@ if (key === "azure" && !process.env.AZURE_SUBSCRIPTION_ID) {
 ## Files Modified Today
 
 ### Clone Fix
-- `SwarmApp/src/app/api/compute/computers/[id]/clone/route.ts`
+- `AgentGuildApp/src/app/api/compute/computers/[id]/clone/route.ts`
   - Now validates provider instance exists
   - Calls `provider.cloneInstance()`
   - Returns new VM ID
   - Fails cleanly without provider backing
 
 ### Snapshot Fix
-- `SwarmApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
+- `AgentGuildApp/src/app/api/compute/computers/[id]/snapshot/route.ts`
   - Removed synthetic snapshot fallback
   - Requires provider instance
   - Returns 501 if not supported
 
 ### State Management (Yesterday)
-- `SwarmApp/src/app/api/compute/computers/[id]/start/route.ts`
+- `AgentGuildApp/src/app/api/compute/computers/[id]/start/route.ts`
   - Auto-recovery from stuck states
   - Better error messages
-- `SwarmApp/src/app/api/compute/computers/[id]/status/route.ts` (new)
+- `AgentGuildApp/src/app/api/compute/computers/[id]/status/route.ts` (new)
   - Debugging endpoint for stuck instances
-- `SwarmApp/src/app/api/compute/computers/[id]/force-reset/route.ts` (new)
+- `AgentGuildApp/src/app/api/compute/computers/[id]/force-reset/route.ts` (new)
   - Manual recovery tool
 
 ---

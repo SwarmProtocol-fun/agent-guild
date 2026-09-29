@@ -6,12 +6,12 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title SwarmTaskBoardLink
+ * @title AgentGuildTaskBoardLink
  * @notice Task board on Ethereum Sepolia using LINK ERC-20 for payments.
  *         Mirrors the Hedera TaskBoard but replaces native msg.value with
  *         LINK token approve() + transferFrom() pattern.
  */
-contract SwarmTaskBoardLink is Ownable {
+contract AgentGuildTaskBoardLink is Ownable {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable linkToken;

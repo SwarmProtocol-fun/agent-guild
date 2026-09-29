@@ -6,8 +6,8 @@
  * is logged and contained; it never breaks core or other mods.
  */
 import type {
-  EventName, ModContext, ModManifest, ModSession, RouteContext, ServerMod, SwarmEventMap,
-} from "@swarm/sdk";
+  EventName, ModContext, ModManifest, ModSession, RouteContext, ServerMod, AgentGuildEventMap,
+} from "@agent-guild/sdk";
 import { MOD_MANIFESTS } from "./generated/manifests";
 import { serverMods } from "./generated/server";
 import { matchRoute } from "./router";
@@ -20,8 +20,8 @@ interface LoadedMod {
 }
 
 // Survive dev-server HMR so setup() doesn't re-run and subscriptions don't double up.
-const g = globalThis as unknown as { __swarmMods?: Map<string, Promise<LoadedMod>> };
-const cache = (g.__swarmMods ??= new Map());
+const g = globalThis as unknown as { __agentGuildMods?: Map<string, Promise<LoadedMod>> };
+const cache = (g.__agentGuildMods ??= new Map());
 
 export function listManifests(): ModManifest[] {
   return MOD_MANIFESTS;
@@ -73,12 +73,12 @@ export function loadMod(modId: string): Promise<LoadedMod | null> {
 }
 
 /** Deliver a core/mod event to every subscribed mod. Never throws. */
-export async function emitEvent<E extends EventName>(event: E, payload: SwarmEventMap[E]): Promise<void> {
+export async function emitEvent<E extends EventName>(event: E, payload: AgentGuildEventMap[E]): Promise<void> {
   await Promise.all(
     MOD_MANIFESTS.filter((m) => m.entry.server).map(async (manifest) => {
       const loaded = await loadMod(manifest.id);
       const handler = loaded?.mod?.events?.[event] as
-        | ((p: SwarmEventMap[E], c: ModContext) => void | Promise<void>)
+        | ((p: AgentGuildEventMap[E], c: ModContext) => void | Promise<void>)
         | undefined;
       if (!loaded || !handler) return;
       if (!manifest.permissions.includes("events:subscribe")) {

@@ -52,8 +52,8 @@ const ENV_REQUIREMENTS = [
       const origins = val.split(",");
       return origins.every((o) => o.trim().startsWith("http"));
     },
-    description: "Comma-separated allowed origins for CORS (default: swarmprotocol.ai + localhost)",
-    example: "https://swarmprotocol.ai,http://localhost:3000",
+    description: "Comma-separated allowed origins for CORS (default: agent-guild.com + localhost)",
+    example: "https://agent-guild.com,http://localhost:3000",
   },
 
   // Optional - Instance Identity
@@ -79,14 +79,14 @@ const ENV_REQUIREMENTS = [
   {
     key: "PUBSUB_TOPIC",
     required: false,
-    description: "Pub/Sub topic name (default: swarm-broadcast)",
-    example: "swarm-broadcast",
+    description: "Pub/Sub topic name (default: agent-guild-broadcast)",
+    example: "agent-guild-broadcast",
   },
   {
     key: "PUBSUB_SUBSCRIPTION",
     required: false,
     description: "Pub/Sub subscription name (unique per instance)",
-    example: "swarm-broadcast-hub-1",
+    example: "agent-guild-broadcast-hub-1",
   },
   {
     key: "GOOGLE_APPLICATION_CREDENTIALS",

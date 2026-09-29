@@ -4,11 +4,11 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title SwarmAgentRegistryLink
+ * @title AgentGuildAgentRegistryLink
  * @notice Agent registry on Ethereum Sepolia with ASN identity and credit scoring.
  *         Mirrors the Hedera AgentRegistry but adds on-chain ASN + credit fields.
  */
-contract SwarmAgentRegistryLink is Ownable {
+contract AgentGuildAgentRegistryLink is Ownable {
     struct Agent {
         address agentAddress;
         string name;

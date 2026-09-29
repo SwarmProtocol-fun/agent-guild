@@ -1,8 +1,8 @@
 /**
- * Swarm Protocol Contracts — Multi-Chain
+ * Agent Guild Protocol Contracts — Multi-Chain
  *
  * Contract addresses, ABIs, types, and helpers for interacting
- * with the SwarmTaskBoard and SwarmAgentRegistry.
+ * with the AgentGuildTaskBoard and AgentGuildAgentRegistry.
  *
  * Chain config is centralized in @/lib/chains.ts.
  * This file re-exports contract-specific helpers.

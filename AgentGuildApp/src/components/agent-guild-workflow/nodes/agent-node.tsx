@@ -4,7 +4,7 @@
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { AGENT_TYPE_ICONS, formatCostCents } from '@/lib/swarm-workflow';
+import { AGENT_TYPE_ICONS, formatCostCents } from '@/lib/agent-guild-workflow';
 import { getTypeColor, getTypeLabel } from '@/lib/agent-types';
 
 export function AgentNode({ data, selected }: NodeProps) {

@@ -247,7 +247,7 @@ export function useMarketplace() {
                 if (!owned.some(o => o.skillId === modId)) {
                     await acquireItem(currentOrg.id, modId, userAddress);
                     await loadInventory();
-                    window.dispatchEvent(new Event("swarm-inventory-changed"));
+                    window.dispatchEvent(new Event("agent-guild-inventory-changed"));
                 }
             } catch (e) {
                 console.error("Failed to add mod to inventory after checkout:", e);
@@ -460,7 +460,7 @@ export function useMarketplace() {
             await acquireItem(currentOrg.id, skillId, userAddress);
             trackMarketplaceEvent("item_installed", { skillId, type: skill?.type });
             await loadInventory();
-            window.dispatchEvent(new Event("swarm-inventory-changed"));
+            window.dispatchEvent(new Event("agent-guild-inventory-changed"));
         } finally {
             setBusyId(null);
         }
@@ -479,7 +479,7 @@ export function useMarketplace() {
             await removeFromInventory(item.id);
             trackMarketplaceEvent("item_removed", { skillId: item.skillId });
             await loadInventory();
-            window.dispatchEvent(new Event("swarm-inventory-changed"));
+            window.dispatchEvent(new Event("agent-guild-inventory-changed"));
         } finally {
             setBusyId(null);
         }
@@ -496,7 +496,7 @@ export function useMarketplace() {
                 inventory.map((i) => i.skillId),
             );
             await loadInventory();
-            window.dispatchEvent(new Event("swarm-inventory-changed"));
+            window.dispatchEvent(new Event("agent-guild-inventory-changed"));
         } finally {
             setBusyId(null);
         }
@@ -529,7 +529,7 @@ export function useMarketplace() {
                     }
                     await loadSubscriptions();
                     await loadInventory();
-                    window.dispatchEvent(new Event("swarm-inventory-changed"));
+                    window.dispatchEvent(new Event("agent-guild-inventory-changed"));
                     setSubscribeTarget(null);
                 }
             } else {

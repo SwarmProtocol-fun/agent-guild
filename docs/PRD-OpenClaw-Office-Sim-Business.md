@@ -1,7 +1,7 @@
 # OpenClaw Office Sim Studio — Business & Packaging PRD
 
 > **Mod ID:** `openclaw-office-sim-studio`
-> **Type:** Premium Swarm Marketplace Mod (Tiered)
+> **Type:** Premium Agent Guild Marketplace Mod (Tiered)
 > **Version:** 0.1.0-draft
 > **Date:** 2026-03-24
 > **Status:** Draft
@@ -13,7 +13,7 @@
 
 ### Positioning Statement
 
-> For AI teams and agent operators who need to monitor, explain, and showcase multi-agent systems, **OpenClaw Office Sim Studio** is a premium Swarm mod that combines real-time 2D/3D office simulation with generative environment design powered by ComfyUI and Meshy. Unlike static dashboards and log viewers, Office Sim Studio makes agent behavior *spatial*, *legible*, and *visually impressive* — turning monitoring into storytelling and operations into identity.
+> For AI teams and agent operators who need to monitor, explain, and showcase multi-agent systems, **OpenClaw Office Sim Studio** is a premium Agent Guild mod that combines real-time 2D/3D office simulation with generative environment design powered by ComfyUI and Meshy. Unlike static dashboards and log viewers, Office Sim Studio makes agent behavior *spatial*, *legible*, and *visually impressive* — turning monitoring into storytelling and operations into identity.
 
 ### One-Line Pitch
 
@@ -48,7 +48,7 @@ Teams don't leave monitoring tools because the data is wrong — they leave beca
 
 ### Why pay for this instead of a plain monitoring UI?
 
-| Capability | Free Swarm Dashboard | Office Sim (Base) | Office Sim Studio (Pro) | Studio 3D (Full) |
+| Capability | Free Agent Guild Dashboard | Office Sim (Base) | Office Sim Studio (Pro) | Studio 3D (Full) |
 |---|---|---|---|---|
 | Agent status & logs | Yes | Yes | Yes | Yes |
 | Spatial agent visualization (2D) | No | Yes | Yes | Yes |
@@ -82,7 +82,7 @@ Install mod → Agents appear in office → Team customizes layout
 | Mechanism | How generative environments drive it |
 |---|---|
 | **Sunk-cost attachment** | A team that has generated 50 custom props, 3 office themes, and branded avatar portraits has invested hours of creative work. This is not exportable to Datadog |
-| **Social proof loops** | Generated environments are shareable. Teams post screenshots, demo videos, and office tours — each one is free marketing for Swarm and the mod |
+| **Social proof loops** | Generated environments are shareable. Teams post screenshots, demo videos, and office tours — each one is free marketing for Agent Guild and the mod |
 | **Progressive discovery** | ComfyUI workflows can be versioned and shared. Teams discover new generation techniques over time, keeping the mod fresh months after install |
 | **Personalization = ownership** | A generic dashboard belongs to the vendor. A generated, customized office belongs to the team |
 
@@ -132,7 +132,7 @@ ComfyUI is a node-based, workflow-driven image generation tool built on Stable D
 - **Workflow-driven**: Saved as JSON graphs, version-controlled, sharable between teams
 - **Deterministic**: Same seed + workflow = same output, critical for brand consistency
 - **Local/open**: No API costs for iteration; teams own their generation infrastructure
-- **Extensible**: Custom nodes for Swarm-specific workflows (e.g., "generate avatar from agent config")
+- **Extensible**: Custom nodes for Agent Guild-specific workflows (e.g., "generate avatar from agent config")
 - **Batch-capable**: Generate hundreds of assets in a single run (icon sets, texture atlases)
 
 ### Meshy — "The 3D Factory"
@@ -183,7 +183,7 @@ Assets load into Office Sim 3D scene via React Three Fiber useGLTF
         ↓
 Team arranges via Studio Placement Mode — drag to slot, transform, save
         ↓
-Saved as named "Office Theme" → optionally published to Swarm marketplace
+Saved as named "Office Theme" → optionally published to Agent Guild marketplace
 ```
 
 ### Approval gates at every stage
@@ -191,7 +191,7 @@ Saved as named "Office Theme" → optionally published to Swarm marketplace
 1. **Concept approval** — ComfyUI concept board reviewed before production generation
 2. **3D preview approval** — Meshy previews reviewed in Asset Approval Drawer before expensive refine
 3. **Scene approval** — Assembled environment reviewed before saving as theme
-4. **Publish approval** — If sharing to marketplace, reviewed by Swarm moderation pipeline
+4. **Publish approval** — If sharing to marketplace, reviewed by Agent Guild moderation pipeline
 
 ---
 
@@ -207,7 +207,7 @@ Saved as named "Office Theme" → optionally published to Swarm marketplace
 | 2D Office view with 6 spatial zones (desk row, meeting room, queue, error bay, tool station, approval gate) | Yes |
 | 5 preset office themes (default dark, cyberpunk, minimal, retro pixel, zen) | Yes |
 | Agent Detail Drawer with status, task, activity, actions | Yes |
-| Real-time WebSocket agent state sync from Swarm Hub | Yes |
+| Real-time WebSocket agent state sync from Agent Guild Hub | Yes |
 | Agent states: idle, active, error, blocked, offline (5 of 10) | Yes |
 | Hover, click, right-click, keyboard interactions | Yes |
 | Filter by status, search by name | Yes |
@@ -272,7 +272,7 @@ Saved as named "Office Theme" → optionally published to Swarm marketplace
 | Custom room kit generator (batch furniture generation per theme) | Yes |
 | Agent 3D avatar generator (portrait → 3D model → rig → animate pipeline) | Yes |
 | Theme Manager — save, import, export, reset themes | Yes |
-| Theme marketplace: publish and sell custom themes to the Swarm community | Yes |
+| Theme marketplace: publish and sell custom themes to the Agent Guild community | Yes |
 | 500 Meshy generation credits/month | Yes |
 | Export scenes as GLB/USDZ for external use | Yes |
 
@@ -295,7 +295,7 @@ Saved as named "Office Theme" → optionally published to Swarm marketplace
 | Audit trail with compliance export (SOC 2, ISO 27001 evidence packages) | Yes |
 | Replay certification (tamper-proof, cryptographically signed playback) | Yes |
 | Multi-floor / multi-org view | Yes |
-| White-label mode (remove Swarm branding, apply customer brand) | Yes |
+| White-label mode (remove Agent Guild branding, apply customer brand) | Yes |
 | Custom SLA (uptime, response time, generation throughput) | Yes |
 | Dedicated success manager | Yes |
 | Priority feature requests | Yes |
@@ -303,7 +303,7 @@ Saved as named "Office Theme" → optionally published to Swarm marketplace
 | On-premises deployment option (air-gapped) | Yes |
 | API access for programmatic environment generation | Yes |
 
-**Positioning:** For regulated industries, large enterprises, and platform teams building on top of Swarm.
+**Positioning:** For regulated industries, large enterprises, and platform teams building on top of Agent Guild.
 
 ---
 
@@ -395,7 +395,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 
 ### Generated Asset Ownership
 
-- **ComfyUI outputs**: Customer owns all generated images, textures, sprites, and concept art. No usage restrictions. Self-hosted generation means outputs never touch Swarm infrastructure.
+- **ComfyUI outputs**: Customer owns all generated images, textures, sprites, and concept art. No usage restrictions. Self-hosted generation means outputs never touch Agent Guild infrastructure.
 - **Meshy outputs**: Customer owns generated 3D models per Meshy's commercial license terms. Models can be exported (GLB, FBX, OBJ, USDZ, Blend, STL) and used outside Office Sim Studio.
 - **Preset theme assets** (included in base/packs): Licensed for use within Office Sim Studio only. Not exportable for other projects.
 - **Scene pack assets**: Licensed for use within Office Sim Studio and customer presentations. Not resalable.
@@ -422,7 +422,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 │          User's Machine / VPS          │
 │                                        │
 │  ┌──────────────┐  ┌───────────────┐  │
-│  │  Swarm Hub   │  │  Office Sim   │  │
+│  │  Agent Guild Hub   │  │  Office Sim   │  │
 │  │  (agents)    │──│  (Next.js)    │  │
 │  └──────────────┘  └───────┬───────┘  │
 │                            │           │
@@ -446,7 +446,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 ┌────────────────────┐     ┌─────────────────────┐
 │   Team Machines     │     │   Cloud / VPS        │
 │                     │     │                      │
-│  Browser → Office  ─┼────▶│  Swarm Hub (hosted)  │
+│  Browser → Office  ─┼────▶│  Agent Guild Hub (hosted)  │
 │            Sim UI   │     │  ComfyUI (GPU VPS)   │
 │                     │     │  Office Sim (Netlify) │
 └────────────────────┘     │                      │
@@ -454,7 +454,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
                             └─────────────────────┘
 ```
 
-- Swarm Hub and Office Sim deployed to cloud (Netlify, Vercel, or VPS)
+- Agent Guild Hub and Office Sim deployed to cloud (Netlify, Vercel, or VPS)
 - ComfyUI on a dedicated GPU VPS (RunPod, Lambda, vast.ai) — runs headless, triggered by Studio API routes
 - Meshy API called from server-side (API key secured, never exposed to client)
 - Best for: distributed teams, CI/CD-integrated environments
@@ -466,7 +466,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 │              Customer's Private Cloud             │
 │                                                   │
 │  ┌────────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Swarm Hub  │  │ Office   │  │ ComfyUI      │ │
+│  │ Agent Guild Hub  │  │ Office   │  │ ComfyUI      │ │
 │  │ (private)  │──│ Sim      │──│ (private GPU)│ │
 │  └────────────┘  └────┬─────┘  └──────────────┘ │
 │                       │                           │
@@ -486,13 +486,13 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 - SSO integration via SAML/OIDC
 - Best for: enterprises with strict data governance requirements
 
-### Model D: Swarm Cloud Managed (Future)
+### Model D: Agent Guild Cloud Managed (Future)
 
 ```
 ┌───────────────┐     ┌──────────────────────────┐
-│  Browser       │────▶│  swarmprotocol.fun           │
+│  Browser       │────▶│  agent-guild.com           │
 │                │     │                            │
-│                │     │  Swarm Hub (managed)       │
+│                │     │  Agent Guild Hub (managed)       │
 │                │     │  Office Sim (managed)      │
 │                │     │  ComfyUI (managed GPU)     │
 │                │     │  Meshy API (pooled credits) │
@@ -508,9 +508,9 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
 
 ## 10. Marketplace Strategy
 
-### Swarm Marketplace Integration
+### Agent Guild Marketplace Integration
 
-Office Sim Studio is distributed through the existing Swarm marketplace infrastructure, following established patterns from existing mods (JRPG Fantasy, Pokemon Trainer, Mecha LaunchPad).
+Office Sim Studio is distributed through the existing Agent Guild marketplace infrastructure, following established patterns from existing mods (JRPG Fantasy, Pokemon Trainer, Mecha LaunchPad).
 
 **Manifest registration:**
 
@@ -520,7 +520,7 @@ Office Sim Studio is distributed through the existing Swarm marketplace infrastr
   "name": "OpenClaw Office Sim Studio",
   "version": "1.0.0",
   "type": "mod",
-  "author": "Swarm Core",
+  "author": "Agent Guild Core",
   "description": "Living 2D/3D office simulation with generative environment design. Monitor agents spatially, design custom offices with ComfyUI, build 3D assets with Meshy.",
   "category": "Monitoring & Visualization",
   "icon": "🏢",
@@ -555,7 +555,7 @@ Office Sim Studio is distributed through the existing Swarm marketplace infrastr
     "iconName": "Building2"
   },
   "dependencies": {
-    "swarm-hub": ">=1.0.0"
+    "agent-guild-hub": ">=1.0.0"
   }
 }
 ```
@@ -571,7 +571,7 @@ Office Sim Studio is distributed through the existing Swarm marketplace infrastr
   category: "Monitoring & Visualization",
   icon: "🏢",
   version: "1.0.0",
-  author: "Swarm Core",
+  author: "Agent Guild Core",
   pricing: {
     model: "subscription",
     tiers: [
@@ -592,15 +592,15 @@ Office Sim Studio is distributed through the existing Swarm marketplace infrastr
 
 ### Marketplace Revenue Sharing
 
-Following the existing Swarm marketplace platform fee structure (15% per `marketplace-settings.ts`):
+Following the existing Agent Guild marketplace platform fee structure (15% per `marketplace-settings.ts`):
 
 | Revenue Stream | Platform Fee | Creator Revenue |
 |---|---|---|
-| Mod subscriptions (first-party) | 100% to Swarm | — |
-| Scene pack purchases (first-party) | 100% to Swarm | — |
+| Mod subscriptions (first-party) | 100% to Agent Guild | — |
+| Scene pack purchases (first-party) | 100% to Agent Guild | — |
 | Community-created themes | 15% platform fee | 85% to creator |
 | Community-created asset packs | 15% platform fee | 85% to creator |
-| Credit top-ups | 100% to Swarm (pass-through to Meshy at cost) | — |
+| Credit top-ups | 100% to Agent Guild (pass-through to Meshy at cost) | — |
 | Custom service engagements | 0% (direct) | 100% to provider |
 
 ### Community Theme Marketplace
@@ -610,7 +610,7 @@ Studio 3D tier users can publish their generated environments as purchasable the
 1. **Create** — User generates an office theme using ComfyUI + Meshy via Studio mode
 2. **Package** — User bundles theme (3D assets, textures, lighting config, concept references) via Theme Manager export
 3. **Submit** — Published through `POST /api/v1/marketplace/publish` with type `office-theme`
-4. **Review** — Swarm team reviews for quality, performance (max polycount, asset count), and IP compliance via the existing submission pipeline (intake → security scan → tier-based routing)
+4. **Review** — Agent Guild team reviews for quality, performance (max polycount, asset count), and IP compliance via the existing submission pipeline (intake → security scan → tier-based routing)
 5. **List** — Approved themes appear in Office Sim's Community Theme Browser and the main marketplace
 6. **Purchase** — Other users buy the theme; revenue split 85/15
 
@@ -628,7 +628,7 @@ This creates a **creator economy** within the mod. The same publisher tier syste
 | **WebSocket state protocol** | Open source | MIT | Interoperability with custom frontends and third-party tools |
 | **Agent state schema** (10-state vocabulary) | Open source | MIT | Standardization benefits the ecosystem |
 | **ComfyUI workflow templates** | Open source | CC-BY-4.0 | Community workflow sharing drives adoption and ComfyUI ecosystem growth |
-| **Swarm Hub integration layer** | Open source | MIT | Allows other community mods to integrate with the same agent data |
+| **Agent Guild Hub integration layer** | Open source | MIT | Allows other community mods to integrate with the same agent data |
 | **Base office theme** (2D only, 5 presets) | Open source | MIT | Entry point, proves value, drives upgrades |
 | **Replay event format** | Open source | MIT | Enables ecosystem tool compatibility and third-party replay viewers |
 
@@ -649,7 +649,7 @@ This creates a **creator economy** within the mod. The same publisher tier syste
 
 ### The Strategic Balance
 
-**Open enough to build an ecosystem.** The 2D renderer, state protocol, ComfyUI workflows, and base theme ensure that community contributors can build complementary tools. A healthy open-source layer drives adoption and makes Swarm the standard for spatial agent visualization.
+**Open enough to build an ecosystem.** The 2D renderer, state protocol, ComfyUI workflows, and base theme ensure that community contributors can build complementary tools. A healthy open-source layer drives adoption and makes Agent Guild the standard for spatial agent visualization.
 
 **Proprietary enough to monetize.** The 3D renderer, generative pipeline orchestrator, and Studio UI represent the engineering and design investment that justifies premium pricing. These components are hard to replicate and deeply integrated.
 
@@ -738,14 +738,14 @@ For teams building agent products who want to show their customers a branded exp
 | Milestone | Deliverable |
 |---|---|
 | Mod registration | Manifest in `src/mods/openclaw-office-sim/`, SKILL_REGISTRY entry, SkinContext entry, sidebar routing |
-| WebSocket integration | Real-time agent state consumption from Swarm Hub via existing WebSocket protocol |
+| WebSocket integration | Real-time agent state consumption from Agent Guild Hub via existing WebSocket protocol |
 | 2D Office renderer | SVG/Canvas floor plan with 6 spatial zones (desk row, meeting room, queue, error bay, tool station, approval gate) |
 | Agent Detail Drawer | Status, current task, recent activity feed, context-sensitive actions |
 | Home Dashboard | Overview cards (active/tasks/errors/cost/uptime), agent status grid, quick actions, activity feed |
 | 5 core agent states | Idle, active, error, blocked, offline — with triple-encoded visual semantics |
-| Base theme (dark) | Default visual design matching Swarm design system, registered in chart-theme.ts |
+| Base theme (dark) | Default visual design matching Agent Guild design system, registered in chart-theme.ts |
 
-**Launch:** Internal alpha. Swarm team and select partners.
+**Launch:** Internal alpha. Agent Guild team and select partners.
 
 ### Phase 1: 3D & Replay (Weeks 5–8)
 
@@ -830,7 +830,7 @@ For teams building agent products who want to show their customers a branded exp
 | Audit trail | Compliance export (SOC 2, ISO 27001 evidence packages) |
 | Replay certification | Tamper-proof cryptographically signed playback |
 | Multi-floor / multi-org | Enterprise-scale visualization |
-| White-label mode | Remove Swarm branding, apply customer brand |
+| White-label mode | Remove Agent Guild branding, apply customer brand |
 | Private deployment playbook | Documentation and automation for on-prem deployment |
 | Replay analytics add-on | Heatmaps, error patterns, collaboration graphs, cost attribution |
 | Compliance add-on | Tamper-proof replay, data residency, automated incident reports |
@@ -885,7 +885,7 @@ For teams building agent products who want to show their customers a branded exp
 |---|---|---|
 | **Time to first value** | 3–6 months for basic 2D, 6–12 months for 3D + generation | Install mod, see agents in minutes |
 | **Generative pipeline** | Build ComfyUI + Meshy integration, approval flows, asset management from scratch | Included, tested, optimized with approval gates at every stage |
-| **Maintenance** | Your team maintains rendering, WebSocket sync, 3D performance, generation pipeline | Swarm team maintains; updates via marketplace |
+| **Maintenance** | Your team maintains rendering, WebSocket sync, 3D performance, generation pipeline | Agent Guild team maintains; updates via marketplace |
 | **Cost** | 2–4 FTE for 6+ months ($200K–$500K+ fully loaded) | $29–$79/seat/month |
 | **Community** | Isolated, no shared themes or assets | Marketplace, community themes, shared ComfyUI workflows |
 | **Enterprise features** | Build SSO, RBAC, compliance, replay certification from scratch | Included in Enterprise tier |
@@ -898,7 +898,7 @@ The combination creates three interlocking moats:
 
 1. **Creative investment** — Generated environments represent irreplaceable creative work
 2. **Community marketplace** — Network effects from community-created themes
-3. **Ecosystem lock-in** — ComfyUI workflows, Meshy assets, replay history, and team customizations all live within the Swarm ecosystem
+3. **Ecosystem lock-in** — ComfyUI workflows, Meshy assets, replay history, and team customizations all live within the Agent Guild ecosystem
 
 ---
 

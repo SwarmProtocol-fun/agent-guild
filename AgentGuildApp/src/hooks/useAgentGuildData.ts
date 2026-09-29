@@ -1,9 +1,9 @@
 /**
- * React hook that polls the SwarmTaskBoard + AgentRegistry
+ * React hook that polls the AgentGuildTaskBoard + AgentRegistry
  * on Hedera Testnet every 12 seconds.
  *
  * Usage:
- *   const { tasks, agents, isLoading, error } = useSwarmData();
+ *   const { tasks, agents, isLoading, error } = useAgentGuildData();
  */
 
 "use client";
@@ -18,14 +18,14 @@ import {
   type TaskListing,
   type AgentProfile,
   type TreasuryPnL,
-} from "@/lib/swarm-contracts";
-import { AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
+} from "@/lib/agent-guild-contracts";
+import { AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
 
 // Hedera Testnet RPC URL
 const HEDERA_RPC_URL = "https://testnet.hashio.io/api";
 const POLL_INTERVAL = 30_000; // 30s — individual fetches can take 10-20s
 
-interface SwarmData {
+interface AgentGuildData {
   tasks: TaskListing[];
   agents: AgentProfile[];
   totalTasks: number;
@@ -37,7 +37,7 @@ interface SwarmData {
   refetch: () => Promise<void>;
 }
 
-export function useSwarmData(): SwarmData {
+export function useAgentGuildData(): AgentGuildData {
   const [tasks, setTasks] = useState<TaskListing[]>([]);
   const [agents, setAgents] = useState<AgentProfile[]>([]);
   const [totalTasks, setTotalTasks] = useState(0);
@@ -150,7 +150,7 @@ export function useSwarmData(): SwarmData {
       setError(null);
       setLastRefresh(new Date());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch Swarm data");
+      setError(err instanceof Error ? err.message : "Failed to fetch Agent Guild data");
     } finally {
       setIsLoading(false);
       isFetchingRef.current = false;
