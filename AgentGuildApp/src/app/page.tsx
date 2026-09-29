@@ -92,7 +92,7 @@ function LandingPageContent() {
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  if (!mounted || loading) {
+  if (!mounted) {
     return <div className="min-h-screen bg-transparent" />; // Prevent hydration mismatch
   }
 
