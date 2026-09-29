@@ -157,8 +157,11 @@ export function OrgProvider({ children }: { children: ReactNode }) {
   // Load orgs when address is available (from wallet or session).
   // Only re-fetch when the address actually changes.
   useEffect(() => {
-    if (address) {
-      // Address available — cancel any pending disconnect timer
+    if (address && authenticated) {
+      // Address available and Firebase Auth is signed in (via the SIWE ->
+      // custom-token exchange in useAutoSiwe) — Firestore rules require
+      // request.auth != null, so only fetch once that's true. Cancel any
+      // pending disconnect timer.
       if (disconnectTimer.current) {
         clearTimeout(disconnectTimer.current);
         disconnectTimer.current = null;
@@ -167,6 +170,15 @@ export function OrgProvider({ children }: { children: ReactNode }) {
       if (address !== lastFetchedAddress.current) {
         lastFetchedAddress.current = address;
         refreshOrgs();
+      }
+    } else if (address && !authenticated) {
+      // Wallet connected but SIWE/Firebase sign-in hasn't completed yet —
+      // fetching now would hit Firestore's "Missing or insufficient
+      // permissions" since request.auth is still null. Wait for
+      // `authenticated` to flip; don't clear state or fetch yet.
+      if (disconnectTimer.current) {
+        clearTimeout(disconnectTimer.current);
+        disconnectTimer.current = null;
       }
     } else if (connectionStatus === 'connecting') {
       // Wallet is actively reconnecting — don't clear state yet.
