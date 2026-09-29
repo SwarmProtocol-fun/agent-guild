@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { getAllGatewaysWithHealth } from "@/lib/gateways";
+import { getAllGatewaysWithHealth } from "@/lib/firestore-admin";
 import { getWalletAddress } from "@/lib/auth-guard";
 
 export async function GET(request: NextRequest) {

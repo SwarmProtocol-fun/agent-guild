@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogContent } from "@/components/ui/dialog";
 import { Building2, Users, Globe, ExternalLink, ArrowLeft } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import {
     getOrganization,
     updateOrganization,
@@ -26,7 +26,7 @@ export default function OrgProfilePage() {
     const params = useParams();
     const router = useRouter();
     const orgId = params.orgId as string;
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const address = account?.address;
     const { currentOrg, refreshOrgs } = useOrg();
 

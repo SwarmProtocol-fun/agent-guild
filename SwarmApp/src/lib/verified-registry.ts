@@ -7,20 +7,8 @@
  * Collection: `verifiedMarketItems`
  */
 
-import {
-    collection,
-    doc,
-    setDoc,
-    getDoc,
-    getDocs,
-    updateDoc,
-    deleteDoc,
-    query,
-    where,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { Timestamp, FieldValue, type Query } from "firebase-admin/firestore";
 import { SKILL_REGISTRY, type Skill, type MarketItemType, type MarketPricing } from "./skills";
 
 // ═══════════════════════════════════════════════════════════════
@@ -144,15 +132,15 @@ export async function seedVerifiedItems(): Promise<{ seeded: number; skipped: nu
     let skipped = 0;
 
     for (const skill of SKILL_REGISTRY) {
-        const ref = doc(db, COLLECTION, skill.id);
-        const snap = await getDoc(ref);
+        const ref = adminDb().collection(COLLECTION).doc(skill.id);
+        const snap = await ref.get();
 
-        if (snap.exists()) {
+        if (snap.exists) {
             skipped++;
             continue;
         }
 
-        await setDoc(ref, {
+        await ref.set({
             name: skill.name,
             description: skill.description,
             type: skill.type,
@@ -169,8 +157,8 @@ export async function seedVerifiedItems(): Promise<{ seeded: number; skipped: nu
             installCount: 0,
             avgRating: 0,
             ratingCount: 0,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
         });
 
         seeded++;
@@ -201,15 +189,11 @@ let autoSeedTriggered = false;
  * removed once all environments have been seeded.
  */
 export async function getVerifiedItems(filters?: VerifiedItemFilters): Promise<VerifiedItem[]> {
-    const constraints = [];
-    if (filters?.type) constraints.push(where("type", "==", filters.type));
-    if (filters?.featured) constraints.push(where("featured", "==", true));
+    let q: Query = adminDb().collection(COLLECTION);
+    if (filters?.type) q = q.where("type", "==", filters.type);
+    if (filters?.featured) q = q.where("featured", "==", true);
 
-    const q = constraints.length > 0
-        ? query(collection(db, COLLECTION), ...constraints)
-        : query(collection(db, COLLECTION));
-
-    const snap = await getDocs(q);
+    const snap = await q.get();
 
     // DEPRECATED FALLBACK: Return static data while auto-seeding Firestore.
     // This path should only fire on fresh environments that haven't been seeded yet.
@@ -259,7 +243,7 @@ export async function getVerifiedItems(filters?: VerifiedItemFilters): Promise<V
  * Get all verified items including disabled ones (for admin).
  */
 export async function getAllVerifiedItems(): Promise<VerifiedItem[]> {
-    const snap = await getDocs(query(collection(db, COLLECTION)));
+    const snap = await adminDb().collection(COLLECTION).get();
 
     if (snap.empty) {
         console.warn("[verified-registry] getAllVerifiedItems: Firestore empty — using static fallback (deprecated).");
@@ -274,11 +258,11 @@ export async function getAllVerifiedItems(): Promise<VerifiedItem[]> {
  * Falls back to SKILL_REGISTRY if not found in Firestore.
  */
 export async function getVerifiedItem(id: string): Promise<VerifiedItem | null> {
-    const ref = doc(db, COLLECTION, id);
-    const snap = await getDoc(ref);
+    const ref = adminDb().collection(COLLECTION).doc(id);
+    const snap = await ref.get();
 
-    if (snap.exists()) {
-        return docToVerifiedItem(snap.id, snap.data());
+    if (snap.exists) {
+        return docToVerifiedItem(snap.id, snap.data()!);
     }
 
     // Deprecated fallback to static registry
@@ -300,10 +284,10 @@ export async function updateVerifiedItem(
     id: string,
     updates: VerifiedItemUpdatable,
 ): Promise<void> {
-    const ref = doc(db, COLLECTION, id);
-    const snap = await getDoc(ref);
+    const ref = adminDb().collection(COLLECTION).doc(id);
+    const snap = await ref.get();
 
-    if (!snap.exists()) {
+    if (!snap.exists) {
         throw new Error(`Verified item "${id}" not found in Firestore. Seed the registry first.`);
     }
 
@@ -319,9 +303,9 @@ export async function updateVerifiedItem(
     if (updates.featured !== undefined) safe.featured = updates.featured;
     if (updates.enabled !== undefined) safe.enabled = updates.enabled;
 
-    safe.updatedAt = serverTimestamp();
+    safe.updatedAt = FieldValue.serverTimestamp();
 
-    await updateDoc(ref, safe);
+    await ref.update(safe);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -333,7 +317,7 @@ export async function updateVerifiedItem(
  * Can be re-seeded later from SKILL_REGISTRY.
  */
 export async function deleteVerifiedItem(id: string): Promise<void> {
-    await deleteDoc(doc(db, COLLECTION, id));
+    await adminDb().collection(COLLECTION).doc(id).delete();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -359,14 +343,14 @@ export interface CreateVerifiedItemInput {
  * Create a new verified item in Firestore (not from SKILL_REGISTRY seed).
  */
 export async function createVerifiedItem(input: CreateVerifiedItemInput): Promise<void> {
-    const ref = doc(db, COLLECTION, input.id);
-    const snap = await getDoc(ref);
+    const ref = adminDb().collection(COLLECTION).doc(input.id);
+    const snap = await ref.get();
 
-    if (snap.exists()) {
+    if (snap.exists) {
         throw new Error(`Verified item "${input.id}" already exists`);
     }
 
-    await setDoc(ref, {
+    await ref.set({
         name: input.name,
         description: input.description,
         type: input.type,
@@ -383,7 +367,7 @@ export async function createVerifiedItem(input: CreateVerifiedItemInput): Promis
         installCount: 0,
         avgRating: 0,
         ratingCount: 0,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
     });
 }

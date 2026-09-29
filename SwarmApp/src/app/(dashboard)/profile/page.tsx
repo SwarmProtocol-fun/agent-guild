@@ -3,7 +3,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -13,7 +13,7 @@ import { getProfile, setProfile } from "@/lib/firestore";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
 
 export default function ProfilePage() {
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const router = useRouter();
   const [displayName, setDisplayName] = useState("");
   const [bio, setBio] = useState("");

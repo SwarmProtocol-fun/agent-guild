@@ -11,7 +11,7 @@
  * - session: Session-scoped message for multi-step workflows
  */
 
-import { Timestamp } from 'firebase/firestore';
+import type { Timestamp } from 'firebase-admin/firestore';
 
 // ============================================================
 // Core Message Types

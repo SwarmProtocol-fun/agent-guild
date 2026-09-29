@@ -2,7 +2,7 @@
 'use client';
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from 'react';
-import { useActiveAccount, useActiveWalletConnectionStatus } from 'thirdweb/react';
+import { useWalletAccount, useWalletConnectionStatus } from "@/lib/wallet";
 import {
   createOrganization,
   getOrganizationsByWallet,
@@ -49,8 +49,8 @@ const ORG_STORAGE_KEY = 'swarm_selected_org_id';
 const DISCONNECT_GRACE_MS = 6_000;
 
 export function OrgProvider({ children }: { children: ReactNode }) {
-  const account = useActiveAccount();
-  const connectionStatus = useActiveWalletConnectionStatus();
+  const account = useWalletAccount();
+  const connectionStatus = useWalletConnectionStatus();
   const { address: sessionAddress, authenticated } = useSession();
   // Use wallet address if connected, otherwise fall back to session address
   const address = account?.address || (authenticated ? sessionAddress : null) || undefined;
@@ -168,7 +168,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
         lastFetchedAddress.current = address;
         refreshOrgs();
       }
-    } else if (connectionStatus === 'connecting' || connectionStatus === 'unknown') {
+    } else if (connectionStatus === 'connecting') {
       // Wallet is actively reconnecting — don't clear state yet.
       if (disconnectTimer.current) {
         clearTimeout(disconnectTimer.current);

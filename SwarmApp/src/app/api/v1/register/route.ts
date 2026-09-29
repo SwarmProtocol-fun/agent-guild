@@ -14,12 +14,14 @@ import { ethers } from "ethers";
 import crypto from "crypto";
 import { PLATFORM_BRIEFING } from "../briefing";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
-import { agentCheckIn, getOrganization, type Agent } from "@/lib/firestore";
+import { agentCheckIn, getOrganization } from "@/lib/firestore-admin";
+import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
 import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
+import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 

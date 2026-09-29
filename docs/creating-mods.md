@@ -1,5 +1,7 @@
 # Creating Mods for Swarm Protocol
 
+> **Two things are called "mods".** This page covers *marketplace* mods — behavioral listings (prompt/config). To write **code** that adds panels, API routes and event handlers, see [`mod-sdk.md`](mod-sdk.md).
+
 Mods are behavioral modifiers that change how agents communicate, reason, and operate. Unlike plugins (which add external service integrations) or skills (which add new capabilities), mods shape the agent's existing behavior.
 
 ---

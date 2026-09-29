@@ -8,15 +8,72 @@
  */
 
 import { adminDb } from "@/lib/firebase-admin";
-// [swarm-core] Hedera removed
-const emitPenalty = async (..._args: unknown[]) => ({});
-// [swarm-core] Hedera removed
-const createPenaltyProposal = async (..._args: unknown[]) => ({});
+import { FieldValue } from "firebase-admin/firestore";
+import { emitPenalty } from "./mod-stubs";
 import { updateSignalStatus, type RiskSignal, type RiskSignalType, type FraudDetectionConfig } from "./fraud-detection";
 import { computeRiskTier } from "./fraud-risk-scoring";
 import { logActivity } from "./activity";
 import { recordAuditEntry } from "./audit-log";
+import { recordCreditAudit } from "./credit-audit-log";
+import { fireWebhooks } from "./credit-webhooks";
+import { invalidateCache } from "./credit-cache";
+import { requestOverride } from "./credit-ops/override";
 import type { Agent } from "./firestore";
+
+const MIN_CREDIT_SCORE = 300;
+const MIN_TRUST_SCORE = 0;
+
+/**
+ * Apply a credit/trust penalty directly to the agent's live scores.
+ *
+ * This is the actual score mutation for auto-detected fraud — separate from
+ * emitPenalty(), which only notifies the (optional) swarm-hedera mod's score
+ * ledger and is non-blocking/best-effort.
+ */
+async function applyCreditPenalty(
+  agentId: string,
+  agent: Agent,
+  creditPenalty: number,
+  trustPenalty: number,
+  reason: string,
+): Promise<{ creditBefore: number; creditAfter: number; trustBefore: number; trustAfter: number }> {
+  const creditBefore = (agent.creditScore as number) ?? 680;
+  const trustBefore = (agent.trustScore as number) ?? 50;
+  const creditAfter = Math.max(MIN_CREDIT_SCORE, creditBefore - creditPenalty);
+  const trustAfter = Math.max(MIN_TRUST_SCORE, trustBefore - trustPenalty);
+
+  await adminDb().collection("agents").doc(agentId).update({
+    creditScore: creditAfter,
+    trustScore: trustAfter,
+    lastCreditUpdate: FieldValue.serverTimestamp(),
+    lastCreditReason: reason,
+  });
+
+  recordCreditAudit({
+    agentId,
+    asn: agent.asn || "",
+    source: "auto",
+    creditBefore,
+    creditAfter,
+    trustBefore,
+    trustAfter,
+    reason,
+    eventType: "fraud_auto_penalty",
+  }).catch((err) => console.error("[fraud-auto-penalty] Failed to record credit audit:", err));
+
+  invalidateCache(`credit:${agentId}`);
+
+  fireWebhooks(agentId, "score_change", {
+    previousCreditScore: creditBefore,
+    newCreditScore: creditAfter,
+    previousTrustScore: trustBefore,
+    newTrustScore: trustAfter,
+    delta: { credit: creditAfter - creditBefore, trust: trustAfter - trustBefore },
+    trigger: "fraud_auto_penalty",
+  }).catch((err) => console.error("[fraud-auto-penalty] Webhook dispatch error:", err));
+
+  return { creditBefore, creditAfter, trustBefore, trustAfter };
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Auto-Penalty Rules
@@ -151,28 +208,37 @@ export async function applyAutoPenalties(
     if (!rule) continue;
 
     try {
+      const reason = `FRAUD AUTO-DETECT: ${rule.description} (signal: ${signal.signalType}, confidence: ${signal.confidence.toFixed(2)})`;
+
       if (rule.creditPenalty > 50) {
-        // Large penalty → governance approval required
-        const proposalId = await createPenaltyProposal(
-          agent.asn,
-          agent.walletAddress,
-          -rule.creditPenalty,
-          `FRAUD AUTO-DETECT: ${rule.description} (signal: ${signal.signalType}, confidence: ${signal.confidence.toFixed(2)})`,
-          "fraud-detection-system",
-          [process.env.PLATFORM_ADMIN_WALLETS?.split(",")[0] || "platform-admin"].filter(Boolean),
-        );
-        governanceProposals.push(proposalId);
+        // Large penalty → real governance approval workflow (second-admin
+        // sign-off), same path used by manual admin overrides. Scores are
+        // NOT deducted until an admin approves.
+        const current = agentDoc.data() as Agent;
+        const currentCredit = (current.creditScore as number) ?? 680;
+        const currentTrust = (current.trustScore as number) ?? 50;
+        const { overrideId } = await requestOverride({
+          agentId,
+          asn: agent.asn,
+          newCreditScore: Math.max(MIN_CREDIT_SCORE, currentCredit - rule.creditPenalty),
+          newTrustScore: Math.max(MIN_TRUST_SCORE, currentTrust - rule.trustPenalty),
+          reason,
+          overrideType: "permanent",
+          requestedBy: "fraud-detection-system",
+        });
+        governanceProposals.push(overrideId);
         await updateSignalStatus(signal.id!, "escalated");
       } else {
-        // Small penalty → apply directly
-        await emitPenalty(
-          agent.asn,
-          agent.walletAddress,
-          -rule.creditPenalty,
-          `FRAUD AUTO-PENALTY: ${rule.description} (signal: ${signal.signalType}, confidence: ${signal.confidence.toFixed(2)})`,
-        );
+        // Small penalty → apply directly to the agent's live score.
+        await applyCreditPenalty(agentId, agent, rule.creditPenalty, rule.trustPenalty, reason);
         await updateSignalStatus(signal.id!, "penalized");
       }
+
+      // Best-effort notify the optional swarm-hedera mod's score ledger.
+      // Non-blocking: the real score mutation above already happened.
+      emitPenalty(agent.asn, agent.walletAddress, -rule.creditPenalty, reason).catch(() => {
+        /* swarm-hedera mod not installed — expected in core */
+      });
 
       penaltiesApplied++;
 

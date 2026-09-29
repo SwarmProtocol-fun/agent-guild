@@ -158,9 +158,8 @@ npm run dev
 
 3. **Verify Firebase credentials:**
 ```bash
-export FIREBASE_PROJECT_ID="swarm-protocol"
-export FIREBASE_CLIENT_EMAIL="..."
-export FIREBASE_PRIVATE_KEY="..."
+# Base64-encoded service account JSON used by the hub's Admin SDK
+export FIREBASE_SERVICE_ACCOUNT="$(base64 -w0 service-account.json)"
 ```
 
 ---

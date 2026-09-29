@@ -38,6 +38,14 @@ interface BrowseItem {
     featured: boolean;
 }
 
+// Hard cap on documents scanned per source collection. This endpoint merges 3
+// sources and sorts/paginates in memory (sort modes like "rating"/"trending"
+// need the full matching set to rank correctly, so we can't push the client's
+// page size straight into Firestore's .limit()) — this cap just stops a single
+// public, unauthenticated request from reading an entire collection as it grows,
+// without changing results while collections stay under the cap.
+const MAX_DOCS_PER_SOURCE = 500;
+
 export async function GET(req: NextRequest) {
     const url = req.nextUrl;
     const typeFilter = url.searchParams.get("type");
@@ -85,7 +93,7 @@ export async function GET(req: NextRequest) {
             let q: Query = adminDb().collection("communityMarketItems").where("status", "==", "approved");
             if (typeFilter) q = q.where("type", "==", typeFilter);
             if (featuredOnly) q = q.where("featured", "==", true);
-            const snap = await q.get();
+            const snap = await q.limit(MAX_DOCS_PER_SOURCE).get();
             for (const d of snap.docs) {
                 const data = d.data();
                 if (categoryFilter && data.category !== categoryFilter) continue;
@@ -113,7 +121,7 @@ export async function GET(req: NextRequest) {
         if (sourceFilter !== "verified" && (!typeFilter || typeFilter === "agent")) {
             let agentQ: Query = adminDb().collection("marketplaceAgents").where("status", "==", "approved");
             if (featuredOnly) agentQ = agentQ.where("featured", "==", true);
-            const agentSnap = await agentQ.get();
+            const agentSnap = await agentQ.limit(MAX_DOCS_PER_SOURCE).get();
             for (const d of agentSnap.docs) {
                 const data = d.data();
                 if (categoryFilter && data.category !== categoryFilter) continue;

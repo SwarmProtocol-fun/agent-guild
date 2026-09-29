@@ -111,6 +111,9 @@ const pendingInvocations = new Map();
 const gatewayConnections = new Map();
 // ws → { gatewayId, orgId, workerName }
 const gwState = new Map();
+// channel → subscriber count, so the shared `sub` client is only unsubscribed
+// once the last gateway listening on that org's job-dispatch channel disconnects
+const gatewayChannelRefs = new Map();
 
 // ── Selective WebSocket Batching ────────────────────────────────────────────
 // High-frequency event types get batched; status/message events go immediate.
@@ -471,6 +474,65 @@ function handleCrossInstanceMessage(payload) {
   }
 }
 
+// ── Auto-capture: agent daily journal ─────────────────────────────────────
+// Duplicated (not imported) from SwarmApp/src/lib/agent-memory-server.ts's
+// appendDailyNote — this is a separate .mjs deploy unit that can't import
+// TypeScript. Keep the doc shape (fixed ID, subtype, structuredData) and
+// append behavior in sync with that file if either changes.
+
+function todayUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function dailyNoteTemplate(date, agentName) {
+  const dayName = new Date(date).toLocaleDateString("en-US", { weekday: "long" });
+  return `# Daily Note — ${dayName}, ${date}\n## ${agentName}\n\n### Summary\n<!-- What did I accomplish today? -->\n\n### Tasks Completed\n-\n\n### Tasks Started\n-\n\n### Learnings\n<!-- What did I learn today? -->\n\n### Tomorrow's Focus\n<!-- What should I prioritize tomorrow? -->\n\n### Notes\n<!-- Additional observations -->\n\n---\n*Created: ${new Date().toISOString()}*\n`;
+}
+
+/** Same append-before-footer logic as memory-templates.ts's appendToMemoryMd. */
+function appendToDailyNote(existingContent, newEntry) {
+  const entry = `\n#### ${new Date().toISOString()}\n${newEntry}\n`;
+  const footerRegex = /---\n\*Created:/;
+  if (footerRegex.test(existingContent)) {
+    return existingContent.replace(footerRegex, `${entry}\n---\n*Created:`);
+  }
+  return existingContent + entry;
+}
+
+/**
+ * Auto-capture: append this agent's own sent-message activity to its daily
+ * journal, fire-and-forget, so context accumulates without the agent (or
+ * its framework) having to call the memory API itself. Never throws —
+ * callers treat this as best-effort.
+ */
+async function autoCaptureDailyActivity(agentId, agentName, orgId, entry) {
+  if (!orgId || !entry) return;
+  const date = todayUTC();
+  const docId = `${agentId}__daily_${date}`;
+  const ref = db.collection("agentMemories").doc(docId);
+  try {
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const base = snap.exists ? snap.data().content : dailyNoteTemplate(date, agentName || agentId);
+      const content = appendToDailyNote(base, entry);
+      tx.set(ref, {
+        orgId,
+        agentId,
+        agentName: agentName || agentId,
+        type: "journal",
+        title: `Daily Note — ${date}`,
+        content,
+        subtype: "daily_note",
+        structuredData: { date },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        ...(snap.exists ? {} : { createdAt: admin.firestore.FieldValue.serverTimestamp() }),
+      }, { merge: true });
+    });
+  } catch (err) {
+    log("warn", "Auto-capture daily activity failed", { agentId, error: err.message });
+  }
+}
+
 async function persistMessage(agentId, agentName, orgId, channelId, content) {
   try {
     const ref = await db.collection("messages").add({
@@ -481,6 +543,10 @@ async function persistMessage(agentId, agentName, orgId, channelId, content) {
       content,
       orgId,
       verified: true,
+      // Caller (index.mjs message handler) already pushes this message live via
+      // broadcastToChannel — mark it so streamChannel's onSnapshot listener
+      // doesn't deliver a second copy to every other subscriber.
+      deliveredViaHub: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -510,6 +576,9 @@ async function persistMessage(agentId, agentName, orgId, channelId, content) {
       });
     });
 
+    // Auto-capture into the sender's daily journal (non-blocking)
+    autoCaptureDailyActivity(agentId, agentName, orgId, `Sent in ${channelName}: ${content}`);
+
     return ref.id;
   } catch (err) {
     log("error", "Failed to persist message", { channelId, error: err.message });
@@ -517,12 +586,20 @@ async function persistMessage(agentId, agentName, orgId, channelId, content) {
   }
 }
 
+// Short-lived cache to avoid a Firestore read on every single inbound WS message.
+// A few seconds of staleness on pause/resume is an acceptable tradeoff for the read savings.
+const PAUSED_CACHE_TTL_MS = 5000;
+const pausedCache = new Map(); // agentId -> { paused, expiresAt }
+
 async function isAgentPaused(agentId) {
+  const cached = pausedCache.get(agentId);
+  if (cached && cached.expiresAt > Date.now()) return cached.paused;
+
   try {
     const agentSnap = await db.collection("agents").doc(agentId).get();
-    if (!agentSnap.exists) return false;
-    const agentData = agentSnap.data();
-    return agentData.status === "paused";
+    const paused = agentSnap.exists && agentSnap.data().status === "paused";
+    pausedCache.set(agentId, { paused, expiresAt: Date.now() + PAUSED_CACHE_TTL_MS });
+    return paused;
   } catch (err) {
     log("error", "Failed to check agent pause status", { agentId, error: err.message });
     return false; // Fail open — don't block if can't check
@@ -604,6 +681,11 @@ function streamChannel(ws, channelId, channelName, agentId) {
         const m = change.doc.data();
         // Don't echo the agent's own messages back
         if (m.senderId === agentId) return;
+        // Already delivered live via broadcastToChannel/Pub-Sub by the writer
+        // (persistMessage / routeBroadcast) — skip to avoid a duplicate copy.
+        // Docs written outside the hub (e.g. SwarmApp's /api/v1/send) won't
+        // carry this marker and still get delivered here as before.
+        if (m.deliveredViaHub) return;
 
         if (ws.readyState === 1) {
           ws.send(JSON.stringify({
@@ -1268,6 +1350,26 @@ wss.on("connection", async (ws, _req) => {
       log("info", "Gateway disconnected", { gatewayId, workerName });
       cleanupBatchBuffer(ws);
 
+      // Remove this connection's job-dispatch listener from the shared Redis
+      // subscriber; unsubscribe the channel only once no gateway in this org
+      // is still listening on it.
+      const gw = gwState.get(ws);
+      if (gw?.jobDispatchHandler) {
+        try {
+          const { sub } = getRedis();
+          sub.removeListener("message", gw.jobDispatchHandler);
+          const remaining = (gatewayChannelRefs.get(gw.jobDispatchChannel) || 1) - 1;
+          if (remaining <= 0) {
+            gatewayChannelRefs.delete(gw.jobDispatchChannel);
+            await sub.unsubscribe(gw.jobDispatchChannel);
+          } else {
+            gatewayChannelRefs.set(gw.jobDispatchChannel, remaining);
+          }
+        } catch (err) {
+          log("warn", "Failed to clean up job dispatch subscription", { gatewayId, error: err.message });
+        }
+      }
+
       const conns = gatewayConnections.get(gatewayId);
       if (conns) {
         conns.delete(ws);
@@ -1295,7 +1397,9 @@ wss.on("connection", async (ws, _req) => {
       const { sub } = getRedis();
       const channel = `gateway:new-task:${orgId}`;
       await sub.subscribe(channel);
-      sub.on("message", async (ch, message) => {
+      gatewayChannelRefs.set(channel, (gatewayChannelRefs.get(channel) || 0) + 1);
+
+      const jobDispatchHandler = async (ch, message) => {
         if (ch !== channel) return;
         try {
           const { taskId, taskType } = JSON.parse(message);
@@ -1332,7 +1436,11 @@ wss.on("connection", async (ws, _req) => {
         } catch (err) {
           log("warn", "Gateway job dispatch failed", { gatewayId, error: err.message });
         }
-      });
+      };
+
+      sub.on("message", jobDispatchHandler);
+      const gw = gwState.get(ws);
+      if (gw) { gw.jobDispatchChannel = channel; gw.jobDispatchHandler = jobDispatchHandler; }
     } catch (err) {
       log("warn", "Failed to subscribe to job dispatch channel", { gatewayId, orgId, error: err.message });
     }

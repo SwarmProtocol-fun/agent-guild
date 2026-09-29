@@ -64,38 +64,3 @@ export async function validateEmbedAccess(
 
   return { valid: true, computerId: token.computerId, mode: token.mode };
 }
-
-/**
- * Build embeddable code snippets for a token.
- */
-export function buildEmbedSnippet(
-  tokenId: string,
-  mode: EmbedMode,
-  baseUrl: string = "",
-): { js: string; react: string } {
-  const src = `${baseUrl}/embed/compute?token=${tokenId}&mode=${mode}`;
-
-  const js = `<iframe
-  src="${src}"
-  width="100%"
-  height="600"
-  frameborder="0"
-  allow="clipboard-write"
-  sandbox="allow-scripts allow-same-origin"
-></iframe>`;
-
-  const react = `export function SwarmComputer() {
-  return (
-    <iframe
-      src="${src}"
-      width="100%"
-      height={600}
-      frameBorder="0"
-      allow="clipboard-write"
-      sandbox="allow-scripts allow-same-origin"
-    />
-  );
-}`;
-
-  return { js, react };
-}

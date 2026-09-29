@@ -9,19 +9,8 @@
  * - Circuit breakers stuck open
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  getDocs,
-  setDoc,
-  deleteDoc,
-  query,
-  where,
-  serverTimestamp,
-  Timestamp,
-  addDoc,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getHeartbeats } from "./heartbeat";
 import { getActiveAlerts } from "./vitals-collector";
 
@@ -100,22 +89,18 @@ export async function checkHighErrorRate(orgId: string): Promise<DiagnosticIssue
   const issues: DiagnosticIssue[] = [];
 
   // Get agents
-  const agentsSnap = await getDocs(
-    query(collection(db, "agents"), where("orgId", "==", orgId))
-  );
+  const agentsSnap = await adminDb().collection("agents").where("orgId", "==", orgId).get();
 
   for (const agentDoc of agentsSnap.docs) {
     const agentId = agentDoc.id;
     const agentName = agentDoc.data().name || agentId;
 
     // Get recent activity
-    const activitySnap = await getDocs(
-      query(
-        collection(db, "activityLog"),
-        where("agentId", "==", agentId),
-        where("eventType", "in", ["task_completed", "task_failed"])
-      )
-    );
+    const activitySnap = await adminDb()
+      .collection("activityLog")
+      .where("agentId", "==", agentId)
+      .where("eventType", "in", ["task_completed", "task_failed"])
+      .get();
 
     const events = activitySnap.docs.map((d) => d.data());
     const failures = events.filter((e) => e.eventType === "task_failed").length;
@@ -164,14 +149,10 @@ export async function checkOrphanedTasks(orgId: string): Promise<DiagnosticIssue
   const issues: DiagnosticIssue[] = [];
 
   // Get all tasks
-  const tasksSnap = await getDocs(
-    query(collection(db, "kanbanTasks"), where("orgId", "==", orgId))
-  );
+  const tasksSnap = await adminDb().collection("kanbanTasks").where("orgId", "==", orgId).get();
 
   // Get all agents
-  const agentsSnap = await getDocs(
-    query(collection(db, "agents"), where("orgId", "==", orgId))
-  );
+  const agentsSnap = await adminDb().collection("agents").where("orgId", "==", orgId).get();
 
   const agentIds = new Set(agentsSnap.docs.map((d) => d.id));
 
@@ -197,9 +178,7 @@ export async function checkCircuitBreakers(orgId: string): Promise<DiagnosticIss
   const issues: DiagnosticIssue[] = [];
 
   // Get circuit breaker states
-  const circuitSnap = await getDocs(
-    query(collection(db, "modelHealth"), where("circuitState", "==", "open"))
-  );
+  const circuitSnap = await adminDb().collection("modelHealth").where("circuitState", "==", "open").get();
 
   for (const circuitDoc of circuitSnap.docs) {
     const circuit = circuitDoc.data();
@@ -227,11 +206,10 @@ export async function fixBudgetOverrun(
 ): Promise<FixResult> {
   try {
     // Pause the agent
-    await setDoc(
-      doc(db, "agents", issue.targetId),
+    await adminDb().collection("agents").doc(issue.targetId).set(
       {
         status: "paused",
-        pausedAt: serverTimestamp(),
+        pausedAt: FieldValue.serverTimestamp(),
         pausedBy: "auto_diagnostics",
         pauseReason: `Auto-paused due to ${issue.description}`,
       },
@@ -258,12 +236,11 @@ export async function fixBudgetOverrun(
 export async function fixOrphanedTask(issue: DiagnosticIssue): Promise<FixResult> {
   try {
     // Unassign the task
-    await setDoc(
-      doc(db, "kanbanTasks", issue.targetId),
+    await adminDb().collection("kanbanTasks").doc(issue.targetId).set(
       {
         assignee: null,
         assigneeName: null,
-        updatedAt: serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
@@ -288,8 +265,7 @@ export async function fixOrphanedTask(issue: DiagnosticIssue): Promise<FixResult
 export async function fixCircuitBreaker(issue: DiagnosticIssue): Promise<FixResult> {
   try {
     // Reset circuit breaker
-    await setDoc(
-      doc(db, "modelHealth", issue.targetId),
+    await adminDb().collection("modelHealth").doc(issue.targetId).set(
       {
         circuitState: "closed",
         failureCount: 0,
@@ -351,10 +327,10 @@ export async function runDiagnostics(
     }
 
     // Record run
-    const runRef = await addDoc(collection(db, "diagnosticRuns"), {
+    const runRef = await adminDb().collection("diagnosticRuns").add({
       orgId,
       checkType: check,
-      runAt: serverTimestamp(),
+      runAt: FieldValue.serverTimestamp(),
       issuesFound: issues.length,
       issues,
       autoFixAttempted: false,
@@ -402,8 +378,7 @@ export async function runAutoFix(
   }
 
   // Update run record
-  await setDoc(
-    doc(db, "diagnosticRuns", runId),
+  await adminDb().collection("diagnosticRuns").doc(runId).set(
     {
       autoFixAttempted: true,
       fixResults: [result],
@@ -422,12 +397,7 @@ export async function getRecentDiagnosticRuns(
   orgId: string,
   limit = 10
 ): Promise<DiagnosticRun[]> {
-  const q = query(
-    collection(db, "diagnosticRuns"),
-    where("orgId", "==", orgId)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection("diagnosticRuns").where("orgId", "==", orgId).get();
   return snap.docs
     .slice(0, limit)
     .map((d) => {

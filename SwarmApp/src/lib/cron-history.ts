@@ -5,19 +5,8 @@
  * Records start time, end time, duration, success/failure, and agent results.
  */
 
-import {
-  collection,
-  doc,
-  addDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -63,7 +52,7 @@ export async function recordCronExecution(
 ): Promise<string> {
   const durationMs = endTime.getTime() - startTime.getTime();
 
-  const ref = await addDoc(collection(db, "cronExecutionHistory"), {
+  const ref = await adminDb().collection("cronExecutionHistory").add({
     jobId,
     jobName,
     orgId,
@@ -74,7 +63,7 @@ export async function recordCronExecution(
     error: error || null,
     agentResults,
     testRun,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   return ref.id;
@@ -88,14 +77,12 @@ export async function getCronExecutionHistory(
   jobId: string,
   limit = 50
 ): Promise<CronExecutionHistory[]> {
-  const q = query(
-    collection(db, "cronExecutionHistory"),
-    where("jobId", "==", jobId),
-    orderBy("startTime", "desc"),
-    firestoreLimit(limit)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("cronExecutionHistory")
+    .where("jobId", "==", jobId)
+    .orderBy("startTime", "desc")
+    .limit(limit)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -118,14 +105,12 @@ export async function getAllCronExecutionHistory(
   orgId: string,
   limit = 100
 ): Promise<CronExecutionHistory[]> {
-  const q = query(
-    collection(db, "cronExecutionHistory"),
-    where("orgId", "==", orgId),
-    orderBy("startTime", "desc"),
-    firestoreLimit(limit)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("cronExecutionHistory")
+    .where("orgId", "==", orgId)
+    .orderBy("startTime", "desc")
+    .limit(limit)
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {

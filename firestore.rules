@@ -7,10 +7,17 @@ service cloud.firestore {
     // Login is wallet/SIWE (Thirdweb) verified server-side, then the server
     // mints a Firebase custom token (uid = lowercased wallet address) so
     // the client SDK gets a real `request.auth`. Server-side privileged
-    // writes (sessions, rate limits, analytics, login-time org lookups) go
-    // through the Firebase Admin SDK (src/lib/firebase-admin.ts), which
-    // bypasses these rules entirely — so those collections below are
-    // locked to clients even though the app still needs to write them.
+    // writes go through the Firebase Admin SDK (src/lib/firebase-admin.ts,
+    // src/lib/firestore-admin.ts), which bypasses these rules entirely.
+    //
+    // Every collection below was audited by tracing, for each one, every
+    // file in the codebase that touches it and whether that file is
+    // reachable from a browser bundle (a 'use client' component, directly
+    // or transitively — including through dynamic `import()`, which a
+    // plain grep for importers misses). Collections with zero remaining
+    // client-reachable code path are denied outright below or by the final
+    // catch-all; collections a dashboard page or component genuinely needs
+    // are explicitly allowed to authenticated users.
 
     // Server-only — Admin SDK writes these, clients never touch them directly.
     match /sessions/{document=**}        { allow read, write: if false; }
@@ -19,7 +26,14 @@ service cloud.firestore {
     match /userProfiles/{document=**}    { allow read, write: if false; }
 
     // Explicit deny — sensitive/financial/security-critical, no client
-    // access at all regardless of auth state.
+    // access at all regardless of auth state. (creditPolicyLog and
+    // githubEvents still have a client-SDK call site reaching for them —
+    // src/lib/credit-policy-settings.ts's recordPolicyEvent, and the
+    // useGitHubEvents hook — but both are write-audit / unused-feature
+    // paths respectively; loosening either isn't worth the risk these
+    // rules exist to avoid. recordPolicyEvent already fails open (it
+    // wraps its write in try/catch), and no code anywhere currently writes
+    // to githubEvents, so neither is a live regression.)
     match /secrets/{document=**}               { allow read, write: if false; }
     match /creditWebhooks/{document=**}         { allow read, write: if false; }
     match /subscriptions/{document=**}          { allow read, write: if false; }
@@ -29,9 +43,17 @@ service cloud.firestore {
     match /fraudReviewQueue/{document=**}       { allow read, write: if false; }
     match /platformConnections/{document=**}    { allow read, write: if false; }
     match /marketplaceTransactions/{document=**} { allow read, write: if false; }
-    match /usageRecords/{document=**}           { allow read, write: if false; }
     match /creditPolicyLog/{document=**}        { allow read, write: if false; }
     match /githubEvents/{document=**}           { allow read, write: if false; }
+
+    // Usage records: the /usage dashboard reads these directly via the
+    // client SDK (src/lib/usage.ts), but writes now go through the Admin
+    // SDK only (src/lib/firestore-admin.ts's logUsage, used by
+    // /api/v1/usage) — so client writes can stay denied while reads work.
+    match /usageRecords/{document=**} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
 
     // Public system/health-check doc.
     match /system/{document=**} {
@@ -57,19 +79,62 @@ service cloud.firestore {
         request.auth.uid == resource.data.ownerAddress;
     }
 
-    // Everything else — still open for now. 62 other API routes
-    // (admin dashboards, marketplace, credit, tasks, gateway, cron, NFT,
-    // memory, messaging — see `grep -rl` for the client Firestore SDK
-    // under src/app/api) call Firestore server-side via the *client* SDK,
-    // exactly like sessions/rateLimits/platformSessions/userProfiles did
-    // before this fix. Flipping this to `request.auth != null` breaks all
-    // of them at once, the same bug multiplied 62x. Converting each to
-    // the Admin SDK (src/lib/firebase-admin.ts) is the real fix — do that
-    // incrementally, tighten this rule collection-by-collection as routes
-    // are converted, and only make this `request.auth != null` once no
-    // server route depends on client-SDK access anymore.
+    // ── Authenticated dashboard collections ───────────────────────────────
+    // Every one of these is read and/or written directly from a browser
+    // bundle (dashboard pages/components via src/lib/*.ts client-SDK
+    // calls). All of the pages that touch them require a logged-in session
+    // at the Next.js middleware level (see PROTECTED_PAGE_PREFIXES in
+    // src/middleware.ts), so requiring request.auth != null here matches
+    // what every legitimate caller already has — it only blocks direct,
+    // unauthenticated Firestore API access. This is coarse (org-membership
+    // is not re-checked per document the way organizations/{orgId} does)
+    // but is a large step up from the previous fully-open rule; tighten
+    // further collection-by-collection as each one's write paths are
+    // reviewed for real per-org scoping.
+    match /activityEvents/{document=**}        { allow read, write: if request.auth != null; }
+    match /agentComms/{document=**}            { allow read, write: if request.auth != null; }
+    match /agentInstalls/{document=**}         { allow read, write: if request.auth != null; }
+    match /agentMemories/{document=**}         { allow read, write: if request.auth != null; }
+    match /agentMessages/{document=**}         { allow read, write: if request.auth != null; }
+    match /agentRatings/{document=**}          { allow read, write: if request.auth != null; }
+    match /agentSessions/{document=**}         { allow read, write: if request.auth != null; }
+    match /agentSkills/{document=**}           { allow read, write: if request.auth != null; }
+    match /agents/{document=**}                { allow read, write: if request.auth != null; }
+    match /approvals/{document=**}             { allow read, write: if request.auth != null; }
+    match /assignmentNotifications/{document=**} { allow read, write: if request.auth != null; }
+    match /channels/{document=**}              { allow read, write: if request.auth != null; }
+    match /communityItemRatings/{document=**}  { allow read, write: if request.auth != null; }
+    match /communityMarketItems/{document=**}  { allow read, write: if request.auth != null; }
+    match /coordinators/{document=**}          { allow read, write: if request.auth != null; }
+    match /cronJobs/{document=**}              { allow read, write: if request.auth != null; }
+    match /gateways/{document=**}              { allow read, write: if request.auth != null; }
+    match /installedSkills/{document=**}       { allow read, write: if request.auth != null; }
+    match /jobs/{document=**}                  { allow read, write: if request.auth != null; }
+    match /kanbanBoards/{document=**}          { allow read, write: if request.auth != null; }
+    match /kanbanTasks/{document=**}           { allow read, write: if request.auth != null; }
+    match /leases/{document=**}                { allow read, write: if request.auth != null; }
+    match /marketSubscriptions/{document=**}   { allow read, write: if request.auth != null; }
+    match /marketplaceAgents/{document=**}     { allow read, write: if request.auth != null; }
+    match /messages/{document=**}              { allow read, write: if request.auth != null; }
+    match /modInstallations/{document=**}      { allow read, write: if request.auth != null; }
+    match /nodes/{document=**}                 { allow read, write: if request.auth != null; }
+    match /operators/{document=**}             { allow read, write: if request.auth != null; }
+    match /profiles/{document=**}              { allow read, write: if request.auth != null; }
+    match /projects/{document=**}              { allow read, write: if request.auth != null; }
+    match /reports/{document=**}               { allow read, write: if request.auth != null; }
+    match /systemVitals/{document=**}          { allow read, write: if request.auth != null; }
+    match /taskAssignments/{document=**}       { allow read, write: if request.auth != null; }
+    match /tasks/{document=**}                 { allow read, write: if request.auth != null; }
+
+    // Everything else has been audited and has zero remaining client-SDK
+    // call site reachable from a browser bundle — every server path that
+    // touches these now goes through the Admin SDK (src/lib/firestore-admin.ts
+    // and the fully-migrated lib files), which bypasses these rules
+    // entirely. Denying by default here (rather than leaving this open) is
+    // also what keeps any new collection safe automatically: it has to be
+    // added above, explicitly, before a browser can touch it.
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

@@ -24,12 +24,12 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   "Content-Security-Policy": [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.thirdweb.com https://*.thirdwebcdn.com https://*.google.com https://*.gstatic.com",
+    "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.google.com https://*.gstatic.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com data:",
+    "font-src 'self' https://fonts.gstatic.com https://fonts.reown.com data:",
     "img-src 'self' data: blob: https: http:",
     "connect-src 'self' https: wss:",
-    "frame-src 'self' https://*.thirdweb.com https://accounts.google.com https://embedded-wallet.thirdweb.com",
+    "frame-src 'self' https://verify.walletconnect.com https://verify.walletconnect.org https://secure.walletconnect.com https://secure.walletconnect.org https://accounts.google.com",
     "media-src 'self' data: blob:",
     "worker-src 'self' blob:",
     "object-src 'none'",
@@ -157,8 +157,14 @@ export async function middleware(req: NextRequest) {
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifyToken(token) : null;
 
-  // Inject session headers into the REQUEST so API route handlers can read them
+  // Inject session headers into the REQUEST so API route handlers can read them.
+  // Strip any client-supplied values first — otherwise an unauthenticated caller
+  // could set x-wallet-address themselves and impersonate any wallet.
   const requestHeaders = new Headers(req.headers);
+  requestHeaders.delete("x-wallet-address");
+  requestHeaders.delete("x-session-address");
+  requestHeaders.delete("x-session-role");
+  requestHeaders.delete("x-session-id");
   if (session) {
     requestHeaders.set("x-wallet-address", session.sub);
     requestHeaders.set("x-session-address", session.sub);

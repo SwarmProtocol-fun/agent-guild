@@ -3,6 +3,15 @@
  *
  * Reads `platformConfig/creditPolicy` and `orgPolicies/{orgId}` from Firestore.
  * Follows the same cache + defaults pattern as marketplace-settings.ts.
+ *
+ * NOTE: stays on the client SDK (not firebase-admin) even though it's mostly
+ * called from server code, because src/lib/firestore.ts::claimJob dynamically
+ * imports this module and claimJob is called directly from client dashboard
+ * pages — bundling firebase-admin (Node-only) into that client chunk breaks
+ * the build. platformConfig/orgPolicies aren't rule-locked, so this costs
+ * nothing security-wise; only recordPolicyEvent's target (creditPolicyLog) is
+ * locked, and it already fails open (see its own try/catch) when called from
+ * a context without write access.
  */
 
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";

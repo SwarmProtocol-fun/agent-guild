@@ -6,7 +6,8 @@
  */
 
 import { NextRequest } from "next/server";
-import { getAgentSOUL, updateAgentSOUL, getDefaultSOUL } from "@/lib/soul";
+import { getDefaultSOUL } from "@/lib/soul";
+import { getAgentSOUL, updateAgentSOUL } from "@/lib/firestore-admin";
 import { adminDb } from "@/lib/firebase-admin";
 import type { Agent } from "@/lib/firestore";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";

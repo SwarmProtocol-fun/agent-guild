@@ -16,7 +16,7 @@ import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import ShinyText from "@/components/reactbits/ShinyText";
 import DecryptedText from "@/components/reactbits/DecryptedText";
 import { VitalsWidget } from "@/components/vitals-widget";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 import { GripVertical, RotateCcw, Plus, X, Check, FolderKanban, Bot, Target, CheckCircle2, Briefcase, ListTodo, BarChart3, Handshake, Users, Loader2, Pencil, Wifi, WifiOff, Zap, TrendingUp, Clock } from "lucide-react";
 import {
@@ -339,7 +339,7 @@ function getColSpanClass(cols: number, isStat: boolean) {
 export default function DashboardPage() {
   const { currentOrg } = useOrg();
   const currencySymbol = "$";
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const { address: sessionAddress, authenticated } = useSession();
   const userAddress = account?.address || sessionAddress || "";
   const [stats, setStats] = useState<OrgStats | null>(null);
@@ -506,11 +506,14 @@ export default function DashboardPage() {
     loadDashboardData(true);
   }, [loadDashboardData]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh every 30 seconds. Skip ticks while the tab is in the
+  // background — this reload touches several collections (agents, computers,
+  // briefing cron, etc.), so a backgrounded dashboard tab shouldn't keep
+  // paying for it every 30s.
   useEffect(() => {
     if (!currentOrg) return;
     const interval = setInterval(() => {
-      loadDashboardData();
+      if (document.visibilityState === "visible") loadDashboardData();
     }, 30_000);
     return () => clearInterval(interval);
   }, [currentOrg, loadDashboardData]);

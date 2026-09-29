@@ -1,11 +1,11 @@
 /**
  * Session — Server-side session management.
  *
- * Auth flow (thirdweb SIWE):
+ * Auth flow (SIWE via wallet adapter):
  *   1. ConnectButton calls POST /api/auth/payload → generates SIWE login payload
  *   2. User signs the payload in their wallet
  *   3. ConnectButton calls POST /api/auth/verify with { payload, signature }
- *   4. Server verifies via thirdweb, creates Firestore session, issues JWT cookie
+ *   4. Server verifies via viem SIWE (lib/auth/siwe.ts), creates Firestore session, issues JWT cookie
  *
  * JWT is stored in an httpOnly cookie (`swarm_session`).
  * Sessions are persisted in the Firestore `sessions` collection.

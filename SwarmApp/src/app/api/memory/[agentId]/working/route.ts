@@ -10,7 +10,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { getMemoryEntries, addMemoryEntry } from "@/lib/memory";
+import { getMemoryEntries, addMemoryEntry } from "@/lib/firestore-admin";
 import {
   getTemplateForSubtype,
   updateWorkingMdSection,

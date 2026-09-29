@@ -330,10 +330,14 @@ export default function DoctorPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Auto-refresh every 60s after first run
+    // Auto-refresh every 60s after first run. Skip ticks while the tab is in
+    // the background — no point re-running the full diagnostic sweep for a
+    // page nobody is looking at.
     useEffect(() => {
         if (checks.length === 0) return;
-        const interval = setInterval(runChecks, 60_000);
+        const interval = setInterval(() => {
+            if (document.visibilityState === "visible") runChecks();
+        }, 60_000);
         return () => clearInterval(interval);
     }, [runChecks, checks.length]);
 

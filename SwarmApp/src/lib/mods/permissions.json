@@ -1,0 +1,4 @@
+{
+  "events:subscribe": "Receive core events (auth.login, …) in server.events handlers",
+  "events:emit": "Emit custom events for other mods via ctx.emit()"
+}

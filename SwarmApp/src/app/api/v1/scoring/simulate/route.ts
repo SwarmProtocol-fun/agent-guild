@@ -11,6 +11,7 @@ import { NextRequest } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { validateSession } from "@/lib/session";
 import { simulateScoreChange } from "@/lib/scoring-engine";
+import type { ScoreEvent } from "@/lib/credit-types";
 // [swarm-core] Hedera type removed — install swarm-hedera mod
 
 export async function POST(request: NextRequest) {

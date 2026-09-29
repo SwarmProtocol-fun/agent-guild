@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useChainCurrency } from "@/hooks/useChainCurrency";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -76,7 +76,7 @@ export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.swarmId as string;
   const { currentOrg } = useOrg();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
   const { symbol: currencySymbol, fmt: fmtCurrency } = useChainCurrency();
 
   const [project, setProject] = useState<Project | null>(null);

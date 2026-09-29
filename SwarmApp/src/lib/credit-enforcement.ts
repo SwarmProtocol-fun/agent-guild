@@ -10,8 +10,7 @@
  *   - firebase.ts: Firestore queries for task counts
  */
 
-import { db } from "@/lib/firebase";
-import { collection, query, where, getDocs } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import { getDefaultPolicy, type PolicyState } from "@/lib/credit-scoring";
 import { getCreditProfileCached, type CreditProfile } from "@/lib/credit-service";
 
@@ -53,12 +52,11 @@ const ACTION_REQUIREMENTS: Record<EnforcedAction, { minCreditScore: number; desc
 /** Count active (in-progress) tasks for an agent. */
 async function getActiveTaskCount(agentId: string): Promise<number> {
     try {
-        const q = query(
-            collection(db, "tasks"),
-            where("assigneeAgentId", "==", agentId),
-            where("status", "==", "in_progress"),
-        );
-        const snap = await getDocs(q);
+        const snap = await adminDb()
+            .collection("tasks")
+            .where("assigneeAgentId", "==", agentId)
+            .where("status", "==", "in_progress")
+            .get();
         return snap.size;
     } catch (error) {
         console.error("[credit-enforcement] Failed to count active tasks:", error);

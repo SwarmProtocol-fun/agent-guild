@@ -20,7 +20,7 @@ import {
   type Workspace,
   type OpenClawVariant,
 } from "@/lib/compute/types";
-import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/billing";
+import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/pricing";
 const trackComputeEvent = (..._args: unknown[]) => {}; // posthog removed
 import { ResourcePicker } from "./resource-picker";
 

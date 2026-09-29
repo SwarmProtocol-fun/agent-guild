@@ -8,17 +8,8 @@
  * score changes specifically.
  */
 
-import {
-    addDoc,
-    collection,
-    getDocs,
-    query,
-    where,
-    orderBy,
-    limit as firestoreLimit,
-    serverTimestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 
 const CREDIT_AUDIT_COLLECTION = "creditAuditLog";
 
@@ -62,9 +53,9 @@ export interface CreditAuditEntry {
 export async function recordCreditAudit(
     entry: Omit<CreditAuditEntry, "id" | "timestamp">,
 ): Promise<string> {
-    const ref = await addDoc(collection(db, CREDIT_AUDIT_COLLECTION), {
+    const ref = await adminDb().collection(CREDIT_AUDIT_COLLECTION).add({
         ...entry,
-        timestamp: serverTimestamp(),
+        timestamp: FieldValue.serverTimestamp(),
     });
     return ref.id;
 }
@@ -79,20 +70,18 @@ export async function getCreditAuditLog(opts: {
     limit?: number;
     source?: CreditAuditEntry["source"];
 }): Promise<CreditAuditEntry[]> {
-    const constraints: Parameters<typeof query>[1][] = [];
+    let q: Query = adminDb().collection(CREDIT_AUDIT_COLLECTION);
 
     if (opts.agentId) {
-        constraints.push(where("agentId", "==", opts.agentId));
+        q = q.where("agentId", "==", opts.agentId);
     }
     if (opts.source) {
-        constraints.push(where("source", "==", opts.source));
+        q = q.where("source", "==", opts.source);
     }
 
-    constraints.push(orderBy("timestamp", "desc"));
-    constraints.push(firestoreLimit(opts.limit || 50));
+    q = q.orderBy("timestamp", "desc").limit(opts.limit || 50);
 
-    const q = query(collection(db, CREDIT_AUDIT_COLLECTION), ...constraints);
-    const snap = await getDocs(q);
+    const snap = await q.get();
 
     return snap.docs.map((d) => ({
         id: d.id,

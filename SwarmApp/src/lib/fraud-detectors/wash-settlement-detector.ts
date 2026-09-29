@@ -10,8 +10,7 @@
  * 3. Flag if settlement < threshold AND poster/completer share wallet lineage
  */
 
-import { db } from "@/lib/firebase";
-import { collection, getDocs, query, where, doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import type { RiskSignal, FraudDetectionConfig } from "../fraud-detection";
 
 export async function detectWashSettlement(
@@ -25,18 +24,16 @@ export async function detectWashSettlement(
   const windowEnd = Date.now();
 
   // Query completed jobs in the org
-  const jobsRef = collection(db, "jobs");
-  const q = query(
-    jobsRef,
-    where("orgId", "==", orgId),
-    where("status", "==", "completed"),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("jobs")
+    .where("orgId", "==", orgId)
+    .where("status", "==", "completed")
+    .get();
 
   // Get org owner wallet for cross-reference
-  const orgDoc = await getDoc(doc(db, "organizations", orgId));
-  const orgOwnerWallet = orgDoc.exists()
-    ? (orgDoc.data().ownerAddress || "").toLowerCase()
+  const orgDoc = await adminDb().collection("organizations").doc(orgId).get();
+  const orgOwnerWallet = orgDoc.exists
+    ? (orgDoc.data()!.ownerAddress || "").toLowerCase()
     : "";
 
   // Track per-agent wash counts
@@ -68,9 +65,9 @@ export async function detectWashSettlement(
     // Get completer's wallet
     let completerWallet = "";
     try {
-      const agentDoc = await getDoc(doc(db, "agents", claimedByAgentId));
-      if (agentDoc.exists()) {
-        completerWallet = (agentDoc.data().walletAddress || "").toLowerCase();
+      const agentDoc = await adminDb().collection("agents").doc(claimedByAgentId).get();
+      if (agentDoc.exists) {
+        completerWallet = (agentDoc.data()!.walletAddress || "").toLowerCase();
       }
     } catch {
       continue;
@@ -113,9 +110,9 @@ export async function detectWashSettlement(
 
     let agentAsn = "";
     try {
-      const agentDoc = await getDoc(doc(db, "agents", agentId));
-      if (agentDoc.exists()) {
-        agentAsn = agentDoc.data().asn || "";
+      const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+      if (agentDoc.exists) {
+        agentAsn = agentDoc.data()!.asn || "";
       }
     } catch {
       // continue without ASN

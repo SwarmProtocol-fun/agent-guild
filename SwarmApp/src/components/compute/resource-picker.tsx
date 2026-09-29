@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { SIZE_PRESETS, REGION_LABELS, PROVIDER_LABELS, type SizeKey, type Region, type ProviderKey } from "@/lib/compute/types";
-import { estimateHourlyCost } from "@/lib/compute/billing";
+import { estimateHourlyCost } from "@/lib/compute/pricing";
 import { getSwarmNodes, type SwarmNode } from "@/lib/firestore";
 
 interface ResourcePickerProps {

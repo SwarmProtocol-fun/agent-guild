@@ -10,7 +10,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { requirePlatformAdmin, getWalletAddress } from "@/lib/auth-guard";
 import { recordAuditEntry } from "@/lib/audit-log";
-import { logActivity } from "@/lib/activity";
+import { logActivity } from "@/lib/firestore-admin";
 import {
   getFraudReviewCase,
   updateFraudReviewCase,
@@ -20,6 +20,7 @@ import {
   saveRiskProfile,
 } from "@/lib/fraud-detection";
 import { computeRiskProfile } from "@/lib/fraud-risk-scoring";
+import { createPenaltyProposal, emitPenalty } from "@/lib/mod-stubs";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 

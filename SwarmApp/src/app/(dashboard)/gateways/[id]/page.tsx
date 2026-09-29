@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, use } from "react";
+import { useState, use } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import {
   Network, Cpu, HardDrive, Activity, Clock, ArrowLeft, RefreshCw,
@@ -82,49 +83,42 @@ export default function GatewayDetailPage({ params }: { params: Promise<{ id: st
   const { currentOrg } = useOrg();
   const authAddress = useAuthAddress();
   const router = useRouter();
-  const [worker, setWorker] = useState<WorkerDetail | null>(null);
-  const [jobs, setJobs] = useState<JobItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [showDispatch, setShowDispatch] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!currentOrg) return;
-    setLoading(true);
-    try {
+  const { data, isLoading: loading, refetch: load } = useQuery({
+    queryKey: ["gateway-worker", workerId, currentOrg?.id, authAddress],
+    queryFn: async () => {
       // Fetch worker details
       const wResp = await fetch(`/api/gateway/workers/${workerId}`, {
         headers: { "x-wallet-address": authAddress || "" },
       });
+      let worker: WorkerDetail | null = null;
       if (wResp.ok) {
         const wData = await wResp.json();
-        setWorker(wData.worker || wData);
+        worker = wData.worker || wData;
       }
 
       // Fetch jobs for this org
-      const jResp = await fetch(`/api/gateway/jobs?orgId=${currentOrg.id}`, {
+      const jResp = await fetch(`/api/gateway/jobs?orgId=${currentOrg!.id}`, {
         headers: { "x-wallet-address": authAddress || "" },
       });
+      let jobs: JobItem[] = [];
       if (jResp.ok) {
         const jData = await jResp.json();
         // Filter to jobs claimed by this worker
         const allJobs = (jData.jobs || []) as JobItem[];
-        setJobs(allJobs.filter((j: JobItem) => j.claimedBy === workerId || !j.claimedBy));
+        jobs = allJobs.filter((j: JobItem) => j.claimedBy === workerId || !j.claimedBy);
       }
-    } catch (err) {
-      console.error("Failed to load gateway details:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [currentOrg, workerId, authAddress]);
 
-  useEffect(() => { load(); }, [load]);
-
-  // Auto-refresh every 15s
-  useEffect(() => {
-    const timer = setInterval(load, 15000);
-    return () => clearInterval(timer);
-  }, [load]);
+      return { worker, jobs };
+    },
+    enabled: !!currentOrg,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+  });
+  const worker = data?.worker ?? null;
+  const jobs = data?.jobs ?? [];
 
   if (!authAddress) {
     return (
@@ -194,7 +188,7 @@ export default function GatewayDetailPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
         <div className="flex gap-2">
-          <Button size="sm" variant="outline" onClick={load}>
+          <Button size="sm" variant="outline" onClick={() => load()}>
             <RefreshCw className="h-3 w-3 mr-1.5" /> Refresh
           </Button>
           <Button size="sm" className="bg-teal-500 hover:bg-teal-600 text-white" onClick={() => setShowDispatch(true)}>

@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import {
   getJobsByOrg,
   getProjectsByOrg,
@@ -55,7 +55,7 @@ const SKILL_OPTIONS = ["Research", "Trading", "Operations", "Support", "Analytic
 
 export default function JobBoardPage() {
   const { currentOrg } = useOrg();
-  const account = useActiveAccount();
+  const account = useWalletAccount();
 
   // ── Firestore state ──
   const [createOpen, setCreateOpen] = useState(false);

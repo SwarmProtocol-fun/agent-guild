@@ -4,17 +4,8 @@
  * Track agent uptime with online/offline/degraded status.
  */
 
-import {
-    collection,
-    doc,
-    setDoc,
-    getDocs,
-    query,
-    where,
-    serverTimestamp,
-    Timestamp,
-} from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -51,13 +42,13 @@ export async function recordHeartbeat(
     agentId: string,
     data?: { agentName?: string; latencyMs?: number; version?: string; uptime?: number }
 ): Promise<void> {
-    const ref = doc(db, HEARTBEAT_COLLECTION, `${orgId}_${agentId}`);
-    await setDoc(ref, {
+    const ref = adminDb().collection(HEARTBEAT_COLLECTION).doc(`${orgId}_${agentId}`);
+    await ref.set({
         orgId,
         agentId,
         agentName: data?.agentName || agentId,
         status: "online" as AgentStatus,
-        lastSeen: serverTimestamp(),
+        lastSeen: FieldValue.serverTimestamp(),
         latencyMs: data?.latencyMs,
         version: data?.version,
         uptime: data?.uptime,
@@ -66,11 +57,7 @@ export async function recordHeartbeat(
 
 /** Get all agent heartbeats for an org */
 export async function getHeartbeats(orgId: string): Promise<AgentHeartbeat[]> {
-    const q = query(
-        collection(db, HEARTBEAT_COLLECTION),
-        where("orgId", "==", orgId),
-    );
-    const snap = await getDocs(q);
+    const snap = await adminDb().collection(HEARTBEAT_COLLECTION).where("orgId", "==", orgId).get();
     const now = Date.now();
     const STALE_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -113,19 +100,19 @@ export async function pauseAgent(
     reason?: string
 ): Promise<void> {
     // Update agent status in agents collection
-    const agentRef = doc(db, "agents", agentId);
-    await setDoc(agentRef, {
+    const agentRef = adminDb().collection("agents").doc(agentId);
+    await agentRef.set({
         status: "paused",
-        pausedAt: serverTimestamp(),
+        pausedAt: FieldValue.serverTimestamp(),
         pausedBy,
         pauseReason: reason || "",
     }, { merge: true });
 
     // Update heartbeat status
-    const heartbeatRef = doc(db, HEARTBEAT_COLLECTION, `${orgId}_${agentId}`);
-    await setDoc(heartbeatRef, {
+    const heartbeatRef = adminDb().collection(HEARTBEAT_COLLECTION).doc(`${orgId}_${agentId}`);
+    await heartbeatRef.set({
         status: "paused" as AgentStatus,
-        pausedAt: serverTimestamp(),
+        pausedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 }
 
@@ -135,8 +122,8 @@ export async function resumeAgent(
     agentId: string
 ): Promise<void> {
     // Update agent status in agents collection
-    const agentRef = doc(db, "agents", agentId);
-    await setDoc(agentRef, {
+    const agentRef = adminDb().collection("agents").doc(agentId);
+    await agentRef.set({
         status: "online",
         pausedAt: null,
         pausedBy: null,
@@ -144,9 +131,9 @@ export async function resumeAgent(
     }, { merge: true });
 
     // Update heartbeat status
-    const heartbeatRef = doc(db, HEARTBEAT_COLLECTION, `${orgId}_${agentId}`);
-    await setDoc(heartbeatRef, {
+    const heartbeatRef = adminDb().collection(HEARTBEAT_COLLECTION).doc(`${orgId}_${agentId}`);
+    await heartbeatRef.set({
         status: "online" as AgentStatus,
-        lastSeen: serverTimestamp(),
+        lastSeen: FieldValue.serverTimestamp(),
     }, { merge: true });
 }

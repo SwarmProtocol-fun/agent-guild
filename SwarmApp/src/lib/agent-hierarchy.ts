@@ -5,20 +5,8 @@
  * Prevents circular dependencies and enforces hierarchy rules.
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  updateDoc,
-  setDoc,
-  query,
-  where,
-  arrayUnion,
-  arrayRemove,
-  serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { logActivity } from "./activity";
 import type { Agent } from "./firestore";
 
@@ -76,10 +64,10 @@ export async function addChildAgent(
   }
 
   // Get both agents
-  const parentDoc = await getDoc(doc(db, "agents", parentAgentId));
-  const childDoc = await getDoc(doc(db, "agents", childAgentId));
+  const parentDoc = await adminDb().collection("agents").doc(parentAgentId).get();
+  const childDoc = await adminDb().collection("agents").doc(childAgentId).get();
 
-  if (!parentDoc.exists() || !childDoc.exists()) {
+  if (!parentDoc.exists || !childDoc.exists) {
     throw new Error("Parent or child agent not found");
   }
 
@@ -101,12 +89,12 @@ export async function addChildAgent(
   const newHierarchyLevel = parent.hierarchyLevel + 1;
 
   // Update parent
-  await updateDoc(doc(db, "agents", parentAgentId), {
-    childAgentIds: arrayUnion(childAgentId),
+  await adminDb().collection("agents").doc(parentAgentId).update({
+    childAgentIds: FieldValue.arrayUnion(childAgentId),
   });
 
   // Update child
-  await updateDoc(doc(db, "agents", childAgentId), {
+  await adminDb().collection("agents").doc(childAgentId).update({
     parentAgentId,
     hierarchyLevel: newHierarchyLevel,
   });
@@ -136,10 +124,10 @@ export async function removeChildAgent(
   parentAgentId: string,
   childAgentId: string
 ): Promise<void> {
-  const parentDoc = await getDoc(doc(db, "agents", parentAgentId));
-  const childDoc = await getDoc(doc(db, "agents", childAgentId));
+  const parentDoc = await adminDb().collection("agents").doc(parentAgentId).get();
+  const childDoc = await adminDb().collection("agents").doc(childAgentId).get();
 
-  if (!parentDoc.exists() || !childDoc.exists()) {
+  if (!parentDoc.exists || !childDoc.exists) {
     throw new Error("Parent or child agent not found");
   }
 
@@ -151,12 +139,12 @@ export async function removeChildAgent(
   }
 
   // Update parent
-  await updateDoc(doc(db, "agents", parentAgentId), {
-    childAgentIds: arrayRemove(childAgentId),
+  await adminDb().collection("agents").doc(parentAgentId).update({
+    childAgentIds: FieldValue.arrayRemove(childAgentId),
   });
 
   // Update child (reset to root level)
-  await updateDoc(doc(db, "agents", childAgentId), {
+  await adminDb().collection("agents").doc(childAgentId).update({
     parentAgentId: null,
     hierarchyLevel: 0,
   });
@@ -211,16 +199,16 @@ export async function getAncestors(
   let currentId = agentId;
 
   while (currentId) {
-    const agentDoc = await getDoc(doc(db, "agents", currentId));
-    if (!agentDoc.exists()) break;
+    const agentDoc = await adminDb().collection("agents").doc(currentId).get();
+    if (!agentDoc.exists) break;
 
     const agent = { id: agentDoc.id, ...agentDoc.data() } as Agent;
     if (agent.orgId !== orgId) break;
     if (!agent.parentAgentId) break;
 
     // Get parent
-    const parentDoc = await getDoc(doc(db, "agents", agent.parentAgentId));
-    if (!parentDoc.exists()) break;
+    const parentDoc = await adminDb().collection("agents").doc(agent.parentAgentId).get();
+    if (!parentDoc.exists) break;
 
     const parent = { id: parentDoc.id, ...parentDoc.data() } as Agent;
     ancestors.push(parent);
@@ -239,8 +227,7 @@ export async function getDescendants(
   agentId: string
 ): Promise<Agent[]> {
   // Fetch all agents for the organization at once
-  const q = query(collection(db, "agents"), where("orgId", "==", orgId));
-  const snapshot = await getDocs(q);
+  const snapshot = await adminDb().collection("agents").where("orgId", "==", orgId).get();
 
   const agentMap = new Map<string, Agent>();
   snapshot.docs.forEach((doc) => {
@@ -281,8 +268,8 @@ export async function getAgentTree(
   orgId: string,
   rootAgentId: string
 ): Promise<AgentNode> {
-  const agentDoc = await getDoc(doc(db, "agents", rootAgentId));
-  if (!agentDoc.exists()) {
+  const agentDoc = await adminDb().collection("agents").doc(rootAgentId).get();
+  if (!agentDoc.exists) {
     throw new Error("Agent not found");
   }
 
@@ -299,8 +286,8 @@ async function buildTreeNode(agent: Agent, depth: number): Promise<AgentNode> {
 
   if (agent.childAgentIds && agent.childAgentIds.length > 0) {
     for (const childId of agent.childAgentIds) {
-      const childDoc = await getDoc(doc(db, "agents", childId));
-      if (childDoc.exists()) {
+      const childDoc = await adminDb().collection("agents").doc(childId).get();
+      if (childDoc.exists) {
         const child = { id: childDoc.id, ...childDoc.data() } as Agent;
         const childNode = await buildTreeNode(child, depth + 1);
         children.push(childNode);
@@ -319,13 +306,11 @@ async function buildTreeNode(agent: Agent, depth: number): Promise<AgentNode> {
  * Get all root agents (agents with no parent)
  */
 export async function getRootAgents(orgId: string): Promise<Agent[]> {
-  const q = query(
-    collection(db, "agents"),
-    where("orgId", "==", orgId),
-    where("hierarchyLevel", "==", 0)
-  );
-
-  const snapshot = await getDocs(q);
+  const snapshot = await adminDb()
+    .collection("agents")
+    .where("orgId", "==", orgId)
+    .where("hierarchyLevel", "==", 0)
+    .get();
   return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() } as Agent));
 }
 
@@ -343,10 +328,10 @@ export async function delegateTask(
   taskId?: string,
   reason?: string
 ): Promise<string> {
-  const parentDoc = await getDoc(doc(db, "agents", parentAgentId));
-  const childDoc = await getDoc(doc(db, "agents", childAgentId));
+  const parentDoc = await adminDb().collection("agents").doc(parentAgentId).get();
+  const childDoc = await adminDb().collection("agents").doc(childAgentId).get();
 
-  if (!parentDoc.exists() || !childDoc.exists()) {
+  if (!parentDoc.exists || !childDoc.exists) {
     throw new Error("Parent or child agent not found");
   }
 
@@ -372,14 +357,14 @@ export async function delegateTask(
   // Get task info if provided
   let taskTitle: string | undefined;
   if (taskId) {
-    const taskDoc = await getDoc(doc(db, "kanbanTasks", taskId));
-    if (taskDoc.exists()) {
-      taskTitle = taskDoc.data().title;
+    const taskDoc = await adminDb().collection("kanbanTasks").doc(taskId).get();
+    if (taskDoc.exists) {
+      taskTitle = taskDoc.data()?.title;
     }
   }
 
   // Create delegation record
-  const delegationRef = doc(collection(db, "delegations"));
+  const delegationRef = adminDb().collection("delegations").doc();
   const delegationData = {
     orgId,
     parentAgentId,
@@ -389,11 +374,11 @@ export async function delegateTask(
     taskId: taskId || null,
     taskTitle: taskTitle || null,
     reason: reason || null,
-    delegatedAt: serverTimestamp(),
+    delegatedAt: FieldValue.serverTimestamp(),
     status: "pending",
   };
 
-  await setDoc(delegationRef, delegationData);
+  await delegationRef.set(delegationData);
 
   // Log activity
   await logActivity({
@@ -424,16 +409,16 @@ export async function getDelegations(
   agentId?: string,
   status?: DelegationRecord["status"]
 ): Promise<DelegationRecord[]> {
-  let q = query(collection(db, "delegations"), where("orgId", "==", orgId));
+  const base = adminDb().collection("delegations").where("orgId", "==", orgId);
 
   if (agentId) {
     // Get delegations where agent is parent OR child
-    const asParent = query(q, where("parentAgentId", "==", agentId));
-    const asChild = query(q, where("childAgentId", "==", agentId));
+    const asParent = base.where("parentAgentId", "==", agentId);
+    const asChild = base.where("childAgentId", "==", agentId);
 
     const [parentSnap, childSnap] = await Promise.all([
-      getDocs(asParent),
-      getDocs(asChild),
+      asParent.get(),
+      asChild.get(),
     ]);
 
     const allDocs = [...parentSnap.docs, ...childSnap.docs];
@@ -458,11 +443,9 @@ export async function getDelegations(
     return delegations;
   }
 
-  if (status) {
-    q = query(q, where("status", "==", status));
-  }
+  const finalQuery = status ? base.where("status", "==", status) : base;
 
-  const snapshot = await getDocs(q);
+  const snapshot = await finalQuery.get();
   return snapshot.docs.map(
     (doc) =>
       ({
@@ -484,8 +467,8 @@ export async function updateDelegationStatus(
   const updates: Record<string, unknown> = { status };
 
   if (status === "completed" || status === "failed") {
-    updates.completedAt = serverTimestamp();
+    updates.completedAt = FieldValue.serverTimestamp();
   }
 
-  await updateDoc(doc(db, "delegations", delegationId), updates);
+  await adminDb().collection("delegations").doc(delegationId).update(updates);
 }

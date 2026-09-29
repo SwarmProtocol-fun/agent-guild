@@ -7,6 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
+import { getPrivacySettings } from "@/lib/privacy-settings";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 import type { Agent } from "@/lib/firestore";
 

@@ -15,8 +15,9 @@ import { getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { adminAuth } from "@/lib/firebase-admin";
 import { getCachedOrgs, cacheOrgs } from "@/lib/org-cache";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit-firestore";
-import { getThirdwebAuth, getDomainFromRequest } from "../thirdweb-auth";
+import { verifySiwePayload, getDomainFromRequest } from "@/lib/auth/siwe";
 import { recordLogin } from "@/lib/platform-analytics";
+import { emitEvent } from "@/lib/mods/runtime";
 
 export async function POST(req: Request) {
   try {
@@ -68,11 +69,10 @@ export async function POST(req: Request) {
       console.log("[auth/verify] Signature:", signature);
     }
     const domain = getDomainFromRequest(req);
-    const auth = getThirdwebAuth(domain);
 
     let verifiedPayload;
     try {
-      verifiedPayload = await auth.verifyPayload({ payload, signature });
+      verifiedPayload = await verifySiwePayload({ payload, signature, domain });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[auth/verify] Signature verification failed:", msg);
@@ -83,7 +83,7 @@ export async function POST(req: Request) {
     }
 
     if (!verifiedPayload.valid) {
-      console.error("[auth/verify] Payload validation failed:", verifiedPayload.error);
+      console.error("[auth/verify] Payload validation failed:", verifiedPayload.valid ? "" : verifiedPayload.error);
       return Response.json(
         { error: "Invalid signature" },
         { status: 401 }
@@ -91,7 +91,7 @@ export async function POST(req: Request) {
     }
 
     // Extract address from verified payload
-    const address = verifiedPayload.payload?.address;
+    const address = verifiedPayload.payload.address;
 
     if (!address) {
       console.error("[auth/verify] No address found in verified payload");
@@ -181,6 +181,9 @@ export async function POST(req: Request) {
     recordLogin(address, role, sessionId, req).catch((err) => {
       console.warn("[auth/verify] analytics recordLogin error:", err);
     });
+
+    // 6. Let mods react to the login (non-blocking; mod errors are contained)
+    emitEvent("auth.login", { address, role }).catch(() => {});
 
     return Response.json({
       success: true,

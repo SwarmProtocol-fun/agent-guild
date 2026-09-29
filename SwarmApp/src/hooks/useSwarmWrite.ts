@@ -10,11 +10,6 @@
 import { useState, useCallback } from "react";
 import { ethers } from "ethers";
 
-declare global {
-  interface Window {
-    ethereum?: ethers.Eip1193Provider;
-  }
-}
 import {
   HEDERA_CONTRACTS,
   HEDERA_TASK_BOARD_ABI,
@@ -40,25 +35,33 @@ interface SwarmWrite {
 const HEDERA_TESTNET_CHAIN_ID = 296;
 const HEDERA_TESTNET_HEX = "0x" + HEDERA_TESTNET_CHAIN_ID.toString(16); // "0x128"
 
+// Read via a local cast instead of augmenting Window: the wallet stack
+// (Reown/wagmi) already declares `Window.ethereum` with a different type.
+function getInjectedProvider(): ethers.Eip1193Provider | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { ethereum?: ethers.Eip1193Provider }).ethereum;
+}
+
 async function getSigner(): Promise<ethers.Signer> {
-  if (typeof window === "undefined" || !window.ethereum) {
+  const ethereum = getInjectedProvider();
+  if (!ethereum) {
     throw new Error("No wallet detected. Please connect your wallet.");
   }
 
-  const provider = new ethers.BrowserProvider(window.ethereum);
+  const provider = new ethers.BrowserProvider(ethereum);
   const network = await provider.getNetwork();
 
   if (Number(network.chainId) !== HEDERA_TESTNET_CHAIN_ID) {
     // Try switching to Hedera Testnet
     try {
-      await window.ethereum.request({
+      await ethereum.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: HEDERA_TESTNET_HEX }],
       });
     } catch (switchErr: any) {
       // Chain not added yet — add it
       if (switchErr?.code === 4902) {
-        await window.ethereum.request({
+        await ethereum.request({
           method: "wallet_addEthereumChain",
           params: [{
             chainId: HEDERA_TESTNET_HEX,
@@ -73,7 +76,7 @@ async function getSigner(): Promise<ethers.Signer> {
       }
     }
     // Re-create provider after network switch
-    return new ethers.BrowserProvider(window.ethereum).getSigner();
+    return new ethers.BrowserProvider(ethereum).getSigner();
   }
 
   return provider.getSigner();

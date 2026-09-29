@@ -5,20 +5,8 @@
  * Background service checks for anomalies at regular intervals.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-  getCountFromServer,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, type Query } from "firebase-admin/firestore";
 import type { CreditOpsAlert, AlertType, AlertSeverity } from "./types";
 
 const ALERT_COLLECTION = "creditOpsAlerts";
@@ -36,10 +24,10 @@ export async function createAlert(alert: {
   message: string;
   details: Record<string, unknown>;
 }): Promise<string> {
-  const ref = await addDoc(collection(db, ALERT_COLLECTION), {
+  const ref = await adminDb().collection(ALERT_COLLECTION).add({
     ...alert,
     acknowledged: false,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -51,17 +39,15 @@ export async function getAlerts(opts: {
   acknowledged?: boolean;
   limit?: number;
 }): Promise<CreditOpsAlert[]> {
-  const constraints: Parameters<typeof query>[1][] = [];
+  let q: Query = adminDb().collection(ALERT_COLLECTION);
 
-  if (opts.severity) constraints.push(where("severity", "==", opts.severity));
-  if (opts.alertType) constraints.push(where("alertType", "==", opts.alertType));
-  if (opts.acknowledged !== undefined) constraints.push(where("acknowledged", "==", opts.acknowledged));
+  if (opts.severity) q = q.where("severity", "==", opts.severity);
+  if (opts.alertType) q = q.where("alertType", "==", opts.alertType);
+  if (opts.acknowledged !== undefined) q = q.where("acknowledged", "==", opts.acknowledged);
 
-  constraints.push(orderBy("createdAt", "desc"));
-  constraints.push(firestoreLimit(opts.limit || 50));
+  q = q.orderBy("createdAt", "desc").limit(opts.limit || 50);
 
-  const q = query(collection(db, ALERT_COLLECTION), ...constraints);
-  const snap = await getDocs(q);
+  const snap = await q.get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsAlert[];
 }
 
@@ -70,11 +56,10 @@ export async function acknowledgeAlert(
   alertId: string,
   acknowledgedBy: string,
 ): Promise<void> {
-  const ref = doc(db, ALERT_COLLECTION, alertId);
-  await updateDoc(ref, {
+  await adminDb().collection(ALERT_COLLECTION).doc(alertId).update({
     acknowledged: true,
     acknowledgedBy,
-    acknowledgedAt: serverTimestamp(),
+    acknowledgedAt: FieldValue.serverTimestamp(),
   });
 }
 
@@ -103,16 +88,11 @@ export async function getMonitoringStats(): Promise<{
   totalAgentsWithScores: number;
 }> {
   // Alert counts
+  const alertsCol = adminDb().collection(ALERT_COLLECTION).where("acknowledged", "==", false);
   const [infoSnap, warningSnap, criticalSnap] = await Promise.all([
-    getCountFromServer(
-      query(collection(db, ALERT_COLLECTION), where("acknowledged", "==", false), where("severity", "==", "info")),
-    ),
-    getCountFromServer(
-      query(collection(db, ALERT_COLLECTION), where("acknowledged", "==", false), where("severity", "==", "warning")),
-    ),
-    getCountFromServer(
-      query(collection(db, ALERT_COLLECTION), where("acknowledged", "==", false), where("severity", "==", "critical")),
-    ),
+    alertsCol.where("severity", "==", "info").count().get(),
+    alertsCol.where("severity", "==", "warning").count().get(),
+    alertsCol.where("severity", "==", "critical").count().get(),
   ]);
 
   const infoCount = infoSnap.data().count;
@@ -120,14 +100,10 @@ export async function getMonitoringStats(): Promise<{
   const criticalCount = criticalSnap.data().count;
 
   // Recent slashings (last 24h)
-  const slashingSnap = await getDocs(
-    query(collection(db, "slashingEvents"), orderBy("slashedAt", "desc"), firestoreLimit(100)),
-  );
+  const slashingSnap = await adminDb().collection("slashingEvents").orderBy("slashedAt", "desc").limit(100).get();
 
   // Agent score distribution
-  const agentsSnap = await getDocs(
-    query(collection(db, "agents"), where("creditScore", ">", 0), firestoreLimit(500)),
-  );
+  const agentsSnap = await adminDb().collection("agents").where("creditScore", ">", 0).limit(500).get();
 
   let totalCredit = 0;
   let totalTrust = 0;
@@ -207,9 +183,7 @@ export async function runAnomalyDetection(): Promise<CreditOpsAlert[]> {
   const alerts: CreditOpsAlert[] = [];
 
   // Check for mass slashing (> 10 events in recent window)
-  const recentSlashings = await getDocs(
-    query(collection(db, "slashingEvents"), orderBy("slashedAt", "desc"), firestoreLimit(50)),
-  );
+  const recentSlashings = await adminDb().collection("slashingEvents").orderBy("slashedAt", "desc").limit(50).get();
 
   if (recentSlashings.docs.length >= 10) {
     const alertId = await createAlert({

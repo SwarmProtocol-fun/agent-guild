@@ -27,6 +27,10 @@
  *   swarm create-session --coordinator <id> --participants <agent1,agent2> [--purpose "..."] [--ttl 60]
  *   swarm list-sessions [--status active]
  *   swarm close-session <sessionId> [--status completed|cancelled]
+ *   swarm context      [--q <keyword>] [--limit <n>] [--json] [--markdown] — fetch memory + recent chat as context
+ *   swarm memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
+ *   swarm memory       append "<text>" [--section "<name>"]               — append to long-term memory
+ *   swarm memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
  */
 
 import crypto from "node:crypto";
@@ -1680,6 +1684,192 @@ async function cmdCloseSession() {
 }
 
 // ---------------------------------------------------------------------------
+// Context Library Commands
+// ---------------------------------------------------------------------------
+
+function todayUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Sign+send a write whose prefix binds to the exact JSON body sent — the
+ * server (src/app/api/v1/memory/*route.ts) hashes the raw request body and
+ * expects the signed message to be "<prefix>:<bodyHash>:<ts>", so the same
+ * serialized string must be both hashed and sent verbatim as the body.
+ */
+async function signedBodyRequest(config, privateKey, method, prefix, url, bodyObj) {
+  const rawBody = JSON.stringify(bodyObj);
+  const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
+  const ts = Date.now().toString();
+  const message = `${prefix}:${bodyHash}:${ts}`;
+  const sig = sign(message, privateKey);
+  const sep = url.includes("?") ? "&" : "?";
+  return fetch(`${url}${sep}sig=${encodeURIComponent(sig)}&ts=${ts}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: rawBody,
+  });
+}
+
+async function cmdContext() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  const jsonMode = hasFlag("--json");
+  const markdownMode = hasFlag("--markdown");
+  const q = arg("--q");
+  const limit = arg("--limit");
+
+  const ts = Date.now().toString();
+  const message = `GET:/v1/context:${config.agentId}:${ts}`;
+  const sig = sign(message, privateKey);
+
+  const params = new URLSearchParams({ agent: config.agentId, sig, ts });
+  if (q) params.set("q", q);
+  if (limit) params.set("limit", limit);
+  if (markdownMode) params.set("format", "markdown");
+
+  const resp = await fetch(`${config.hubUrl}/api/v1/context?${params.toString()}`);
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    if (jsonMode) {
+      console.log(JSON.stringify({ error: err.error || "Context fetch failed", status: resp.status }));
+    } else {
+      console.error(`Context fetch failed (${resp.status}): ${err.error || "Unknown error"}`);
+    }
+    process.exit(1);
+  }
+
+  if (markdownMode) {
+    console.log(await resp.text());
+    return;
+  }
+
+  const data = await resp.json();
+  if (jsonMode) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+
+  console.log(`Context for ${data.agent.agentName} (${data.agent.agentId})\n`);
+  if (data.memory.working) console.log(`── WORKING.md ──\n${data.memory.working}\n`);
+  if (data.memory.longTerm) console.log(`── MEMORY.md ──\n${data.memory.longTerm}\n`);
+  if (data.memory.daily) console.log(`── Today's note ──\n${data.memory.daily}\n`);
+  if (data.messages.length) {
+    console.log(`── Recent messages (${data.messages.length}) ──`);
+    for (const m of data.messages) {
+      console.log(`  [${m.fromType}] [#${m.channelName}] ${m.from}: ${m.content}`);
+    }
+  } else {
+    console.log("No recent messages.");
+  }
+}
+
+async function cmdMemory() {
+  const sub = process.argv[3];
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const sectionIdx = process.argv.indexOf("--section");
+  const section = sectionIdx !== -1 ? process.argv[sectionIdx + 1] : undefined;
+
+  if (sub === "working") {
+    const setIdx = process.argv.indexOf("--set");
+    if (setIdx !== -1) {
+      const content = process.argv[setIdx + 1];
+      if (!content) {
+        console.error('Usage: swarm memory working --set "<text>" [--section "<Section Name>"]');
+        process.exit(1);
+      }
+      const resp = await signedBodyRequest(
+        config, privateKey, "PUT", "PUT:/v1/memory/working",
+        `${config.hubUrl}/api/v1/memory/working?agent=${config.agentId}`,
+        { content, ...(section ? { section } : {}) },
+      );
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        console.error(`Update failed: ${err.error}`);
+        process.exit(1);
+      }
+      console.log("✓ Working memory updated");
+      return;
+    }
+
+    const ts = Date.now().toString();
+    const message = `GET:/v1/memory/working:${config.agentId}:${ts}`;
+    const sig = sign(message, privateKey);
+    const resp = await fetch(`${config.hubUrl}/api/v1/memory/working?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      console.error(`Fetch failed: ${err.error}`);
+      process.exit(1);
+    }
+    const data = await resp.json();
+    console.log(data.content);
+    return;
+  }
+
+  if (sub === "append") {
+    const entry = process.argv[4];
+    if (!entry) {
+      console.error('Usage: swarm memory append "<text>" [--section "<Section Name>"]');
+      process.exit(1);
+    }
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/memory/append",
+      `${config.hubUrl}/api/v1/memory/append?agent=${config.agentId}`,
+      { entry, ...(section ? { section } : {}) },
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      console.error(`Append failed: ${err.error}`);
+      process.exit(1);
+    }
+    console.log("✓ Appended to long-term memory");
+    return;
+  }
+
+  if (sub === "daily") {
+    const entry = process.argv[4];
+    const date = arg("--date") || todayUTC();
+
+    if (!entry) {
+      const ts = Date.now().toString();
+      const message = `GET:/v1/memory/daily:${config.agentId}:${date}:${ts}`;
+      const sig = sign(message, privateKey);
+      const resp = await fetch(`${config.hubUrl}/api/v1/memory/daily?agent=${config.agentId}&date=${date}&sig=${encodeURIComponent(sig)}&ts=${ts}`);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        console.error(`Fetch failed: ${err.error}`);
+        process.exit(1);
+      }
+      const data = await resp.json();
+      console.log(data.content);
+      return;
+    }
+
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/memory/daily",
+      `${config.hubUrl}/api/v1/memory/daily?agent=${config.agentId}`,
+      { entry, date, ...(section ? { section } : {}) },
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      console.error(`Append failed: ${err.error}`);
+      process.exit(1);
+    }
+    console.log(`✓ Appended to daily note (${date})`);
+    return;
+  }
+
+  console.error(`Usage: swarm memory <working|append|daily> ...
+  working              [--set "<text>" [--section "<name>"]]  — get or set working memory
+  append   "<text>"    [--section "<name>"]                   — append to long-term memory
+  daily    ["<text>"]  [--section "<name>"] [--date YYYY-MM-DD] — get or append today's journal`);
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -1705,6 +1895,8 @@ try {
   else if (cmd === "create-session") await cmdCreateSession();
   else if (cmd === "list-sessions") await cmdListSessions();
   else if (cmd === "close-session") await cmdCloseSession();
+  else if (cmd === "context") await cmdContext();
+  else if (cmd === "memory") await cmdMemory();
   else {
     console.log(`@swarmprotocol/agent-skill — Sandbox-safe Swarm agent
 
@@ -1732,6 +1924,12 @@ Structured Messaging Commands:
   create-session --coordinator <id> --participants <agent1,agent2> [--purpose "..."] [--ttl 60]  — create workflow session
   list-sessions  [--status active]                       — list agent sessions
   close-session  <sessionId> [--status completed|cancelled]  — close a session
+
+Context Library Commands:
+  context     [--q <keyword>] [--limit <n>] [--json] [--markdown]  — fetch working/long-term/daily memory + recent chat as one context payload
+  memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
+  memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
+  memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
 
 Auth:
   Ed25519 keypair generated on first run.

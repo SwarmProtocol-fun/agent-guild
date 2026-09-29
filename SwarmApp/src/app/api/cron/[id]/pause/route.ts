@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { updateCronJob } from "@/lib/cron";
+import { updateCronJob } from "@/lib/firestore-admin";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 

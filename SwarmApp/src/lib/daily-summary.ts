@@ -12,18 +12,8 @@
  * - Delivery to channels or email
  */
 
-import { db } from "./firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  Timestamp,
-  serverTimestamp,
-} from "firebase/firestore";
+import { adminDb } from "./firebase-admin";
+import { FieldValue, Timestamp, type QueryDocumentSnapshot } from "firebase-admin/firestore";
 import { getActivityFeed, type ActivityEvent } from "./activity";
 import { getUsageRecords } from "./usage";
 
@@ -94,14 +84,14 @@ export async function generateDailySummary(
   const summaryData = aggregateSummaryData(activities, usage);
 
   // Save to Firestore
-  const ref = await addDoc(collection(db, "dailySummaries"), {
+  const ref = await adminDb().collection("dailySummaries").add({
     orgId,
     agentId,
     agentName,
     date: targetDate,
     summary: summaryData,
     deliveredTo: [],
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   return ref.id;
@@ -118,16 +108,14 @@ async function getActivitiesForDate(
   const endOfDay = new Date(date);
   endOfDay.setHours(23, 59, 59, 999);
 
-  const q = query(
-    collection(db, "activityLog"),
-    where("orgId", "==", orgId),
-    where("agentId", "==", agentId),
-    where("timestamp", ">=", Timestamp.fromDate(startOfDay)),
-    where("timestamp", "<=", Timestamp.fromDate(endOfDay)),
-    orderBy("timestamp", "desc")
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("activityLog")
+    .where("orgId", "==", orgId)
+    .where("agentId", "==", agentId)
+    .where("timestamp", ">=", Timestamp.fromDate(startOfDay))
+    .where("timestamp", "<=", Timestamp.fromDate(endOfDay))
+    .orderBy("timestamp", "desc")
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -155,15 +143,13 @@ async function getUsageForDate(orgId: string, agentId: string, date: string) {
   const endOfDay = new Date(date);
   endOfDay.setHours(23, 59, 59, 999);
 
-  const q = query(
-    collection(db, "usageRecords"),
-    where("orgId", "==", orgId),
-    where("agentId", "==", agentId),
-    where("timestamp", ">=", Timestamp.fromDate(startOfDay)),
-    where("timestamp", "<=", Timestamp.fromDate(endOfDay))
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("usageRecords")
+    .where("orgId", "==", orgId)
+    .where("agentId", "==", agentId)
+    .where("timestamp", ">=", Timestamp.fromDate(startOfDay))
+    .where("timestamp", "<=", Timestamp.fromDate(endOfDay))
+    .get();
   return snap.docs.map((d) => {
     const data = d.data();
     return {
@@ -383,14 +369,12 @@ export async function getDailySummary(
   agentId: string,
   date: string
 ): Promise<DailySummary | null> {
-  const q = query(
-    collection(db, "dailySummaries"),
-    where("orgId", "==", orgId),
-    where("agentId", "==", agentId),
-    where("date", "==", date)
-  );
-
-  const snap = await getDocs(q);
+  const snap = await adminDb()
+    .collection("dailySummaries")
+    .where("orgId", "==", orgId)
+    .where("agentId", "==", agentId)
+    .where("date", "==", date)
+    .get();
   if (snap.empty) return null;
 
   const doc = snap.docs[0];
@@ -408,7 +392,7 @@ export async function getDailySummary(
 }
 
 export async function getAllSummaries(orgId: string, maxResults: number = 30): Promise<DailySummary[]> {
-  function mapDoc(d: import("firebase/firestore").QueryDocumentSnapshot): DailySummary {
+  function mapDoc(d: QueryDocumentSnapshot): DailySummary {
     const data = d.data();
     return {
       id: d.id,
@@ -424,23 +408,18 @@ export async function getAllSummaries(orgId: string, maxResults: number = 30): P
 
   // Try composite index query first (orgId + createdAt desc)
   try {
-    const q = query(
-      collection(db, "dailySummaries"),
-      where("orgId", "==", orgId),
-      orderBy("createdAt", "desc")
-    );
-    const snap = await getDocs(q);
+    const snap = await adminDb()
+      .collection("dailySummaries")
+      .where("orgId", "==", orgId)
+      .orderBy("createdAt", "desc")
+      .get();
     return snap.docs.slice(0, maxResults).map(mapDoc);
   } catch (err) {
     // Composite index may not exist — fall back to filter-only query + in-memory sort
     const msg = err instanceof Error ? err.message : "";
     if (msg.includes("index") || msg.includes("requires an index")) {
       console.warn("[daily-summary] Composite index missing for dailySummaries (orgId + createdAt). Falling back to in-memory sort.");
-      const q = query(
-        collection(db, "dailySummaries"),
-        where("orgId", "==", orgId)
-      );
-      const snap = await getDocs(q);
+      const snap = await adminDb().collection("dailySummaries").where("orgId", "==", orgId).get();
       const docs = snap.docs.map(mapDoc);
       docs.sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
       return docs.slice(0, maxResults);

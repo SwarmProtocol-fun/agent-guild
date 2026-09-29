@@ -31,10 +31,8 @@ services:
       - PORT=3000
       - INSTANCE_ID=hub-1
       - REDIS_URL=redis://:${REDIS_PASSWORD:-swarm_dev_password}@redis:6379
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
-      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
-      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
-      - PUBSUB_PROJECT_ID=${PUBSUB_PROJECT_ID}
+      - FIREBASE_SERVICE_ACCOUNT=${FIREBASE_SERVICE_ACCOUNT}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
     depends_on:
       redis:
         condition: service_healthy
@@ -54,10 +52,8 @@ services:
       - PORT=3000
       - INSTANCE_ID=hub-2
       - REDIS_URL=redis://:${REDIS_PASSWORD:-swarm_dev_password}@redis:6379
-      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
-      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
-      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
-      - PUBSUB_PROJECT_ID=${PUBSUB_PROJECT_ID}
+      - FIREBASE_SERVICE_ACCOUNT=${FIREBASE_SERVICE_ACCOUNT}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
     depends_on:
       redis:
         condition: service_healthy

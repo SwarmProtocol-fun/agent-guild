@@ -5,20 +5,8 @@
  * slashing rules, anomaly thresholds. Only one policy can be active.
  */
 
-import {
-  addDoc,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  updateDoc,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { recordCreditOpsAudit } from "./audit";
 import type { CreditOpsPolicy, PolicyStatus } from "./types";
 
@@ -71,12 +59,7 @@ export async function getActivePolicy(): Promise<CreditOpsPolicy> {
     return activePolicyCache;
   }
 
-  const q = query(
-    collection(db, POLICY_COLLECTION),
-    where("status", "==", "active"),
-    firestoreLimit(1),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(POLICY_COLLECTION).where("status", "==", "active").limit(1).get();
 
   if (snap.empty) {
     // Seed default policy
@@ -95,20 +78,14 @@ export async function getActivePolicy(): Promise<CreditOpsPolicy> {
 
 /** Get a policy by ID. */
 export async function getPolicy(policyId: string): Promise<CreditOpsPolicy | null> {
-  const ref = doc(db, POLICY_COLLECTION, policyId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) return null;
+  const snap = await adminDb().collection(POLICY_COLLECTION).doc(policyId).get();
+  if (!snap.exists) return null;
   return { id: snap.id, ...snap.data() } as CreditOpsPolicy;
 }
 
 /** List all policy versions. */
 export async function listPolicies(): Promise<CreditOpsPolicy[]> {
-  const q = query(
-    collection(db, POLICY_COLLECTION),
-    orderBy("version", "desc"),
-    firestoreLimit(50),
-  );
-  const snap = await getDocs(q);
+  const snap = await adminDb().collection(POLICY_COLLECTION).orderBy("version", "desc").limit(50).get();
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as CreditOpsPolicy[];
 }
 
@@ -131,10 +108,10 @@ export async function createDraftPolicy(
     version: maxVersion + 1,
     status: "draft",
     createdBy,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   };
 
-  const ref = await addDoc(collection(db, POLICY_COLLECTION), policy);
+  const ref = await adminDb().collection(POLICY_COLLECTION).add(policy);
 
   await recordCreditOpsAudit({
     action: "policy.created",
@@ -152,14 +129,14 @@ export async function updateDraftPolicy(
   policyId: string,
   updates: Partial<CreditOpsPolicy>,
 ): Promise<void> {
-  const ref = doc(db, POLICY_COLLECTION, policyId);
-  const snap = await getDoc(ref);
-  if (!snap.exists()) throw new Error("Policy not found");
-  if (snap.data().status !== "draft") throw new Error("Only draft policies can be edited");
+  const ref = adminDb().collection(POLICY_COLLECTION).doc(policyId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new Error("Policy not found");
+  if (snap.data()!.status !== "draft") throw new Error("Only draft policies can be edited");
 
   // Prevent changing status or version through this function
   const { status: _s, version: _v, id: _id, ...safeUpdates } = updates;
-  await updateDoc(ref, safeUpdates);
+  await ref.update(safeUpdates);
 }
 
 /** Activate a policy. Archives the current active one. */
@@ -170,15 +147,13 @@ export async function activatePolicy(
   // Archive current active policy
   const currentActive = await getActivePolicy();
   if (currentActive.id && currentActive.id !== policyId) {
-    const currentRef = doc(db, POLICY_COLLECTION, currentActive.id);
-    await updateDoc(currentRef, { status: "archived" });
+    await adminDb().collection(POLICY_COLLECTION).doc(currentActive.id).update({ status: "archived" });
   }
 
   // Activate new policy
-  const ref = doc(db, POLICY_COLLECTION, policyId);
-  await updateDoc(ref, {
+  await adminDb().collection(POLICY_COLLECTION).doc(policyId).update({
     status: "active",
-    activatedAt: serverTimestamp(),
+    activatedAt: FieldValue.serverTimestamp(),
   });
 
   // Invalidate cache
@@ -195,10 +170,10 @@ export async function activatePolicy(
 
 /** Seed default policy if none exists. */
 export async function seedDefaultPolicy(): Promise<string> {
-  const ref = await addDoc(collection(db, POLICY_COLLECTION), {
+  const ref = await adminDb().collection(POLICY_COLLECTION).add({
     ...DEFAULT_POLICY,
-    createdAt: serverTimestamp(),
-    activatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    activatedAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }

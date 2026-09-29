@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { useActiveAccount, useActiveWalletConnectionStatus } from 'thirdweb/react';
+import { useWalletAccount, useWalletConnectionStatus } from "@/lib/wallet";
 import { useOrg } from '@/contexts/OrgContext';
 import { useSession } from '@/contexts/SessionContext';
 import { AuthState, ReconnectionBanner, type AuthPhase } from './auth-state';
@@ -26,8 +26,8 @@ let appAuthSettled = false;
 let appHadOrgs = false;
 
 export function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const account = useActiveAccount();
-  const connectionStatus = useActiveWalletConnectionStatus();
+  const account = useWalletAccount();
+  const connectionStatus = useWalletConnectionStatus();
   const walletConnected = !!account;
   const { organizations, loading: orgLoading, error: orgError, refreshOrgs } = useOrg();
   const { authenticated, loading: sessionLoading } = useSession();
@@ -72,7 +72,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }, [isAuthenticated, graceOver]);
 
   // Wallet is still being reconnected
-  const isReconnecting = connectionStatus === 'connecting' || connectionStatus === 'unknown';
+  const isReconnecting = connectionStatus === 'connecting';
 
   useEffect(() => {
     // Don't redirect during grace period or session loading.

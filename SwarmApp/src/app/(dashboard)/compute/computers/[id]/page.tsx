@@ -12,7 +12,7 @@ import {
   MODEL_LABELS,
   DEFAULT_AUTO_STOP_MINUTES,
 } from "@/lib/compute/types";
-import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/billing";
+import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/pricing";
 const trackComputeEvent = (..._args: unknown[]) => {}; // posthog removed
 import { StatusBadge } from "@/components/compute/status-badge";
 import { DesktopViewer } from "@/components/compute/desktop-viewer";
@@ -92,12 +92,16 @@ export default function ComputerDetailPage({ params }: { params: Promise<{ id: s
     });
   }, [computer?.status, id]);
 
-  // Poll for status updates when computer is in a transitional state
+  // Poll for status updates when computer is in a transitional state.
+  // Skip ticks while the tab is in the background — a provisioning/stopping
+  // transition left unattended shouldn't keep polling every 3s until it ends.
   useEffect(() => {
     if (!computer) return;
     const transitional = ["provisioning", "starting", "stopping", "snapshotting"];
     if (!transitional.includes(computer.status)) return;
-    const interval = setInterval(fetchComputer, 3000);
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") fetchComputer();
+    }, 3000);
     return () => clearInterval(interval);
   }, [computer?.status]);
 

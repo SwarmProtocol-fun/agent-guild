@@ -106,16 +106,16 @@ const ENV_REQUIREMENTS: EnvRequirement[] = [
     description: "Firebase measurement ID for analytics (client-side, optional)",
   },
 
-  // Critical - Thirdweb
+  // Critical - Wallet connection (WalletConnect / Reown AppKit)
   {
-    key: "NEXT_PUBLIC_THIRDWEB_CLIENT_ID",
+    key: "NEXT_PUBLIC_REOWN_PROJECT_ID",
     required: true,
-    description: "Thirdweb client ID for wallet connection",
+    description: "Reown (WalletConnect) project ID for wallet connection — https://cloud.reown.com",
   },
   {
-    key: "THIRDWEB_SECRET_KEY",
+    key: "NEXT_PUBLIC_WALLET_PROVIDER",
     required: false,
-    description: "Thirdweb secret key (server-side, optional for advanced features)",
+    description: "Wallet adapter id (default: walletconnect)",
   },
 
   // Optional - Platform Admin
@@ -294,8 +294,8 @@ export function printEnvSummary(): void {
     `  FIREBASE_PROJECT_ID: ${process.env.FIREBASE_PROJECT_ID || "❌ Missing"}`
   );
   console.log(
-    `  THIRDWEB_CLIENT_ID: ${
-      process.env.NEXT_PUBLIC_THIRDWEB_CLIENT_ID ? "✅ Set" : "❌ Missing"
+    `  REOWN_PROJECT_ID: ${
+      process.env.NEXT_PUBLIC_REOWN_PROJECT_ID ? "✅ Set" : "❌ Missing"
     }`
   );
   console.log(

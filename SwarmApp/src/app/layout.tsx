@@ -11,6 +11,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { SkinProvider } from "@/contexts/SkinContext";
 import { CommandBar } from "@/components/command-bar";
 import AutoSiwe from "@/components/AutoSiwe";
+import { QueryProvider } from "@/components/query-provider";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -44,6 +45,7 @@ export default function RootLayout({
         `}</Script>
       </head>
       <body className={inter.className} suppressHydrationWarning>
+        <QueryProvider>
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           <SkinProvider>
           <Web3Provider>
@@ -59,6 +61,7 @@ export default function RootLayout({
           </Web3Provider>
           </SkinProvider>
         </ThemeProvider>
+        </QueryProvider>
       </body>
     </html>
   );

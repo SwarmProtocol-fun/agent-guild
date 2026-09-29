@@ -1,13 +1,10 @@
 /** Landing Page — Hero section with 3D Spline robots, wallet connect CTA, and feature showcase.
- *  SIWE sign-in is handled by thirdweb's ConnectButton auth prop (see useThirdwebAuth). */
+ *  SIWE sign-in is handled by useAutoSiwe once the wallet connects. */
 "use client";
 
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { ConnectButton, useActiveAccount } from "thirdweb/react";
-import { thirdwebClient } from "@/lib/thirdweb-client";
-import { WALLET_CHAINS, DEFAULT_CHAIN } from "@/lib/chains";
-import { swarmWallets } from "@/lib/wallets";
+import { ConnectWalletButton, useWalletAccount } from "@/lib/wallet";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, Suspense, lazy, useRef } from "react";
 import Image from "next/image";
@@ -15,7 +12,6 @@ import { ArrowRight, Sun, Moon, Loader2 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useSession } from "@/contexts/SessionContext";
 import { debug } from "@/lib/debug";
-import { useThirdwebAuth } from "@/hooks/useThirdwebAuth";
 
 // [swarm-core] Spline 3D extracted to mod — placeholder
 const Spline = lazy(() => Promise.resolve({ default: (_props: Record<string, unknown>) => null }));
@@ -34,8 +30,7 @@ function LandingPageContent() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const { authenticated, loading } = useSession();
-  const account = useActiveAccount();
-  const authConfig = useThirdwebAuth();
+  const account = useWalletAccount();
   // Staggered loading: center first, then flanks after delay
   const [robotsReady, setRobotsReady] = useState<boolean[]>([false, false, false]);
 
@@ -145,7 +140,7 @@ function LandingPageContent() {
                 </Button>
               </Link>
             ) : (
-              <ConnectButton client={thirdwebClient} wallets={swarmWallets} chain={DEFAULT_CHAIN} chains={WALLET_CHAINS} connectButton={{ label: "Connect" }} />
+              <ConnectWalletButton label="Connect" />
             )}
           </div>
         </div>
@@ -214,7 +209,7 @@ function LandingPageContent() {
                   </Button>
                 </Link>
               ) : (
-                <ConnectButton client={thirdwebClient} wallets={swarmWallets} chain={DEFAULT_CHAIN} chains={WALLET_CHAINS} connectButton={{ label: "Connect" }} />
+                <ConnectWalletButton label="Connect" />
               )}
               <Link href="/docs">
                 <Button variant="outline" size="lg" className="h-12 px-8 rounded-full border-white/10 hover:bg-white/5 group bg-black/20">
@@ -239,7 +234,7 @@ function LandingPageContent() {
                   </Button>
                 </Link>
               ) : (
-                <ConnectButton client={thirdwebClient} wallets={swarmWallets} chain={DEFAULT_CHAIN} chains={WALLET_CHAINS} connectButton={{ label: "Connect" }} />
+                <ConnectWalletButton label="Connect" />
               )}
             </div>
           </div>

@@ -11,7 +11,7 @@ import { getWalletAddress } from "@/lib/auth-guard";
 import {
     submitAgentRating,
     submitCommunityItemRating,
-} from "@/lib/skills";
+} from "@/lib/firestore-admin";
 
 export async function POST(req: NextRequest) {
     const wallet = getWalletAddress(req);

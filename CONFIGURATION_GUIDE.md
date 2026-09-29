@@ -41,10 +41,10 @@ FIREBASE_STORAGE_BUCKET=your-project.appspot.com
 FIREBASE_MESSAGING_SENDER_ID=123456789
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CRITICAL - Thirdweb (Wallet Connection)
+# CRITICAL - WalletConnect / Reown (Wallet Connection)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-NEXT_PUBLIC_THIRDWEB_CLIENT_ID=your-thirdweb-client-id
+NEXT_PUBLIC_REOWN_PROJECT_ID=your-reown-project-id  # https://cloud.reown.com
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # OPTIONAL - Platform Administration
@@ -499,7 +499,7 @@ Before deploying to production:
 ### Next.js App
 - [ ] `SESSION_SECRET` is 64 hex characters
 - [ ] All Firebase env vars set (6 total)
-- [ ] `NEXT_PUBLIC_THIRDWEB_CLIENT_ID` configured
+- [ ] `NEXT_PUBLIC_REOWN_PROJECT_ID` configured
 - [ ] `PLATFORM_ADMIN_WALLETS` set (if using admin features)
 - [ ] `.env.local` file in `.gitignore`
 - [ ] Run `requireValidEnv()` passes

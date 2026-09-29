@@ -8,7 +8,7 @@
  *   org — (required) organization ID
  */
 import { NextRequest } from "next/server";
-import { getAgentCapabilities } from "@/lib/skills";
+import { getAgentCapabilities } from "@/lib/firestore-admin";
 
 export async function GET(
     req: NextRequest,

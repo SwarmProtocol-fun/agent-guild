@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import { CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -20,29 +20,26 @@ interface CronConfig {
 }
 
 export function CronWidget() {
-    const [config, setConfig] = useState<CronConfig>({});
-    const [loading, setLoading] = useState(true);
-
-    const fetchCron = async () => {
-        try {
+    const queryClient = useQueryClient();
+    const { data: config = {}, isLoading: loading } = useQuery<CronConfig>({
+        queryKey: ["cron-jobs"],
+        queryFn: async () => {
             const res = await fetch("/api/cron-jobs");
-            if (!res.ok) return;
+            if (!res.ok) return {};
             const data = await res.json();
-            if (data.config) setConfig(data.config);
-        } catch (err) { }
-        finally { setLoading(false); }
-    };
-
-    useEffect(() => {
-        fetchCron();
-        const interval = setInterval(fetchCron, 30000); // 30s
-        return () => clearInterval(interval);
-    }, []);
+            return data.config ?? {};
+        },
+        refetchInterval: 30000,
+        refetchIntervalInBackground: false,
+    });
 
     const toggleCron = async (taskId: string, currentActive: boolean) => {
         try {
             // Optimistic update
-            setConfig(prev => ({ ...prev, [taskId]: { ...prev[taskId], active: !currentActive } }));
+            queryClient.setQueryData<CronConfig>(["cron-jobs"], (prev) => ({
+                ...prev,
+                [taskId]: { ...prev?.[taskId], active: !currentActive } as CronConfig[string],
+            }));
 
             await fetch("/api/cron-jobs", {
                 method: "POST",
@@ -50,7 +47,7 @@ export function CronWidget() {
                 body: JSON.stringify({ action: "toggle", taskId, active: !currentActive })
             });
         } catch (err) {
-            fetchCron(); // Revert on failure
+            queryClient.invalidateQueries({ queryKey: ["cron-jobs"] }); // Revert on failure
         }
     };
 

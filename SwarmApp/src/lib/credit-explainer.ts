@@ -9,11 +9,10 @@
  * enriched when PRD 2 (scoring engine) and PRD 4 (policy tiers) land.
  */
 
-import { db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 // [swarm-core] Hedera removed
-type ScoreEvent = { agentId: string; delta: number; reason: string; timestamp: number };
-const getReputationTopicId = () => null;
+import type { ScoreEvent } from "@/lib/credit-types";
+const getReputationTopicId = (): string | null => null;
 import {
     getTierForScore,
     getConfidenceInfo,
@@ -125,12 +124,12 @@ async function fetchEventsForASN(asn: string, limit = 500): Promise<Array<{ even
  */
 export async function explainScore(agentId: string): Promise<ScoreExplanation> {
     // 1. Load agent from Firestore
-    const agentSnap = await getDoc(doc(db, "agents", agentId));
-    if (!agentSnap.exists()) {
+    const agentSnap = await adminDb().collection("agents").doc(agentId).get();
+    if (!agentSnap.exists) {
         throw new Error(`Agent ${agentId} not found`);
     }
 
-    const agentData = agentSnap.data();
+    const agentData = agentSnap.data()!;
     const asn = (agentData.asn as string) || "";
     const currentCredit = (agentData.creditScore as number) || CREDIT_SCORE_DEFAULT;
     const currentTrust = (agentData.trustScore as number) || TRUST_SCORE_DEFAULT;
@@ -250,12 +249,12 @@ export async function explainScore(agentId: string): Promise<ScoreExplanation> {
  */
 export async function getScoreHistory(agentId: string, days = 30): Promise<ScoreHistoryPoint[]> {
     // Load agent for ASN and current scores
-    const agentSnap = await getDoc(doc(db, "agents", agentId));
-    if (!agentSnap.exists()) {
+    const agentSnap = await adminDb().collection("agents").doc(agentId).get();
+    if (!agentSnap.exists) {
         throw new Error(`Agent ${agentId} not found`);
     }
 
-    const agentData = agentSnap.data();
+    const agentData = agentSnap.data()!;
     const asn = (agentData.asn as string) || "";
 
     if (!asn) {

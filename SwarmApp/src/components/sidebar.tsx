@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MaturityBadge } from "@/components/ui/maturity-badge";
+import { MOD_MANIFESTS } from "@/lib/mods/generated/manifests";
 
 /** Map iconName strings from sidebarConfig to lucide components */
 const ICON_MAP: Record<string, typeof LayoutDashboard> = {
@@ -138,6 +139,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
       { id: "board", href: "/kanban", label: "Task Board", icon: LayoutGrid, maturity: "production" },
       { id: "jobs", href: "/jobs", label: "Job Board", icon: Briefcase, maturity: "production" },
       { id: "channels", href: "/chat", label: "Channels", icon: MessageSquare, maturity: "production" },
+      { id: "agent-comms", href: "/agent-comms", label: "Agent Chat Logs", icon: Bot, maturity: "production" },
       { id: "approvals", href: "/approvals", label: "Approvals", icon: Shield, maturity: "production" },
       { id: "workflows", href: "/workflows", label: "Workflows", icon: Zap, maturity: "beta" },
       { id: "cron", href: "/cron", label: "Scheduler", icon: Clock, maturity: "production" },
@@ -154,6 +156,21 @@ export const DEFAULT_SECTIONS: NavSection[] = [
       { id: "storage", href: "/usage/storage", label: "Storage", icon: Database, maturity: "production" },
       { id: "publisher", href: "/market/publisher", label: "Publisher", icon: Upload, maturity: "production" },
     ],
+  },
+  // Panels contributed by installed runtime mods (mods/<id>/swarm.mod.json).
+  // Empty sections are hidden, so this only shows up once a mod adds a panel.
+  {
+    id: "modifications",
+    label: "Mods",
+    collapsible: true,
+    items: MOD_MANIFESTS.flatMap((m) =>
+      (m.panels ?? []).map((p): NavItem => ({
+        id: `runtime-mod-${m.id}-${p.id}`,
+        href: `/mods/${m.id}/${p.id}`,
+        label: p.title,
+        icon: (p.icon && ICON_MAP[p.icon]) || Puzzle,
+      })),
+    ),
   },
 ];
 

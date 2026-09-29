@@ -21,7 +21,8 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
-import { logUsage, estimateCost } from "@/lib/usage";
+import { estimateCost } from "@/lib/usage";
+import { logUsage } from "@/lib/firestore-admin";
 
 export async function POST(req: NextRequest) {
     const url = req.nextUrl;

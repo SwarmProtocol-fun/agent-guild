@@ -4,7 +4,7 @@
  * Provides the frontend with durable session info (address, role, authenticated status)
  * fetched from the httpOnly cookie via /api/auth/session.
  *
- * Auth flow: ConnectButton (thirdweb) → SIWE sign → POST /api/auth/verify → session cookie.
+ * Auth flow: Wallet connect → SIWE sign → POST /api/auth/verify → session cookie.
  * The wallet connection is still used for signing transactions, but the *session*
  * is what determines auth state.
  */
@@ -21,6 +21,7 @@ import {
 } from "react";
 import { signOut as firebaseSignOut } from "firebase/auth";
 import { auth } from "@/lib/firebase";
+import { clearWalletStorage } from "@/lib/wallet";
 import { debug } from "@/lib/debug";
 
 export type UserRole = "operator" | "org_admin" | "platform_admin";
@@ -119,35 +120,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [fetchSession]);
 
   // If session check completes as NOT authenticated, clear any stale
-  // thirdweb wallet state from localStorage. This prevents thirdweb from
-  // auto-reconnecting the wallet and re-triggering SIWE when the user
-  // cleared cookies externally (not through our logout flow).
-  //
-  // IMPORTANT: Skip cleanup when an OAuth redirect is in progress
-  // (URL contains walletId + authResult params). Clearing localStorage
-  // during a redirect would destroy the in-progress wallet connection
-  // before thirdweb can process the OAuth callback.
+  // wallet state from localStorage. This prevents the wallet adapter from
+  // auto-reconnecting and re-triggering SIWE when the user cleared cookies
+  // externally (not through our logout flow).
   const cleanedRef = useRef(false);
   useEffect(() => {
     if (loading || session.authenticated || cleanedRef.current) return;
-
-    // Detect OAuth redirect callback — do NOT clear thirdweb state mid-redirect
-    const params = new URLSearchParams(window.location.search);
-    if (params.has("walletId") && params.has("authResult")) {
-      debug.log("[Swarm:Session] OAuth redirect detected — skipping thirdweb state cleanup");
-      return;
-    }
-
     cleanedRef.current = true;
-    try {
-      const twKeys = Object.keys(localStorage).filter(
-        k => k.startsWith("thirdweb:") || k.startsWith("walletConnect")
-      );
-      if (twKeys.length > 0) {
-        debug.log("[Swarm:Session] Not authenticated — clearing stale thirdweb state:", twKeys.length, "keys");
-        twKeys.forEach(k => localStorage.removeItem(k));
-      }
-    } catch { /* localStorage unavailable */ }
+    const removed = clearWalletStorage();
+    if (removed > 0) debug.log("[Swarm:Session] Not authenticated — cleared stale wallet state:", removed, "keys");
   }, [loading, session.authenticated]);
 
   const logout = useCallback(async () => {
@@ -159,14 +140,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       // Clear Firebase Auth session (client-side Firestore access)
       await firebaseSignOut(auth).catch(() => {});
     } finally {
-      // Clear thirdweb wallet connection state from localStorage so the
-      // wallet doesn't auto-reconnect and re-trigger SIWE on next load.
-      try {
-        const keysToRemove = Object.keys(localStorage).filter(
-          k => k.startsWith("thirdweb:") || k.startsWith("walletConnect")
-        );
-        keysToRemove.forEach(k => localStorage.removeItem(k));
-      } catch { /* localStorage may be unavailable */ }
+      // Clear persisted wallet state so the wallet doesn't auto-reconnect
+      // and re-trigger SIWE on next load.
+      clearWalletStorage();
 
       setSession({
         authenticated: false,

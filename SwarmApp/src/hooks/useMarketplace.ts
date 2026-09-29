@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { useOrg } from "@/contexts/OrgContext";
-import { useActiveAccount } from "thirdweb/react";
+import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 import {
     type Skill,
@@ -64,7 +64,7 @@ const TYPE_FOR_CATEGORY: Record<MarketCategory, MarketItemType | undefined> = {
 
 export function useMarketplace() {
     const { currentOrg } = useOrg();
-    const account = useActiveAccount();
+    const account = useWalletAccount();
     const { address: sessionAddress, authenticated } = useSession();
     const userAddress = account?.address || sessionAddress || "";
 

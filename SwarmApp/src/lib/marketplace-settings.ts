@@ -5,8 +5,7 @@
  * defaults. Caches for 60 seconds to avoid repeated reads.
  */
 
-import { doc, getDoc } from "firebase/firestore";
-import { db } from "./firebase";
+import { adminDb } from "./firebase-admin";
 
 export interface MarketplaceSettings {
   autoApproveForTier: number;
@@ -53,8 +52,8 @@ export async function getMarketplaceSettings(): Promise<MarketplaceSettings> {
   }
 
   try {
-    const snap = await getDoc(doc(db, "platformConfig", "marketplace"));
-    const data = snap.exists() ? snap.data() : {};
+    const snap = await adminDb().collection("platformConfig").doc("marketplace").get();
+    const data = snap.exists ? snap.data() : {};
     const settings = { ...DEFAULTS, ...data } as MarketplaceSettings;
     cached = { settings, expiresAt: Date.now() + 60_000 };
     return settings;

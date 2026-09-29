@@ -15,8 +15,7 @@
  * This is a platform-wide detector (not org-scoped).
  */
 
-import { db } from "@/lib/firebase";
-import { collection, getDocs, query, where } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 import type { RiskSignal, FraudDetectionConfig, PlatformWideDetector } from "../fraud-detection";
 
 const LOW_CREDIT_THRESHOLD = 400;
@@ -29,7 +28,7 @@ export const detectIdentityResets: PlatformWideDetector = async (
   const signals: RiskSignal[] = [];
 
   // Fetch all agents
-  const agentsSnap = await getDocs(collection(db, "agents"));
+  const agentsSnap = await adminDb().collection("agents").get();
 
   // Group by wallet address
   const walletGroups = new Map<string, Array<{
