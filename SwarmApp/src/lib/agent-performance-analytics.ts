@@ -282,5 +282,6 @@ export async function getAgentPerformanceOverview(
     delegations,
     dailyThroughput: Array.from(dailyMap.values()),
     topAgents,
+    apiCalls,
   };
 }
