@@ -224,10 +224,10 @@ function getSystemMetrics() {
  * Execute a shell command with timeout and output capture.
  * Returns { stdout, stderr, exitCode }.
  */
-function executeShell(command, args = [], { timeoutMs = 60000, cwd, env } = {}) {
+function executeShell(command, args = [], { timeoutMs = 60000, cwd, env, shell = true } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(command, args, {
-      shell: true,
+      shell,
       cwd: cwd || AGENT_DIR,
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
@@ -262,10 +262,14 @@ function executeShell(command, args = [], { timeoutMs = 60000, cwd, env } = {}) 
       reject(new Error(`Spawn error: ${err.message}`));
     });
 
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       clearTimeout(timer);
       if (killed) {
         reject(new Error(`Process killed: execution timed out after ${timeoutMs}ms`));
+        return;
+      }
+      if (signal) {
+        reject(new Error(`Process terminated by signal ${signal}`));
         return;
       }
       resolve({ stdout: stdout.trim(), stderr: stderr.trim(), exitCode: code || 0, logLines });
@@ -305,26 +309,33 @@ async function executeDocker(image, command = [], { timeoutMs = 120000, volumes 
  * Execute a Node.js script inline.
  */
 async function executeNode(script, { timeoutMs = 60000 } = {}) {
-  return executeShell("node", ["-e", script], { timeoutMs });
+  return executeShell("node", ["-e", script], { timeoutMs, shell: false });
 }
 
-/**
- * Route a task to the appropriate executor based on taskType.
- */
 /**
  * Route a task to the appropriate executor.
  * Uses modular executors from ./executors/ (comfyui, workflow, etc.)
  * with inline fallback for core types (shell, docker, node).
+ *
+ * @param {Object} task
+ * @param {Function} logCallback
+ * @param {(executor: {cancel: Function, getStatus: Function}) => void} [onExecutorReady] —
+ *   called synchronously (before execution completes) with the executor
+ *   instance handling this specific task, so the caller can cancel it later.
+ *   For shell/docker/node this is an isolated per-task instance (see
+ *   executors/index.mjs's createTaskExecutor) — concurrent tasks no longer
+ *   share a single module-level process reference the way they used to.
  */
-async function executeTask(task, logCallback) {
+async function executeTask(task, logCallback, onExecutorReady) {
   const { taskType, payload, timeoutMs = 60000 } = task;
   const startTime = Date.now();
 
   // Try modular executor registry first (supports comfyui, workflow, etc.)
   try {
-    const { getExecutor } = await import("./executors/index.mjs");
-    const executor = getExecutor(taskType);
+    const { createTaskExecutor } = await import("./executors/index.mjs");
+    const executor = createTaskExecutor(taskType);
     if (executor) {
+      onExecutorReady?.(executor);
       const collectLines = [];
       const wrappedLog = (lines) => {
         collectLines.push(...lines);
@@ -468,7 +479,7 @@ class GatewayWSClient {
     }
   }
 
-  /** Handle job cancellation — kill running process and report cancelled */
+  /** Handle job cancellation — cancel the running executor and report cancelled */
   handleJobCancel(taskId) {
     // _activeTasks is set externally by the daemon after construction
     const entry = this._activeTasks?.get(taskId);
@@ -481,17 +492,20 @@ class GatewayWSClient {
 
     log("info", `Cancelling task ${taskId}...`);
 
-    // Kill the process if one is tracked (shell/docker executor)
-    if (entry.proc && typeof entry.proc.kill === "function") {
+    // Cancel via the task's own executor instance (shell/docker/node get an
+    // isolated instance per task — see executeTask's onExecutorReady — so
+    // this only ever touches this task's process, never another concurrent
+    // task's). Previously this looked for `entry.proc`, which was never
+    // populated by runTask, so cancellation never actually killed anything —
+    // it only reported "cancelled" status while the process kept running.
+    if (entry.executor && typeof entry.executor.cancel === "function") {
       try {
-        entry.proc.kill("SIGTERM");
-        // Force-kill after 5s if still alive
-        setTimeout(() => {
-          try { entry.proc.kill("SIGKILL"); } catch { /* already dead */ }
-        }, 5000);
-      } catch {
-        // Process may have already exited
+        entry.executor.cancel();
+      } catch (err) {
+        log("warn", `Cancel: executor.cancel() threw for ${taskId}: ${err.message}`);
       }
+    } else {
+      log("warn", `Cancel: task ${taskId} has no cancellable executor instance yet`);
     }
 
     // Report cancelled status to hub
@@ -1052,7 +1066,15 @@ async function runTask(config, task, activeTasks, wsClient = null, state) {
       wsClient?.sendJobLog(task.id, lines);
     };
 
-    const result = await executeTask(task, logCallback);
+    const result = await executeTask(task, logCallback, (executor) => {
+      // activeTasks.set(task.id, ...) has already run by the time this
+      // fires (executeTask's first await is an internal dynamic import, so
+      // control returns to the caller — which sets the activeTasks entry —
+      // before this callback resolves). Attach the executor so a later
+      // job:cancel can actually reach this specific task's process.
+      const entry = activeTasks.get(task.id);
+      if (entry) entry.executor = executor;
+    });
 
     // Send any remaining buffered lines (from inline executors that don't use logCallback)
     if (result.logLines?.length > 0) {

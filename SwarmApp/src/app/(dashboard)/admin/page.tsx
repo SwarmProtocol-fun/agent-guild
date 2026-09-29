@@ -6,7 +6,8 @@ import {
   ShieldAlert, Users, Flag, Server, Package, TrendingUp,
   Ban, CheckCircle, XCircle, Loader2, RefreshCw, ChevronDown,
   AlertTriangle, Globe, Clock, Star, Scale, ArrowRight,
-  Wallet, Fuel, ExternalLink, Copy,
+  Wallet, Fuel, ExternalLink, Copy, Activity,
+  DollarSign, Eye,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,21 @@ interface GasSponsor {
   explorerUrl: string;
 }
 
+interface PlatformPulse {
+  activeNow: number;
+  dau: number;
+  totalUsers: number;
+  agentsOnline: number;
+  agentsTotal: number;
+  jobsSuccessRate: number;
+  workflowsSuccessRate: number;
+  computeProfitCents: number;
+  marketplaceTxCount: number;
+  riskPendingReviews: number;
+  riskActiveSignals: number;
+  creditQueueDepth: number;
+}
+
 const TIER_NAMES: Record<number, string> = { 0: "New", 1: "Approved", 2: "Trusted", 3: "Strategic" };
 const TIER_COLORS: Record<number, string> = {
   0: "bg-zinc-500/20 text-zinc-400",
@@ -100,6 +116,7 @@ export default function AdminPage() {
   const [modServices, setModServices] = useState<ModService[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [gasSponsor, setGasSponsor] = useState<GasSponsor | null>(null);
+  const [pulse, setPulse] = useState<PlatformPulse | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [subFilter, setSubFilter] = useState<"pending" | "approved" | "rejected">("pending");
@@ -107,13 +124,21 @@ export default function AdminPage() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [overviewRes, pubRes, repRes, modRes, subRes, gasRes] = await Promise.all([
+      const [
+        overviewRes, pubRes, repRes, modRes, subRes, gasRes,
+        analyticsRes, perfRes, revRes, riskRes, creditOpsRes,
+      ] = await Promise.all([
         fetch("/api/admin/overview"),
         fetch("/api/admin/publishers"),
         fetch("/api/admin/reports"),
         fetch("/api/admin/mod-services"),
         fetch(`/api/admin/submissions?status=${subFilter}`),
         fetch("/api/admin/gas-sponsor"),
+        fetch("/api/admin/analytics/overview"),
+        fetch("/api/admin/analytics/performance"),
+        fetch("/api/admin/analytics/revenue"),
+        fetch("/api/admin/risk/overview"),
+        fetch("/api/admin/credit-ops/overview"),
       ]);
 
       if (overviewRes.ok) {
@@ -140,6 +165,37 @@ export default function AdminPage() {
         const d = await gasRes.json();
         setGasSponsor(d);
       }
+
+      // Platform Pulse — merge fields from each analytics domain independently
+      const pulseData: Partial<PlatformPulse> = {};
+      if (analyticsRes.ok) {
+        const d = await analyticsRes.json();
+        pulseData.activeNow = d.overview?.activeNow ?? 0;
+        pulseData.dau = d.overview?.dau ?? 0;
+        pulseData.totalUsers = d.overview?.totalUsers ?? 0;
+      }
+      if (perfRes.ok) {
+        const d = await perfRes.json();
+        pulseData.agentsOnline = d.overview?.agents?.online ?? 0;
+        pulseData.agentsTotal = d.overview?.agents?.total ?? 0;
+        pulseData.jobsSuccessRate = d.overview?.jobs?.successRate ?? 0;
+        pulseData.workflowsSuccessRate = d.overview?.workflows?.successRate ?? 0;
+      }
+      if (revRes.ok) {
+        const d = await revRes.json();
+        pulseData.computeProfitCents = d.overview?.compute?.totalPlatformProfitCents ?? 0;
+        pulseData.marketplaceTxCount = d.overview?.marketplace?.transactionCount ?? 0;
+      }
+      if (riskRes.ok) {
+        const d = await riskRes.json();
+        pulseData.riskPendingReviews = d.stats?.pendingReviews ?? 0;
+        pulseData.riskActiveSignals = d.stats?.activeSignals ?? 0;
+      }
+      if (creditOpsRes.ok) {
+        const d = await creditOpsRes.json();
+        pulseData.creditQueueDepth = d.stats?.queueDepth ?? 0;
+      }
+      setPulse(pulseData as PlatformPulse);
     } catch {
       // silent
     } finally {
@@ -237,6 +293,54 @@ export default function AdminPage() {
           Refresh
         </Button>
       </div>
+
+      {/* Platform Pulse — unified snapshot across every analytics domain */}
+      {pulse && (
+        <div>
+          <h3 className="text-sm font-medium text-muted-foreground mb-2">Platform Pulse</h3>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+            <PulseCard
+              href="/admin/analytics"
+              icon={Eye}
+              label="Active Now"
+              value={pulse.activeNow}
+              detail={`${pulse.dau} DAU · ${pulse.totalUsers} total users`}
+              accent="green"
+            />
+            <PulseCard
+              href="/admin/analytics/performance"
+              icon={Activity}
+              label="Agents Online"
+              value={`${pulse.agentsOnline}/${pulse.agentsTotal}`}
+              detail={`${pulse.jobsSuccessRate}% jobs · ${pulse.workflowsSuccessRate}% workflows`}
+            />
+            <PulseCard
+              href="/admin/analytics/revenue"
+              icon={DollarSign}
+              label="Compute Profit (mo.)"
+              value={`$${(pulse.computeProfitCents / 100).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+              detail={`${pulse.marketplaceTxCount} marketplace tx`}
+              accent={pulse.computeProfitCents > 0 ? "green" : undefined}
+            />
+            <PulseCard
+              href="/admin/risk"
+              icon={Flag}
+              label="Risk Signals"
+              value={pulse.riskActiveSignals}
+              detail={`${pulse.riskPendingReviews} pending review`}
+              accent={pulse.riskActiveSignals > 0 ? "amber" : undefined}
+            />
+            <PulseCard
+              href="/admin/credit-ops"
+              icon={Scale}
+              label="Credit Ops Queue"
+              value={pulse.creditQueueDepth}
+              detail="pending + in review"
+              accent={pulse.creditQueueDepth > 0 ? "amber" : undefined}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Overview Cards */}
       {stats && (
@@ -646,6 +750,46 @@ export default function AdminPage() {
 }
 
 // ── Sub-components ──
+
+function PulseCard({
+  href,
+  icon: Icon,
+  label,
+  value,
+  detail,
+  accent,
+}: {
+  href: string;
+  icon: typeof Users;
+  label: string;
+  value: number | string;
+  detail: string;
+  accent?: "green" | "amber" | "red";
+}) {
+  const accentStyles: Record<string, { border: string; bg: string; text: string; icon: string }> = {
+    green: { border: "border-emerald-500/30", bg: "bg-emerald-500/5", text: "text-emerald-400", icon: "text-emerald-400" },
+    amber: { border: "border-amber-500/30", bg: "bg-amber-500/5", text: "text-amber-400", icon: "text-amber-400" },
+    red: { border: "border-red-500/30", bg: "bg-red-500/5", text: "text-red-400", icon: "text-red-400" },
+  };
+  const s = accent ? accentStyles[accent] : null;
+
+  return (
+    <Link
+      href={href}
+      className={`rounded-xl border p-3 block hover:bg-card/80 transition-colors ${s ? `${s.border} ${s.bg}` : "border-border bg-card/50"}`}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Icon className={`h-4 w-4 ${s ? s.icon : "text-muted-foreground"}`} />
+          <span className="text-xs text-muted-foreground">{label}</span>
+        </div>
+        <ArrowRight className="h-3 w-3 text-muted-foreground" />
+      </div>
+      <p className={`text-2xl font-bold mt-1 ${s ? s.text : ""}`}>{value}</p>
+      <p className="text-xs text-muted-foreground mt-0.5 truncate">{detail}</p>
+    </Link>
+  );
+}
 
 function StatCard({
   icon: Icon,

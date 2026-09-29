@@ -148,11 +148,6 @@ export async function middleware(req: NextRequest) {
     }
   }
 
-  // Check if this is a public API route — pass through
-  if (PUBLIC_API_PREFIXES.some((p) => pathname.startsWith(p))) {
-    return withSecurityHeaders(NextResponse.next());
-  }
-
   // Read session cookie
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   const session = token ? await verifyToken(token) : null;
@@ -160,6 +155,13 @@ export async function middleware(req: NextRequest) {
   // Inject session headers into the REQUEST so API route handlers can read them.
   // Strip any client-supplied values first — otherwise an unauthenticated caller
   // could set x-wallet-address themselves and impersonate any wallet.
+  //
+  // This MUST run before the public-API-prefix early-return below. Route
+  // handlers under /api/v1/** (a public prefix, since they do their own
+  // route-level auth) still read these headers via helpers like
+  // requirePlatformAdmin()/getWalletAddress() — if those headers reached the
+  // handler unsanitized, a caller could set x-session-role: platform_admin
+  // or x-wallet-address: <victim> directly and bypass auth entirely.
   const requestHeaders = new Headers(req.headers);
   requestHeaders.delete("x-wallet-address");
   requestHeaders.delete("x-session-address");
@@ -171,6 +173,15 @@ export async function middleware(req: NextRequest) {
     requestHeaders.set("x-session-role", session.role);
     requestHeaders.set("x-session-id", session.sid);
   }
+
+  // Check if this is a public API route — pass through, but with the
+  // sanitized headers above (never the raw client-supplied ones).
+  if (PUBLIC_API_PREFIXES.some((p) => pathname.startsWith(p))) {
+    return withSecurityHeaders(
+      NextResponse.next({ request: { headers: requestHeaders } })
+    );
+  }
+
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   // Also mirror to response headers for client-side consumption
   if (session) {

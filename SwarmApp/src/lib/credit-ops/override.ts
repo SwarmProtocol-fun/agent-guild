@@ -25,17 +25,20 @@ async function getAgentScores(agentId: string): Promise<{
   trustScore: number;
   docId: string;
 }> {
-  const snap = await adminDb().collection("agents").where("id", "==", agentId).get();
+  // Agent documents are created via `.add()` and never get an `id` field
+  // written into the body — the doc ID itself IS the agent ID, so this must
+  // be a direct doc lookup, not a `.where("id", ...)` query (which always
+  // comes back empty and silently falls back to the default below).
+  const doc = await adminDb().collection("agents").doc(agentId).get();
 
-  if (snap.empty) {
+  if (!doc.exists) {
     return { creditScore: 680, trustScore: 50, docId: "" };
   }
 
-  const d = snap.docs[0];
   return {
-    creditScore: d.data().creditScore ?? 680,
-    trustScore: d.data().trustScore ?? 50,
-    docId: d.id,
+    creditScore: doc.data()?.creditScore ?? 680,
+    trustScore: doc.data()?.trustScore ?? 50,
+    docId: doc.id,
   };
 }
 
@@ -46,11 +49,12 @@ async function updateAgentScores(
   trustScore: number,
   reason: string,
 ): Promise<void> {
-  const snap = await adminDb().collection("agents").where("id", "==", agentId).get();
+  const ref = adminDb().collection("agents").doc(agentId);
+  const doc = await ref.get();
 
-  if (snap.empty) return;
+  if (!doc.exists) return;
 
-  await adminDb().collection("agents").doc(snap.docs[0].id).update({
+  await ref.update({
     creditScore: Math.max(300, Math.min(900, creditScore)),
     trustScore: Math.max(0, Math.min(100, trustScore)),
     lastCreditUpdate: FieldValue.serverTimestamp(),

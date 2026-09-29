@@ -54,9 +54,10 @@ export async function detectTrustRings(
     if (fromId && toId) addEdge(fromId, toId);
   }
 
-  // Add validation stakes
+  // Add validation stakes, scoped to this org only (see cross-validation-abuse.ts
+  // for why: an unfiltered read leaks/mislabels other orgs' validator data).
   try {
-    const stakesSnap = await adminDb().collection("validationStakes").get();
+    const stakesSnap = await adminDb().collection("validationStakes").where("orgId", "==", orgId).get();
     for (const d of stakesSnap.docs) {
       const data = d.data();
       const createdAt = data.createdAt?.toDate?.()?.getTime() || 0;

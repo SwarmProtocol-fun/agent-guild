@@ -37,17 +37,34 @@ async function applyCreditPenalty(
   trustPenalty: number,
   reason: string,
 ): Promise<{ creditBefore: number; creditAfter: number; trustBefore: number; trustAfter: number }> {
-  const creditBefore = (agent.creditScore as number) ?? 680;
-  const trustBefore = (agent.trustScore as number) ?? 50;
-  const creditAfter = Math.max(MIN_CREDIT_SCORE, creditBefore - creditPenalty);
-  const trustAfter = Math.max(MIN_TRUST_SCORE, trustBefore - trustPenalty);
+  const ref = adminDb().collection("agents").doc(agentId);
 
-  await adminDb().collection("agents").doc(agentId).update({
-    creditScore: creditAfter,
-    trustScore: trustAfter,
-    lastCreditUpdate: FieldValue.serverTimestamp(),
-    lastCreditReason: reason,
-  });
+  // Re-read inside a transaction rather than using the caller's (possibly
+  // stale, pre-loop) `agent` snapshot for the score fields, and write the
+  // clamped absolute result. When a single scan produces multiple
+  // penalizable signals for the same agent, each call now compounds on the
+  // previous call's committed result instead of every call independently
+  // computing "baseline - penalty" off the same stale score and overwriting
+  // each other (only the last write would have survived).
+  const { creditBefore, creditAfter, trustBefore, trustAfter } = await adminDb().runTransaction(
+    async (tx) => {
+      const snap = await tx.get(ref);
+      const data = (snap.data() as Agent) || {};
+      const creditBefore = (data.creditScore as number) ?? 680;
+      const trustBefore = (data.trustScore as number) ?? 50;
+      const creditAfter = Math.max(MIN_CREDIT_SCORE, creditBefore - creditPenalty);
+      const trustAfter = Math.max(MIN_TRUST_SCORE, trustBefore - trustPenalty);
+
+      tx.update(ref, {
+        creditScore: creditAfter,
+        trustScore: trustAfter,
+        lastCreditUpdate: FieldValue.serverTimestamp(),
+        lastCreditReason: reason,
+      });
+
+      return { creditBefore, creditAfter, trustBefore, trustAfter };
+    },
+  );
 
   recordCreditAudit({
     agentId,
@@ -213,8 +230,12 @@ export async function applyAutoPenalties(
       if (rule.creditPenalty > 50) {
         // Large penalty → real governance approval workflow (second-admin
         // sign-off), same path used by manual admin overrides. Scores are
-        // NOT deducted until an admin approves.
-        const current = agentDoc.data() as Agent;
+        // NOT deducted until an admin approves. Re-read live rather than
+        // reusing the pre-loop `agentDoc` snapshot, so a governance proposal
+        // that follows an earlier direct penalty in this same scan computes
+        // its target off the agent's actual current score.
+        const freshDoc = await adminDb().collection("agents").doc(agentId).get();
+        const current = (freshDoc.data() as Agent) || agent;
         const currentCredit = (current.creditScore as number) ?? 680;
         const currentTrust = (current.trustScore as number) ?? 50;
         const { overrideId } = await requestOverride({

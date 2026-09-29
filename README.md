@@ -115,7 +115,7 @@ Official mods (separate repos):
 ## Documentation
 
 - [`CONFIGURATION_GUIDE.md`](CONFIGURATION_GUIDE.md) — Environment variables and setup
-- [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md) — Deploy to Netlify/Vercel/Railway/self-host
+- [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md) — Deploy to Netlify/Railway/self-host
 - [`HARDENING.md`](HARDENING.md) — Security hardening checklist
 - [`SCALING_ARCHITECTURE.md`](SCALING_ARCHITECTURE.md) — Horizontal scaling
 - [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — Common issues

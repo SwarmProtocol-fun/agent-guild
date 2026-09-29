@@ -22,6 +22,8 @@ import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
 import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
+import { getWalletAddress } from "@/lib/auth-guard";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 // [swarm-core] Hedera integration removed — install swarm-hedera mod
 
@@ -176,6 +178,16 @@ function sanitizeSkills(raw: unknown): ReportedSkillPayload[] {
 }
 
 export async function POST(request: NextRequest) {
+    // Registration mints a real on-chain agent identity (NFT + registry tx
+    // paid by the platform wallet) — rate limit per source IP to bound abuse.
+    const rateLimit = await checkRateLimit(`register:${getClientIp(request)}`, {
+        max: 10,
+        windowMs: 60_000,
+    });
+    if (!rateLimit.allowed) {
+        return Response.json({ error: "Too many registration attempts, try again shortly" }, { status: 429 });
+    }
+
     let body: Record<string, unknown>;
     try {
         body = await request.json();
@@ -187,6 +199,7 @@ export async function POST(request: NextRequest) {
     const agentName = body.agentName as string | undefined;
     const agentType = body.agentType as string | undefined;
     const orgId = body.orgId as string | undefined;
+    const inviteCode = body.inviteCode as string | undefined;
     const skills = sanitizeSkills(body.skills);
     const bio = typeof body.bio === "string" ? body.bio.slice(0, 500) : undefined;
 
@@ -201,6 +214,26 @@ export async function POST(request: NextRequest) {
     const org = await getOrganization(orgId);
     if (!org) {
         return Response.json({ error: "Organization not found" }, { status: 404 });
+    }
+
+    // Registering an agent into an org requires proof of org membership —
+    // either the org's invite code (the same credential a human uses to join
+    // via /api/v1/orgs/join), or a session-authenticated wallet that's
+    // already an owner/member. Previously any caller who knew/enumerated an
+    // orgId could register agents into it with no proof at all.
+    const codeMatches = !!org.inviteCode && inviteCode?.toUpperCase() === org.inviteCode.toUpperCase();
+    if (!codeMatches) {
+        const wallet = getWalletAddress(request);
+        const isMember = !!wallet && (
+            org.ownerAddress?.toLowerCase() === wallet ||
+            org.members?.some((m) => m.toLowerCase() === wallet)
+        );
+        if (!isMember) {
+            return Response.json(
+                { error: "Registering into this organization requires its invite code or an authenticated member session" },
+                { status: 403 }
+            );
+        }
     }
     // Note: agents can register to both public and private orgs.
     // The isPrivate flag controls public directory visibility, not agent connectivity.

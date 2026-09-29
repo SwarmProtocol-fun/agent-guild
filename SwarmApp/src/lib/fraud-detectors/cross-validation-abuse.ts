@@ -33,10 +33,16 @@ export async function detectCrossValidationAbuse(
   const windowStart = Date.now() - windowDays * 24 * 60 * 60 * 1000;
   const windowEnd = Date.now();
 
-  // Query all validation stakes
+  // Query validation stakes scoped to this org only. Without this filter,
+  // every org's scan reads the platform's entire validationStakes history
+  // and can generate signals attributing other orgs' validators/agents to
+  // this org. (If validationStakes documents don't carry an `orgId` field
+  // — e.g. written by an external validation-staking mod — this returns no
+  // results rather than leaking other orgs' data; add `orgId` at the write
+  // site to restore detection.)
   let stakesSnap;
   try {
-    stakesSnap = await adminDb().collection("validationStakes").get();
+    stakesSnap = await adminDb().collection("validationStakes").where("orgId", "==", orgId).get();
   } catch {
     return signals; // Collection may not exist
   }

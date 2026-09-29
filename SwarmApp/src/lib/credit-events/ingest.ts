@@ -39,7 +39,8 @@ export async function ingestCreditEvent(
     return { success: false, error: validation.errors.join("; ") };
   }
 
-  // Step 2: Idempotency check
+  // Step 2: Idempotency check (fast-path — avoids a wasted store attempt for
+  // the common case of a genuine, non-racing duplicate).
   const idempotencyKey = computeIdempotencyKey(
     event.source.system,
     event.source.sourceEventId,
@@ -49,8 +50,27 @@ export async function ingestCreditEvent(
     return { success: true, deduplicated: true };
   }
 
-  // Step 3: Store
-  const eventId = await storeCreditEvent(event);
+  // Step 3: Store. storeCreditEvent's `.create()` is the real dedup
+  // guarantee (atomic on the idempotency-key-derived doc ID) — if two
+  // concurrent calls both passed the isDuplicate check above, the loser's
+  // `.create()` throws ALREADY_EXISTS here rather than silently double-storing.
+  try {
+    const eventId = await storeCreditEvent(event);
+    return finishIngest(event, eventId, options);
+  } catch (err: unknown) {
+    const code = (err as { code?: number | string })?.code;
+    if (code === 6 || code === "already-exists" || code === "ALREADY_EXISTS") {
+      return { success: true, deduplicated: true };
+    }
+    throw err;
+  }
+}
+
+async function finishIngest(
+  event: CreditEventInput,
+  eventId: string,
+  options?: { forwardToHCS?: boolean },
+): Promise<IngestResult> {
 
   // Step 4: Optional HCS forward (non-blocking)
   if (options?.forwardToHCS && isHCSConfigured()) {

@@ -7,13 +7,17 @@
     "dev": "node --watch index.mjs",
     "test": "node --test test/hub.test.mjs"
   },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "qs": "^6.16.0"
+  },
   "dependencies": {
-    "@google-cloud/pubsub": "^5.3.0",
+    "@google-cloud/pubsub": "^6.1.0",
     "cors": "^2.8.5",
     "dotenv": "^17.3.1",
     "express": "^4.21.0",
     "firebase": "^12.8.0",
-    "firebase-admin": "^13.7.0",
+    "firebase-admin": "^14.5.0",
     "ioredis": "^5.10.0",
     "ws": "^8.18.0"
   }

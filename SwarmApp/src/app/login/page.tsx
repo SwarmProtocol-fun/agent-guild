@@ -21,10 +21,14 @@ export default function LoginPage() {
     }
 
     // If not authenticated and no OAuth redirect params are present,
-    // the user shouldn't be here -> send back to landing page.
+    // the user shouldn't be here -> send back to landing page. Preserve any
+    // `redirect` param this page was given so the landing page's own
+    // auto-redirect-after-connect logic can still send the user where they
+    // meant to go, instead of silently dropping it.
     const hasOAuthParams = searchParams.has("walletId") && searchParams.has("authResult");
     if (!hasOAuthParams) {
-      router.replace("/");
+      const redirectTarget = searchParams.get("redirect");
+      router.replace(redirectTarget ? `/?redirect=${encodeURIComponent(redirectTarget)}` : "/");
     }
   }, [authenticated, loading, router, searchParams]);
 

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   BarChart3, Users, Clock, TrendingUp, Activity, Loader2, RefreshCw,
-  ArrowRight, ShieldAlert, Eye, UserPlus, Timer, Zap,
+  ArrowRight, ShieldAlert, Eye, UserPlus, Timer, Zap, DollarSign,
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -154,6 +154,18 @@ export default function AnalyticsOverviewPage() {
               icon={BarChart3}
               title="Pages"
               description="Page-level view analytics"
+            />
+            <QuickLink
+              href="/admin/analytics/performance"
+              icon={Activity}
+              title="Agent Performance"
+              description="Job/workflow success rates, agent health"
+            />
+            <QuickLink
+              href="/admin/analytics/revenue"
+              icon={DollarSign}
+              title="Revenue"
+              description="Marketplace, compute & subscription revenue"
             />
           </div>
 

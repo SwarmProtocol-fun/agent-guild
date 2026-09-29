@@ -454,7 +454,7 @@ Pre-designed, high-quality office themes with matched 3D assets. Available at an
                             └─────────────────────┘
 ```
 
-- Swarm Hub and Office Sim deployed to cloud (Netlify, Vercel, or VPS)
+- Swarm Hub and Office Sim deployed to cloud (Netlify or VPS)
 - ComfyUI on a dedicated GPU VPS (RunPod, Lambda, vast.ai) — runs headless, triggered by Studio API routes
 - Meshy API called from server-side (API key secured, never exposed to client)
 - Best for: distributed teams, CI/CD-integrated environments

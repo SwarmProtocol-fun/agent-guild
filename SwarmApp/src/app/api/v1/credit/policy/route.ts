@@ -6,7 +6,7 @@
  */
 
 import { NextRequest } from "next/server";
-import { resolveAgentPolicy } from "@/lib/auth-guard";
+import { resolveAgentPolicy, requireAgentAuth, requirePlatformAdminOrOrgMember } from "@/lib/auth-guard";
 
 export async function GET(req: NextRequest) {
     const agentId = req.nextUrl.searchParams.get("agentId");
@@ -20,6 +20,22 @@ export async function GET(req: NextRequest) {
             { error: result.error || "Unable to resolve policy" },
             { status: 404 },
         );
+    }
+
+    // Accessible by the agent itself (signed request), its org members, or platform admins.
+    // Previously this had no auth check at all — any caller could read any
+    // agent's spending caps and fraud-review flags just by knowing/guessing
+    // its Firestore doc ID.
+    const agentAuth = await requireAgentAuth(req, "GET:/v1/credit/policy");
+    const isSelf = agentAuth.ok && agentAuth.agent?.agentId === agentId;
+    if (!isSelf) {
+        const orgAuth = await requirePlatformAdminOrOrgMember(req, result.orgId || "");
+        if (!orgAuth.ok) {
+            return Response.json(
+                { error: orgAuth.error || "Not authorized to view this agent's policy" },
+                { status: orgAuth.status || 403 },
+            );
+        }
     }
 
     return Response.json({

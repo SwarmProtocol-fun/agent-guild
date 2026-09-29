@@ -3,6 +3,12 @@
 import { useSession } from "@/contexts/SessionContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { useEffect, useState } from "react";
+import { notFound } from "next/navigation";
+
+// Dev-only diagnostic page — dumps session/wallet/cookie state with no auth
+// gate. Not a secrets leak by itself, but it's an unauthenticated
+// introspection surface that shouldn't be reachable in a production build.
+const IS_PROD = process.env.NODE_ENV === "production";
 
 export default function DebugAuthPage() {
   const session = useSession();
@@ -12,6 +18,7 @@ export default function DebugAuthPage() {
 
   // Fetch session status
   useEffect(() => {
+    if (IS_PROD) return;
     fetch("/api/auth/session", { credentials: "include" })
       .then((res) => res.json())
       .then((data) => {
@@ -28,6 +35,10 @@ export default function DebugAuthPage() {
     console.log("[Debug] All cookies:", cookies);
     setCookieCheck(cookies || "No cookies found");
   }, []);
+
+  if (IS_PROD) {
+    notFound();
+  }
 
   return (
     <div className="p-8 max-w-4xl mx-auto">

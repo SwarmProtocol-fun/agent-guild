@@ -497,6 +497,7 @@ function parseMemory(id: string, d: Record<string, unknown>): MemoryEntry {
     createdByUserId: (d.createdByUserId as string) || null,
     content: (d.content as string) || "",
     embeddingRef: (d.embeddingRef as string) || null,
+    embedding: (Array.isArray(d.embedding) ? (d.embedding as number[]) : null),
     tags: (d.tags as string[]) || [],
     pinned: (d.pinned as boolean) ?? false,
     createdAt: toDate(d.createdAt),

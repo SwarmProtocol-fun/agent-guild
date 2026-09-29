@@ -21,7 +21,7 @@ export async function detectSpamFarming(
   scanRunId: string,
 ): Promise<RiskSignal[]> {
   const signals: RiskSignal[] = [];
-  const windowStart = Date.now() - 7 * 24 * 60 * 60 * 1000; // Use 7-day window for velocity
+  const windowStart = Date.now() - windowDays * 24 * 60 * 60 * 1000;
   const windowEnd = Date.now();
 
   // Query completed assignments in the org

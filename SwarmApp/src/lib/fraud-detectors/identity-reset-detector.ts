@@ -29,6 +29,7 @@ export const detectIdentityResets: PlatformWideDetector = async (
 
   // Fetch all agents
   const agentsSnap = await adminDb().collection("agents").get();
+  const agentsById = new Map(agentsSnap.docs.map((d) => [d.id, d]));
 
   // Group by wallet address
   const walletGroups = new Map<string, Array<{
@@ -71,17 +72,33 @@ export const detectIdentityResets: PlatformWideDetector = async (
     // Sort by creation time
     agents.sort((a, b) => a.createdAt - b.createdAt);
 
-    // Check for pattern: old agent with low score → new agent created
-    for (let i = 0; i < agents.length - 1; i++) {
-      const oldAgent = agents[i];
-      const newAgent = agents[i + 1];
+    // Check for pattern: any earlier agent with low score → new agent created.
+    // Compares against ALL earlier agents under the wallet, not just the
+    // immediately preceding one — an attacker who interposes one clean agent
+    // between a low-score agent and the evasive re-creation would otherwise
+    // never be flagged (agents[i] vs agents[i+1] only misses agents[i] vs
+    // agents[i+2]).
+    for (let i = 1; i < agents.length; i++) {
+      const newAgent = agents[i];
 
-      // Check if old agent had low credit score
-      if (oldAgent.creditScore >= LOW_CREDIT_THRESHOLD) continue;
+      // Find the worst-scoring qualifying prior agent within the reset window.
+      let worstOldAgent: typeof agents[number] | null = null;
+      for (let j = 0; j < i; j++) {
+        const oldAgent = agents[j];
+        if (oldAgent.creditScore >= LOW_CREDIT_THRESHOLD) continue;
 
-      // Check if new agent was created within the reset window
+        const daysBetween = (newAgent.createdAt - oldAgent.createdAt) / (1000 * 60 * 60 * 24);
+        if (daysBetween > RESET_WINDOW_DAYS * config.windowDays / 30) continue;
+
+        if (!worstOldAgent || oldAgent.creditScore < worstOldAgent.creditScore) {
+          worstOldAgent = oldAgent;
+        }
+      }
+
+      if (!worstOldAgent) continue;
+      const oldAgent = worstOldAgent;
+
       const daysBetween = (newAgent.createdAt - oldAgent.createdAt) / (1000 * 60 * 60 * 24);
-      if (daysBetween > RESET_WINDOW_DAYS * config.windowDays / 30) continue;
 
       // This looks like an identity reset
       const severity = oldAgent.creditScore < 350 ? "critical" as const : "high" as const;
@@ -128,7 +145,7 @@ export const detectIdentityResets: PlatformWideDetector = async (
     if (childIds.length < 3) continue; // Need at least 3 children to be suspicious
 
     // Check if parent has low score
-    const parentAgent = agentsSnap.docs.find((d) => d.id === parentId);
+    const parentAgent = agentsById.get(parentId);
     if (!parentAgent) continue;
 
     const parentData = parentAgent.data();
@@ -138,7 +155,7 @@ export const detectIdentityResets: PlatformWideDetector = async (
 
     // Check if children were created recently
     const recentChildren = childIds.filter((childId) => {
-      const childDoc = agentsSnap.docs.find((d) => d.id === childId);
+      const childDoc = agentsById.get(childId);
       if (!childDoc) return false;
       const createdAt = childDoc.data().createdAt?.toDate?.()?.getTime() || 0;
       return createdAt > Date.now() - config.windowDays * 24 * 60 * 60 * 1000;

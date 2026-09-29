@@ -3,7 +3,7 @@
  */
 import { NextRequest } from "next/server";
 import { getWalletAddress } from "@/lib/auth-guard";
-import { searchMemory } from "@/lib/compute/memory";
+import { hybridSearchMemory } from "@/lib/compute/memory";
 import type { MemoryScopeType } from "@/lib/compute/types";
 
 export async function POST(req: NextRequest) {
@@ -22,6 +22,6 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "scopeType and scopeId required" }, { status: 400 });
   }
 
-  const entries = await searchMemory(scopeType, scopeId, searchQuery || "", { limit });
+  const entries = await hybridSearchMemory(scopeType, scopeId, searchQuery || "", { limit });
   return Response.json({ ok: true, entries });
 }

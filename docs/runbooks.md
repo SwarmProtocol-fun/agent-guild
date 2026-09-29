@@ -272,7 +272,7 @@ redis-cli -u $REDIS_URL PING
 | `STORACHA_AGENT_KEY` | `npx ucan-key ed --json` |
 | `NEXT_PUBLIC_LINK_*` | Run `contracts/scripts/deploy.ts` first |
 
-**Staging secret inventory location:** Store all staging secrets in your secrets manager (e.g. Netlify environment variables, Vercel environment variables, or GCP Secret Manager). Never commit to git. The `.env.template` in this repo is the authoritative list of what's needed.
+**Staging secret inventory location:** Store all staging secrets in your secrets manager (e.g. Netlify environment variables or GCP Secret Manager). Never commit to git. The `.env.template` in this repo is the authoritative list of what's needed.
 
 ---
 

@@ -22,6 +22,7 @@ import {
   updateTimestamp,
   type MemorySubtype,
 } from "./memory-templates";
+import { sanitizeText, scanForSecrets } from "./secret-scanner";
 
 const COLLECTION = "agentMemories";
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -74,6 +75,23 @@ function docId(agentId: string, subtype: MemorySubtype, date?: string): string {
 function toMillis(v: unknown): number | null {
   const ts = v as { toMillis?: () => number } | undefined;
   return ts?.toMillis ? ts.toMillis() : null;
+}
+
+/** Redacts secrets out of agent-supplied content before it's persisted.
+ *  Only re-scans (`sanitizeText` internally calls `scanForSecrets` again)
+ *  when the first pass actually found something, so the common clean-input
+ *  case costs one scan, not two. Logs the target doc id + secret type on
+ *  redaction — never the matched value. Exported for direct unit testing;
+ *  callers below still pass the module-level `docId()` function's output
+ *  as `targetDocId`, not the function itself. */
+export function redactBeforePersist(raw: string, agentId: string, targetDocId: string): string {
+  const scan = scanForSecrets(raw);
+  if (scan.clean) return raw;
+  console.warn(
+    `[agent-memory] redacted ${scan.secrets.length} secret(s) before persisting`,
+    { agentId, docId: targetDocId, types: [...new Set(scan.secrets.map((s) => s.type))] },
+  );
+  return sanitizeText(raw);
 }
 
 /**
@@ -168,6 +186,7 @@ export async function getOrCreateWorkingMd(agent: AgentIdentity): Promise<Memory
 
 export async function updateWorkingMd(agent: AgentIdentity, content: string, section?: string): Promise<MemoryDoc> {
   const id = docId(agent.agentId, "working_md");
+  content = redactBeforePersist(content, agent.agentId, id);
   const ref = adminDb().collection(COLLECTION).doc(id);
   return adminDb().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -212,6 +231,7 @@ export async function getOrCreateMemoryMd(agent: AgentIdentity): Promise<MemoryD
 export async function appendMemoryMd(agent: AgentIdentity, entry: string, section?: string): Promise<MemoryDoc> {
   if (section) assertAllowedSection("memory_md", section);
   const id = docId(agent.agentId, "memory_md");
+  entry = redactBeforePersist(entry, agent.agentId, id);
   const ref = adminDb().collection(COLLECTION).doc(id);
   return adminDb().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -264,6 +284,7 @@ export async function appendDailyNote(agent: AgentIdentity, date: string, entry:
   assertValidDate(date);
   if (section) assertAllowedSection("daily_note", section);
   const id = docId(agent.agentId, "daily_note", date);
+  entry = redactBeforePersist(entry, agent.agentId, id);
   const ref = adminDb().collection(COLLECTION).doc(id);
   return adminDb().runTransaction(async (tx) => {
     const snap = await tx.get(ref);

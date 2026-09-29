@@ -167,9 +167,13 @@ async function routeCoord(db, message, broadcastToAgent, log) {
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Increment coordinator load
+  // Increment coordinator load atomically — a read-modify-write off the
+  // `coordinator` snapshot read at the top of this function loses updates
+  // under concurrent `coord` messages to the same coordinator (exactly the
+  // condition the capacity check above exists to guard against), letting
+  // currentLoad under-count and a coordinator silently exceed maxConcurrentTasks.
   await coordSnap.docs[0].ref.update({
-    currentLoad: coordinator.currentLoad + 1,
+    currentLoad: admin.firestore.FieldValue.increment(1),
   });
 
   log("info", "Coord message routed", {

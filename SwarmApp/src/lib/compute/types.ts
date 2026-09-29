@@ -419,7 +419,15 @@ export interface MemoryEntry {
   agentId: string | null;
   createdByUserId: string | null;
   content: string;
+  /** SHA-256 hex digest of `content` — lets a write path skip re-embedding
+   *  identical content (Context Vault PRD §4.2/§123). Not a pointer to a
+   *  vector store; the vector itself lives in `embedding` below. */
   embeddingRef: string | null;
+  /** Populated by rememberMemory() when an embedding provider is
+   *  configured; null otherwise. A memory with a null embedding is still
+   *  fully searchable via substring match, just not semantic ranking —
+   *  see hybridSearchMemory() in compute/memory.ts. */
+  embedding: number[] | null;
   tags: string[];
   pinned: boolean;
   createdAt: Date | null;

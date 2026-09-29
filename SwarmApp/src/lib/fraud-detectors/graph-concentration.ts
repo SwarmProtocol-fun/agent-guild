@@ -61,9 +61,11 @@ export async function detectGraphConcentration(
     }
   }
 
-  // Source 2: Validation Stakes
+  // Source 2: Validation Stakes, scoped to this org only (see
+  // cross-validation-abuse.ts for why: an unfiltered read leaks/mislabels
+  // other orgs' validator data).
   try {
-    const stakesSnap = await adminDb().collection("validationStakes").get();
+    const stakesSnap = await adminDb().collection("validationStakes").where("orgId", "==", orgId).get();
 
     for (const d of stakesSnap.docs) {
       const data = d.data();

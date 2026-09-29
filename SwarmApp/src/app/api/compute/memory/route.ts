@@ -4,7 +4,8 @@
  */
 import { NextRequest } from "next/server";
 import { getWalletAddress } from "@/lib/auth-guard";
-import { getMemoryEntries, createMemoryEntry } from "@/lib/compute/firestore";
+import { getMemoryEntries } from "@/lib/compute/firestore";
+import { rememberMemory } from "@/lib/compute/memory";
 import type { MemoryScopeType } from "@/lib/compute/types";
 
 export async function GET(req: NextRequest) {
@@ -48,7 +49,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "tags must be an array with at most 20 items" }, { status: 400 });
   }
 
-  const id = await createMemoryEntry({
+  const id = await rememberMemory({
     scopeType,
     scopeId,
     workspaceId: workspaceId || null,
@@ -56,7 +57,6 @@ export async function POST(req: NextRequest) {
     agentId: agentId || null,
     createdByUserId: wallet,
     content,
-    embeddingRef: null,
     tags: tags || [],
     pinned: pinned ?? false,
   });

@@ -200,6 +200,12 @@ function LandingPageContent() {
               Deploy projects, assign tasks, and monitor performance with the ultimate enterprise command center.
             </p>
 
+            {redirectParam && !authenticated && !loading && (
+              <p className="mb-6 text-sm text-amber-400/90 pointer-events-auto animate-in delay-200">
+                Connect your wallet to continue to {redirectParam}
+              </p>
+            )}
+
             <div className="flex flex-col sm:flex-row items-center justify-center gap-6 animate-in delay-300 pointer-events-auto">
               {authenticated && !loading ? (
                 <Link href="/dashboard">

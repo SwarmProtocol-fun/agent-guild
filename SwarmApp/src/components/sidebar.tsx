@@ -857,7 +857,7 @@ export function Sidebar() {
                       >
                         {isActive && <span className={cn("absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 rounded-full", colors.activeBar)} />}
                         <item.icon className="shrink-0 h-4 w-4" />
-                        <span className="truncate">{item.label}</span>
+                        <span className="flex-1 min-w-0 truncate">{item.label}</span>
                         <button
                           onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleFavorite(item.id); }}
                           className="ml-auto text-amber-400 hover:text-amber-300"
@@ -1011,7 +1011,7 @@ export function Sidebar() {
                           )}
                           {!normalizedQuery && <GripVertical className="h-2.5 w-2.5 text-muted-foreground/20 group-hover/item:text-muted-foreground/60 transition-colors shrink-0 cursor-grab active:cursor-grabbing" />}
                           <item.icon className="shrink-0 h-4 w-4" />
-                          <span className="truncate">{item.label}</span>
+                          <span className="flex-1 min-w-0 truncate">{item.label}</span>
                           <div className="ml-auto flex items-center gap-1">
                             {item.maturity && item.maturity !== "production" && <MaturityBadge level={item.maturity} />}
                             {item.badge && (
@@ -1059,7 +1059,7 @@ export function Sidebar() {
                             )}
                           >
                             <child.icon className="shrink-0 h-3.5 w-3.5" />
-                            <span className="truncate">{child.label}</span>
+                            <span className="flex-1 min-w-0 truncate">{child.label}</span>
                           </Link>
                         </div>
                       );
@@ -1100,7 +1100,7 @@ export function Sidebar() {
                 <span className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 rounded-full bg-amber-500" />
               )}
               <item.icon className={cn("shrink-0", collapsed ? "h-4.5 w-4.5" : "h-4 w-4")} />
-              {!collapsed && <span className="truncate">{item.label}</span>}
+              {!collapsed && <span className="flex-1 min-w-0 truncate">{item.label}</span>}
             </Link>
           );
           return collapsed ? (

@@ -23,7 +23,7 @@ export async function detectLowValueGrinding(
   scanRunId: string,
 ): Promise<RiskSignal[]> {
   const signals: RiskSignal[] = [];
-  const windowStart = Date.now() - 14 * 24 * 60 * 60 * 1000; // 14-day window
+  const windowStart = Date.now() - windowDays * 24 * 60 * 60 * 1000;
   const windowEnd = Date.now();
 
   // Query completed assignments in the org

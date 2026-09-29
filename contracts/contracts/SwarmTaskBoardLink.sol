@@ -16,7 +16,7 @@ contract SwarmTaskBoardLink is Ownable {
 
     IERC20 public immutable linkToken;
 
-    enum TaskStatus { Open, Claimed, Completed, Expired, Disputed }
+    enum TaskStatus { Open, Claimed, Completed, Expired, Disputed, Refunded }
 
     struct Task {
         uint256 taskId;
@@ -40,6 +40,8 @@ contract SwarmTaskBoardLink is Ownable {
     event DeliverySubmitted(uint256 indexed taskId, address indexed agent, bytes32 deliveryHash, uint256 timestamp);
     event DeliveryApproved(uint256 indexed taskId, address indexed agent, uint256 payout, uint256 timestamp);
     event DeliveryDisputed(uint256 indexed taskId, address indexed poster, uint256 timestamp);
+    event TaskExpiredReclaimed(uint256 indexed taskId, address indexed poster, uint256 refund, uint256 timestamp);
+    event DisputeResolved(uint256 indexed taskId, address indexed resolver, bool paidAgent, uint256 amount, uint256 timestamp);
 
     constructor(address _linkToken) Ownable(msg.sender) {
         require(_linkToken != address(0), "Invalid LINK address");
@@ -134,6 +136,57 @@ contract SwarmTaskBoardLink is Ownable {
         task.status = uint8(TaskStatus.Disputed);
 
         emit DeliveryDisputed(taskId, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice Reclaim escrowed LINK on a task that expired without ever
+     *         being delivered — either nobody claimed it, or the agent who
+     *         claimed it never submitted delivery before the deadline.
+     *         Only the original poster can reclaim, and only their own
+     *         escrow. Once delivery has been submitted, the poster must use
+     *         approveDelivery/disputeDelivery instead — reclaim is not a way
+     *         to unilaterally cut off an agent who already did the work.
+     * @param taskId The task to reclaim
+     */
+    function reclaimExpired(uint256 taskId) external {
+        require(taskId < tasks.length, "Invalid task");
+        Task storage task = tasks[taskId];
+        require(task.poster == msg.sender, "Only poster can reclaim");
+        require(block.timestamp > task.deadline, "Not yet expired");
+        require(
+            task.status == uint8(TaskStatus.Open) ||
+            (task.status == uint8(TaskStatus.Claimed) && task.deliveryHash == bytes32(0)),
+            "Not reclaimable"
+        );
+
+        uint256 refund = task.budget;
+        task.status = uint8(TaskStatus.Expired);
+
+        linkToken.safeTransfer(task.poster, refund);
+
+        emit TaskExpiredReclaimed(taskId, task.poster, refund, block.timestamp);
+    }
+
+    /**
+     * @notice Resolve a disputed task: pay the claiming agent (if the
+     *         dispute is rejected) or refund the poster (if it's upheld).
+     *         Owner-gated (platform arbitrator) — same trust model already
+     *         used for the registry/treasury contracts' privileged actions.
+     * @param taskId The disputed task to resolve
+     * @param payAgent true to pay the agent their budget, false to refund the poster
+     */
+    function resolveDispute(uint256 taskId, bool payAgent) external onlyOwner {
+        require(taskId < tasks.length, "Invalid task");
+        Task storage task = tasks[taskId];
+        require(task.status == uint8(TaskStatus.Disputed), "Not disputed");
+
+        uint256 amount = task.budget;
+        address recipient = payAgent ? task.claimedBy : task.poster;
+        task.status = uint8(payAgent ? TaskStatus.Completed : TaskStatus.Refunded);
+
+        linkToken.safeTransfer(recipient, amount);
+
+        emit DisputeResolved(taskId, msg.sender, payAgent, amount, block.timestamp);
     }
 
     function getTask(uint256 taskId) external view returns (Task memory) {
