@@ -17,6 +17,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../../../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../../../webhooks/auth";
 import { recordHeartbeat } from "@/lib/heartbeat";
 
@@ -43,6 +44,7 @@ export async function POST(
 
     let resolvedAgentId: string = pathAgentId;
     let resolvedOrgId: string | null = orgId;
+    let resolvedAuthMethod: "ed25519" | "apikey";
 
     if (agent && sig && ts) {
         const tsNum = parseInt(ts, 10);
@@ -54,6 +56,7 @@ export async function POST(
 
         resolvedAgentId = verified.agentId || pathAgentId;
         resolvedOrgId = resolvedOrgId || verified.orgId || null;
+        resolvedAuthMethod = "ed25519";
     } else {
         const paramAgentId = url.searchParams.get("agentId");
         const apiKey = url.searchParams.get("apiKey");
@@ -61,11 +64,19 @@ export async function POST(
         if (!auth) return webhookUnauthorized();
         resolvedAgentId = auth.agentId || pathAgentId;
         resolvedOrgId = resolvedOrgId || auth.orgId || null;
+        resolvedAuthMethod = "apikey";
     }
 
     if (!resolvedOrgId) {
         return Response.json({ error: "orgId is required" }, { status: 400 });
     }
+    logAgentCall({
+        agentId: resolvedAgentId,
+        orgId: resolvedOrgId,
+        authMethod: resolvedAuthMethod,
+        method: "POST",
+        endpoint: "/v1/agents/[id]/heartbeat",
+    });
 
     const agentName = typeof body.agentName === "string" ? body.agentName : undefined;
     const latencyMs = typeof body.latencyMs === "number" ? body.latencyMs : undefined;

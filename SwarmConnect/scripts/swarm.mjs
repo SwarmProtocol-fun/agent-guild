@@ -46,6 +46,13 @@ const SKILL_DIR = join(__dirname, "..");
 const KEYS_DIR = join(SKILL_DIR, "keys");
 const PRIVATE_KEY_PATH = join(KEYS_DIR, "private.pem");
 const PUBLIC_KEY_PATH = join(KEYS_DIR, "public.pem");
+// Vault keypair — separate from the Ed25519 signing key above. X25519 was
+// chosen because Node's built-in crypto module generates and derives with
+// it natively (generateKeyPairSync("x25519", ...)); Ed25519 keys have no
+// built-in conversion to a Diffie-Hellman-capable curve. Zero new
+// dependencies, matching this package's existing zero-dependency footprint.
+const VAULT_PRIVATE_KEY_PATH = join(KEYS_DIR, "vault-private.pem");
+const VAULT_PUBLIC_KEY_PATH = join(KEYS_DIR, "vault-public.pem");
 const STATE_PATH = join(SKILL_DIR, "state.json");
 const CONFIG_PATH = join(SKILL_DIR, "config.json");
 

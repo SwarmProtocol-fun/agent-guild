@@ -8,6 +8,7 @@
 import { NextRequest } from "next/server";
 import crypto from "crypto";
 import { requireAgentAuth } from "@/lib/auth-guard";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../../rate-limit";
 import { getOrCreateDailyNote, appendDailyNote, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -34,6 +35,13 @@ export async function GET(request: NextRequest) {
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "GET",
+    endpoint: "/v1/memory/daily",
+  });
 
   try {
     const doc = await getOrCreateDailyNote(auth.agent, date);
@@ -60,6 +68,13 @@ export async function POST(request: NextRequest) {
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "POST",
+    endpoint: "/v1/memory/daily",
+  });
 
   let body: { entry?: string; section?: string; date?: string };
   try {

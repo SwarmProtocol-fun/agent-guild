@@ -1,18 +1,18 @@
 /**
- * Agent Call Log — comprehensive, low-footprint record of every
- * agent-authenticated request through the platform.
+ * Agent Call Log — record of agent-authenticated requests through the
+ * platform, called directly from each /v1/* and gateway route.ts file
+ * right after a successful requireAgentAuth/verifyAgentRequest/
+ * authenticateAgent/requireGatewayAuth check.
  *
- * Rather than instrument every /v1/* route individually, this hooks into
- * the two shared auth primitives every agent-authenticated route already
- * funnels through: verifyAgentRequest() (Ed25519) in src/app/api/v1/verify.ts
- * and authenticateAgent() (API key) in src/app/api/webhooks/auth.ts, plus
- * requireGatewayAuth() in src/lib/auth-guard.ts for gateway workers. A
- * single successful auth = one logged call, agnostic of which of the ~20
- * routes it hit.
- *
- * Ed25519 callers sign a message of the form "{METHOD}:{path}:...", so the
- * endpoint can be recovered for free; API-key callers have no such message,
- * so their calls are logged without an endpoint (still counted).
+ * IMPORTANT: this must NOT be imported from src/app/api/v1/verify.ts,
+ * src/app/api/webhooks/auth.ts, or src/lib/auth-guard.ts. Those three are
+ * reachable from a client bundle via a pre-existing dynamic-import chain
+ * (src/lib/firestore.ts's `await import("@/lib/auth-guard")`, used by the
+ * client-side OrgContext), so they must stay free of any Admin SDK
+ * dependency — this module imports firebase-admin, which pulls in
+ * grpc/tls/net and breaks the browser build if reached from there. Route
+ * handlers under src/app/api are never client-bundled, so calling this from
+ * a route.ts file (after auth already succeeded) is the safe place.
  *
  * Fire-and-forget — logAgentCall() is never awaited by its callers, so a
  * slow/failed write never adds latency or errors to the actual API request.
@@ -25,7 +25,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
 const COLLECTION = "agentCallLog";
 
-export type AgentAuthMethod = "ed25519" | "apikey" | "gateway";
+export type AgentAuthMethod = "ed25519" | "apikey" | "gateway" | "unknown";
 
 export interface AgentCallLogInput {
   agentId: string;

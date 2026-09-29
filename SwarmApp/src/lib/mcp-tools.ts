@@ -48,6 +48,17 @@ export interface McpRememberArgs {
   scopeId?: string;
   tags?: string[];
   pinned?: boolean;
+  /** True when `content` is ciphertext the calling agent produced itself
+   *  (AES-256-GCM, key derived locally from its X25519 vault keypair — see
+   *  docs/PRD-Context-Vault.md §5). Requires `iv`/`authTag`; the server
+   *  stores and returns the blob as-is and never attempts to decrypt it. */
+  encrypted?: boolean;
+  iv?: string;
+  authTag?: string;
+  /** Only meaningful when `encrypted` is true — the agent's own embedding
+   *  of its plaintext, computed before encrypting, since the server never
+   *  sees plaintext to embed for these entries. */
+  embedding?: number[];
 }
 
 export async function mcpRemember(agent: AgentIdentity, args: McpRememberArgs): Promise<{ id: string }> {
@@ -60,10 +71,16 @@ export async function mcpRemember(agent: AgentIdentity, args: McpRememberArgs): 
   if (args.tags && (!Array.isArray(args.tags) || args.tags.length > MAX_TAGS)) {
     throw new McpToolInputError(`tags must be an array of at most ${MAX_TAGS} items`);
   }
+  if (args.encrypted && (!args.iv || !args.authTag)) {
+    throw new McpToolInputError("encrypted content requires iv and authTag");
+  }
 
   const scopeType = args.scopeType ?? "agent";
   const scopeId = args.scopeId ?? agent.agentId;
-  const content = redactBeforePersist(args.content, agent.agentId);
+  // Secret-scanning a ciphertext blob is meaningless (it's uniform random
+  // bytes to the scanner) and would only produce false positives — the
+  // redaction discipline only applies to plaintext the server can read.
+  const content = args.encrypted ? args.content : redactBeforePersist(args.content, agent.agentId);
 
   const id = await rememberMemory({
     scopeType,
@@ -75,6 +92,7 @@ export async function mcpRemember(agent: AgentIdentity, args: McpRememberArgs): 
     content,
     tags: args.tags ?? [],
     pinned: args.pinned ?? false,
+    ...(args.encrypted ? { encrypted: true, iv: args.iv, authTag: args.authTag, precomputedEmbedding: args.embedding ?? null } : {}),
   });
   return { id };
 }
@@ -88,7 +106,13 @@ export interface McpRecallArgs {
 
 export interface McpRecallResult {
   id: string;
+  /** Ciphertext when `encrypted` is true — the caller must decrypt it
+   *  locally with its own derived content key; the server never has and
+   *  never returns a decrypted version. */
   content: string;
+  encrypted: boolean;
+  iv: string | null;
+  authTag: string | null;
   score: number;
   matchType: "semantic" | "substring" | "both";
   tags: string[];
@@ -108,6 +132,9 @@ export async function mcpRecall(agent: AgentIdentity, args: McpRecallArgs): Prom
     results: scored.map((m) => ({
       id: m.id,
       content: m.content,
+      encrypted: m.encrypted,
+      iv: m.iv,
+      authTag: m.authTag,
       score: m.score,
       matchType: m.matchType,
       tags: m.tags,

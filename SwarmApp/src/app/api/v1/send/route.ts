@@ -9,6 +9,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../rate-limit";
 import { getRedis } from "@/lib/redis";
 import { adminDb } from "@/lib/firebase-admin";
@@ -156,6 +157,13 @@ export async function POST(request: NextRequest) {
     const signedMessage = `POST:/v1/send:${channelId}:${text || ""}:${attachHash}:${nonce}`;
     const agentData = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agentData) return unauthorized();
+    logAgentCall({
+        agentId: agentData.agentId,
+        orgId: agentData.orgId,
+        authMethod: "ed25519",
+        method: "POST",
+        endpoint: "/v1/send",
+    });
 
     // Nonce already recorded atomically in checkAndRecordNonce above
 

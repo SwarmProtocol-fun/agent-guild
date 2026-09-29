@@ -3,17 +3,22 @@
  * POST /api/compute/memory                                   — Create memory entry
  */
 import { NextRequest } from "next/server";
-import { getWalletAddress } from "@/lib/auth-guard";
+import crypto from "crypto";
+import { requireWalletOrAgentIdentity } from "@/lib/agent-identity-guard";
 import { getMemoryEntries } from "@/lib/compute/firestore";
 import { rememberMemory } from "@/lib/compute/memory";
 import type { MemoryScopeType } from "@/lib/compute/types";
 
 export async function GET(req: NextRequest) {
-  const wallet = getWalletAddress(req);
-  if (!wallet) return Response.json({ error: "Authentication required" }, { status: 401 });
+  const auth = await requireWalletOrAgentIdentity(req, "GET:/compute/memory");
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status || 401 });
 
-  const scopeType = req.nextUrl.searchParams.get("scopeType") as MemoryScopeType | null;
-  const scopeId = req.nextUrl.searchParams.get("scopeId");
+  // Agent callers default to their own agent-scoped memories — mirrors
+  // mcpRecall's own defaulting (mcp-tools.ts) so the REST and MCP onramps
+  // behave the same way for an agent that omits scope.
+  const scopeType = (req.nextUrl.searchParams.get("scopeType") as MemoryScopeType | null)
+    ?? (auth.agent ? "agent" : null);
+  const scopeId = req.nextUrl.searchParams.get("scopeId") ?? (auth.agent ? auth.agent.agentId : null);
 
   if (!scopeType || !scopeId) {
     return Response.json({ error: "scopeType and scopeId required" }, { status: 400 });
@@ -29,11 +34,33 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const wallet = getWalletAddress(req);
-  if (!wallet) return Response.json({ error: "Authentication required" }, { status: 401 });
+  // Read raw text first (not req.json()) so an Ed25519-signing caller's
+  // body-hash binding — signedBodyRequest() in SwarmConnect's CLI, same
+  // convention as PUT /v1/memory/working — verifies against exactly the
+  // bytes that arrived, not a re-serialized copy.
+  const rawBody = await req.text();
+  const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
 
-  const body = await req.json();
-  const { scopeType, scopeId, content, tags, workspaceId, computerId, agentId, pinned } = body;
+  const auth = await requireWalletOrAgentIdentity(req, `POST:/compute/memory:${bodyHash}`);
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status || 401 });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- JSON.parse is `any` by design; matches this route's pre-existing req.json() typing
+  let body: any;
+  try {
+    body = JSON.parse(rawBody || "{}");
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const { content, tags, workspaceId, computerId, pinned, encrypted, iv, authTag, embedding } = body;
+  let { scopeType, scopeId, agentId } = body as { scopeType?: MemoryScopeType; scopeId?: string; agentId?: string };
+
+  // Agent callers (Ed25519/API-key, no wallet session) default to writing
+  // into their own agent scope, same as the MCP onramp's context_remember.
+  if (auth.agent) {
+    scopeType = scopeType ?? "agent";
+    scopeId = scopeId ?? auth.agent.agentId;
+    agentId = agentId ?? auth.agent.agentId;
+  }
 
   if (!scopeType || !scopeId || !content) {
     return Response.json({ error: "scopeType, scopeId, and content are required" }, { status: 400 });
@@ -48,6 +75,9 @@ export async function POST(req: NextRequest) {
   if (tags && (!Array.isArray(tags) || tags.length > 20)) {
     return Response.json({ error: "tags must be an array with at most 20 items" }, { status: 400 });
   }
+  if (encrypted && (!iv || !authTag)) {
+    return Response.json({ error: "encrypted content requires iv and authTag" }, { status: 400 });
+  }
 
   const id = await rememberMemory({
     scopeType,
@@ -55,10 +85,11 @@ export async function POST(req: NextRequest) {
     workspaceId: workspaceId || null,
     computerId: computerId || null,
     agentId: agentId || null,
-    createdByUserId: wallet,
+    createdByUserId: auth.walletAddress || null,
     content,
     tags: tags || [],
     pinned: pinned ?? false,
+    ...(encrypted ? { encrypted: true, iv, authTag, precomputedEmbedding: embedding ?? null } : {}),
   });
 
   return Response.json({ ok: true, id }, { status: 201 });

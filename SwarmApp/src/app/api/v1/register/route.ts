@@ -17,17 +17,39 @@ import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { agentCheckIn, getOrganization } from "@/lib/firestore-admin";
 import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
-import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/swarm-contracts";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
-import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
+import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory, issueAgentIdentity } from "@/lib/mod-stubs";
 import { getWalletAddress } from "@/lib/auth-guard";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
-// [swarm-core] Hedera integration removed — install swarm-hedera mod
+import { mintIdentityOnChains, supportedIdentityChains, type IdentityMintReceipt } from "@/lib/identity/registry";
 
-const HEDERA_TESTNET_RPC = "https://testnet.hashio.io/api";
+/** Chains the caller can mint the agent's ASN identity NFT on at birth — defaults to all of them. */
+function resolveChainChoice(body: Record<string, unknown>): string[] {
+    const supported = supportedIdentityChains();
+    const raw = body.chainChoice;
+    const requested = Array.isArray(raw)
+        ? raw.filter((c): c is string => typeof c === "string")
+        : typeof raw === "string" && raw !== "both"
+            ? [raw]
+            : supported;
+    const chosen = requested.filter((c) => supported.includes(c));
+    return chosen.length > 0 ? chosen : supported;
+}
+
+/** Applies a mintIdentityOnChains() result to an agent's Firestore doc fields. */
+function identityUpdateFields(receipts: IdentityMintReceipt[]): Record<string, unknown> {
+    if (receipts.length === 0) return {};
+    const identityMints = Object.fromEntries(
+        receipts.map((r) => [r.chain, { txSig: r.txSig, tokenId: r.tokenId ?? null, explorerUrl: r.explorerUrl }]),
+    );
+    return {
+        identityMints,
+        onChainRegistered: true,
+        onChainTxHash: receipts[0].txSig,
+    };
+}
 
 /**
  * Derive a deterministic Ethereum address from an Ed25519 public key.
@@ -46,93 +68,6 @@ function deriveAgentAddress(publicKeyPem: string): string {
 
     // Take last 20 bytes as Ethereum address
     return ethers.getAddress('0x' + hash.slice(-40));
-}
-
-/** Attempt on-chain registration on Hedera Testnet using platform wallet */
-async function registerOnChain(
-    agentName: string,
-    asn: string,
-    skills: string,
-    publicKey: string,
-): Promise<{ txHash: string } | null> {
-    const privateKey = process.env.HEDERA_PLATFORM_KEY;
-    if (!privateKey) return null;
-    try {
-        const provider = new ethers.JsonRpcProvider(HEDERA_TESTNET_RPC);
-        const wallet = new ethers.Wallet(privateKey, provider);
-        const registry = new ethers.Contract(
-            HEDERA_CONTRACTS.AGENT_REGISTRY,
-            AGENT_REGISTRY_ABI,
-            wallet,
-        );
-
-        // Derive unique agent address from public key
-        const agentAddress = deriveAgentAddress(publicKey);
-
-        // Use registerAgentFor to register with the agent's derived address
-        const tx = await registry.registerAgentFor(
-            agentAddress,
-            `${agentName} | ${asn}`,
-            skills,
-            asn,
-            0,
-            { gasLimit: HEDERA_GAS_LIMIT, type: 0 },
-        );
-        const receipt = await tx.wait();
-        return { txHash: receipt.hash };
-    } catch (err) {
-        console.error("On-chain registration failed (non-fatal):", err);
-        return null;
-    }
-}
-
-/** Mint a Soulbound Identity NFT for the agent on Hedera Testnet (platform-sponsored) */
-async function mintIdentityNFT(
-    agentAddress: string,
-    asn: string,
-    creditScore: number,
-    trustScore: number,
-): Promise<{ txHash: string; tokenId?: string } | null> {
-    const privateKey = process.env.HEDERA_PLATFORM_KEY;
-    if (!privateKey) return null;
-    try {
-        const provider = new ethers.JsonRpcProvider(HEDERA_TESTNET_RPC);
-        const wallet = new ethers.Wallet(privateKey, provider);
-        const nftContract = new ethers.Contract(
-            CONTRACTS.AGENT_IDENTITY_NFT,
-            AGENT_IDENTITY_NFT_ABI,
-            wallet,
-        );
-
-        // Check if agent already has an NFT (idempotent)
-        const hasNFT = await nftContract.hasNFT(agentAddress);
-        if (hasNFT) return null; // Already minted
-
-        const tx = await nftContract.mintAgentNFT(
-            agentAddress,
-            asn,
-            Math.min(Math.max(creditScore, 300), 900), // clamp 300-900
-            Math.min(Math.max(trustScore, 0), 100),     // clamp 0-100
-            { gasLimit: HEDERA_GAS_LIMIT, type: 0 },
-        );
-        const receipt = await tx.wait();
-
-        // Extract tokenId from logs if available
-        let tokenId: string | undefined;
-        for (const log of receipt.logs) {
-            try {
-                const parsed = nftContract.interface.parseLog({ topics: log.topics as string[], data: log.data });
-                if (parsed?.name === "AgentNFTMinted") {
-                    tokenId = parsed.args.tokenId?.toString();
-                }
-            } catch { /* skip non-matching logs */ }
-        }
-
-        return { txHash: receipt.hash, tokenId };
-    } catch (err) {
-        console.error("NFT mint failed (non-fatal):", err);
-        return null;
-    }
 }
 
 /**
@@ -202,6 +137,12 @@ export async function POST(request: NextRequest) {
     const inviteCode = body.inviteCode as string | undefined;
     const skills = sanitizeSkills(body.skills);
     const bio = typeof body.bio === "string" ? body.bio.slice(0, 500) : undefined;
+    // X25519 public key (SwarmConnect's vault keypair) — optional so older
+    // clients keep working; an agent that omits it simply has no vault
+    // encryption capability recorded yet (backfillable on a later register).
+    const vaultPublicKey = typeof body.vaultPublicKey === "string" && body.vaultPublicKey.includes("BEGIN PUBLIC KEY")
+        ? body.vaultPublicKey
+        : null;
 
     if (!publicKey || !agentName || !orgId) {
         return Response.json(
@@ -245,6 +186,9 @@ export async function POST(request: NextRequest) {
             { status: 400 }
         );
     }
+
+    // Which chain(s) to mint this agent's ASN identity NFT on at birth — caller's choice, defaults to all.
+    const chosenChains = resolveChainChoice(body);
 
     try {
         // Check if this public key is already registered
@@ -301,28 +245,18 @@ export async function POST(request: NextRequest) {
                 });
             }
 
-            // If not yet on-chain, sponsor registration now
+            // Mint the ASN identity NFT on the chosen chain(s) if not yet minted (non-blocking)
             if (!existingData.onChainRegistered) {
-                const skillStr = (skills.length > 0 ? skills.map(s => s.name).join(",") : existingData.reportedSkills?.map((s: { name: string }) => s.name).join(",")) || "general";
-                registerOnChain(existingData.name || agentName, existingAsn, skillStr, publicKey).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(existingDoc.id).update({
-                            onChainTxHash: result.txHash,
-                            onChainRegistered: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Mint Identity NFT if not yet minted (non-blocking)
-            if (!existingData.hederaNftMinted) {
-                mintIdentityNFT(agentAddress, existingAsn, existingData.creditScore ?? 680, existingData.trustScore ?? 50).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(existingDoc.id).update({
-                            hederaNftTxHash: result.txHash,
-                            hederaNftTokenId: result.tokenId || null,
-                            hederaNftMinted: true,
-                        });
+                mintIdentityOnChains(chosenChains, {
+                    agentAddress,
+                    asn: existingAsn,
+                    agentName: existingData.name || agentName,
+                    creditScore: existingData.creditScore ?? 680,
+                    trustScore: existingData.trustScore ?? 50,
+                }).then(async ({ receipts }) => {
+                    const fields = identityUpdateFields(receipts);
+                    if (Object.keys(fields).length > 0) {
+                        await adminDb().collection("agents").doc(existingDoc.id).update(fields);
                     }
                 }).catch(() => {});
             }
@@ -336,6 +270,11 @@ export async function POST(request: NextRequest) {
                 emitSkillReport(existingAsn, agentAddress, skills.map(s => s.name)).catch(() => {});
             }
 
+            // Issue (or refresh) the core-native identity credential
+            // synchronously — this is what gates vault access, independent
+            // of whether the chain-specific NFT mints above ever land.
+            const existingIdentity = await issueAgentIdentity(existingDoc.id, agentAddress, existingAsn, vaultPublicKey);
+
             return Response.json({
                 agentId: existingDoc.id,
                 agentName: existingData.name || agentName,
@@ -344,7 +283,8 @@ export async function POST(request: NextRequest) {
                 registered: true,
                 existing: true,
                 reportedSkills: skills.length,
-                chain: existingData.onChainRegistered ? undefined : "hedera-testnet",
+                chains: existingData.onChainRegistered ? undefined : chosenChains,
+                identity: { tokenId: existingIdentity.tokenId, vaultPublicKey: existingIdentity.vaultPublicKey },
                 briefing: PLATFORM_BRIEFING,
                 ...(restoreResult.restored ? {
                     restored: true,
@@ -412,28 +352,18 @@ export async function POST(request: NextRequest) {
                 });
             }
 
-            // If not yet on-chain, sponsor registration now
+            // Mint the ASN identity NFT on the chosen chain(s) if not yet minted (non-blocking)
             if (!matchedData.onChainRegistered) {
-                const skillStr = (skills.length > 0 ? skills.map(s => s.name).join(",") : matchedData.reportedSkills?.map((s: { name: string }) => s.name).join(",")) || "general";
-                registerOnChain(matchedData.name || agentName, matchedAsn, skillStr, publicKey).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(matchedDoc.id).update({
-                            onChainTxHash: result.txHash,
-                            onChainRegistered: true,
-                        });
-                    }
-                }).catch(() => {});
-            }
-
-            // Mint Identity NFT if not yet minted (non-blocking)
-            if (!matchedData.hederaNftMinted) {
-                mintIdentityNFT(agentAddress, matchedAsn, matchedData.creditScore ?? 680, matchedData.trustScore ?? 50).then(async (result) => {
-                    if (result) {
-                        await adminDb().collection("agents").doc(matchedDoc.id).update({
-                            hederaNftTxHash: result.txHash,
-                            hederaNftTokenId: result.tokenId || null,
-                            hederaNftMinted: true,
-                        });
+                mintIdentityOnChains(chosenChains, {
+                    agentAddress,
+                    asn: matchedAsn,
+                    agentName: matchedData.name || agentName,
+                    creditScore: matchedData.creditScore ?? 680,
+                    trustScore: matchedData.trustScore ?? 50,
+                }).then(async ({ receipts }) => {
+                    const fields = identityUpdateFields(receipts);
+                    if (Object.keys(fields).length > 0) {
+                        await adminDb().collection("agents").doc(matchedDoc.id).update(fields);
                     }
                 }).catch(() => {});
             }
@@ -447,6 +377,8 @@ export async function POST(request: NextRequest) {
                 emitSkillReport(matchedAsn, agentAddress, skills.map(s => s.name)).catch(() => {});
             }
 
+            const matchedIdentity = await issueAgentIdentity(matchedDoc.id, agentAddress, matchedAsn, vaultPublicKey);
+
             return Response.json({
                 agentId: matchedDoc.id,
                 agentName: matchedData.name || agentName,
@@ -455,7 +387,8 @@ export async function POST(request: NextRequest) {
                 registered: true,
                 existing: true,
                 reportedSkills: skills.length,
-                chain: matchedData.onChainRegistered ? undefined : "hedera-testnet",
+                chains: matchedData.onChainRegistered ? undefined : chosenChains,
+                identity: { tokenId: matchedIdentity.tokenId, vaultPublicKey: matchedIdentity.vaultPublicKey },
                 briefing: PLATFORM_BRIEFING,
                 ...(restoreResult.restored ? {
                     restored: true,
@@ -475,8 +408,6 @@ export async function POST(request: NextRequest) {
             console.warn(`ASN collision on ${asn}, regenerating (attempt ${attempt + 1})`);
             asn = generateASN();
         }
-        const skillStr = skills.map(s => s.name).join(",") || "general";
-
         // Derive unique on-chain address from public key
         const agentAddress = deriveAgentAddress(publicKey);
 
@@ -518,24 +449,18 @@ export async function POST(request: NextRequest) {
             createdAt: FieldValue.serverTimestamp(),
         });
 
-        // Attempt on-chain registration on Hedera Testnet (non-blocking)
-        registerOnChain(agentName, asn, skillStr, publicKey).then(async (result) => {
-            if (result) {
-                await adminDb().collection("agents").doc(ref.id).update({
-                    onChainTxHash: result.txHash,
-                    onChainRegistered: true,
-                });
-            }
-        }).catch(() => {});
-
-        // Mint Soulbound Identity NFT on Hedera (non-blocking, platform-sponsored)
-        mintIdentityNFT(agentAddress, asn, initialCreditScore, initialTrustScore).then(async (result) => {
-            if (result) {
-                await adminDb().collection("agents").doc(ref.id).update({
-                    hederaNftTxHash: result.txHash,
-                    hederaNftTokenId: result.tokenId || null,
-                    hederaNftMinted: true,
-                });
+        // Mint the agent's ASN Soulbound Identity NFT on the chosen chain(s) at
+        // birth — non-blocking, platform-sponsored.
+        mintIdentityOnChains(chosenChains, {
+            agentAddress,
+            asn,
+            agentName,
+            creditScore: initialCreditScore,
+            trustScore: initialTrustScore,
+        }).then(async ({ receipts }) => {
+            const fields = identityUpdateFields(receipts);
+            if (Object.keys(fields).length > 0) {
+                await adminDb().collection("agents").doc(ref.id).update(fields);
             }
         }).catch(() => {});
 
@@ -580,6 +505,11 @@ export async function POST(request: NextRequest) {
             emitSkillReport(asn, agentAddress, skills.map(s => s.name)).catch(() => {});
         }
 
+        // Core-native identity credential — synchronous, zero-config, the
+        // actual gate `requireAgentIdentity` checks. The chain-specific NFT
+        // mints above are a best-effort bonus, not a prerequisite.
+        const identity = await issueAgentIdentity(ref.id, agentAddress, asn, vaultPublicKey);
+
         return Response.json({
             agentId: ref.id,
             agentName,
@@ -588,7 +518,8 @@ export async function POST(request: NextRequest) {
             registered: true,
             existing: false,
             reportedSkills: skills.length,
-            chain: "hedera-testnet",
+            chains: chosenChains,
+            identity: { tokenId: identity.tokenId, vaultPublicKey: identity.vaultPublicKey },
             briefing: PLATFORM_BRIEFING,
             ...(preRestoreResult.restored ? {
                 restored: true,

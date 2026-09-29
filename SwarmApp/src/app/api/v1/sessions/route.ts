@@ -11,6 +11,7 @@
 
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../verify';
+import { logAgentCall } from '@/lib/agent-call-log';
 import { rateLimit } from '../rate-limit';
 import { db } from '@/lib/firebase';
 import {
@@ -48,6 +49,13 @@ export async function GET(req: NextRequest) {
     const signedMessage = `GET:/v1/sessions:${agentId}:${ts}`;
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
+    logAgentCall({
+      agentId: agent.agentId,
+      orgId: agent.orgId,
+      authMethod: 'ed25519',
+      method: 'GET',
+      endpoint: '/v1/sessions',
+    });
 
     const constraints = [
       where('orgId', '==', agent.orgId),
@@ -105,6 +113,13 @@ export async function POST(req: NextRequest) {
     const signedMessage = `POST:/v1/sessions:${ts}`;
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
+    logAgentCall({
+      agentId: agent.agentId,
+      orgId: agent.orgId,
+      authMethod: 'ed25519',
+      method: 'POST',
+      endpoint: '/v1/sessions',
+    });
 
     const body = await req.json();
     const { coordinatorId, participants, purpose, metadata, ttlMinutes } = body;

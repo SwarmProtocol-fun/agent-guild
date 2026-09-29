@@ -12,7 +12,9 @@ import { defineChain } from "viem";
 import { WagmiProvider, useAccount, useSignMessage as useWagmiSignMessage } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiAdapter } from "@reown/appkit-adapter-wagmi";
+import { SolanaAdapter } from "@reown/appkit-adapter-solana/react";
 import { createAppKit, useAppKit, useDisconnect as useAppKitDisconnect } from "@reown/appkit/react";
+import { solana, solanaDevnet } from "@reown/appkit/networks";
 import type { AppKitNetwork } from "@reown/appkit/networks";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
@@ -22,7 +24,10 @@ import { parseWalletIds } from "./wallet-ids";
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
 
 // Every EVM chain in the registry becomes selectable in the wallet modal.
-const networks = Object.values(CHAIN_CONFIGS)
+// Kept separate from Solana below: WagmiAdapter's own `networks` must stay
+// EVM-only (wagmi has no concept of a Solana chain) — only createAppKit's
+// top-level `networks` spans every namespace.
+const evmNetworks = Object.values(CHAIN_CONFIGS)
   .filter((c) => c.chainId > 0)
   .map((c) =>
     defineChain({
@@ -34,7 +39,15 @@ const networks = Object.values(CHAIN_CONFIGS)
     }),
   ) as unknown as [AppKitNetwork, ...AppKitNetwork[]];
 
-const defaultNetwork = networks.find((n) => n.id === 296) ?? networks[0];
+// Solana joins the same AppKit instance/WalletConnect session as a second
+// namespace ("solana" alongside "eip155"), not a separate connection — see
+// src/lib/wallet/solana.ts for the additive read/send facade this enables.
+// Tangem's WalletConnect support already covers Solana + 40+ EVM chains, so
+// no extra per-wallet code is needed on our end (docs/wallet-adapters.md).
+const networks = [...evmNetworks, solana, solanaDevnet] as unknown as [AppKitNetwork, ...AppKitNetwork[]];
+const solanaAdapter = new SolanaAdapter();
+
+const defaultNetwork = evmNetworks.find((n) => n.id === 296) ?? evmNetworks[0];
 
 // Wallets pinned to the top of the connect modal (e.g. Tangem, which is
 // WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
@@ -48,7 +61,7 @@ if (featured.invalid.length > 0) {
 
 const wagmiAdapter = new WagmiAdapter({
   projectId: projectId || "unconfigured",
-  networks,
+  networks: evmNetworks,
   ssr: false,
 });
 
@@ -57,7 +70,7 @@ if (projectId) {
     ? window.location.origin
     : `https://${process.env.NEXT_PUBLIC_APP_DOMAIN || "swarmprotocol.fun"}`;
   createAppKit({
-    adapters: [wagmiAdapter],
+    adapters: [wagmiAdapter, solanaAdapter],
     projectId,
     networks,
     defaultNetwork,

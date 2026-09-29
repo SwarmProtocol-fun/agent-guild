@@ -428,6 +428,21 @@ export interface MemoryEntry {
    *  fully searchable via substring match, just not semantic ranking —
    *  see hybridSearchMemory() in compute/memory.ts. */
   embedding: number[] | null;
+  /** True when `content` is AES-256-GCM ciphertext (base64), not plaintext.
+   *  The encrypting agent derives its content key locally from its own
+   *  X25519 vault private key (HKDF, "derived, never stored" — see
+   *  docs/PRD-Context-Vault.md §5) and never transmits it — the server
+   *  stores and returns the blob as-is and cannot decrypt it. `iv`/
+   *  `authTag` are required when true; `embedding`, if present, was
+   *  computed by the agent itself before encrypting, since the server
+   *  never sees plaintext to embed. Substring search is unavailable for
+   *  these entries by construction — hybridSearchMemory() skips that term
+   *  rather than failing (PRD §3, "vault must degrade gracefully"). */
+  encrypted: boolean;
+  /** Base64 AES-GCM initialization vector. Required when `encrypted`. */
+  iv: string | null;
+  /** Base64 AES-GCM authentication tag. Required when `encrypted`. */
+  authTag: string | null;
   tags: string[];
   pinned: boolean;
   createdAt: Date | null;

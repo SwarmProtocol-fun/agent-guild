@@ -10,7 +10,6 @@
 import crypto from "crypto";
 import { db } from "@/lib/firebase";
 import { doc, getDoc } from "firebase/firestore";
-import { logAgentCall } from "@/lib/agent-call-log";
 
 // ── Nonce tracking (in-memory with Redis fallback) ──────
 // Nonces are signature hashes — if the same signature is seen twice
@@ -106,16 +105,10 @@ export async function verifyAgentRequest(
         const valid = verifySignature(publicKeyPem, message, signatureBase64);
         if (!valid) return null;
 
-        const orgId = data.orgId || data.organizationId || "";
-        // Signed messages are conventionally "{METHOD}:{path}:...ts" —
-        // recover the endpoint for free instead of instrumenting every route.
-        const [method, endpoint] = message.split(":");
-        logAgentCall({ agentId, orgId, authMethod: "ed25519", method, endpoint });
-
         return {
             agentId,
             agentName: data.name || agentId,
-            orgId,
+            orgId: data.orgId || data.organizationId || "",
             agentType: data.type || "agent",
         };
     } catch {

@@ -15,6 +15,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../rate-limit";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { getPlatformSnapshot } from "@/lib/firestore-admin";
@@ -39,6 +40,13 @@ export async function GET(req: NextRequest) {
         const message = `GET:/v1/platform:${ts}`;
         const verified = await verifyAgentRequest(agent, message, sig);
         if (!verified) return unauthorized();
+        logAgentCall({
+            agentId: verified.agentId,
+            orgId: verified.orgId,
+            authMethod: "ed25519",
+            method: "GET",
+            endpoint: "/v1/platform",
+        });
 
         const snapshot = await getPlatformSnapshot(verified.orgId);
         return Response.json({ ok: true, ...snapshot });
@@ -49,6 +57,13 @@ export async function GET(req: NextRequest) {
     const apiKey = url.searchParams.get("apiKey");
     const auth = await authenticateAgent(agentId, apiKey);
     if (!auth) return webhookUnauthorized();
+    logAgentCall({
+        agentId: auth.agentId,
+        orgId: auth.orgId,
+        authMethod: "apikey",
+        method: "GET",
+        endpoint: "/v1/platform",
+    });
 
     const snapshot = await getPlatformSnapshot(auth.orgId);
     return Response.json({ ok: true, ...snapshot });

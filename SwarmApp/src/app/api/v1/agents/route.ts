@@ -17,6 +17,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../rate-limit";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
@@ -61,12 +62,26 @@ export async function GET(req: NextRequest) {
         if (verified.orgId !== orgId) {
             return unauthorized("Agent does not belong to this organization");
         }
+        logAgentCall({
+            agentId: verified.agentId,
+            orgId: verified.orgId,
+            authMethod: "ed25519",
+            method: "GET",
+            endpoint: "/v1/agents",
+        });
     } else {
         // Fallback: API key auth
         const paramAgentId = url.searchParams.get("agentId");
         const apiKey = url.searchParams.get("apiKey");
         const auth = await authenticateAgent(paramAgentId, apiKey);
         if (!auth) return webhookUnauthorized();
+        logAgentCall({
+            agentId: auth.agentId,
+            orgId: auth.orgId,
+            authMethod: "apikey",
+            method: "GET",
+            endpoint: "/v1/agents",
+        });
     }
 
     // Filters

@@ -10,6 +10,7 @@
 
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../verify';
+import { logAgentCall } from '@/lib/agent-call-log';
 import { rateLimit } from '../rate-limit';
 import { db } from '@/lib/firebase';
 import { collection, addDoc } from 'firebase/firestore';
@@ -38,6 +39,13 @@ export async function POST(req: NextRequest) {
     const signedMessage = `POST:/v1/messaging:${ts}`;
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
+    logAgentCall({
+      agentId: agent.agentId,
+      orgId: agent.orgId,
+      authMethod: 'ed25519',
+      method: 'POST',
+      endpoint: '/v1/messaging',
+    });
 
     const body = await req.json();
     const { messageType, payload } = body;

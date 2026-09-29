@@ -1,7 +1,8 @@
 /**
  * Hook that returns the native currency symbol based on the
- * connected wallet's chain. When connected to Hedera → "HBAR",
- * otherwise → "$" (treated as USD display).
+ * connected wallet's chain. Defaults to "ETH" (Ethereum mainnet)
+ * when no chain is connected; token-style chains (HBAR/AVAX/FIL)
+ * display their symbol, others fall back to "$" (USD display).
  */
 
 "use client";

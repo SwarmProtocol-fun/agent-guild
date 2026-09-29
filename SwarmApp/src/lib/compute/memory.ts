@@ -27,8 +27,12 @@ export async function searchMemory(
 
   const q = searchQuery.toLowerCase();
   return entries.filter(
+    // Encrypted entries' `content` is ciphertext — matching against it
+    // would be meaningless noise, so they're excluded from the substring
+    // half entirely (tags stay plaintext/searchable by design; they're
+    // metadata the agent chose to leave unencrypted, not content).
     (e) =>
-      e.content.toLowerCase().includes(q) ||
+      (!e.encrypted && e.content.toLowerCase().includes(q)) ||
       e.tags.some((t) => t.toLowerCase().includes(q)),
   );
 }
@@ -70,9 +74,14 @@ export async function hybridSearchMemory(
   }
 
   const q = searchQuery.toLowerCase();
+  // Encrypted entries never contribute a substring match — their `content`
+  // is ciphertext the server cannot read. They still rank on the semantic
+  // half below (using the embedding the encrypting agent computed itself
+  // before sending ciphertext) and the pinned boost; the substring term of
+  // their score is structurally zero rather than a special case.
   const substringMatches = new Set(
     entries
-      .filter((e) => e.content.toLowerCase().includes(q) || e.tags.some((t) => t.toLowerCase().includes(q)))
+      .filter((e) => !e.encrypted && (e.content.toLowerCase().includes(q) || e.tags.some((t) => t.toLowerCase().includes(q))))
       .map((e) => e.id),
   );
 
@@ -102,6 +111,23 @@ export async function hybridSearchMemory(
   return relevant.slice(0, limit);
 }
 
+export interface RememberMemoryInput
+  extends Omit<MemoryEntry, "id" | "createdAt" | "updatedAt" | "embedding" | "embeddingRef" | "encrypted" | "iv" | "authTag"> {
+  /** When true, `content` is already ciphertext the caller (agent) produced
+   *  locally — see docs/PRD-Context-Vault.md §5. Requires `iv`/`authTag`.
+   *  The server never attempts to decrypt or embed this content itself. */
+  encrypted?: boolean;
+  iv?: string;
+  authTag?: string;
+  /** Required when `encrypted` is true — the server cannot generate an
+   *  embedding for content it never sees in plaintext, so the encrypting
+   *  agent must compute and supply its own vector (same model/dimension
+   *  discipline as embeddings.ts's own provider-per-deployment rule).
+   *  Ignored (and overwritten by a server-computed embedding) when
+   *  `encrypted` is false or omitted. */
+  precomputedEmbedding?: number[] | null;
+}
+
 /**
  * Wraps createMemoryEntry with embedding generation. Embeds inline
  * (awaited within the request) rather than via a background queue — this
@@ -113,23 +139,43 @@ export async function hybridSearchMemory(
  * Degrades gracefully: if embedding fails (no provider, rate limit,
  * network error), the entry is still created without a vector — found by
  * substring search only until it's re-embedded.
+ *
+ * Encrypted entries (§5) skip server-side embedding entirely — there is no
+ * plaintext to hash or send to a provider — and instead store whatever
+ * `precomputedEmbedding` the caller supplied (or null).
  */
 export async function rememberMemory(
-  data: Omit<MemoryEntry, "id" | "createdAt" | "updatedAt" | "embedding" | "embeddingRef">,
+  data: RememberMemoryInput,
   opts?: { provider?: EmbeddingProvider | null },
 ): Promise<string> {
+  const { encrypted, iv, authTag, precomputedEmbedding, ...rest } = data;
+
+  if (encrypted) {
+    if (!iv || !authTag) {
+      throw new Error("encrypted memory entries require iv and authTag");
+    }
+    return createMemoryEntry({
+      ...rest,
+      encrypted: true,
+      iv,
+      authTag,
+      embedding: precomputedEmbedding ?? null,
+      embeddingRef: null, // contentHash() is meaningless over ciphertext the server can't dedupe by plaintext
+    });
+  }
+
   const provider = opts?.provider !== undefined ? opts.provider : getEmbeddingProvider();
   let embedding: number[] | null = null;
   let embeddingRef: string | null = null;
   if (provider) {
-    embeddingRef = contentHash(data.content);
+    embeddingRef = contentHash(rest.content);
     try {
-      embedding = await provider.embed(data.content);
+      embedding = await provider.embed(rest.content);
     } catch {
       embedding = null; // entry still gets created — see doc comment above
     }
   }
-  return createMemoryEntry({ ...data, embedding, embeddingRef });
+  return createMemoryEntry({ ...rest, encrypted: false, iv: null, authTag: null, embedding, embeddingRef });
 }
 
 /**

@@ -130,6 +130,29 @@ const ENV_REQUIREMENTS: EnvRequirement[] = [
     example: "0x1234...abcd,0x5678...efgh",
   },
 
+  // Optional - PostHog (click/event tracking + admin analytics)
+  {
+    key: "NEXT_PUBLIC_POSTHOG_KEY",
+    required: false,
+    description: "PostHog project API key — enables client-side click/pageview capture (unset = no tracking)",
+    example: "phc_...",
+  },
+  {
+    key: "NEXT_PUBLIC_POSTHOG_HOST",
+    required: false,
+    description: "PostHog ingestion host (default: https://us.i.posthog.com)",
+  },
+  {
+    key: "POSTHOG_PERSONAL_API_KEY",
+    required: false,
+    description: "PostHog personal API key — lets /admin/analytics/events and /pages read data back from PostHog",
+  },
+  {
+    key: "POSTHOG_PROJECT_ID",
+    required: false,
+    description: "PostHog numeric project ID, used alongside POSTHOG_PERSONAL_API_KEY",
+  },
+
   // Optional - Rate Limiting
   {
     key: "RATE_LIMIT_WINDOW_MS",

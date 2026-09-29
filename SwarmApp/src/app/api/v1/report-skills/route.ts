@@ -11,6 +11,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -56,6 +57,8 @@ export async function POST(req: NextRequest) {
     const ts = url.searchParams.get("ts");
 
     let agentId: string | null = null;
+    let orgIdForLog: string | null = null;
+    let authMethodForLog: "ed25519" | "apikey" = "ed25519";
 
     if (agent && sig && ts) {
         const tsNum = parseInt(ts, 10);
@@ -67,6 +70,8 @@ export async function POST(req: NextRequest) {
         const verified = await verifyAgentRequest(agent, message, sig);
         if (!verified) return unauthorized();
         agentId = verified.agentId;
+        orgIdForLog = verified.orgId;
+        authMethodForLog = "ed25519";
     } else {
         // Fallback: API key auth
         const paramAgentId = url.searchParams.get("agentId");
@@ -74,7 +79,16 @@ export async function POST(req: NextRequest) {
         const auth = await authenticateAgent(paramAgentId, apiKey);
         if (!auth) return webhookUnauthorized();
         agentId = auth.agentId;
+        orgIdForLog = auth.orgId;
+        authMethodForLog = "apikey";
     }
+    logAgentCall({
+        agentId: agentId!,
+        orgId: orgIdForLog || "",
+        authMethod: authMethodForLog,
+        method: "POST",
+        endpoint: "/v1/report-skills",
+    });
 
     try {
         await adminDb().collection("agents").doc(agentId!).update({

@@ -239,7 +239,16 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
 
     /**
      * @notice Override transfer to prevent NFT trading (reputation is non-transferable)
-     * @dev Allows initial mint and admin recovery, but blocks user-to-user transfers
+     * @dev Allows mint (from == 0) and burn (to == 0); blocks every ordinary
+     *      transfer in between, including one where the contract owner is
+     *      `auth`. OpenZeppelin's own `_checkAuthorized` — run inside the
+     *      `super._update` call below — still requires `auth` to be the
+     *      token's owner or an approved operator, so an `auth == owner()`
+     *      special case here would never actually let the contract owner
+     *      move a token they don't hold or aren't approved for; it looked
+     *      like a working admin escape hatch but wasn't one. Real recovery
+     *      goes through emergencyTransfer()'s burn-then-remint instead,
+     *      which stays inside the mint/burn branches already allowed here.
      */
     function _update(
         address to,
@@ -248,13 +257,7 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
     ) internal override returns (address) {
         address from = _ownerOf(tokenId);
 
-        // Allow minting (from == address(0))
-        if (from == address(0)) {
-            return super._update(to, tokenId, auth);
-        }
-
-        // Allow admin burns/recovery (to == address(0) or owner is calling)
-        if (to == address(0) || auth == owner()) {
+        if (from == address(0) || to == address(0)) {
             return super._update(to, tokenId, auth);
         }
 
@@ -267,8 +270,15 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
     // ══════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Emergency recovery: transfer NFT to new agent wallet
-     * @dev Only owner can call, for wallet recovery scenarios
+     * @notice Emergency recovery: move an agent's identity to a new wallet
+     * @dev Only owner can call, for wallet recovery scenarios. Implemented
+     *      as burn-then-remint (not _transfer) so it lands in the mint/burn
+     *      branches _update already allows, rather than needing its own
+     *      bypass — a direct _transfer here hits _update with a nonzero
+     *      `to` and reverts as non-transferable, same as it would for
+     *      anyone else. agentIdentities[tokenId] is keyed by tokenId, not
+     *      address, so the agent's credit/trust history carries over
+     *      untouched across the burn/remint.
      */
     function emergencyTransfer(uint256 tokenId, address newAgent) external onlyOwner {
         require(newAgent != address(0), "Invalid new agent");
@@ -277,12 +287,11 @@ contract SwarmAgentIdentityNFT is ERC721, Ownable {
         address oldAgent = tokenIdToAgent[tokenId];
         require(oldAgent != address(0), "Token does not exist");
 
-        // Update mappings
         delete agentToTokenId[oldAgent];
         agentToTokenId[newAgent] = tokenId;
         tokenIdToAgent[tokenId] = newAgent;
 
-        // Transfer NFT
-        _transfer(oldAgent, newAgent, tokenId);
+        _burn(tokenId);
+        _safeMint(newAgent, tokenId);
     }
 }

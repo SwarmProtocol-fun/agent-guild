@@ -81,11 +81,20 @@ export interface ModSession {
   role: "operator" | "org_admin" | "platform_admin";
 }
 
+/** A headless agent authenticated via its own Ed25519 keypair (see auth-guard.ts's requireAgentAuth) rather than a browser session. */
+export interface ModAgentIdentity {
+  agentId: string;
+  orgId: string;
+  agentType: string;
+}
+
 export interface RouteContext extends ModContext {
   /** `:name` segments from the route pattern. */
   params: Record<string, string>;
-  /** Null only on routes declared `public: true`. */
+  /** Null unless a signed-in browser session made this request. */
   session: ModSession | null;
+  /** Null unless the request carried a valid Ed25519 agent signature (?agent=&sig=&ts=). Routes should trust this over any agentId/orgId in the body. */
+  agent: ModAgentIdentity | null;
 }
 
 /** Return a Response, or any JSON-serialisable value (sent as 200 JSON). */

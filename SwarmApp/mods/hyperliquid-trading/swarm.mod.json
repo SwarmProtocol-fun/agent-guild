@@ -1,0 +1,11 @@
+{
+  "id": "hyperliquid-trading",
+  "name": "Hyperliquid Trading",
+  "version": "1.0.0",
+  "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt.",
+  "author": "Swarm",
+  "swarmApi": 1,
+  "permissions": ["events:subscribe"],
+  "entry": { "client": "./client", "server": "./server" },
+  "panels": [{ "id": "trading", "title": "Hyperliquid Trading", "icon": "Zap" }]
+}

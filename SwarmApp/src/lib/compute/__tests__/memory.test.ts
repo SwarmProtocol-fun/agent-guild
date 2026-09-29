@@ -31,6 +31,9 @@ function entry(overrides: Partial<MemoryEntry>): MemoryEntry {
     content: "",
     embeddingRef: null,
     embedding: null,
+    encrypted: false,
+    iv: null,
+    authTag: null,
     tags: [],
     pinned: false,
     createdAt: new Date(),
@@ -113,6 +116,31 @@ describe("hybridSearchMemory", () => {
 
     expect(results[0].id).toBe("b");
   });
+
+  it("never substring-matches an encrypted entry's ciphertext, even if it happens to contain the query text", async () => {
+    // "railway" appears literally in this "ciphertext" on purpose — proves
+    // the exclusion is driven by the `encrypted` flag, not content shape.
+    getMemoryEntries.mockResolvedValue([
+      entry({ id: "encrypted", content: "railway-looking-ciphertext-blob", encrypted: true, iv: "iv", authTag: "tag" }),
+    ]);
+
+    const results = await hybridSearchMemory("workspace", "ws_1", "railway", { provider: null });
+
+    expect(results.map((r) => r.id)).not.toContain("encrypted");
+  });
+
+  it("still ranks an encrypted entry semantically using its caller-supplied embedding", async () => {
+    const provider = new StubEmbeddingProvider();
+    const queryVector = await provider.embed("deploy notes");
+    getMemoryEntries.mockResolvedValue([
+      entry({ id: "encrypted-semantic", content: "opaque-ciphertext", encrypted: true, iv: "iv", authTag: "tag", embedding: queryVector }),
+    ]);
+
+    const results = await hybridSearchMemory("workspace", "ws_1", "deploy notes", { provider });
+
+    expect(results.map((r) => r.id)).toContain("encrypted-semantic");
+    expect(results[0].matchType).toBe("semantic");
+  });
 });
 
 describe("rememberMemory", () => {
@@ -151,5 +179,35 @@ describe("rememberMemory", () => {
     );
 
     expect(createMemoryEntry).toHaveBeenCalledWith(expect.objectContaining({ content: "hello", embedding: null }));
+  });
+
+  it("stores ciphertext as-is and never calls an embedding provider for encrypted content", async () => {
+    const provider = new StubEmbeddingProvider();
+    const embedSpy = vi.spyOn(provider, "embed");
+    await rememberMemory(
+      {
+        scopeType: "agent", scopeId: "agent_1", workspaceId: null, computerId: null, agentId: "agent_1", createdByUserId: null,
+        content: "base64-ciphertext-blob", tags: [], pinned: false,
+        encrypted: true, iv: "base64-iv", authTag: "base64-tag", precomputedEmbedding: [0.1, 0.2],
+      },
+      { provider },
+    );
+
+    expect(embedSpy).not.toHaveBeenCalled();
+    expect(createMemoryEntry).toHaveBeenCalledWith(expect.objectContaining({
+      content: "base64-ciphertext-blob",
+      encrypted: true,
+      iv: "base64-iv",
+      authTag: "base64-tag",
+      embedding: [0.1, 0.2],
+      embeddingRef: null,
+    }));
+  });
+
+  it("rejects an encrypted entry missing iv or authTag", async () => {
+    await expect(rememberMemory({
+      scopeType: "agent", scopeId: "agent_1", workspaceId: null, computerId: null, agentId: "agent_1", createdByUserId: null,
+      content: "ciphertext", tags: [], pinned: false, encrypted: true,
+    })).rejects.toThrow(/iv and authTag/);
   });
 });

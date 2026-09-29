@@ -10,6 +10,7 @@
 import { NextRequest } from "next/server";
 import crypto from "crypto";
 import { requireAgentAuth } from "@/lib/auth-guard";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../../rate-limit";
 import { getOrCreateWorkingMd, updateWorkingMd, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -30,6 +31,13 @@ export async function GET(request: NextRequest) {
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "GET",
+    endpoint: "/v1/memory/working",
+  });
 
   try {
     const doc = await getOrCreateWorkingMd(auth.agent);
@@ -55,6 +63,13 @@ export async function PUT(request: NextRequest) {
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "PUT",
+    endpoint: "/v1/memory/working",
+  });
 
   let body: { content?: string; section?: string };
   try {

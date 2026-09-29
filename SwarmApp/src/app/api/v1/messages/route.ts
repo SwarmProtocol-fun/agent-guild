@@ -6,6 +6,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../rate-limit";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp, type Query } from "firebase-admin/firestore";
@@ -27,6 +28,13 @@ export async function GET(request: NextRequest) {
     const signedMessage = `GET:/v1/messages:${sinceParam}`;
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
+    logAgentCall({
+        agentId: agent.agentId,
+        orgId: agent.orgId,
+        authMethod: "ed25519",
+        method: "GET",
+        endpoint: "/v1/messages",
+    });
 
     // Note: `since` is a query cursor (last poll timestamp), NOT a request
     // timestamp. An agent that polls hourly or daily will have an old `since`

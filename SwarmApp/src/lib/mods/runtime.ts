@@ -6,7 +6,7 @@
  * is logged and contained; it never breaks core or other mods.
  */
 import type {
-  EventName, ModContext, ModManifest, ModSession, RouteContext, ServerMod, SwarmEventMap,
+  EventName, ModAgentIdentity, ModContext, ModManifest, ModSession, RouteContext, ServerMod, SwarmEventMap,
 } from "@swarm/sdk";
 import { MOD_MANIFESTS } from "./generated/manifests";
 import { serverMods } from "./generated/server";
@@ -94,12 +94,21 @@ export async function emitEvent<E extends EventName>(event: E, payload: SwarmEve
   );
 }
 
-/** Dispatch /api/mods/<modId>/<path…>. `session` is null when not signed in. */
+/**
+ * Dispatch /api/mods/<modId>/<path…>.
+ *
+ * A request is authenticated either by a browser `session`, or by `agent` —
+ * a per-agent Ed25519 signature verified via auth-guard.ts's
+ * requireAgentAuth (the same mechanism /api/v1/credit/task-complete and
+ * /api/v1/work-mode already trust for headless callers). Unlike a shared
+ * service secret, a compromised agent key only compromises that one agent.
+ */
 export async function handleModRequest(
   modId: string,
   req: Request,
   path: string[],
   session: ModSession | null,
+  agent: ModAgentIdentity | null = null,
 ): Promise<Response> {
   const loaded = await loadMod(modId);
   if (!loaded) return Response.json({ error: "Mod not found" }, { status: 404 });
@@ -111,10 +120,10 @@ export async function handleModRequest(
   if (!match) return Response.json({ error: "Not found" }, { status: 404 });
 
   const isPublic = typeof match.def !== "function" && match.def.public === true;
-  if (!isPublic && !session) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (!isPublic && !session && !agent) return Response.json({ error: "Authentication required" }, { status: 401 });
 
   const handler = typeof match.def === "function" ? match.def : match.def.handler;
-  const ctx: RouteContext = { ...loaded.ctx, params: match.params, session };
+  const ctx: RouteContext = { ...loaded.ctx, params: match.params, session, agent };
   try {
     const result = await handler(req, ctx);
     return result instanceof Response ? result : Response.json(result ?? null);

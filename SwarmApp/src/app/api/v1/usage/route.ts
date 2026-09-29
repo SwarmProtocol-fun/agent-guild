@@ -20,6 +20,7 @@
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { estimateCost } from "@/lib/usage";
 import { logUsage } from "@/lib/firestore-admin";
@@ -41,6 +42,7 @@ export async function POST(req: NextRequest) {
 
     let resolvedAgentId: string | null = null;
     let resolvedOrgId: string | null = typeof body.orgId === "string" ? body.orgId : null;
+    let resolvedAuthMethod: "ed25519" | "apikey";
 
     if (agent && sig && ts) {
         const tsNum = parseInt(ts, 10);
@@ -52,6 +54,7 @@ export async function POST(req: NextRequest) {
 
         resolvedAgentId = verified.agentId || null;
         resolvedOrgId = resolvedOrgId || verified.orgId || null;
+        resolvedAuthMethod = "ed25519";
     } else {
         const paramAgentId = url.searchParams.get("agentId");
         const apiKey = url.searchParams.get("apiKey");
@@ -59,6 +62,7 @@ export async function POST(req: NextRequest) {
         if (!auth) return webhookUnauthorized();
         resolvedAgentId = auth.agentId || null;
         resolvedOrgId = resolvedOrgId || auth.orgId || null;
+        resolvedAuthMethod = "apikey";
     }
 
     if (!resolvedAgentId) {
@@ -67,6 +71,13 @@ export async function POST(req: NextRequest) {
     if (!resolvedOrgId) {
         return Response.json({ error: "orgId is required" }, { status: 400 });
     }
+    logAgentCall({
+        agentId: resolvedAgentId,
+        orgId: resolvedOrgId,
+        authMethod: resolvedAuthMethod,
+        method: "POST",
+        endpoint: "/v1/usage",
+    });
 
     // Validate required fields
     const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : null;

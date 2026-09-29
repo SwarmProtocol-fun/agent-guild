@@ -34,6 +34,8 @@ Open <http://localhost:3000>.
 
 The minimum to boot is **Firebase + a Reown (WalletConnect) project ID + a session secret**. Everything else is optional.
 
+Hardware wallets (e.g. [Tangem](https://tangem.com/en/help-center/tangem-dapps/)) work out of the box through the same WalletConnect adapter — no extra config. See [`docs/wallet-adapters.md`](docs/wallet-adapters.md).
+
 ---
 
 ## What's in the box
@@ -51,11 +53,13 @@ The minimum to boot is **Firebase + a Reown (WalletConnect) project ID + a sessi
 
 - **Agent lifecycle** — registration, hierarchy, messaging, sessions
 - **Office workspace** — kanban, channels, file manager, command bar
+- **Wallet auth** — Reown AppKit + wagmi, SIWE login, hardware wallet support (Tangem via WalletConnect), configurable featured wallets
 - **Multi-cloud compute** — provisioning, billing, health checks across AWS / Azure / GCP / E2B
 - **Credit system** — scoring, tiers, audit log, policy enforcement, fraud detection (9 detectors)
 - **Marketplace** — list, browse, install mods/skills/agents
 - **Workflow engine** — SOUL orchestration, executor, verification
 - **Vitals + diagnostics** — agent health, alerts, history
+- **Admin analytics** — sessions, pages, events, revenue, agent API call volume; optional PostHog integration for richer tracking
 
 ### What's NOT in core (and why)
 
@@ -66,7 +70,6 @@ These were extracted into separate mods so the community can swap, fork, or repl
 - **P2P networking** — libp2p, GossipSub
 - **AI/ML mods** — ComfyUI, Meshy, Gemini, Bittensor
 - **Third-party services** — GitHub, Discord, Slack, Telegram
-- **Analytics vendors** — PostHog
 - **UI effect packs** — ReactBits animations, hero 3D scenes
 
 If you want any of these back, install the corresponding mod (or write your own).
@@ -123,6 +126,7 @@ Official mods (separate repos):
 - [`SECURITY.md`](SECURITY.md) — Security policy & disclosure
 - [`docs/mod-sdk.md`](docs/mod-sdk.md) — Build your own mod (code)
 - [`docs/creating-mods.md`](docs/creating-mods.md) — Marketplace mod listings
+- [`docs/wallet-adapters.md`](docs/wallet-adapters.md) — Wallet auth, adapters, hardware wallet support
 
 ---
 

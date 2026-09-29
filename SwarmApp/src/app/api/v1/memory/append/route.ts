@@ -7,6 +7,7 @@
 import { NextRequest } from "next/server";
 import crypto from "crypto";
 import { requireAgentAuth } from "@/lib/auth-guard";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../../rate-limit";
 import { appendMemoryMd, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -26,6 +27,13 @@ export async function POST(request: NextRequest) {
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "POST",
+    endpoint: "/v1/memory/append",
+  });
 
   let body: { entry?: string; section?: string };
   try {

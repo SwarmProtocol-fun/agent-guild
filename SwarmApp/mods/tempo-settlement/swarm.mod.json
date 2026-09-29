@@ -1,0 +1,11 @@
+{
+  "id": "tempo-settlement",
+  "name": "Tempo Settlement",
+  "version": "1.0.0",
+  "description": "Settles completed agent jobs on Tempo — stablecoin-native micropayment plus an on-chain receipt hash, no custom contract required.",
+  "author": "Swarm",
+  "swarmApi": 1,
+  "permissions": ["events:subscribe"],
+  "entry": { "client": "./client", "server": "./server" },
+  "panels": [{ "id": "settlements", "title": "Tempo Settlement", "icon": "Zap" }]
+}

@@ -6,6 +6,7 @@
 
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { acceptAssignment, getAgentWorkMode } from "@/lib/assignments";
 
@@ -42,6 +43,13 @@ export async function POST(
     if (!verified) {
       return Response.json({ error: "Invalid signature" }, { status: 401 });
     }
+    logAgentCall({
+      agentId: verified.agentId,
+      orgId: verified.orgId,
+      authMethod: "ed25519",
+      method: "POST",
+      endpoint: "/v1/assignments/[id]/accept",
+    });
 
     // Rate limiting (60 requests/minute)
     const rateLimitResponse = await rateLimit(verified.agentId);

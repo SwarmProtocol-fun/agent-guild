@@ -1,0 +1,11 @@
+{
+  "id": "tagem-wallet",
+  "name": "Tangem Wallet",
+  "version": "1.0.0",
+  "description": "Multi-chain balance dashboard, send, and receive for a Tangem hardware wallet connected via WalletConnect. Signing happens on the card itself — this mod never holds a key.",
+  "author": "Swarm",
+  "swarmApi": 1,
+  "permissions": [],
+  "entry": { "client": "./client", "server": "./server" },
+  "panels": [{ "id": "wallet", "title": "Tangem Wallet", "icon": "DollarSign" }]
+}

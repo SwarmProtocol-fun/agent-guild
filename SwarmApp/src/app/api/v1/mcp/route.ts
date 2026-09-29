@@ -19,6 +19,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { authenticateAgent } from "@/app/api/webhooks/auth";
+import { getAgentIdentity } from "@/lib/mod-stubs";
 import type { AgentIdentity } from "@/lib/agent-memory-server";
 import { mcpRemember, mcpRecall, mcpContextPack, mcpLink, mcpGraph, McpToolInputError } from "@/lib/mcp-tools";
 
@@ -53,11 +54,19 @@ function buildServer(agent: AgentIdentity): McpServer {
       title: "Remember",
       description: "Store a memory for this agent, or an explicit shared scope (workspace/computer/user).",
       inputSchema: {
-        content: z.string().describe("The content to remember"),
+        content: z.string().describe("The content to remember, or ciphertext when encrypted=true"),
         scopeType: z.enum(SCOPE_TYPES).optional().describe("Defaults to this agent's own scope"),
         scopeId: z.string().optional(),
         tags: z.array(z.string()).optional(),
         pinned: z.boolean().optional().describe("Pinned memories are always included in context packs"),
+        encrypted: z.boolean().optional().describe(
+          "True if content is AES-256-GCM ciphertext you encrypted yourself with a key derived from your vault keypair — the server never decrypts it. Requires iv and authTag."
+        ),
+        iv: z.string().optional().describe("Base64 AES-GCM IV, required when encrypted=true"),
+        authTag: z.string().optional().describe("Base64 AES-GCM auth tag, required when encrypted=true"),
+        embedding: z.array(z.number()).optional().describe(
+          "Your own embedding of the plaintext, computed before encrypting — required for semantic recall of encrypted entries since the server never sees plaintext to embed"
+        ),
       },
     },
     async (args) => {
@@ -162,6 +171,17 @@ async function handle(req: NextRequest): Promise<Response> {
     return Response.json(
       { error: "Unauthorized — provide x-agent-id and x-agent-api-key headers" },
       { status: 401 },
+    );
+  }
+
+  // The Vault gate: an agent must have completed /api/v1/register (which
+  // issues an identity credential synchronously — mod-stubs.ts's
+  // issueAgentIdentity) before it can touch the Context Vault at all.
+  const identity = await getAgentIdentity(agent.agentId);
+  if (!identity) {
+    return Response.json(
+      { error: "No identity credential issued for this agent — complete /api/v1/register first" },
+      { status: 403 },
     );
   }
 

@@ -11,6 +11,7 @@ import * as shellExecutor from "./shell.mjs";
 import * as dockerExecutor from "./docker.mjs";
 import * as comfyuiExecutor from "./comfyui.mjs";
 import * as workflowExecutor from "./workflow.mjs";
+import * as hyperliquidExecutor from "./hyperliquid.mjs";
 
 /** Built-in executor registry (module-level singleton behavior — see createTaskExecutor for the concurrency-safe per-task path) */
 const executors = new Map([
@@ -32,6 +33,7 @@ const executors = new Map([
   }],
   ["comfyui", comfyuiExecutor],
   ["workflow", workflowExecutor],
+  ["hyperliquid", hyperliquidExecutor],
 ]);
 
 /**
@@ -45,6 +47,7 @@ const executors = new Map([
 const executorFactories = new Map([
   ["shell", () => shellExecutor.createExecutor()],
   ["docker", () => dockerExecutor.createExecutor()],
+  ["hyperliquid", () => hyperliquidExecutor.createExecutor()],
   ["node", () => {
     const shell = shellExecutor.createExecutor();
     return {

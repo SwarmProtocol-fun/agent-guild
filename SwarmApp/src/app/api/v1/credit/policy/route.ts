@@ -7,6 +7,7 @@
 
 import { NextRequest } from "next/server";
 import { resolveAgentPolicy, requireAgentAuth, requirePlatformAdminOrOrgMember } from "@/lib/auth-guard";
+import { logAgentCall } from "@/lib/agent-call-log";
 
 export async function GET(req: NextRequest) {
     const agentId = req.nextUrl.searchParams.get("agentId");
@@ -28,6 +29,15 @@ export async function GET(req: NextRequest) {
     // its Firestore doc ID.
     const agentAuth = await requireAgentAuth(req, "GET:/v1/credit/policy");
     const isSelf = agentAuth.ok && agentAuth.agent?.agentId === agentId;
+    if (isSelf && agentAuth.agent) {
+        logAgentCall({
+            agentId: agentAuth.agent.agentId,
+            orgId: agentAuth.agent.orgId,
+            authMethod: "unknown",
+            method: "GET",
+            endpoint: "/v1/credit/policy",
+        });
+    }
     if (!isSelf) {
         const orgAuth = await requirePlatformAdminOrOrgMember(req, result.orgId || "");
         if (!orgAuth.ok) {

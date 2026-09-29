@@ -168,6 +168,92 @@ export default function AgentPerformancePage() {
             </div>
           )}
 
+          {/* Agent API calls */}
+          <div>
+            <h3 className="text-sm font-medium text-muted-foreground mb-2">
+              Agent API Calls — Last {overview.apiCalls.periodDays} Days
+            </h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+              <StatCard icon={Radio} label="Total Calls" value={overview.apiCalls.total} />
+              <StatCard
+                icon={Fingerprint}
+                label="Ed25519 Signed"
+                value={overview.apiCalls.byAuthMethod.ed25519 || 0}
+              />
+              <StatCard
+                icon={KeyRound}
+                label="API Key"
+                value={overview.apiCalls.byAuthMethod.apikey || 0}
+              />
+              <StatCard
+                icon={Router}
+                label="Gateway Workers"
+                value={overview.apiCalls.byAuthMethod.gateway || 0}
+              />
+            </div>
+            {overview.apiCalls.dailyVolume.some((d) => d.count > 0) && (
+              <div className="rounded-xl border border-border bg-card/50 p-4 mb-3">
+                <h4 className="text-xs font-medium text-muted-foreground mb-3">Calls per Day</h4>
+                <div style={{ width: "100%", height: 200 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={overview.apiCalls.dailyVolume}
+                      margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
+                    >
+                      <defs>
+                        <linearGradient id="gradCalls" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={palette.accent} stopOpacity={0.3} />
+                          <stop offset="100%" stopColor={palette.accent} stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke={palette.grid} />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 10, fill: palette.muted }}
+                        tickLine={false}
+                        axisLine={false}
+                        interval="preserveStartEnd"
+                      />
+                      <YAxis
+                        tick={{ fontSize: 10, fill: palette.muted }}
+                        tickLine={false}
+                        axisLine={false}
+                        allowDecimals={false}
+                      />
+                      <Tooltip content={<ChartTooltip />} />
+                      <Area
+                        type="monotone"
+                        dataKey="count"
+                        name="Calls"
+                        stroke={palette.accent}
+                        strokeWidth={2}
+                        fill="url(#gradCalls)"
+                        dot={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+            {overview.apiCalls.topAgents.length > 0 && (
+              <div className="rounded-xl border border-border bg-card/50 p-4">
+                <h4 className="text-xs font-medium text-muted-foreground mb-3">Most Active Agents</h4>
+                <div className="space-y-1.5">
+                  {overview.apiCalls.topAgents.map((a, i) => (
+                    <div key={a.agentId} className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-black/10 text-sm">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="text-xs text-muted-foreground w-5 shrink-0">#{i + 1}</span>
+                        <span className="font-mono truncate">{a.agentId}</span>
+                        <span className="text-xs text-muted-foreground font-mono truncate">{a.orgId}</span>
+                      </div>
+                      <span className="font-semibold shrink-0">{a.count} calls</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Top agents */}
           <div className="rounded-xl border border-border bg-card/50 p-4">
             <h3 className="text-sm font-medium mb-3 flex items-center gap-2">

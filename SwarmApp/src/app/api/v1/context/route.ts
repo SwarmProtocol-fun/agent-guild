@@ -31,7 +31,8 @@
  * Read-only: never creates a memory doc (unlike the /v1/memory/* routes).
  */
 import { NextRequest } from "next/server";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentIdentity } from "@/lib/agent-identity-guard";
+import { logAgentCall } from "@/lib/agent-call-log";
 import { rateLimit } from "../rate-limit";
 import { type ResolvedChannel } from "@/lib/agent-context";
 import { assembleAgentContext } from "@/lib/agent-context-pack";
@@ -43,13 +44,20 @@ export async function GET(request: NextRequest) {
   const limited = await rateLimit(agentParam || "anon");
   if (limited) return limited;
 
-  const auth = await requireAgentAuth(request, `GET:/v1/context:${agentParam}`);
+  const auth = await requireAgentIdentity(request, `GET:/v1/context:${agentParam}`);
   if (!auth.ok || !auth.agent) {
-    return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
+    return Response.json({ error: auth.error || "Unauthorized" }, { status: auth.status || 401 });
   }
   if (!auth.agent.orgId) {
     return Response.json({ error: "Agent has no organization" }, { status: 403 });
   }
+  logAgentCall({
+    agentId: auth.agent.agentId,
+    orgId: auth.agent.orgId,
+    authMethod: "unknown",
+    method: "GET",
+    endpoint: "/v1/context",
+  });
 
   const q = sp.get("q")?.trim().toLowerCase() || "";
   const task = sp.get("task")?.trim() || "";

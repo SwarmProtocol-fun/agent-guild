@@ -12,6 +12,16 @@
  *   4. org admin          — wallet address + org ownership
  *   5. platform admin     — PLATFORM_ADMIN_SECRET bearer token
  *   6. internal service   — INTERNAL_SERVICE_SECRET bearer token
+ *
+ * IMPORTANT — client-bundle safety: this file (and everything it statically
+ * or dynamically imports — verify.ts, webhooks/auth.ts) is reachable from
+ * the browser bundle via src/lib/firestore.ts's `await import("@/lib/auth-guard")`,
+ * used by the client-side OrgContext. Never import anything here that pulls
+ * in firebase-admin (Node-only: grpc/tls/net) — it breaks the browser build
+ * for every page. requireAgentIdentity/requireWalletOrAgentIdentity (the
+ * NFT/vault identity gate, which needs mod-stubs.ts's Admin-SDK-backed
+ * getAgentIdentity) deliberately live in src/lib/agent-identity-guard.ts
+ * instead, which only route.ts files import.
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
@@ -350,16 +360,6 @@ export async function requireGatewayAuth(
   if (!result) {
     return { ok: false, error: "Invalid gateway signature" };
   }
-
-  const { logAgentCall } = await import("./agent-call-log");
-  const [method, endpoint] = signedMessagePrefix.split(":");
-  logAgentCall({
-    agentId: result.gatewayId,
-    orgId: result.orgId,
-    authMethod: "gateway",
-    method,
-    endpoint,
-  });
 
   return { ok: true, gateway: result };
 }
