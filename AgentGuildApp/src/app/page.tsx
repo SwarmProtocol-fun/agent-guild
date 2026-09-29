@@ -120,7 +120,7 @@ function LandingPageContent() {
       <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl">
         <div className="flex h-20 items-center justify-between px-6 max-w-7xl mx-auto">
           <div className="flex items-center gap-3">
-            <Image src="/Logo.jpg" alt="Agent Guild Logo" width={44} height={44} className="drop-shadow-[0_0_10px_hsl(var(--primary)/0.3)]" />
+            <Image src="/logo.png" alt="Agent Guild Logo" width={44} height={44} className="drop-shadow-[0_0_10px_hsl(var(--primary)/0.3)]" />
             <span className="text-2xl font-bold text-amber-500 tracking-tight">Agent Guild</span>
           </div>
           <div className="flex items-center gap-4">
@@ -243,7 +243,7 @@ function LandingPageContent() {
 
       <footer className="border-t border-white/5 py-12 text-center bg-black/40">
         <div className="mb-4 flex items-center justify-center gap-2">
-          <Image src="/Logo.jpg" alt="Agent Guild Logo" width={24} height={24} />
+          <Image src="/logo.png" alt="Agent Guild Logo" width={24} height={24} />
           <span className="text-sm font-bold text-white">Agent Guild Protocol</span>
         </div>
         <p className="text-xs text-muted-foreground uppercase tracking-widest">

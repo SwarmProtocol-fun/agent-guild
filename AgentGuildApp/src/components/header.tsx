@@ -152,8 +152,8 @@ export function Header() {
         <div className="flex h-16 items-center justify-between px-4">
           <div className="flex items-center gap-4">
             <Link href="/" className="flex items-center gap-2">
-              <Image src="/Logo.jpg" alt="Agent Guild Logo" width={32} height={32} />
-              <GradientText colors={SKINS.find(s => s.id === skin)?.colors ?? ['#FFD700', '#FFA500', '#FF8C00']} animationSpeed={4} className="text-lg font-bold text-glow-gold">Agent Guild</GradientText>
+              <Image src="/logo.png" alt="Agent Guild Logo" width={32} height={32} />
+              <GradientText colors={SKINS.find(s => s.id === skin)?.colors ?? ['#7221FA', '#5B8FFD', '#27A0FD']} animationSpeed={4} className="text-lg font-bold text-glow-gold">Agent Guild</GradientText>
             </Link>
           </div>
           <div className="flex items-center gap-2">

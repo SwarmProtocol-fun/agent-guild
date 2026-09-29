@@ -49,10 +49,10 @@ function AgentGuildBot({ index, total }: { index: number; total: number }) {
   const size = 0.15 + (index % 3) * 0.04;
 
   const material = useMemo(() => new THREE.MeshStandardMaterial({
-    color: new THREE.Color("#FFD700"),
+    color: new THREE.Color("#7221FA"),
     metalness: 0.9,
     roughness: 0.15,
-    emissive: new THREE.Color("#FF8C00"),
+    emissive: new THREE.Color("#27A0FD"),
     emissiveIntensity: 0.3,
   }), []);
 
@@ -94,8 +94,8 @@ function GlowRing() {
     <mesh ref={ringRef} position={[0, 0, 0]}>
       <torusGeometry args={[3, 0.015, 8, 64]} />
       <meshStandardMaterial
-        color="#FFD700"
-        emissive="#FFD700"
+        color="#7221FA"
+        emissive="#7221FA"
         emissiveIntensity={0.5}
         transparent
         opacity={0.3}
@@ -123,7 +123,7 @@ export default function FoidMommy() {
       <ambientLight intensity={0.5} />
       <directionalLight position={[5, 5, 5]} intensity={1.2} />
       <directionalLight position={[-3, 2, -2]} intensity={0.4} />
-      <pointLight position={[0, 0, 3]} intensity={0.8} color="#FFD700" />
+      <pointLight position={[0, 0, 3]} intensity={0.8} color="#7221FA" />
 
       {/* Center: FoidMommy */}
       <FoidModel />

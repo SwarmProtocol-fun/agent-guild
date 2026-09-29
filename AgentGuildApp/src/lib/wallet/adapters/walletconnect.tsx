@@ -65,7 +65,7 @@ if (projectId) {
       name: "Agent Guild",
       description: "Enterprise AI fleet orchestration",
       url: origin,
-      icons: [`${origin}/Logo.jpg`],
+      icons: [`${origin}/logo.png`],
     },
     ...(featured.ids.length > 0 ? { featuredWalletIds: featured.ids } : {}),
     features: { analytics: false },

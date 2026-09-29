@@ -12,9 +12,9 @@ export function DashboardBackground() {
         <Squares
           direction="diagonal"
           speed={0.3}
-          borderColor="rgba(255, 215, 0, 0.06)"
+          borderColor="rgba(114, 33, 250, 0.06)"
           squareSize={50}
-          hoverFillColor="rgba(255, 215, 0, 0.03)"
+          hoverFillColor="rgba(114, 33, 250, 0.03)"
         />
       </div>
       <div className="scan-line-overlay" />

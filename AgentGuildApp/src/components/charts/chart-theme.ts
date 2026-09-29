@@ -18,17 +18,17 @@ export interface ChartPalette {
 
 const SKIN_PALETTES: Record<string, ChartPalette> = {
   classic: {
-    primary: "#f59e0b",
-    secondary: "#d97706",
-    accent: "#fbbf24",
+    primary: "#7221FA",
+    secondary: "#27A0FD",
+    accent: "#5B8FFD",
     success: "#10b981",
-    warning: "#f59e0b",
+    warning: "#7221FA",
     danger: "#ef4444",
     muted: "#6b7280",
     grid: "rgba(255,255,255,0.06)",
-    tooltip: { bg: "rgba(0,0,0,0.85)", border: "rgba(245,158,11,0.3)", text: "#f5f5f5" },
-    task: { done: "#10b981", inProgress: "#f59e0b", todo: "#4b5563" },
-    agent: { online: "#10b981", busy: "#f59e0b", offline: "#4b5563" },
+    tooltip: { bg: "rgba(0,0,0,0.85)", border: "rgba(114,33,250,0.3)", text: "#f5f5f5" },
+    task: { done: "#10b981", inProgress: "#7221FA", todo: "#4b5563" },
+    agent: { online: "#10b981", busy: "#7221FA", offline: "#4b5563" },
   },
   futuristic: {
     primary: "#26dafd",

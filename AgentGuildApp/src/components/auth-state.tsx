@@ -48,11 +48,11 @@ function InitializingState() {
   return (
     <>
       <Image
-        src="/Logo.jpg"
+        src="/logo.png"
         alt="Agent Guild"
         width={48}
         height={48}
-        className="animate-pulse drop-shadow-[0_0_12px_rgba(255,215,0,0.3)]"
+        className="animate-pulse drop-shadow-[0_0_12px_rgba(114,33,250,0.3)]"
       />
       <div className="text-center">
         <h2 className="text-lg font-semibold text-foreground">Starting up...</h2>

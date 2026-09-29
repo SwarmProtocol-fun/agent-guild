@@ -786,7 +786,7 @@ export default function DashboardPage() {
               📋 <DecryptedText text="Recent Tasks" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
             </CardTitle>
             <Link href="/missions" className="text-xs">
-              <ShinyText text="View all →" speed={3} color="#b5954a" shineColor="#FFD700" className="text-xs" />
+              <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-0.5 px-4 pb-3">
@@ -830,7 +830,7 @@ export default function DashboardPage() {
               💼 <DecryptedText text="Recent Jobs" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
             </CardTitle>
             <Link href="/jobs" className="text-xs">
-              <ShinyText text="View all →" speed={3} color="#b5954a" shineColor="#FFD700" className="text-xs" />
+              <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-0.5 px-4 pb-3">
@@ -934,7 +934,7 @@ export default function DashboardPage() {
               📜 <DecryptedText text="Activity Feed" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
             </CardTitle>
             <Link href="/activity" className="text-xs">
-              <ShinyText text="View all →" speed={3} color="#b5954a" shineColor="#FFD700" className="text-xs" />
+              <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-1 px-4 pb-3">
@@ -1365,7 +1365,7 @@ export default function DashboardPage() {
                 📋 <DecryptedText text="Daily Briefing" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
               </CardTitle>
               <Link href="/summaries" className="text-xs">
-                <ShinyText text="View All →" speed={3} color="#b5954a" shineColor="#FFD700" className="text-xs" />
+                <ShinyText text="View All →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
               </Link>
               <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-amber-500/10 border-amber-500/20 text-amber-400">
                 {scheduleLabel}
@@ -1881,7 +1881,7 @@ export default function DashboardPage() {
             <CardHeader className="flex flex-row items-center gap-2 px-4 pt-3 pb-1.5">
               <CardTitle className="text-sm">📝 Audit Log</CardTitle>
               <Link href="/activity" className="text-xs">
-                <ShinyText text="View all →" speed={3} color="#b5954a" shineColor="#FFD700" className="text-xs" />
+                <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
               </Link>
             </CardHeader>
             <CardContent className="px-4 pb-3">
@@ -1997,7 +1997,7 @@ export default function DashboardPage() {
     <div className="space-y-2">
       {/* Dashboard hero header */}
       <div className="relative overflow-hidden rounded-xl border border-amber-500/10 bg-gradient-to-br from-amber-500/5 via-transparent to-orange-500/5 dark:from-amber-500/[0.07] dark:to-orange-500/[0.04] px-5 py-3.5">
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_rgba(255,215,0,0.08),transparent_60%)] pointer-events-none" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_rgba(114,33,250,0.08),transparent_60%)] pointer-events-none" />
         <div className="relative flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold tracking-tight text-glow-gold">{greeting}</h1>

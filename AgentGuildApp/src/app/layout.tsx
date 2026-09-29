@@ -20,12 +20,12 @@ export const metadata: Metadata = {
   title: "Agent Guild | Enterprise AI Fleet Orchestration",
   description: "Deploy, orchestrate, and scale enterprise-grade AI agent fleets. The ultimate command center for autonomous business operations.",
   icons: {
-    icon: "/Logo.jpg",
+    icon: "/logo.png",
   },
   openGraph: {
     title: "Agent Guild | Enterprise AI Fleet Orchestration",
     description: "The ultimate command center for autonomous business operations.",
-    images: ["/Logo.jpg"],
+    images: ["/logo.png"],
   }
 };
 
