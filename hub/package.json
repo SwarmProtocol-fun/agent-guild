@@ -14,10 +14,12 @@
     "express": "^4.21.0",
     "firebase-admin": "^13.7.0",
     "ioredis": "^5.10.0",
-    "websocket-driver": "^0.7.5",
     "ws": "^8.22.0"
   },
   "devDependencies": {
     "railway": "^3.12.0"
+  },
+  "overrides": {
+    "websocket-driver": "^0.7.5"
   }
 }
