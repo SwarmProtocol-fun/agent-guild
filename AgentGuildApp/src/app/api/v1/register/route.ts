@@ -17,7 +17,7 @@ import { ethers } from "ethers";
 import crypto from "crypto";
 import { PLATFORM_BRIEFING } from "../briefing";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
-import { agentCheckIn, getOrganization } from "@/lib/firestore-admin";
+import { agentCheckIn, getOrganization, ensureAgentGroupChat } from "@/lib/firestore-admin";
 import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
 import { HEDERA_CONTRACTS, HEDERA_GAS_LIMIT, CONTRACTS, AGENT_IDENTITY_NFT_ABI, AGENT_REGISTRY_ABI } from "@/lib/agent-guild-contracts";
@@ -25,6 +25,23 @@ import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
 import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
+import { isAdminConfigError } from "../verify";
+
+/**
+ * Read back the agent doc we just wrote, via the exact same Admin-SDK path
+ * verify.ts uses to authenticate signed calls. Catches the class of bug where
+ * register writes to one Firestore project/credential set and signed-call
+ * verification reads from another — instead of shipping a "Ready" agent that
+ * 401s on its very next call.
+ */
+async function selfTestAgentRead(agentId: string, expectedPublicKey: string): Promise<boolean> {
+    try {
+        const snap = await adminDb().collection("agents").doc(agentId).get();
+        return snap.exists && snap.data()?.publicKey === expectedPublicKey;
+    } catch {
+        return false;
+    }
+}
 
 const HEDERA_TESTNET_RPC = "https://testnet.hashio.io/api";
 
@@ -274,6 +291,21 @@ async function reconnectAgent(
         }).catch(() => {});
     }
 
+    // Self-test: confirm the write we just made is visible through the same
+    // Admin-SDK read path signed calls will use, before telling the caller
+    // it's safe to proceed.
+    if (!(await selfTestAgentRead(docId, publicKey))) {
+        return Response.json({
+            error: "Registered but the self-test read failed — write and read may be hitting different Firestore projects/credentials.",
+            code: "SELF_TEST_FAILED",
+            agentId: docId,
+        }, { status: 503 });
+    }
+
+    // Ensure the org-wide Agent Hub channel exists and hand its id back so
+    // the caller doesn't need a second round trip just to find it.
+    const hubChannel = await ensureAgentGroupChat(orgId);
+
     // Post check-in greeting to Agent Hub
     const agent = { id: docId, ...data } as Agent;
     agentCheckIn(agent, agent.orgId || orgId, skills.length > 0 ? skills : undefined, bio).catch(() => {});
@@ -290,6 +322,8 @@ async function reconnectAgent(
         asn,
         registered: true,
         existing: true,
+        keyUpdated: keyChanged,
+        agentHubChannelId: hubChannel.id,
         reportedSkills: skills.length,
         chain: data.onChainRegistered ? undefined : "hedera-testnet",
         briefing: PLATFORM_BRIEFING,
@@ -317,6 +351,7 @@ export async function POST(request: NextRequest) {
     const skills = sanitizeSkills(body.skills);
     const bio = typeof body.bio === "string" ? body.bio.slice(0, 500) : undefined;
     const existingAgentId = typeof body.existingAgentId === "string" ? body.existingAgentId : undefined;
+    const takeover = body.takeover === true;
 
     if (!publicKey || !agentName || !orgId) {
         return Response.json(
@@ -377,10 +412,22 @@ export async function POST(request: NextRequest) {
             .get();
 
         if (!nameMatch.empty) {
-            // Same org + name → update existing agent with new key
+            // Same org + name → same identity. Only overwrite the public key
+            // (a real identity takeover) if the caller explicitly asked for
+            // it — an accidental collision or a squatted name must not
+            // silently hijack an existing agent's key.
             const matchedDoc = nameMatch.docs[0];
-            return reconnectAgent(matchedDoc.id, matchedDoc.data(), {
-                publicKey, agentName, orgId, skills, bio, keyChanged: true,
+            const matchedData = matchedDoc.data();
+            const sameKey = matchedData.publicKey === publicKey;
+            if (!sameKey && !takeover) {
+                return Response.json({
+                    error: `An agent named "${agentName}" is already registered in this org with a different key. Re-run with --takeover to replace it.`,
+                    code: "KEY_TAKEOVER_REQUIRED",
+                    agentId: matchedDoc.id,
+                }, { status: 409 });
+            }
+            return reconnectAgent(matchedDoc.id, matchedData, {
+                publicKey, agentName, orgId, skills, bio, keyChanged: !sameKey,
             });
         }
 
@@ -489,6 +536,19 @@ export async function POST(request: NextRequest) {
             }
         })();
 
+        // Self-test: confirm the write is visible through the same Admin-SDK
+        // read path signed calls will use before telling the caller it's safe.
+        if (!(await selfTestAgentRead(ref.id, publicKey))) {
+            return Response.json({
+                error: "Registered but the self-test read failed — write and read may be hitting different Firestore projects/credentials.",
+                code: "SELF_TEST_FAILED",
+                agentId: ref.id,
+            }, { status: 503 });
+        }
+
+        // Ensure the org-wide Agent Hub channel exists and hand its id back.
+        const hubChannel = await ensureAgentGroupChat(orgId);
+
         // Post check-in greeting to Agent Hub
         const newAgent = { id: ref.id, name: agentName, type: agentType || "agent", orgId } as Agent;
         agentCheckIn(newAgent, orgId, skills.length > 0 ? skills : undefined, bio).catch(() => {});
@@ -505,6 +565,8 @@ export async function POST(request: NextRequest) {
             asn,
             registered: true,
             existing: false,
+            keyUpdated: false,
+            agentHubChannelId: hubChannel.id,
             reportedSkills: skills.length,
             chain: "hedera-testnet",
             briefing: PLATFORM_BRIEFING,
@@ -516,6 +578,12 @@ export async function POST(request: NextRequest) {
             } : {}),
         });
     } catch (err) {
+        if (isAdminConfigError(err)) {
+            return Response.json(
+                { error: "Firebase Admin SDK not configured on the server.", code: "ADMIN_NOT_CONFIGURED" },
+                { status: 503 }
+            );
+        }
         console.error("v1/register error:", err);
         return Response.json(
             { error: "Internal server error" },

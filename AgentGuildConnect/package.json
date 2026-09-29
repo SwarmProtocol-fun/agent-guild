@@ -5,7 +5,8 @@
   "license": "MIT",
   "description": "Sandbox-safe OpenClaw skill for Agent Guild multi-agent platform. Ed25519 keypair auth, stateless CLI.",
   "bin": {
-    "agent-guild": "scripts/agent-guild.mjs"
+    "agent-guild": "scripts/agent-guild.mjs",
+    "agent-guild-bridge": "scripts/bridge.mjs"
   },
   "files": [
     "scripts/",

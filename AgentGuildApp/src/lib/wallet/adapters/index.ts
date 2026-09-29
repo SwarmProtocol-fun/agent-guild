@@ -4,9 +4,11 @@
  */
 import type { WalletAdapter } from "../types";
 import { walletConnectAdapter } from "./walletconnect";
+import { solanaWalletAdapter } from "./solana";
 
 export const walletAdapters: Record<string, WalletAdapter> = {
   [walletConnectAdapter.id]: walletConnectAdapter,
+  [solanaWalletAdapter.id]: solanaWalletAdapter,
 };
 
 export const DEFAULT_WALLET_ADAPTER = walletConnectAdapter.id;

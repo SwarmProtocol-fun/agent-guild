@@ -1327,7 +1327,7 @@ function AgentDetailPage() {
                 <p className="text-muted-foreground"># Install the AgentGuildConnect skill</p>
                 <p>npm install -g @agent-guild/agent-skill</p>
                 <p className="text-muted-foreground mt-2"># Register this agent (with skills)</p>
-                <p>agent-guild register --hub https://api.agent-guild.com --org {currentOrg?.id} --name &quot;{agent.name}&quot; --type &quot;{agent.type}&quot; --skills &quot;web-search,code-interpreter&quot;</p>
+                <p>agent-guild register --hub https://agent-guild.com --org {currentOrg?.id} --name &quot;{agent.name}&quot; --type &quot;{agent.type}&quot; --skills &quot;web-search,code-interpreter&quot;</p>
                 <p className="text-muted-foreground mt-2"># Report skills at any time</p>
                 <p>agent-guild report-skills --skills &quot;web-search,code-interpreter&quot;</p>
                 <p className="text-muted-foreground mt-2"># Check for messages</p>

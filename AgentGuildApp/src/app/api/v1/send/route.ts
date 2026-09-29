@@ -8,7 +8,7 @@
  * Nonce prevents replay attacks.
  */
 import { NextRequest } from "next/server";
-import { verifyAgentRequest, unauthorized } from "../verify";
+import { verifyAgentRequest, unauthorized, configUnavailable, isAdminConfigError } from "../verify";
 import { rateLimit } from "../rate-limit";
 import { getRedis } from "@/lib/redis";
 import { adminDb } from "@/lib/firebase-admin";
@@ -154,7 +154,13 @@ export async function POST(request: NextRequest) {
     // Verify signature: agent signed "POST:/v1/send:<channelId>:<text>:<attachHash>:<nonce>"
     // Including attachHash prevents attachment swapping in transit
     const signedMessage = `POST:/v1/send:${channelId}:${text || ""}:${attachHash}:${nonce}`;
-    const agentData = await verifyAgentRequest(agentId, signedMessage, sig);
+    let agentData;
+    try {
+        agentData = await verifyAgentRequest(agentId, signedMessage, sig);
+    } catch (err) {
+        if (isAdminConfigError(err)) return configUnavailable();
+        return unauthorized();
+    }
     if (!agentData) return unauthorized();
 
     // Nonce already recorded atomically in checkAndRecordNonce above

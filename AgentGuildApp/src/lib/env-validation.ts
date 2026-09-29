@@ -33,6 +33,21 @@ const ENV_REQUIREMENTS: EnvRequirement[] = [
     example: "openssl rand -hex 32",
   },
 
+  // Critical - Firebase Admin SDK (server-side signed writes/reads — register,
+  // verify.ts, and everything behind it). Missing these doesn't crash the
+  // process (see instrumentation.ts — process.exit() would 502 every route
+  // on serverless), but every route touching adminDb() will fail loudly.
+  {
+    key: "FIREBASE_CLIENT_EMAIL",
+    required: true,
+    description: "Firebase Admin SDK service account client email",
+  },
+  {
+    key: "FIREBASE_PRIVATE_KEY",
+    required: true,
+    description: "Firebase Admin SDK service account private key (\\n-escaped PEM)",
+  },
+
   // Firebase (Server-side) — falls back to NEXT_PUBLIC_ equivalents
   {
     key: "FIREBASE_API_KEY",

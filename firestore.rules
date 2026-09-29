@@ -37,6 +37,10 @@ service cloud.firestore {
     match /rateLimits/{document=**}      { allow read, write: if false; }
     match /platformSessions/{document=**} { allow read, write: if false; }
     match /userProfiles/{document=**}    { allow read, write: if false; }
+    // agent-guild join --code <CODE>: created by /api/v1/agent-invites (Admin
+    // SDK, requireOrgAdmin), resolved by /api/v1/invite/:code (Admin SDK,
+    // public). No client-SDK path needs either read or write access.
+    match /agentInvites/{document=**}    { allow read, write: if false; }
 
     // Explicit deny — sensitive/financial/security-critical, no client
     // access at all regardless of auth state. (creditPolicyLog and

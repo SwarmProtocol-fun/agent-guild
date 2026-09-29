@@ -5,7 +5,7 @@
  * Signature = Ed25519.sign("GET:/v1/messages:<since_timestamp>")
  */
 import { NextRequest } from "next/server";
-import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { verifyAgentRequest, isTimestampFresh, unauthorized, configUnavailable, isAdminConfigError } from "../verify";
 import { rateLimit } from "../rate-limit";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp, type Query } from "firebase-admin/firestore";
@@ -25,7 +25,15 @@ export async function GET(request: NextRequest) {
 
     // Verify signature: agent signed "GET:/v1/messages:<since>"
     const signedMessage = `GET:/v1/messages:${sinceParam}`;
-    const agent = await verifyAgentRequest(agentId, signedMessage, sig);
+    let agent;
+    try {
+        agent = await verifyAgentRequest(agentId, signedMessage, sig);
+    } catch (err) {
+        // verify.ts only ever rethrows an Admin-SDK-not-configured error —
+        // every other failure is already swallowed there and returns null.
+        if (isAdminConfigError(err)) return configUnavailable();
+        return unauthorized();
+    }
     if (!agent) return unauthorized();
 
     // Note: `since` is a query cursor (last poll timestamp), NOT a request

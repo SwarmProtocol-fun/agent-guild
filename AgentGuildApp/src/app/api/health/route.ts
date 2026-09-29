@@ -82,8 +82,11 @@ export async function GET() {
     ? "degraded" // Firestore works but memory high
     : "unhealthy"; // Firestore down
 
-  const response: HealthStatus = {
+  const response: HealthStatus & { ok: boolean; commit: string; firebaseProjectId: string | null } = {
     status,
+    ok: allHealthy,
+    commit: process.env.COMMIT_REF || process.env.VERCEL_GIT_COMMIT_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || "unknown",
+    firebaseProjectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || null,
     timestamp: new Date().toISOString(),
     checks: {
       firestore: firestoreHealthy,

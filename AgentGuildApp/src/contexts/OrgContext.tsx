@@ -6,6 +6,7 @@ import { useWalletAccount, useWalletConnectionStatus } from "@/lib/wallet";
 import {
   createOrganization,
   getOrganizationsByWallet,
+  getAgentsByOrg,
   type Organization
 } from '@/lib/firestore';
 import { useSession } from './SessionContext';
@@ -25,6 +26,12 @@ interface OrgContextValue {
   refreshOrgs: () => Promise<void>;
   /** Create a new organization */
   createOrg: (name: string, description?: string) => Promise<void>;
+  /** Number of agents registered under currentOrg */
+  agentCount: number;
+  /** Whether the agent count for currentOrg is still loading */
+  agentsLoading: boolean;
+  /** Re-fetch the agent count for currentOrg (call after registering an agent) */
+  refreshAgentCount: () => Promise<void>;
 }
 
 const OrgContext = createContext<OrgContextValue>({
@@ -35,6 +42,9 @@ const OrgContext = createContext<OrgContextValue>({
   selectOrg: () => { },
   refreshOrgs: async () => { },
   createOrg: async () => { },
+  agentCount: 0,
+  agentsLoading: true,
+  refreshAgentCount: async () => { },
 });
 
 export function useOrg() {
@@ -59,6 +69,8 @@ export function OrgProvider({ children }: { children: ReactNode }) {
   const [currentOrg, setCurrentOrg] = useState<Organization | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [agentCount, setAgentCount] = useState(0);
+  const [agentsLoading, setAgentsLoading] = useState(true);
 
   // Track the grace-period timer so we can cancel if wallet reconnects
   const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -154,6 +166,30 @@ export function OrgProvider({ children }: { children: ReactNode }) {
     }
   }, [address, refreshOrgs, organizations]);
 
+  const refreshAgentCount = useCallback(async () => {
+    if (!currentOrg) {
+      setAgentCount(0);
+      setAgentsLoading(false);
+      return;
+    }
+
+    setAgentsLoading(true);
+    try {
+      const agents = await getAgentsByOrg(currentOrg.id);
+      setAgentCount(agents.length);
+    } catch (err) {
+      console.error('Failed to fetch agent count:', err);
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, [currentOrg]);
+
+  // Keep agent count in sync with the selected org — onboarding gates on
+  // this to require a first agent registration before entering the app.
+  useEffect(() => {
+    refreshAgentCount();
+  }, [currentOrg?.id, refreshAgentCount]);
+
   // Load orgs when address is available (from wallet or session).
   // Only re-fetch when the address actually changes.
   useEffect(() => {
@@ -216,6 +252,9 @@ export function OrgProvider({ children }: { children: ReactNode }) {
       selectOrg,
       refreshOrgs,
       createOrg,
+      agentCount,
+      agentsLoading,
+      refreshAgentCount,
     }}>
       {children}
     </OrgContext.Provider>

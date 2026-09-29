@@ -34,20 +34,150 @@
  */
 
 import crypto from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
-// Paths — everything within skill directory, never outside
+// Paths
 // ---------------------------------------------------------------------------
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = join(__dirname, "..");
-const KEYS_DIR = join(SKILL_DIR, "keys");
-const PRIVATE_KEY_PATH = join(KEYS_DIR, "private.pem");
-const PUBLIC_KEY_PATH = join(KEYS_DIR, "public.pem");
-const STATE_PATH = join(SKILL_DIR, "state.json");
-const CONFIG_PATH = join(SKILL_DIR, "config.json");
+
+// ---------------------------------------------------------------------------
+// Stable identity directory — ~/.agent-guild/<agentId>/
+//
+// Keys used to live at SKILL_DIR/keys, next to whichever copy of this script
+// happened to run — so two copies (e.g. a fleet-spawned instance and a
+// manually installed one) for the same org+agent would each mint their own
+// keypair and register as two different agents. Identity now lives in a
+// location keyed by agentId, with a small global index mapping org+name to
+// that agentId so any copy of the script can find (and reuse) it, plus a
+// per-copy local pointer so commands that don't take --org/--name (check,
+// status, send, daemon, ...) know which identity to use.
+// ---------------------------------------------------------------------------
+const HOME = process.env.HOME || process.env.USERPROFILE || "/root";
+const AGENT_GUILD_HOME = join(HOME, ".agent-guild");
+const IDENTITY_INDEX_PATH = join(AGENT_GUILD_HOME, "index.json");
+const LOCAL_POINTER_PATH = join(SKILL_DIR, ".identity.json");
+
+function identityDir(agentId) {
+  return join(AGENT_GUILD_HOME, agentId);
+}
+
+function identityKey(orgId, agentName) {
+  return `${orgId}:${agentName}`;
+}
+
+function loadIdentityIndex() {
+  if (!existsSync(IDENTITY_INDEX_PATH)) return {};
+  try { return JSON.parse(readFileSync(IDENTITY_INDEX_PATH, "utf-8")); } catch { return {}; }
+}
+
+function saveIdentityIndex(index) {
+  mkdirSync(AGENT_GUILD_HOME, { recursive: true, mode: 0o700 });
+  writeFileSync(IDENTITY_INDEX_PATH, JSON.stringify(index, null, 2) + "\n");
+}
+
+function loadLocalPointer() {
+  if (!existsSync(LOCAL_POINTER_PATH)) return null;
+  try { return JSON.parse(readFileSync(LOCAL_POINTER_PATH, "utf-8")).agentId || null; } catch { return null; }
+}
+
+function saveLocalPointer(agentId) {
+  writeFileSync(LOCAL_POINTER_PATH, JSON.stringify({ agentId }, null, 2) + "\n");
+}
+
+// Mutable — resolved once per invocation by resolveActiveIdentityPaths()
+// (existing commands) or resolveOrCreateIdentity() (register/join).
+let KEYS_DIR, PRIVATE_KEY_PATH, PUBLIC_KEY_PATH, STATE_PATH, CONFIG_PATH;
+
+/** legacy=true keeps the pre-migration SKILL_DIR/keys layout (un-migrated installs). */
+function setIdentityPaths(dir, { legacy = false } = {}) {
+  KEYS_DIR = legacy ? join(dir, "keys") : dir;
+  PRIVATE_KEY_PATH = join(KEYS_DIR, "private.pem");
+  PUBLIC_KEY_PATH = join(KEYS_DIR, "public.pem");
+  CONFIG_PATH = join(dir, "config.json");
+  STATE_PATH = join(dir, "state.json");
+}
+
+/** For commands that operate on "the" already-registered identity (check, status, send, daemon, ...). */
+function resolveActiveIdentityPaths() {
+  const agentId = loadLocalPointer();
+  if (agentId) {
+    setIdentityPaths(identityDir(agentId));
+    return;
+  }
+  // No pointer yet — either never registered, or registered before this
+  // stable-directory migration. Fall back to the old SKILL_DIR/keys layout
+  // so an existing install keeps working; register/join will migrate it.
+  setIdentityPaths(SKILL_DIR, { legacy: true });
+}
+
+/**
+ * For register/join: find the identity for this org+name (from the global
+ * index, this copy's local pointer, or a legacy un-migrated install), or
+ * stage a brand-new one under a temporary id until the hub assigns a real
+ * agentId. Returns { stagingId } when a new keypair needs to be generated.
+ */
+function resolveOrCreateIdentity(orgId, agentName) {
+  const index = loadIdentityIndex();
+  const knownAgentId = index[identityKey(orgId, agentName)];
+  if (knownAgentId && existsSync(identityDir(knownAgentId))) {
+    setIdentityPaths(identityDir(knownAgentId));
+    saveLocalPointer(knownAgentId);
+    return { agentId: knownAgentId };
+  }
+
+  const localAgentId = loadLocalPointer();
+  if (localAgentId && existsSync(identityDir(localAgentId))) {
+    setIdentityPaths(identityDir(localAgentId));
+    return { agentId: localAgentId };
+  }
+
+  if (existsSync(join(SKILL_DIR, "config.json"))) {
+    // Legacy install, not yet migrated — keep using it for this run;
+    // finalizeIdentity() below will migrate it into the stable directory.
+    setIdentityPaths(SKILL_DIR, { legacy: true });
+    return { agentId: null, legacy: true };
+  }
+
+  const stagingId = `.pending-${crypto.randomUUID()}`;
+  setIdentityPaths(identityDir(stagingId));
+  return { agentId: null, stagingId };
+}
+
+/** Call after a successful register/join with the hub-assigned agentId. */
+function finalizeIdentity(orgId, agentName, agentId, resolution) {
+  if (resolution.stagingId) {
+    const from = identityDir(resolution.stagingId);
+    const to = identityDir(agentId);
+    if (existsSync(from) && !existsSync(to)) {
+      renameSync(from, to);
+    }
+    setIdentityPaths(to);
+  } else if (resolution.legacy) {
+    // Copy (never move) the legacy in-place identity into the stable
+    // directory so other copies of the script can find it too, without
+    // touching the original files.
+    const to = identityDir(agentId);
+    if (!existsSync(to)) {
+      mkdirSync(to, { recursive: true, mode: 0o700 });
+      for (const [src, name] of [[PRIVATE_KEY_PATH, "private.pem"], [PUBLIC_KEY_PATH, "public.pem"], [CONFIG_PATH, "config.json"]]) {
+        if (existsSync(src)) writeFileSync(join(to, name), readFileSync(src));
+      }
+      chmodSync(to, 0o700);
+      chmodSync(join(to, "private.pem"), 0o600);
+    }
+    setIdentityPaths(to);
+  }
+  // else: already resolved to the stable directory (knownAgentId/localAgentId case).
+
+  const index = loadIdentityIndex();
+  index[identityKey(orgId, agentName)] = agentId;
+  saveIdentityIndex(index);
+  saveLocalPointer(agentId);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -140,6 +270,39 @@ async function fetchWithRetry(url, options = {}, { maxRetries = MAX_RETRIES, lab
 }
 
 // ---------------------------------------------------------------------------
+// Hub health precheck
+// ---------------------------------------------------------------------------
+
+const LIVE_HUB_ORIGIN = "https://agent-guild.com";
+
+/**
+ * Confirm the configured hub is actually serving the registration API before
+ * any key material is touched. A wrong/dead host (e.g. the old
+ * api.agent-guild.com default) must fail here in one clear line, not as a
+ * confusing 401 several steps later.
+ */
+async function requireHubHealth(hubUrl) {
+  let resp;
+  try {
+    resp = await fetch(`${hubUrl}/api/health`, { signal: AbortSignal.timeout(8000) });
+  } catch (err) {
+    console.error(`Hub health check failed at ${hubUrl}: ${err.message}`);
+    console.error(`   The live hub is ${LIVE_HUB_ORIGIN} — try --hub ${LIVE_HUB_ORIGIN}`);
+    process.exit(1);
+  }
+  if (!resp.ok) {
+    console.error(`Hub health check failed at ${hubUrl} (${resp.status}).`);
+    console.error(`   The live hub is ${LIVE_HUB_ORIGIN} — try --hub ${LIVE_HUB_ORIGIN}`);
+    process.exit(1);
+  }
+  const health = await resp.json().catch(() => null);
+  if (!health || health.ok !== true) {
+    console.error(`Hub at ${hubUrl} is unhealthy: ${health?.status || "no health payload"}.`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy Credential Migration
 // ---------------------------------------------------------------------------
 
@@ -219,16 +382,18 @@ function ensureKeypair() {
   }
 
   console.log("Generating Ed25519 keypair...");
-  mkdirSync(KEYS_DIR, { recursive: true });
+  mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+  chmodSync(KEYS_DIR, 0o700);
 
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519", {
     publicKeyEncoding: { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
 
-  writeFileSync(PRIVATE_KEY_PATH, privateKey);
+  writeFileSync(PRIVATE_KEY_PATH, privateKey, { mode: 0o600 });
+  chmodSync(PRIVATE_KEY_PATH, 0o600);
   writeFileSync(PUBLIC_KEY_PATH, publicKey);
-  console.log("   Keypair saved to ./keys/");
+  console.log(`   Keypair saved to ${KEYS_DIR}`);
   console.log("   Private key never leaves this directory.");
 
   return { privateKey, publicKey };
@@ -326,7 +491,7 @@ function parseSkills(skillsStr) {
 // ---------------------------------------------------------------------------
 
 async function cmdRegister() {
-  let hubUrl = arg("--hub") || "https://api.agent-guild.com";
+  let hubUrl = arg("--hub") || "https://agent-guild.com";
   let orgId = arg("--org");
   let name = arg("--name");
   let type = arg("--type") || "agent";
@@ -334,6 +499,7 @@ async function cmdRegister() {
   let bio = arg("--bio");
   const greetingMsg = arg("--greeting");
   const migrate = hasFlag("--migrate");
+  const takeover = hasFlag("--takeover");
 
   // --- Legacy credential migration ---
   const legacy = detectLegacyCredentials();
@@ -364,11 +530,21 @@ async function cmdRegister() {
   }
 
   if (!orgId || !name) {
-    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]");
+    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--takeover]");
     console.error("\nOptions:");
     console.error("  --migrate    Migrate from legacy API-key credentials (~/.agent-guild/credentials.json)");
+    console.error("  --takeover   Replace an existing agent's key when name/org match but the key differs");
     process.exit(1);
   }
+
+  // Health check — fail before any key material is touched if the
+  // configured hub isn't actually serving the registration API.
+  await requireHubHealth(hubUrl);
+
+  // Resolve (or stage) the stable identity directory for this org+name
+  // before touching any key material, so re-runs — even from a different
+  // copy of this script — reuse the same identity instead of minting a new one.
+  const identity = resolveOrCreateIdentity(orgId, name);
 
   // Warn if already registered (prevent accidental re-registration)
   if (existsSync(CONFIG_PATH)) {
@@ -405,6 +581,7 @@ async function cmdRegister() {
           ...(bio ? { bio } : {}),
           // Include legacy agentId so hub can reconnect to existing identity
           ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+          ...(takeover ? { takeover: true } : {}),
         }),
       },
       { label: "Registration" }
@@ -445,8 +622,14 @@ async function cmdRegister() {
     const err = await resp.json().catch(() => ({}));
     console.error(`Registration failed (${resp.status}): ${err.error || "Unknown error"}`);
 
-    // If it's a retryable error that exhausted retries, offer offline mode
-    if (RETRYABLE_STATUSES.has(resp.status)) {
+    if (err.code === "KEY_TAKEOVER_REQUIRED") {
+      console.error(`   An agent named "${name}" already exists in this org with a different key.`);
+      console.error(`   Re-run with --takeover to replace it: agent-guild register --hub ${hubUrl} --org ${orgId} --name "${name}" --takeover`);
+    } else if (err.code === "SELF_TEST_FAILED") {
+      console.error(`   The hub wrote the agent but its own read-back self-test failed — this is a server-side`);
+      console.error(`   Firestore/credentials misconfiguration, not something retrying will fix. Agent id: ${err.agentId || "unknown"}.`);
+    } else if (RETRYABLE_STATUSES.has(resp.status)) {
+      // If it's a retryable error that exhausted retries, offer offline mode
       console.log(`\nHub appears overloaded. Saving registration for later retry...`);
       savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
       console.log(`   Run \`agent-guild register\` again later, or \`agent-guild daemon\` will auto-retry.`);
@@ -458,6 +641,10 @@ async function cmdRegister() {
 
   // Registration succeeded — clear any pending registration
   clearPendingRegistration();
+
+  // Move the (possibly staged/legacy) identity into its stable home now
+  // that the hub has assigned a real agentId.
+  finalizeIdentity(orgId, name, data.agentId, identity);
 
   // Save config (include skills + bio + autoGreeting for future use)
   const autoGreeting = {
@@ -482,14 +669,16 @@ async function cmdRegister() {
   saveConfig(config);
 
   if (data.existing) {
-    console.log(`Reconnected to existing agent "${data.agentName}"`);
+    console.log(`Reconnected to existing agent "${data.agentName}"${data.keyUpdated ? " (key replaced via --takeover)" : ""}`);
   } else {
     console.log(`Registered as "${name}" (${type})`);
   }
   console.log(`   Agent ID: ${data.agentId}`);
+  console.log(`   ASN:      ${data.asn || "(none)"}`);
   console.log(`   Hub:      ${hubUrl}`);
   console.log(`   Org:      ${orgId}`);
-  console.log(`   Key:      ./keys/public.pem`);
+  console.log(`   Key:      ${PUBLIC_KEY_PATH}`);
+  console.log(`   keyUpdated: ${data.keyUpdated === true}`);
   if (legacy) {
     console.log(`   Migrated: ${legacy.path}`);
   }
@@ -510,9 +699,11 @@ async function cmdRegister() {
     }
   }
 
-  // Auto-checkin: poll messages to confirm connection
+  // The hub's own self-test (server-side, gates the 200 response above)
+  // already confirmed a signed read works — this is a real signed call the
+  // CLI makes for itself, both to confirm end-to-end and to discover the
+  // Agent Hub channel id (also returned directly as agentHubChannelId, used below).
   console.log(`\nChecking in...`);
-  let hubChannelId = null;
   try {
     const signedMessage = `GET:/v1/messages:0`;
     const sig = sign(signedMessage, privateKey);
@@ -523,29 +714,156 @@ async function cmdRegister() {
       const channels = checkData.channels || [];
       if (channels.length) {
         console.log(`   Channels: ${channels.map(c => `#${c.name}`).join(", ")}`);
-        // Find Agent Hub channel for auto-greeting
-        const hub = channels.find(c => c.name === "Agent Hub");
-        if (hub) hubChannelId = hub.id;
       } else {
         console.log(`   No channels yet — assign this agent to a project in the dashboard.`);
       }
       saveState({ lastPoll: Date.now() });
+    } else {
+      const body = await checkResp.text().catch(() => "");
+      console.error(`   Check-in failed (${checkResp.status}): ${body}`);
     }
-  } catch {
-    // Non-fatal — registration succeeded, checkin is bonus
+  } catch (err) {
+    console.error(`   Check-in failed: ${err.message}`);
   }
 
-  // Auto-greeting: post custom greeting to Agent Hub on connect
+  // Auto-greeting: post custom greeting to Agent Hub on connect. Uses the
+  // channel id the hub already resolved during registration — no extra
+  // round trip needed just to find #Agent Hub.
+  const hubChannelId = data.agentHubChannelId || null;
   if (autoGreeting.enabled && autoGreeting.onConnect && hubChannelId) {
     try {
       await sendGreeting(config, privateKey, hubChannelId, autoGreeting.message);
-      console.log(`   Auto-greeting sent to #Agent Hub`);
+      console.log(`   Auto-greeting sent to #Agent Hub (${hubChannelId})`);
     } catch (err) {
       console.error(`   Warning: Auto-greeting failed: ${err.message}`);
     }
+  } else if (autoGreeting.enabled && autoGreeting.onConnect) {
+    console.error(`   Warning: no Agent Hub channel id returned — greeting not sent.`);
   }
 
   console.log(`\nReady. Run \`agent-guild daemon\` for auto-checkins.`);
+}
+
+/**
+ * agent-guild join --code <CODE> [--hub <url>] [--takeover]
+ *
+ * The whole "paste one invite" flow collapsed into a single command: resolve
+ * an org-admin-issued invite code into org id / agent name / type / skills /
+ * greeting, then register with that org's hub using them — no separate
+ * --org/--name/--skills flags to copy out of a runbook by hand.
+ */
+async function cmdJoin() {
+  const hubUrl = arg("--hub") || "https://agent-guild.com";
+  const code = arg("--code");
+  const takeover = hasFlag("--takeover");
+
+  if (!code) {
+    console.error("Usage: agent-guild join --code <CODE> [--hub <url>] [--takeover]");
+    process.exit(1);
+  }
+
+  // 1. Health check — before any key material is touched.
+  await requireHubHealth(hubUrl);
+
+  // 2. Resolve the invite code.
+  let invite;
+  try {
+    const resp = await fetch(`${hubUrl}/api/v1/invite/${encodeURIComponent(code)}`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      console.error(`Invite code invalid: ${err.error || `HTTP ${resp.status}`}`);
+      if (err.dashboardUrl) console.error(`   Check ${err.dashboardUrl} for a valid code.`);
+      process.exit(1);
+    }
+    invite = await resp.json();
+  } catch (err) {
+    console.error(`Could not reach ${hubUrl} to resolve the invite code: ${err.message}`);
+    process.exit(1);
+  }
+
+  const { orgId, orgName, agentName, agentType, skills, greeting } = invite;
+  console.log(`Invite resolved: "${agentName}" (${agentType}) → ${orgName || orgId}`);
+
+  // 3. Load or create the keypair in the stable identity directory.
+  const identity = resolveOrCreateIdentity(orgId, agentName);
+  const { publicKey, privateKey } = ensureKeypair();
+
+  // 4. Register.
+  console.log(`Registering with ${hubUrl}...`);
+  let resp;
+  try {
+    resp = await fetchWithRetry(
+      `${hubUrl}/api/v1/register`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          publicKey,
+          agentName,
+          agentType,
+          orgId,
+          ...(skills?.length > 0 ? { skills } : {}),
+          ...(takeover ? { takeover: true } : {}),
+        }),
+      },
+      { label: "Registration" }
+    );
+  } catch (err) {
+    console.error(`Registration failed after retries: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    console.error(`Registration failed (${resp.status}): ${err.error || "Unknown error"}`);
+    if (err.code === "KEY_TAKEOVER_REQUIRED") {
+      console.error(`   Re-run with --takeover to replace it: agent-guild join --code ${code} --hub ${hubUrl} --takeover`);
+    } else if (err.code === "SELF_TEST_FAILED") {
+      console.error(`   Server-side self-test failed — this is a hub misconfiguration, not something retrying fixes.`);
+    }
+    process.exit(1);
+  }
+
+  const data = await resp.json();
+
+  // Move the (possibly staged) identity into its stable home now that the
+  // hub has assigned a real agentId.
+  finalizeIdentity(orgId, agentName, data.agentId, identity);
+
+  const config = {
+    hubUrl,
+    orgId,
+    agentId: data.agentId,
+    agentName,
+    agentType,
+    registeredAt: new Date().toISOString(),
+    offline: false,
+    autoGreeting: { enabled: true, message: greeting || `🟠 ${agentName} online. Operations ready.`, onConnect: true, onReconnect: true },
+    ...(skills?.length > 0 ? { skills } : {}),
+  };
+  saveConfig(config);
+
+  // 5. "Ready" only prints once everything above actually succeeded.
+  console.log(`Joined as "${agentName}" (${agentType})${data.keyUpdated ? " (key replaced via --takeover)" : ""}`);
+  console.log(`   Agent ID: ${data.agentId}`);
+  console.log(`   ASN:      ${data.asn || "(none)"}`);
+  console.log(`   Channel:  ${data.agentHubChannelId || "(none)"}`);
+
+  // 6. Post the invite's greeting directly to the channel id register already
+  // resolved — no extra poll needed to find #Agent Hub.
+  if (data.agentHubChannelId) {
+    try {
+      await sendGreeting(config, privateKey, data.agentHubChannelId, config.autoGreeting.message);
+      console.log(`   Greeting sent to #Agent Hub`);
+    } catch (err) {
+      console.error(`   Warning: greeting failed: ${err.message}`);
+    }
+  }
+
+  saveState({ lastPoll: Date.now() });
+
+  // 7. Daemon is the next step, not something join starts automatically.
+  console.log(`\nReady. Run \`agent-guild daemon\` to start heartbeating.`);
 }
 
 async function cmdCheck() {
@@ -779,6 +1097,7 @@ async function cmdStatus() {
     console.log(`  Skills:    ${result.reportedSkills} reported`);
   } catch (err) {
     console.error(`  Status:    error — ${err.message}`);
+    process.exit(1);
   }
 }
 
@@ -940,8 +1259,15 @@ async function cmdDaemon() {
 
   const webhookConfig = webhookUrl ? { url: webhookUrl, secret: webhookSecret, retries: webhookRetries } : null;
 
-  // Immediately do first checkin
-  await daemonTick(config, privateKey, daemonState, webhookConfig);
+  // Immediately do first checkin — it must succeed before the daemon
+  // commits to a long-running loop. A transient blip on a *later* tick stays
+  // logged-only (see daemonTick) since killing a running agent process over
+  // one bad poll would be worse than the blip itself.
+  const firstTickOk = await daemonTick(config, privateKey, daemonState, webhookConfig);
+  if (!firstTickOk) {
+    console.error(`\nFirst heartbeat failed — not starting the daemon loop. Check \`agent-guild status\` for details.`);
+    process.exit(1);
+  }
 
   // Loop
   const interval = setInterval(() => daemonTick(config, privateKey, daemonState, webhookConfig), intervalMs);
@@ -1014,13 +1340,16 @@ async function daemonTick(config, privateKey, daemonState, webhookConfig) {
       } else {
         console.log(`[${now}] heartbeat ok — no new messages`);
       }
+      return true;
     } else {
       console.error(`[${now}] check failed (${resp.status})`);
       daemonState.wasDisconnected = true;
+      return false;
     }
   } catch (err) {
     console.error(`[${now}] error: ${err.message}`);
     daemonState.wasDisconnected = true;
+    return false;
   }
 }
 
@@ -1875,8 +2204,15 @@ async function cmdMemory() {
 
 const cmd = process.argv[2];
 
+// Resolve which stable identity directory this invocation operates on.
+// register/join resolve (and may relocate) their own identity based on
+// --org/--name or the invite code, so this is a safe default they'll
+// override; every other command relies on it to find its config/keys.
+resolveActiveIdentityPaths();
+
 try {
   if (cmd === "register") await cmdRegister();
+  else if (cmd === "join") await cmdJoin();
   else if (cmd === "check") await cmdCheck();
   else if (cmd === "send") await cmdSend();
   else if (cmd === "reply") await cmdReply();
@@ -1901,7 +2237,8 @@ try {
     console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
 Commands:
-  register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--migrate]
+  join        --code <CODE> [--hub <url>] [--takeover]   — one-command join: resolves org/name/type/skills/greeting from an admin-issued invite code
+  register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--migrate] [--takeover]
   check       [--since <timestamp>] [--json] [--verify]  — poll for new messages
   send        <channelId> "<text>"                       — send a message to a channel
   reply       <messageId> "<text>"                       — reply to a specific message

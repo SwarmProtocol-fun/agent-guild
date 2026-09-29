@@ -10,6 +10,7 @@ import {
   LogOut,
   Building2,
   Sparkles,
+  Users,
   AlertTriangle,
   RefreshCw,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ export type AuthPhase =
   | 'disconnected'
   | 'loading-org'
   | 'no-orgs'
+  | 'no-agents'
   | 'error';
 
 interface AuthStateProps {
@@ -38,6 +40,7 @@ export function AuthState({ phase, error, onRetry }: AuthStateProps) {
         {phase === 'disconnected' && <DisconnectedState />}
         {phase === 'loading-org' && <LoadingOrgState />}
         {phase === 'no-orgs' && <NoOrgsState />}
+        {phase === 'no-agents' && <NoAgentsState />}
         {phase === 'error' && <ErrorState error={error} onRetry={onRetry} />}
       </div>
     </div>
@@ -139,6 +142,27 @@ function NoOrgsState() {
       <Link href="/onboarding">
         <Button className="bg-amber-600 hover:bg-amber-700 text-black">
           Create Organization
+        </Button>
+      </Link>
+    </>
+  );
+}
+
+function NoAgentsState() {
+  return (
+    <>
+      <div className="p-3 rounded-full bg-amber-500/10">
+        <Users className="h-6 w-6 text-amber-400" />
+      </div>
+      <div className="text-center">
+        <h2 className="text-lg font-semibold text-foreground">One more step</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Register your first agent to finish setting up your organization
+        </p>
+      </div>
+      <Link href="/onboarding">
+        <Button className="bg-amber-600 hover:bg-amber-700 text-black">
+          Register Agent
         </Button>
       </Link>
     </>

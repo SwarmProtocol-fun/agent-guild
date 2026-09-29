@@ -9,7 +9,7 @@
 // Types
 // ═══════════════════════════════════════════════════════════════
 
-export type ChainKey = "ethereum" | "avalanche" | "base" | "hedera" | "filecoin" | "sepolia" | "solana" | "baseSepolia";
+export type ChainKey = "ethereum" | "avalanche" | "base" | "filecoin" | "sepolia" | "solana" | "baseSepolia";
 
 export interface ChainConfig {
     /** Internal key */
@@ -130,31 +130,6 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         logo: "/chains/base.svg",
     },
 
-    hedera: {
-        key: "hedera",
-        name: "Hedera Testnet",
-        chainId: 296,
-        rpc: "https://testnet.hashio.io/api",
-        nativeCurrency: { name: "HBAR", symbol: "HBAR", decimals: 8 },
-        explorer: {
-            name: "HashScan",
-            baseUrl: "https://hashscan.io/testnet",
-            txUrl: (h) => `https://hashscan.io/testnet/transaction/${h}`,
-            addressUrl: (a) => `https://hashscan.io/testnet/account/${a}`,
-            contractUrl: (a) => `https://hashscan.io/testnet/contract/${a}`,
-        },
-        contracts: {
-            taskBoard: "0xf97b6900f5573cba7dcE4e58e5118b403E098434",
-            agentRegistry: "0xC110E3bB1a898E1A4bd8Cc75a913603601e7c228",
-            brandVault: "0x2254185AB8B6AC995F97C769a414A0281B42853b",
-            agentTreasury: "0x91D581cFdda6F1AC4cA211d8A05B31BeFcEF2882",
-            treasury: process.env.HEDERA_TREASURY_ADDRESS,
-        },
-        enabled: true,
-        paymentEnabled: true,
-        logo: "/chains/hedera.svg",
-    },
-
     filecoin: {
         key: "filecoin",
         name: "Filecoin",
@@ -234,6 +209,11 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
             contractUrl: (a) => `https://solscan.io/account/${a}?cluster=devnet`,
         },
         contracts: {
+            // Single Anchor program (solana-program/programs/agent_guild) —
+            // registry/task-board/treasury are all PDAs under this one program id.
+            taskBoard: process.env.NEXT_PUBLIC_SOLANA_PROGRAM_ID || "4T3UJ83HEwQH3Pb6eQuMnkEYSxyqXv7o6rNARXXKT3ci",
+            agentRegistry: process.env.NEXT_PUBLIC_SOLANA_PROGRAM_ID || "4T3UJ83HEwQH3Pb6eQuMnkEYSxyqXv7o6rNARXXKT3ci",
+            agentTreasury: process.env.NEXT_PUBLIC_SOLANA_PROGRAM_ID || "4T3UJ83HEwQH3Pb6eQuMnkEYSxyqXv7o6rNARXXKT3ci",
             treasury: process.env.SOLANA_TREASURY_ADDRESS,
         },
         enabled: true,
@@ -259,16 +239,16 @@ export function getChain(key: string): ChainConfig | undefined {
     return CHAIN_CONFIGS[key];
 }
 
-/** Get native currency symbol for a chain (default: "HBAR" for Hedera Mainnet) */
+/** Get native currency symbol for a chain (default: "SOL" for Solana) */
 export function getCurrencySymbol(chainId?: number): string {
-    if (!chainId) return "HBAR";
-    return getChainById(chainId)?.nativeCurrency.symbol ?? "HBAR";
+    if (!chainId) return "SOL";
+    return getChainById(chainId)?.nativeCurrency.symbol ?? "SOL";
 }
 
 /** Get native currency decimals for a chain */
 export function getCurrencyDecimals(chainId?: number): number {
-    if (!chainId) return 8; // HBAR default (Hedera uses 8 decimals)
-    return getChainById(chainId)?.nativeCurrency.decimals ?? 8;
+    if (!chainId) return 9; // SOL default (lamports use 9 decimals)
+    return getChainById(chainId)?.nativeCurrency.decimals ?? 9;
 }
 
 /** Convert raw amount to human-readable using chain-specific decimals */
@@ -279,21 +259,21 @@ export function toNative(rawAmount: bigint | number, chainId?: number): number {
 
 /** Get explorer TX link for a chain */
 export function getExplorerTxUrl(hash: string, chainId?: number): string {
-    if (!chainId) return `https://hashscan.io/testnet/transaction/${hash}`;
+    if (!chainId) return CHAIN_CONFIGS.solana.explorer.txUrl(hash);
     const chain = getChainById(chainId);
     return chain?.explorer.txUrl(hash) ?? `#`;
 }
 
 /** Get explorer contract link for a chain */
 export function getExplorerContractUrl(addr: string, chainId?: number): string {
-    if (!chainId) return `https://hashscan.io/testnet/contract/${addr}`;
+    if (!chainId) return CHAIN_CONFIGS.solana.explorer.contractUrl(addr);
     const chain = getChainById(chainId);
     return chain?.explorer.contractUrl(addr) ?? `#`;
 }
 
 /** Get deployed contract addresses for a chain (returns empty object if none) */
 export function getContracts(chainId?: number) {
-    if (!chainId) return CHAIN_CONFIGS.hedera.contracts;
+    if (!chainId) return CHAIN_CONFIGS.solana.contracts;
     return getChainById(chainId)?.contracts ?? {};
 }
 

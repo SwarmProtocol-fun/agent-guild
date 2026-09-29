@@ -18,38 +18,36 @@ import {
 } from "./chains";
 
 // ============================================================
-// Default Config — Hedera Testnet is the PRIMARY chain
-// (Testnet for hackathon: free HBAR, easy for judges to test)
+// Default Config — Solana is the PRIMARY chain (see chains.ts).
+// This file's ABIs/addresses are for the EVM chains that still run the
+// Solidity contracts (Base, Sepolia) — Sepolia is the default since it has
+// a real deployment (contracts/deployed-addresses.json).
 // ============================================================
 
-export const DEFAULT_RPC_URL = "https://testnet.hashio.io/api";
-export const DEFAULT_CHAIN_ID = 296; // Hedera Testnet
-export const EXPLORER_BASE = "https://hashscan.io/testnet";
-export const DEFAULT_GAS_LIMIT = 10_000_000;
+export const DEFAULT_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com";
+export const DEFAULT_CHAIN_ID = 11155111; // Ethereum Sepolia
+export const EXPLORER_BASE = "https://sepolia.etherscan.io";
+export const DEFAULT_GAS_LIMIT = 3_000_000;
 
 // ============================================================
-// Contract Addresses — Hedera Testnet (chain 296)
-// Fallbacks are the deployed testnet addresses (2026-03-23).
-// Override via NEXT_PUBLIC_HEDERA_* env vars for other networks.
+// Contract Addresses — Ethereum Sepolia (chain 11155111)
+// Fallbacks are the deployed testnet addresses (2026-03-08).
+// Override via NEXT_PUBLIC_SEPOLIA_* env vars for other networks.
 // ============================================================
 
 export const CONTRACTS = {
-  TASK_BOARD: process.env.NEXT_PUBLIC_HEDERA_TASK_BOARD || "0xf97b6900f5573cba7dcE4e58e5118b403E098434",
-  AGENT_REGISTRY: process.env.NEXT_PUBLIC_HEDERA_AGENT_REGISTRY || "0xC110E3bB1a898E1A4bd8Cc75a913603601e7c228",
-  BRAND_VAULT: process.env.NEXT_PUBLIC_HEDERA_BRAND_VAULT || "0x2254185AB8B6AC995F97C769a414A0281B42853b",
-  AGENT_TREASURY: process.env.NEXT_PUBLIC_HEDERA_TREASURY || "0x91D581cFdda6F1AC4cA211d8A05B31BeFcEF2882",
-  AGENT_IDENTITY_NFT: process.env.NEXT_PUBLIC_HEDERA_AGENT_NFT || "0x09F7D7717a67783298d5Ca6C0fe036C39951D337",
+  TASK_BOARD: process.env.NEXT_PUBLIC_SEPOLIA_TASK_BOARD || "0xc3E0869913FCdbeB59934FfC92C74269c428C834",
+  AGENT_REGISTRY: process.env.NEXT_PUBLIC_SEPOLIA_AGENT_REGISTRY || "0x9C34200882C37344A098E0e8B84a533DFB80e552",
+  AGENT_TREASURY: process.env.NEXT_PUBLIC_SEPOLIA_TREASURY || "0xE7e2F81F6CA9a3738B0E8555401CEF986Fbc33Aa",
+  // No Sepolia NFT deployment exists yet — override with NEXT_PUBLIC_SEPOLIA_AGENT_NFT once deployed.
+  AGENT_IDENTITY_NFT: process.env.NEXT_PUBLIC_SEPOLIA_AGENT_NFT || "",
 } as const;
-
-// Legacy compatibility exports
-export const HEDERA_CONTRACTS = CONTRACTS;
-export const HEDERA_GAS_LIMIT = DEFAULT_GAS_LIMIT;
 
 /** Get contracts for a specific chain */
 export { getContracts, getCurrencySymbol };
 
 // ============================================================
-// ABIs — Canonical (match deployed contracts on Hedera Testnet)
+// ABIs — Canonical (match deployed contracts on Base/Sepolia)
 // ============================================================
 
 export const AGENT_REGISTRY_ABI = [
@@ -110,11 +108,6 @@ export const TREASURY_ABI = [
   "event RevenueDeposited(address indexed from, uint256 amount, uint256 timestamp)",
   "event Withdrawn(address indexed to, uint256 amount, uint256 timestamp)",
 ];
-
-// Backward-compatible aliases
-export const HEDERA_TASK_BOARD_ABI = TASK_BOARD_ABI;
-export const HEDERA_AGENT_REGISTRY_ABI = AGENT_REGISTRY_ABI;
-export const HEDERA_TREASURY_ABI = TREASURY_ABI;
 
 // Agent Identity NFT ABI — Dynamic NFT for agent reputation
 export const AGENT_IDENTITY_NFT_ABI = [
@@ -189,11 +182,6 @@ export const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; b
 // ============================================================
 // Helpers (backwards compat — wrap chain-aware functions from chains.ts)
 // ============================================================
-
-/** Convert tinybars to HBAR (1 HBAR = 100,000,000 tinybars) */
-export function toHbar(tinybars: bigint | number): number {
-  return Number(tinybars) / 1e8;
-}
 
 /** Shorten an address (backwards compat) */
 export const shortAddr = shortAddress;

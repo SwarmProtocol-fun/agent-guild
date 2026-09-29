@@ -1,0 +1,22 @@
+[package]
+name = "agent-guild"
+version = "0.1.0"
+description = "Agent Guild on-chain program: agent registry, task board escrow, treasury"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "agent_guild"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+
+[dependencies]
+anchor-lang = "0.31.1"
+

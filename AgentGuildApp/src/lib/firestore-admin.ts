@@ -659,6 +659,46 @@ export async function getOrganization(orgId: string): Promise<Organization | nul
   return { id: snap.id, ...snap.data() } as Organization;
 }
 
+// ─── Agent invites ──────────────────────────────────────
+// Org-admin-issued codes that resolve to a pre-configured agent identity
+// (name/type/skills/greeting) for `agent-guild join --code <CODE>` — distinct
+// from organizations.inviteCode, which only carries an org id for human
+// wallet members self-joining via /api/v1/orgs/join.
+
+export interface AgentInvite {
+  id: string;
+  code: string;
+  orgId: string;
+  orgName: string;
+  agentName: string;
+  agentType: string;
+  skills: { id: string; name: string; type: "skill" | "plugin"; version?: string }[];
+  greeting?: string;
+  createdBy: string;
+  createdAt: FirebaseFirestore.Timestamp | FirebaseFirestore.FieldValue;
+}
+
+export async function createAgentInvite(
+  data: Omit<AgentInvite, "id" | "createdAt">,
+): Promise<string> {
+  const ref = await adminDb().collection("agentInvites").add({
+    ...data,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function getAgentInviteByCode(code: string): Promise<AgentInvite | null> {
+  const snap = await adminDb()
+    .collection("agentInvites")
+    .where("code", "==", code.toUpperCase())
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  return { id: doc.id, ...doc.data() } as AgentInvite;
+}
+
 // ─── Agents ─────────────────────────────────────────────
 
 export async function getAgent(agentId: string): Promise<Agent | null> {

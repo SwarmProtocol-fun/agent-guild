@@ -9,21 +9,20 @@ import {
 } from "../chains";
 
 describe("toNative", () => {
-  it("converts tinybars to HBAR (8 decimals, default)", () => {
-    expect(toNative(100_000_000)).toBeCloseTo(1);
+  it("converts lamports to SOL (9 decimals, default)", () => {
+    expect(toNative(1_000_000_000)).toBeCloseTo(1);
   });
 
-  it("converts tinybars to HBAR (8 decimals, chainId 296)", () => {
-    // Hedera testnet is chainId 296 in chains.ts
-    expect(toNative(100_000_000, 296)).toBeCloseTo(1);
+  it("converts wei to ETH (18 decimals, chainId 8453 / Base)", () => {
+    expect(toNative(1_000_000_000_000_000_000, 8453)).toBeCloseTo(1);
   });
 
   it("handles zero", () => {
     expect(toNative(0)).toBe(0);
   });
 
-  it("defaults to 8 decimals for unknown chainId", () => {
-    expect(toNative(100_000_000, 999999)).toBeCloseTo(1);
+  it("defaults to 9 decimals for unknown chainId", () => {
+    expect(toNative(1_000_000_000, 999999)).toBeCloseTo(1);
   });
 });
 
@@ -46,38 +45,38 @@ describe("shortAddress", () => {
 });
 
 describe("getCurrencySymbol", () => {
-  it("returns HBAR for undefined chainId", () => {
-    expect(getCurrencySymbol()).toBe("HBAR");
+  it("returns SOL for undefined chainId", () => {
+    expect(getCurrencySymbol()).toBe("SOL");
   });
 
-  it("returns HBAR for Hedera Testnet (296)", () => {
-    expect(getCurrencySymbol(296)).toBe("HBAR");
+  it("returns ETH for Base (8453)", () => {
+    expect(getCurrencySymbol(8453)).toBe("ETH");
   });
 
-  it("returns HBAR for unknown chainId", () => {
-    expect(getCurrencySymbol(999999)).toBe("HBAR");
+  it("returns SOL for unknown chainId", () => {
+    expect(getCurrencySymbol(999999)).toBe("SOL");
   });
 });
 
 describe("getCurrencyDecimals", () => {
-  it("returns 8 for Hedera Testnet (296)", () => {
-    expect(getCurrencyDecimals(296)).toBe(8);
+  it("returns 18 for Base (8453)", () => {
+    expect(getCurrencyDecimals(8453)).toBe(18);
   });
 
-  it("defaults to 8 for undefined chainId", () => {
-    expect(getCurrencyDecimals()).toBe(8);
+  it("defaults to 9 for undefined chainId", () => {
+    expect(getCurrencyDecimals()).toBe(9);
   });
 
-  it("defaults to 8 for unknown chainId", () => {
-    expect(getCurrencyDecimals(999999)).toBe(8);
+  it("defaults to 9 for unknown chainId", () => {
+    expect(getCurrencyDecimals(999999)).toBe(9);
   });
 });
 
 describe("getChainById", () => {
-  it("finds Hedera Testnet by chainId (296)", () => {
-    const chain = getChainById(296);
+  it("finds Base by chainId (8453)", () => {
+    const chain = getChainById(8453);
     expect(chain).toBeDefined();
-    expect(chain!.key).toBe("hedera");
+    expect(chain!.key).toBe("base");
   });
 
   it("returns undefined for unknown chainId", () => {
@@ -86,15 +85,15 @@ describe("getChainById", () => {
 });
 
 describe("getExplorerTxUrl", () => {
-  it("returns HashScan testnet URL for undefined chainId", () => {
-    const url = getExplorerTxUrl("0xabc");
-    expect(url).toBe("https://hashscan.io/testnet/transaction/0xabc");
+  it("returns Solscan devnet URL for undefined chainId", () => {
+    const url = getExplorerTxUrl("abc123");
+    expect(url).toContain("solscan.io");
+    expect(url).toContain("abc123");
   });
 
-  it("returns HashScan URL for Hedera Testnet (296)", () => {
-    const url = getExplorerTxUrl("0xabc", 296);
-    expect(url).toContain("hashscan.io");
+  it("returns BaseScan URL for Base (8453)", () => {
+    const url = getExplorerTxUrl("0xabc", 8453);
+    expect(url).toContain("basescan.org");
     expect(url).toContain("0xabc");
   });
 });
-

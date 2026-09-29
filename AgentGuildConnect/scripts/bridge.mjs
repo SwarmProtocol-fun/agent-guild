@@ -23,7 +23,7 @@
  *   BRIDGE_RUNTIME        — Runtime type
  *   BRIDGE_RUNTIME_URL    — Runtime endpoint
  *   BRIDGE_WEBHOOK_SECRET — HMAC secret for verifying inbound agent-guild webhooks
- *   AGENT_GUILD_HUB_URL         — Agent Guild hub URL (default: https://api.agent-guild.com)
+ *   AGENT_GUILD_HUB_URL         — Agent Guild hub URL (default: https://agent-guild.com)
  *   AGENT_GUILD_AGENT_ID        — Agent ID for replies
  *   AGENT_GUILD_API_KEY         — API key for replies (simple auth)
  *   ELIZA_AGENT_ID        — Eliza OS agent ID
@@ -71,7 +71,7 @@ const RUNTIME_TYPE = arg("--runtime") || process.env.BRIDGE_RUNTIME || "generic"
 const DEFAULT_RUNTIME_URLS = { grok: "https://api.x.ai/v1/responses" };
 const RUNTIME_URL = arg("--runtime-url") || process.env.BRIDGE_RUNTIME_URL || DEFAULT_RUNTIME_URLS[RUNTIME_TYPE];
 const WEBHOOK_SECRET = arg("--webhook-secret") || process.env.BRIDGE_WEBHOOK_SECRET || agentGuildConfig.webhook?.secret || null;
-const HUB_URL = arg("--hub") || process.env.AGENT_GUILD_HUB_URL || agentGuildConfig.hubUrl || "https://api.agent-guild.com";
+const HUB_URL = arg("--hub") || process.env.AGENT_GUILD_HUB_URL || agentGuildConfig.hubUrl || "https://agent-guild.com";
 const AGENT_ID = arg("--agent-id") || process.env.AGENT_GUILD_AGENT_ID || agentGuildConfig.agentId || null;
 const API_KEY = arg("--api-key") || process.env.AGENT_GUILD_API_KEY || null;
 const ELIZA_AGENT_ID = arg("--eliza-agent-id") || process.env.ELIZA_AGENT_ID || null;

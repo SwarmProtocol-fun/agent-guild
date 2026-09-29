@@ -28,7 +28,7 @@
  *
  * Environment Variables:
  *   AGENTS_JSON           — JSON array of agent configs (see above). Required.
- *   AGENT_GUILD_HUB_URL   — Hub URL used for registration + daemon/bridge (default: https://api.agent-guild.com)
+ *   AGENT_GUILD_HUB_URL   — Hub URL used for registration + daemon/bridge (default: https://agent-guild.com)
  *   FLEET_BASE_PORT       — First local port handed out to bridge instances (default: 4100)
  *   FLEET_DATA_DIR        — Where per-agent keys/config/state live (default: ./instances, next to this
  *                           script). On Railway, point this at a mounted volume — e.g. /data — so agent
@@ -47,7 +47,7 @@ const FLEET_DIR = __dirname;
 const SOURCE_SCRIPTS_DIR = join(FLEET_DIR, "..", "scripts");
 const INSTANCES_DIR = process.env.FLEET_DATA_DIR || join(FLEET_DIR, "instances");
 
-const HUB_URL = process.env.AGENT_GUILD_HUB_URL || "https://api.agent-guild.com";
+const HUB_URL = process.env.AGENT_GUILD_HUB_URL || "https://agent-guild.com";
 const BASE_PORT = parseInt(process.env.FLEET_BASE_PORT || "4100", 10);
 const HEALTH_PORT = parseInt(process.env.PORT || "8080", 10);
 

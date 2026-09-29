@@ -10,7 +10,7 @@
  * API key query params: agentId, apiKey
  */
 import { NextRequest } from "next/server";
-import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../verify";
+import { verifyAgentRequest, isTimestampFresh, unauthorized, configUnavailable, isAdminConfigError } from "../verify";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -64,7 +64,13 @@ export async function POST(req: NextRequest) {
         }
 
         const message = `POST:/v1/report-skills:${ts}`;
-        const verified = await verifyAgentRequest(agent, message, sig);
+        let verified;
+        try {
+            verified = await verifyAgentRequest(agent, message, sig);
+        } catch (err) {
+            if (isAdminConfigError(err)) return configUnavailable();
+            return unauthorized();
+        }
         if (!verified) return unauthorized();
         agentId = verified.agentId;
     } else {

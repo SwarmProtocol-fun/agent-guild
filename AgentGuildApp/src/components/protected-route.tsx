@@ -29,7 +29,7 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const account = useWalletAccount();
   const connectionStatus = useWalletConnectionStatus();
   const walletConnected = !!account;
-  const { organizations, loading: orgLoading, error: orgError, refreshOrgs } = useOrg();
+  const { organizations, loading: orgLoading, error: orgError, refreshOrgs, agentCount, agentsLoading } = useOrg();
   const { authenticated, loading: sessionLoading } = useSession();
   const router = useRouter();
   const pathname = usePathname();
@@ -97,12 +97,17 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
       if (organizations.length === 0 && pathname !== '/onboarding') {
         const timer = setTimeout(() => router.push('/onboarding'), ONBOARDING_REDIRECT_DELAY);
         return () => clearTimeout(timer);
-      } else if (organizations.length > 0 && pathname === '/onboarding') {
+      } else if (organizations.length > 0 && !agentsLoading && agentCount === 0 && pathname !== '/onboarding') {
+        // Org exists but has no registered agent yet — onboarding isn't
+        // complete until the first agent is registered.
+        const timer = setTimeout(() => router.push('/onboarding'), ONBOARDING_REDIRECT_DELAY);
+        return () => clearTimeout(timer);
+      } else if (organizations.length > 0 && agentCount > 0 && pathname === '/onboarding') {
         const timer = setTimeout(() => router.push('/dashboard'), 750);
         return () => clearTimeout(timer);
       }
     }
-  }, [isAuthenticated, organizations.length, orgLoading, router, pathname, graceOver, isReconnecting, sessionLoading]);
+  }, [isAuthenticated, organizations.length, orgLoading, router, pathname, graceOver, isReconnecting, sessionLoading, agentCount, agentsLoading]);
 
   // --- Derive auth phase for contextual UI ---
   const authPhase = useMemo((): AuthPhase | null => {
@@ -112,8 +117,9 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
     if (orgLoading) return 'loading-org';
     if (orgError && organizations.length === 0) return 'error';
     if (organizations.length === 0 && pathname !== '/onboarding') return 'no-orgs';
+    if (organizations.length > 0 && !agentsLoading && agentCount === 0 && pathname !== '/onboarding') return 'no-agents';
     return null;
-  }, [graceOver, sessionLoading, isReconnecting, isAuthenticated, orgLoading, orgError, organizations.length, pathname]);
+  }, [graceOver, sessionLoading, isReconnecting, isAuthenticated, orgLoading, orgError, organizations.length, pathname, agentCount, agentsLoading]);
 
   // Brief reconnection during active session — show children + banner, don't block UI
   const showReconnectionBanner = graceOver && !walletConnected && isAuthenticated && everConnected.current && isReconnecting;

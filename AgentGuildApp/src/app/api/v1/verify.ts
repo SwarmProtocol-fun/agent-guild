@@ -8,8 +8,14 @@
  * 2-minute timestamp freshness window.
  */
 import crypto from "crypto";
-import { db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+
+/** Thrown by firebase-admin.ts when Admin SDK env vars are missing — distinct from an auth failure. */
+const ADMIN_NOT_CONFIGURED_MARKER = "Firebase Admin SDK not configured";
+
+export function isAdminConfigError(err: unknown): boolean {
+    return err instanceof Error && err.message.includes(ADMIN_NOT_CONFIGURED_MARKER);
+}
 
 // ── Nonce tracking (in-memory with Redis fallback) ──────
 // Nonces are signature hashes — if the same signature is seen twice
@@ -95,10 +101,10 @@ export async function verifyAgentRequest(
     if (!checkAndRecordNonce(signatureBase64)) return null;
 
     try {
-        const agentSnap = await getDoc(doc(db, "agents", agentId));
-        if (!agentSnap.exists()) return null;
+        const agentSnap = await adminDb().collection("agents").doc(agentId).get();
+        if (!agentSnap.exists) return null;
 
-        const data = agentSnap.data();
+        const data = agentSnap.data()!;
         const publicKeyPem = data.publicKey;
         if (!publicKeyPem) return null;
 
@@ -111,7 +117,10 @@ export async function verifyAgentRequest(
             orgId: data.orgId || data.organizationId || "",
             agentType: data.type || "agent",
         };
-    } catch {
+    } catch (err) {
+        // Admin SDK misconfiguration is a server-config problem, not an auth failure —
+        // let it propagate so callers can return a distinct 503 instead of a misleading 401.
+        if (isAdminConfigError(err)) throw err;
         return null;
     }
 }
@@ -130,4 +139,16 @@ export function isTimestampFresh(timestampMs: number, maxAgeMs = 2 * 60 * 1000):
  */
 export function unauthorized(message = "Invalid or missing signature") {
     return Response.json({ error: message }, { status: 401 });
+}
+
+/**
+ * Standard 503 response when the Admin SDK itself isn't configured — distinct
+ * from a signature/auth failure so operators don't mistake a broken deploy
+ * for a bad key.
+ */
+export function configUnavailable() {
+    return Response.json(
+        { error: "Firebase Admin SDK not configured on the server — signed requests cannot be verified.", code: "ADMIN_NOT_CONFIGURED" },
+        { status: 503 }
+    );
 }
