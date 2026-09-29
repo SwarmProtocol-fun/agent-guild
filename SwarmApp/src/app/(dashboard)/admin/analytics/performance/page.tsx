@@ -3,11 +3,11 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Activity, Users, Zap, GitBranch, UserCheck, Share2, Loader2, RefreshCw,
-  ShieldAlert, Trophy, CircleDot,
+  ShieldAlert, Trophy, CircleDot, Radio, KeyRound, Fingerprint, Router,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer,
+  ResponsiveContainer, AreaChart, Area,
 } from "recharts";
 import { Button } from "@/components/ui/button";
 import { useSession } from "@/contexts/SessionContext";
