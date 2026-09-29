@@ -124,6 +124,7 @@ export async function getAgentPerformanceOverview(
     assignmentDocs,
     delegationDocs,
     topAgentsSnap,
+    apiCalls,
   ] = await Promise.all([
     db.collection("agents").count().get(),
     db.collection("agentHeartbeats").get(),
@@ -133,6 +134,7 @@ export async function getAgentPerformanceOverview(
     fetchWindowed("taskAssignments", "createdAt", cutoff),
     fetchWindowed("delegations", "delegatedAt", cutoff),
     db.collection("agents").orderBy("tasksCompleted", "desc").limit(10).get().catch(() => null),
+    getAgentCallStats(periodDays),
   ]);
 
   // ── Agent health (from live heartbeat staleness, not the stored field) ──
