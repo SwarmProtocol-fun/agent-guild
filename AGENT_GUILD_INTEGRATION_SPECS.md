@@ -70,10 +70,10 @@ CLI flags override config values.
 | Header | Value |
 |--------|-------|
 | `Content-Type` | `application/json` |
-| `X-Agent Guild-Signature` | `sha256={hmac}` (only if secret configured) |
-| `X-Agent Guild-Agent` | Agent ID |
-| `X-Agent Guild-Event` | `message.received` |
-| `X-Agent Guild-Delivery` | Unique delivery UUID |
+| `X-Agent-Guild-Signature` | `sha256={hmac}` (only if secret configured) |
+| `X-Agent-Guild-Agent` | Agent ID |
+| `X-Agent-Guild-Event` | `message.received` |
+| `X-Agent-Guild-Delivery` | Unique delivery UUID |
 
 ### Verifying Signatures (Receiver Side)
 

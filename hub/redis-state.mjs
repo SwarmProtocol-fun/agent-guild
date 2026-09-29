@@ -204,6 +204,59 @@ export async function resetRateLimit(key) {
 }
 
 /* ────────────────────────────────────────────────────────────────────────
+ *  Auth Nonce Consumption (Replay Protection)
+ *
+ *  Ed25519-authenticated requests sign (message, ts) and are accepted within
+ *  a time window (AUTH_WINDOW_MS) rather than requiring a fresh handshake.
+ *  A valid (agentId/gatewayId, sig, ts) tuple observed once — e.g. via a
+ *  proxy access log, browser history on a query-string endpoint, or network
+ *  capture — could otherwise be replayed verbatim for the rest of that
+ *  window. This makes each (subjectId, ts) pair single-use: the first use
+ *  claims it via SET NX with a TTL past the auth window; any repeat within
+ *  that TTL is rejected as a replay.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** In-memory fallback: key → expiry timestamp (ms) */
+const _memoryNonces = new Map();
+
+function consumeNonceMemory(key, ttlMs) {
+  const now = Date.now();
+  const expiry = _memoryNonces.get(key);
+  if (expiry && expiry > now) return false; // already consumed, still within TTL
+
+  _memoryNonces.set(key, now + ttlMs);
+
+  if (_memoryNonces.size > 5000) {
+    for (const [k, exp] of _memoryNonces) {
+      if (exp <= now) _memoryNonces.delete(k);
+    }
+  }
+  return true;
+}
+
+/**
+ * Atomically claim a (subjectId, ts) auth nonce.
+ * @returns {Promise<boolean>} true if this is the first use (accept), false if already seen (reject as replay)
+ */
+export async function consumeAuthNonce(subjectId, tsMs, ttlMs) {
+  const key = `authnonce:${subjectId}:${tsMs}`;
+
+  if (!redisClient) {
+    return consumeNonceMemory(key, ttlMs);
+  }
+
+  try {
+    // "NX" — only set if not already present; the sig/ts pair becomes the
+    // idempotency key, so a genuine retry with a *new* signature still works.
+    const result = await redisClient.set(key, "1", "PX", ttlMs, "NX");
+    return result === "OK";
+  } catch (err) {
+    console.warn("[Redis] Nonce consumption check failed, using in-memory fallback:", err.message);
+    return consumeNonceMemory(key, ttlMs);
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
  *  Cross-Instance Messaging (Pub/Sub)
  * ──────────────────────────────────────────────────────────────────────── */
 

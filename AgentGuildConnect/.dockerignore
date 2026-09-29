@@ -1,0 +1,3 @@
+fleet/instances/
+node_modules/
+*.log

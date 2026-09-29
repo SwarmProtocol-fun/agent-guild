@@ -10,9 +10,13 @@
     "smoke:sepolia": "hardhat run scripts/smoke.ts --network sepolia"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.2",
     "@openzeppelin/contracts": "^5.1.0",
     "dotenv": "^16.4.7",
-    "hardhat": "^2.22.0"
+    "hardhat": "^2.29.1"
+  },
+  "overrides": {
+    "lodash": "^4.18.1",
+    "tmp": "^0.2.7"
   }
 }

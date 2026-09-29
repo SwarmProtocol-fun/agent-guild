@@ -1060,11 +1060,11 @@ async function forwardToWebhook(config, messages, webhookConfig, timestamp) {
     const headers = { "Content-Type": "application/json" };
     if (secret) {
       const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
-      headers["X-Agent Guild-Signature"] = `sha256=${hmac}`;
+      headers["X-Agent-Guild-Signature"] = `sha256=${hmac}`;
     }
-    headers["X-Agent Guild-Agent"] = config.agentId;
-    headers["X-Agent Guild-Event"] = "message.received";
-    headers["X-Agent Guild-Delivery"] = crypto.randomUUID();
+    headers["X-Agent-Guild-Agent"] = config.agentId;
+    headers["X-Agent-Guild-Event"] = "message.received";
+    headers["X-Agent-Guild-Delivery"] = crypto.randomUUID();
 
     let delivered = false;
     for (let attempt = 0; attempt <= retries; attempt++) {

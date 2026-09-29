@@ -34,6 +34,7 @@ import {
   refreshGatewayPresence,
   getOrgGateways,
   publishJobLogs,
+  consumeAuthNonce,
 } from "./redis-state.mjs";
 
 // Firebase Admin SDK — server-side Firestore access with service account credentials.
@@ -66,6 +67,33 @@ const RATE_LIMIT_WINDOW = parseInt(optionalEnv("RATE_LIMIT_WINDOW_MS", "60000"),
 const RATE_LIMIT_MAX = parseInt(optionalEnv("RATE_LIMIT_MAX", "60"), 10);
 const MAX_CONNECTIONS_PER_AGENT = parseInt(optionalEnv("MAX_CONNECTIONS_PER_AGENT", "5"), 10);
 const AUTH_WINDOW_MS = parseInt(optionalEnv("AUTH_WINDOW_MS", String(5 * 60 * 1000)), 10);
+const WS_MAX_PAYLOAD_BYTES = parseInt(optionalEnv("WS_MAX_PAYLOAD_BYTES", String(1_000_000)), 10);
+const MAX_LOG_LINES_PER_MESSAGE = parseInt(optionalEnv("MAX_LOG_LINES_PER_MESSAGE", "1000"), 10);
+// Number of trusted reverse-proxy hops in front of this process (e.g. the
+// nginx `load-balancer` service in docker-compose.yml). 0 (default) means
+// "not behind a trusted proxy" — X-Forwarded-For is attacker-spoofable and
+// ignored, and req.socket.remoteAddress is used as-is. Only raise this when
+// the deployment topology actually puts that many trusted proxies in front.
+const TRUST_PROXY_HOPS = parseInt(optionalEnv("TRUST_PROXY_HOPS", "0"), 10);
+
+/**
+ * Resolve the real client IP, honoring TRUST_PROXY_HOPS trusted proxy hops.
+ * Without this, any code behind a reverse proxy (nginx in docker-compose.yml)
+ * sees the proxy's own IP for every connection via req.socket.remoteAddress,
+ * silently breaking IP-based checks like the Tailscale whitelist below.
+ */
+function getClientIP(req) {
+  const remote = req.socket.remoteAddress || "";
+  if (TRUST_PROXY_HOPS <= 0) return remote;
+  const xff = req.headers["x-forwarded-for"];
+  if (!xff) return remote;
+  const chain = xff.split(",").map((s) => s.trim()).filter(Boolean);
+  // Each proxy hop appends its own view of the peer IP, so the chain reads
+  // client, hop1, hop2, ... nearest-hop. Trusting N hops means taking the
+  // Nth entry from the end (the earliest hop we still trust).
+  const idx = chain.length - TRUST_PROXY_HOPS;
+  return idx >= 0 ? chain[idx] : chain[0];
+}
 
 // Multi-region gateway configuration
 const HUB_REGION = optionalEnv("HUB_REGION", "us-east");
@@ -90,6 +118,15 @@ function log(level, msg, meta = {}) {
   const ts = new Date().toISOString();
   const extra = Object.keys(meta).length ? " " + JSON.stringify(meta) : "";
   console.log(`[${ts}] [${level.toUpperCase()}] ${msg}${extra}`);
+}
+
+/** Constant-time secret comparison — avoids a timing side channel on the length/content of the guess. */
+function safeSecretEqual(candidate, expected) {
+  if (typeof candidate !== "string" || typeof expected !== "string") return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -956,7 +993,7 @@ app.post("/agents/:agentId/invoke", async (req, res) => {
   const internalSecret = process.env.INTERNAL_SERVICE_SECRET;
   const headerSecret = req.headers["x-internal-secret"];
 
-  if (internalSecret && headerSecret === internalSecret) {
+  if (internalSecret && safeSecretEqual(headerSecret, internalSecret)) {
     // Trusted internal call — skip signature verification
   } else {
     const sig = req.query.sig;
@@ -972,6 +1009,13 @@ app.post("/agents/:agentId/invoke", async (req, res) => {
     const agentData = await verifyEd25519(agentId, signedMessage, sig);
     if (!agentData) {
       return res.status(401).json({ error: "Invalid signature" });
+    }
+    // sig+ts travel in the URL query string (visible in proxy/access logs) —
+    // make each (agentId, ts) pair single-use so a leaked log line can't be
+    // replayed for the rest of the auth window.
+    const fresh = await consumeAuthNonce(`invoke:${agentId}`, tsMs, AUTH_WINDOW_MS + 10000);
+    if (!fresh) {
+      return res.status(401).json({ error: "Signature already used (replay rejected)" });
     }
   }
 
@@ -1042,7 +1086,7 @@ app.get("/agents/online", (_req, res) => {
 
 // ── HTTP + WS Server ────────────────────────────────────────────────────────
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
 /**
  * WebSocket upgrade handler.
@@ -1084,7 +1128,7 @@ server.on("upgrade", async (req, socket, head) => {
 
   if (!sig || !ts) {
     log("warn", "WS upgrade rejected — missing sig or ts", { entityId, wsType });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: missing-auth-params\r\nX-Agent Guild-Hint: URL must include ?sig=<base64>&ts=<epoch-ms>\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent-Guild-Error: missing-auth-params\r\nX-Agent-Guild-Hint: URL must include ?sig=<base64>&ts=<epoch-ms>\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1093,7 +1137,7 @@ server.on("upgrade", async (req, socket, head) => {
   const tsMs = parseInt(ts, 10);
   if (Math.abs(Date.now() - tsMs) > AUTH_WINDOW_MS) {
     log("warn", "WS upgrade rejected — stale timestamp", { entityId, wsType, ageMs: Math.abs(Date.now() - tsMs) });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: stale-timestamp\r\nX-Agent Guild-Hint: Clock drift detected — ensure system clock is accurate; auth window is " + AUTH_WINDOW_MS + "ms\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent-Guild-Error: stale-timestamp\r\nX-Agent-Guild-Hint: Clock drift detected — ensure system clock is accurate; auth window is " + AUTH_WINDOW_MS + "ms\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1107,6 +1151,17 @@ server.on("upgrade", async (req, socket, head) => {
     if (!gatewayData) {
       log("warn", "WS upgrade rejected — invalid gateway signature", { gatewayId });
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    // sig+ts travel in the connect URL (visible in proxy/access logs) — make
+    // each (gatewayId, ts) pair single-use so a leaked log line can't be
+    // replayed to open a second session as this gateway within the window.
+    const gwFresh = await consumeAuthNonce(`ws-gw:${gatewayId}`, tsMs, AUTH_WINDOW_MS + 10000);
+    if (!gwFresh) {
+      log("warn", "WS upgrade rejected — replayed signature", { gatewayId });
+      socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent-Guild-Error: replay-rejected\r\n\r\n");
       socket.destroy();
       return;
     }
@@ -1138,7 +1193,18 @@ server.on("upgrade", async (req, socket, head) => {
   if (!agentData) {
     log("warn", "WS upgrade rejected — invalid signature", { agentId,
       hint: "Verify agent is registered (GET /diagnostics?agentId=<id>) and keys match Firestore" });
-    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent Guild-Error: invalid-signature\r\nX-Agent Guild-Hint: Run GET /diagnostics?agentId=" + agentId + " for diagnosis\r\n\r\n");
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent-Guild-Error: invalid-signature\r\nX-Agent-Guild-Hint: Run GET /diagnostics?agentId=" + agentId + " for diagnosis\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  // sig+ts travel in the connect URL (visible in proxy/access logs) — make
+  // each (agentId, ts) pair single-use so a leaked log line can't be
+  // replayed to open a second session as this agent within the window.
+  const agentFresh = await consumeAuthNonce(`ws-agent:${agentId}`, tsMs, AUTH_WINDOW_MS + 10000);
+  if (!agentFresh) {
+    log("warn", "WS upgrade rejected — replayed signature", { agentId });
+    socket.write("HTTP/1.1 401 Unauthorized\r\nX-Agent-Guild-Error: replay-rejected\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -1146,7 +1212,7 @@ server.on("upgrade", async (req, socket, head) => {
   // Tailscale IP whitelisting (if enabled)
   const TAILSCALE_WHITELIST_MODE = optionalEnv("TAILSCALE_WHITELIST_MODE", "disabled");
   if (TAILSCALE_WHITELIST_MODE !== "disabled") {
-    const clientIP = req.socket.remoteAddress || "";
+    const clientIP = getClientIP(req);
     const isWhitelisted = await checkTailscaleWhitelist(agentData.orgId, clientIP);
 
     if (!isWhitelisted) {
@@ -1216,6 +1282,14 @@ wss.on("connection", async (ws, _req) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch {
         ws.send(JSON.stringify({ error: "Invalid JSON" }));
+        return;
+      }
+
+      // Unlike the agent WS path (checkRateLimit(agentId) above), gateway
+      // job:status/job:log handlers had no rate limit at all — a compromised
+      // or misbehaving gateway could spam Firestore writes without bound.
+      if (!await checkRateLimit(`gw:${gatewayId}`)) {
+        ws.send(JSON.stringify({ error: "Rate limit exceeded", type: "error", code: "RATE_LIMITED" }));
         return;
       }
 
@@ -1304,6 +1378,12 @@ wss.on("connection", async (ws, _req) => {
 
       // job:log — gateway streams execution logs
       if (type === "job:log" && msg.taskId && Array.isArray(msg.lines)) {
+        // Cap batch size — msg.lines had no size limit before a Firestore
+        // write, letting one message balloon storage/cost.
+        if (msg.lines.length > MAX_LOG_LINES_PER_MESSAGE) {
+          ws.send(JSON.stringify({ type: "error", error: `Too many log lines in one message (max ${MAX_LOG_LINES_PER_MESSAGE})` }));
+          return;
+        }
         try {
           // Persist to Firestore
           await db.collection("gatewayJobLogs").add({
@@ -1607,10 +1687,14 @@ wss.on("connection", async (ws, _req) => {
     // ── Structured Agent Messages (a2a, coord, broadcast, session) ──────────
     if (["a2a", "coord", "broadcast", "session"].includes(type)) {
       try {
-        // Ensure message has required fields
-        msg.orgId = msg.orgId || orgId;
-        msg.from = msg.from || agentId;
-        msg.fromName = msg.fromName || agentName;
+        // orgId/from/fromName must come from the authenticated connection,
+        // never the client-supplied payload — otherwise any agent could tag
+        // a message with another org's orgId or impersonate another agent
+        // as the sender (routeMessage persists these into Firestore records
+        // other orgs' dashboards read).
+        msg.orgId = orgId;
+        msg.from = agentId;
+        msg.fromName = agentName;
         msg.id = msg.id || crypto.randomUUID();
         msg.timestamp = msg.timestamp || Date.now();
 

@@ -58,7 +58,15 @@ export async function routeMessage(db, message, broadcastToAgent, broadcastToCha
  * Attempts WebSocket delivery, falls back to Firestore
  */
 async function routeA2A(db, message, broadcastToAgent, log) {
-  const { id, from, fromName, to, toName, payload, metadata } = message;
+  const { id, from, fromName, to, toName, payload, metadata, orgId } = message;
+
+  // `to` is client-supplied — without this check a sender in one org could
+  // address (and get persisted comms logged to/visible from) an agent that
+  // belongs to a different org entirely.
+  const toDoc = await db.collection("agents").doc(to).get();
+  if (!toDoc.exists || toDoc.data().orgId !== orgId) {
+    throw new Error(`Target agent not found in this org: ${to}`);
+  }
 
   // Attempt WebSocket delivery
   const delivered = broadcastToAgent(to, message);
@@ -111,11 +119,13 @@ async function routeA2A(db, message, broadcastToAgent, log) {
  * First sends to coordinator, who then routes to target
  */
 async function routeCoord(db, message, broadcastToAgent, log) {
-  const { id, from, fromName, coordinatorId, targetId, action, payload, priority } = message;
+  const { id, from, fromName, coordinatorId, targetId, action, payload, priority, orgId } = message;
 
-  // Find coordinator info
+  // Find coordinator info — scoped to the sender's org, otherwise a sender
+  // could route (and increment load on) another org's coordinator.
   const coordQuery = db.collection("coordinators")
     .where("agentId", "==", coordinatorId)
+    .where("orgId", "==", orgId)
     .where("active", "==", true);
 
   const coordSnap = await coordQuery.get();
@@ -192,7 +202,15 @@ async function routeCoord(db, message, broadcastToAgent, log) {
  * Sends to all channel subscribers
  */
 async function routeBroadcast(db, message, broadcastToChannel, log) {
-  const { id, from, fromName, channelId, payload, mentions } = message;
+  const { id, from, fromName, channelId, payload, mentions, orgId } = message;
+
+  // channelId is client-supplied — without this check a sender could
+  // broadcast into (and have their message persisted/delivered to) a
+  // channel belonging to a different org.
+  const channelDoc = await db.collection("channels").doc(channelId).get();
+  if (!channelDoc.exists || channelDoc.data().orgId !== orgId) {
+    throw new Error(`Target channel not found in this org: ${channelId}`);
+  }
 
   // Broadcast to channel
   broadcastToChannel(channelId, message);
@@ -246,7 +264,7 @@ async function routeBroadcast(db, message, broadcastToChannel, log) {
  * Sends to all session participants
  */
 async function routeSession(db, message, broadcastToAgent, log) {
-  const { id, from, fromName, sessionId, participants, payload, step } = message;
+  const { id, from, fromName, sessionId, participants, payload, step, orgId } = message;
 
   // Verify session exists and is active
   const sessionDoc = await db.collection("agentSessions").doc(sessionId).get();
@@ -258,10 +276,21 @@ async function routeSession(db, message, broadcastToAgent, log) {
   if (session.status !== "active") {
     throw new Error(`Session ${sessionId} is not active (status: ${session.status})`);
   }
+  // Cross-org isolation, and the sender must actually be a participant —
+  // otherwise any agent could join/observe another org's session by guessing
+  // its sessionId and supplying its own participants list.
+  if (session.orgId !== orgId) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+  if (!Array.isArray(session.participants) || !session.participants.includes(from)) {
+    throw new Error(`${from} is not a participant in session ${sessionId}`);
+  }
 
-  // Deliver to all participants
+  // Deliver to the session's actual (DB-recorded) participant list, not the
+  // client-supplied `participants` field — otherwise a sender could smuggle
+  // in arbitrary agentIds as fake "session" delivery targets.
   let deliveredCount = 0;
-  for (const participantId of participants) {
+  for (const participantId of session.participants) {
     if (participantId === from) continue; // Don't send to self
 
     const delivered = broadcastToAgent(participantId, message);
@@ -275,12 +304,12 @@ async function routeSession(db, message, broadcastToAgent, log) {
     from,
     fromName,
     sessionId,
-    participants,
+    participants: session.participants,
     step: step || session.currentStep,
     payload,
     deliveryStatus: deliveredCount > 0 ? "delivered" : "pending",
     timestamp: admin.firestore.FieldValue.serverTimestamp(),
-    orgId: message.orgId || "",
+    orgId,
   });
 
   // Update session step if provided

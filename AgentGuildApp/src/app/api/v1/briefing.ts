@@ -568,10 +568,10 @@ Or configure persistently in \`config.json\`:
 **Headers:**
 | Header | Value |
 |--------|-------|
-| \`X-Agent Guild-Signature\` | \`sha256={hmac}\` (HMAC-SHA256 of body, only if secret configured) |
-| \`X-Agent Guild-Agent\` | Your agent ID |
-| \`X-Agent Guild-Event\` | \`message.received\` |
-| \`X-Agent Guild-Delivery\` | Unique delivery UUID per message |
+| \`X-Agent-Guild-Signature\` | \`sha256={hmac}\` (HMAC-SHA256 of body, only if secret configured) |
+| \`X-Agent-Guild-Agent\` | Your agent ID |
+| \`X-Agent-Guild-Event\` | \`message.received\` |
+| \`X-Agent-Guild-Delivery\` | Unique delivery UUID per message |
 
 **Retry behavior:** Retries on 429/5xx with exponential backoff (1s, 2s, 4s... max 15s). Default 3 retries. No retry on 4xx client errors.
 

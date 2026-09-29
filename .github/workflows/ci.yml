@@ -10,6 +10,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# No job here needs to write to the repo, comment on PRs, or otherwise use
+# the GITHUB_TOKEN beyond reading code — without this, jobs get the
+# repository's default token permissions, which are often broader than
+# needed for a checkout+build+test+deploy pipeline that also handles
+# third-party secrets.
+permissions:
+  contents: read
+
 # ─── AgentGuildApp jobs ─────────────────────────────────────────────────────────────
 
 jobs:
@@ -20,8 +28,8 @@ jobs:
       run:
         working-directory: AgentGuildApp
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -38,8 +46,8 @@ jobs:
     env:
       PLATFORM_ADMIN_WALLETS: "0x723708273e811a07d90d2e81e799b9Ab27F0B549"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -64,8 +72,8 @@ jobs:
       NEXT_PUBLIC_FIREBASE_APP_ID: "1:000000000000:web:0000000000000000"
       NEXT_PUBLIC_THIRDWEB_CLIENT_ID: "ci-placeholder"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -106,10 +114,14 @@ jobs:
       NEXT_PUBLIC_SUPER_ADMINS: ${{ secrets.NEXT_PUBLIC_SUPER_ADMINS }}
       NEXT_PUBLIC_OPENCLAW_WORKSPACE: ${{ secrets.NEXT_PUBLIC_OPENCLAW_WORKSPACE }}
       NEXT_PUBLIC_TREASURY_ADDRESS: ${{ secrets.NEXT_PUBLIC_TREASURY_ADDRESS }}
-      NEXT_PUBLIC_THIRDWEB_SECRET: ${{ secrets.NEXT_PUBLIC_THIRDWEB_SECRET }}
+      # Deliberately NOT NEXT_PUBLIC_-prefixed even though the GitHub secret
+      # is named that way: any env var with that prefix gets inlined into the
+      # client JS bundle by the Next.js build this job runs. This is a
+      # server-only Thirdweb secret key, not a publishable client ID.
+      THIRDWEB_SECRET: ${{ secrets.NEXT_PUBLIC_THIRDWEB_SECRET }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -127,8 +139,8 @@ jobs:
       run:
         working-directory: hub
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -150,8 +162,8 @@ jobs:
       # Use a throwaway non-functional key for compile/test.
       DEPLOYER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -169,8 +181,8 @@ jobs:
     env:
       DEPLOYER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm

@@ -10,8 +10,58 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
 
 const SESSION_COOKIE = "agent_guild_session";
+
+// ── Rate limiting for /api/v1/* mutations ──────────────────
+// @upstash/ratelimit + @upstash/redis were installed as dependencies but
+// never wired up anywhere — every /api/v1/* mutating request (purchase,
+// publish, credit-ops, webhooks, ...) was unrate-limited. Sliding window,
+// per-IP, applied here in middleware so it covers all ~70 v1 routes
+// uniformly rather than requiring each route handler to opt in.
+const RATE_LIMIT_MAX = parseInt(process.env.API_V1_RATE_LIMIT_MAX || "30", 10);
+const RATE_LIMIT_WINDOW = (process.env.API_V1_RATE_LIMIT_WINDOW || "10 s") as `${number} ${"ms" | "s" | "m" | "h" | "d"}`;
+
+const upstashConfigured = !!(
+  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+);
+
+const ratelimit = upstashConfigured
+  ? new Ratelimit({
+      redis: Redis.fromEnv(),
+      limiter: Ratelimit.slidingWindow(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW),
+      prefix: "ratelimit:api-v1",
+      analytics: false,
+    })
+  : null;
+
+/** Best-effort in-memory fallback for when Upstash isn't configured (e.g. local dev). Not distributed across instances. */
+const memoryLimitState = new Map<string, { count: number; windowStart: number }>();
+const MEMORY_WINDOW_MS = 10_000;
+
+function checkMemoryRateLimit(key: string): boolean {
+  const now = Date.now();
+  let entry = memoryLimitState.get(key);
+  if (!entry || now - entry.windowStart > MEMORY_WINDOW_MS) {
+    entry = { count: 0, windowStart: now };
+  }
+  entry.count++;
+  memoryLimitState.set(key, entry);
+  if (memoryLimitState.size > 5000) {
+    for (const [k, v] of memoryLimitState) {
+      if (now - v.windowStart > MEMORY_WINDOW_MS * 2) memoryLimitState.delete(k);
+    }
+  }
+  return entry.count <= RATE_LIMIT_MAX;
+}
+
+function getClientIP(req: NextRequest): string {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0].trim();
+  return req.headers.get("x-real-ip") || "unknown";
+}
 
 // ── Security Headers ──────────────────────────────────────
 // Applied to all SSR responses. Netlify [[headers]] only cover
@@ -144,6 +194,22 @@ export async function middleware(req: NextRequest) {
           { error: `Request body too large (max ${MAX_BODY_BYTES / 1_000_000}MB)` },
           { status: 413 }
         )
+      );
+    }
+  }
+
+  // Rate limit mutating /api/v1/* requests, keyed by client IP.
+  if (
+    pathname.startsWith("/api/v1") &&
+    ["POST", "PUT", "PATCH", "DELETE"].includes(req.method)
+  ) {
+    const ip = getClientIP(req);
+    const allowed = ratelimit
+      ? (await ratelimit.limit(`${ip}:${pathname}`)).success
+      : checkMemoryRateLimit(`${ip}:${pathname}`);
+    if (!allowed) {
+      return withSecurityHeaders(
+        NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 })
       );
     }
   }

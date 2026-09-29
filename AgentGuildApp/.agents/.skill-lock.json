@@ -1,15 +1,5 @@
 {
   "version": 3,
-  "skills": {
-    "3d-web-experience": {
-      "source": "sickn33/antigravity-awesome-skills",
-      "sourceType": "github",
-      "sourceUrl": "https://github.com/sickn33/antigravity-awesome-skills.git",
-      "skillPath": "skills/3d-web-experience/SKILL.md",
-      "skillFolderHash": "3ee9dd198f6e2b7d65248e37745b608553669caf",
-      "installedAt": "2026-02-21T06:18:42.556Z",
-      "updatedAt": "2026-02-21T06:18:42.556Z"
-    }
-  },
+  "skills": {},
   "dismissed": {}
 }

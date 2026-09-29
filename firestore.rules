@@ -3,6 +3,19 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ── Org membership helper ───────────────────────────────────────────
+    // Used by every per-org collection below. A caller is a member of
+    // orgId if they are the org's owner or appear in its members array —
+    // resolved by reading the actual organizations/{orgId} doc, never
+    // from data the caller submitted in the same request (see the
+    // organizations/{orgId} update rule fix below for why that matters).
+    function isOrgMember(orgId) {
+      return orgId != null &&
+        exists(/databases/$(database)/documents/organizations/$(orgId)) &&
+        (request.auth.uid == get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerAddress ||
+         request.auth.uid in get(/databases/$(database)/documents/organizations/$(orgId)).data.members);
+    }
+
     // ── Auth model ──────────────────────────────────────────────────────
     // Login is wallet/SIWE (Thirdweb) verified server-side, then the server
     // mints a Firebase custom token (uid = lowercased wallet address) so
@@ -66,14 +79,16 @@ service cloud.firestore {
     match /organizations/{orgId} {
       allow read: if request.auth != null;
       allow create: if request.auth != null;
-      // Owner can change anything. A member (existing or joining via this
-      // write) can update membership-adjacent fields. This is coarse —
-      // it doesn't stop a member from editing fields beyond membership —
-      // but requires a verified wallet, which the fully-open state didn't.
+      // Owner or an EXISTING member can update. Membership is checked only
+      // against the document already stored (resource.data) — never
+      // against request.resource.data, the caller's own submitted content.
+      // (Previously this also allowed `request.auth.uid in
+      // request.resource.data.members`, which let any authenticated wallet
+      // self-join any org simply by including its own address in the
+      // members array it submitted. Fixed: that clause is removed.)
       allow update: if request.auth != null && (
         request.auth.uid == resource.data.ownerAddress ||
-        request.auth.uid in resource.data.members ||
-        request.auth.uid in request.resource.data.members
+        request.auth.uid in resource.data.members
       );
       allow delete: if request.auth != null &&
         request.auth.uid == resource.data.ownerAddress;
@@ -84,47 +99,194 @@ service cloud.firestore {
     // bundle (dashboard pages/components via src/lib/*.ts client-SDK
     // calls). All of the pages that touch them require a logged-in session
     // at the Next.js middleware level (see PROTECTED_PAGE_PREFIXES in
-    // src/middleware.ts), so requiring request.auth != null here matches
-    // what every legitimate caller already has — it only blocks direct,
-    // unauthenticated Firestore API access. This is coarse (org-membership
-    // is not re-checked per document the way organizations/{orgId} does)
-    // but is a large step up from the previous fully-open rule; tighten
-    // further collection-by-collection as each one's write paths are
-    // reviewed for real per-org scoping.
-    match /activityEvents/{document=**}        { allow read, write: if request.auth != null; }
-    match /agentComms/{document=**}            { allow read, write: if request.auth != null; }
-    match /agentInstalls/{document=**}         { allow read, write: if request.auth != null; }
-    match /agentMemories/{document=**}         { allow read, write: if request.auth != null; }
-    match /agentMessages/{document=**}         { allow read, write: if request.auth != null; }
-    match /agentRatings/{document=**}          { allow read, write: if request.auth != null; }
-    match /agentSessions/{document=**}         { allow read, write: if request.auth != null; }
-    match /agentSkills/{document=**}           { allow read, write: if request.auth != null; }
-    match /agents/{document=**}                { allow read, write: if request.auth != null; }
-    match /approvals/{document=**}             { allow read, write: if request.auth != null; }
-    match /assignmentNotifications/{document=**} { allow read, write: if request.auth != null; }
-    match /channels/{document=**}              { allow read, write: if request.auth != null; }
-    match /communityItemRatings/{document=**}  { allow read, write: if request.auth != null; }
-    match /communityMarketItems/{document=**}  { allow read, write: if request.auth != null; }
-    match /coordinators/{document=**}          { allow read, write: if request.auth != null; }
-    match /cronJobs/{document=**}              { allow read, write: if request.auth != null; }
-    match /gateways/{document=**}              { allow read, write: if request.auth != null; }
-    match /installedSkills/{document=**}       { allow read, write: if request.auth != null; }
-    match /jobs/{document=**}                  { allow read, write: if request.auth != null; }
-    match /kanbanBoards/{document=**}          { allow read, write: if request.auth != null; }
-    match /kanbanTasks/{document=**}           { allow read, write: if request.auth != null; }
-    match /leases/{document=**}                { allow read, write: if request.auth != null; }
-    match /marketSubscriptions/{document=**}   { allow read, write: if request.auth != null; }
-    match /marketplaceAgents/{document=**}     { allow read, write: if request.auth != null; }
-    match /messages/{document=**}              { allow read, write: if request.auth != null; }
-    match /modInstallations/{document=**}      { allow read, write: if request.auth != null; }
-    match /nodes/{document=**}                 { allow read, write: if request.auth != null; }
-    match /operators/{document=**}             { allow read, write: if request.auth != null; }
-    match /profiles/{document=**}              { allow read, write: if request.auth != null; }
-    match /projects/{document=**}              { allow read, write: if request.auth != null; }
-    match /reports/{document=**}               { allow read, write: if request.auth != null; }
-    match /systemVitals/{document=**}          { allow read, write: if request.auth != null; }
-    match /taskAssignments/{document=**}       { allow read, write: if request.auth != null; }
-    match /tasks/{document=**}                 { allow read, write: if request.auth != null; }
+    // src/middleware.ts). Each collection below was traced to its actual
+    // write paths and re-scoped per-org (or per-owner) rather than merely
+    // requiring `request.auth != null` — see per-collection comments for
+    // the field each one is scoped on. `create` is handled separately from
+    // read/update/delete because `resource.data` does not exist yet on
+    // create; `request.resource.data` (the caller's own submitted content)
+    // is used there instead.
+
+    // ── Category A: org-scoped via `orgId` ──────────────────────────────
+    match /activityEvents/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentComms/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentInstalls/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentMemories/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentMessages/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentSessions/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agentSkills/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /agents/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /approvals/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /assignmentNotifications/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /channels/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /coordinators/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /cronJobs/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /gateways/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /installedSkills/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /jobs/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /kanbanBoards/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /kanbanTasks/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /leases/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /marketSubscriptions/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /modInstallations/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /operators/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /projects/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /reports/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /systemVitals/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /taskAssignments/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /tasks/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+
+    // messages: no reliable `orgId` on every doc (src/lib/firestore.ts's
+    // Message type has it as optional and it isn't consistently queried
+    // on) — but every message always has `channelId`, and channels/{id}
+    // is itself orgId-scoped above. Scope messages transitively through
+    // their parent channel instead of trusting a possibly-absent field.
+    match /messages/{docId} {
+      allow read, update, delete: if request.auth != null &&
+        exists(/databases/$(database)/documents/channels/$(resource.data.channelId)) &&
+        isOrgMember(get(/databases/$(database)/documents/channels/$(resource.data.channelId)).data.orgId);
+      allow create: if request.auth != null &&
+        exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId)) &&
+        isOrgMember(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data.orgId);
+    }
+
+    // ── Category B: owner-scoped, not org-scoped ────────────────────────
+    // profiles/{walletAddress}: doc ID is always the lowercased wallet
+    // address (src/lib/firestore.ts's getProfile/setProfile), with a
+    // matching `walletAddress` field. Reads stay broad — display names /
+    // avatars are looked up across orgs (e.g. src/lib/firestore.ts's
+    // getProfilesByAddresses) to render member names in shared channels —
+    // but only the profile's own owner may write it.
+    match /profiles/{walletAddress} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == walletAddress;
+    }
+
+    // ── Category C: genuinely shared/cross-org by design ────────────────
+    // marketplaceAgents: public marketplace listings (src/lib/skills.ts's
+    // getMarketplaceAgents queries status == "approved" with no org
+    // filter — meant to be browsed by any org). Writable only by the
+    // publishing creator (`authorWallet`).
+    match /marketplaceAgents/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.authorWallet == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.authorWallet == request.auth.uid;
+    }
+    // communityMarketItems: same pattern (src/lib/skills.ts's
+    // getCommunityItems / submitMarketItem) — public community listings,
+    // writable only by their submitter (`submittedBy`).
+    match /communityMarketItems/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.submittedBy == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.submittedBy == request.auth.uid;
+    }
+    // agentRatings / communityItemRatings: reviews of a shared marketplace
+    // item, queried and displayed by packageId/itemId across every org
+    // (e.g. src/components/market/persona-detail-dialog.tsx), so reads
+    // must stay broad. Each rating does carry an `orgId`, but the true
+    // authorship field is the reviewer's own wallet (`reviewerWallet`),
+    // which is what write access is scoped to.
+    match /agentRatings/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.reviewerWallet == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.reviewerWallet == request.auth.uid;
+    }
+    match /communityItemRatings/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.reviewerWallet == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.reviewerWallet == request.auth.uid;
+    }
+
+    // ── Category D: ambiguous — left coarse, flagged for human review ───
+    // nodes: no orgId or any other org/owner field on the AgentGuildNode
+    // type (src/lib/firestore.ts), and no write call site — client or
+    // Admin SDK — exists anywhere in this repo (only getAgentGuildNodes /
+    // getAgentGuildNode reads). Compute-provider nodes are presumably
+    // registered by an external provider process outside this codebase,
+    // so the correct owner field for writes could not be confirmed here.
+    // TODO(security): could not determine org-scoping field, still coarse
+    match /nodes/{document=**} { allow read, write: if request.auth != null; }
 
     // Everything else has been audited and has zero remaining client-SDK
     // call site reachable from a browser bundle — every server path that

@@ -15,6 +15,7 @@
  *   node bridge.mjs --runtime eliza --runtime-url http://localhost:3000 --eliza-agent-id <id> --port 3777
  *   node bridge.mjs --runtime agent-zero --runtime-url http://localhost:50001 --port 3777
  *   node bridge.mjs --runtime hermes --runtime-url http://localhost:8000/v1/chat/completions --port 3777
+ *   node bridge.mjs --runtime grok --port 3777   (uses https://api.x.ai/v1/responses by default)
  *   node bridge.mjs --runtime generic --runtime-url http://localhost:5000/message --port 3777
  *
  * Environment Variables (alternative to CLI flags):
@@ -27,6 +28,8 @@
  *   AGENT_GUILD_API_KEY         — API key for replies (simple auth)
  *   ELIZA_AGENT_ID        — Eliza OS agent ID
  *   RUNTIME_API_KEY       — API key for the runtime (if required)
+ *   XAI_API_KEY           — xAI/Grok API key (used as RUNTIME_API_KEY when --runtime grok)
+ *   XAI_MODEL             — Grok model name (default: grok-4.7)
  */
 
 import http from "node:http";
@@ -65,13 +68,15 @@ const agentGuildConfig = loadAgentGuildConfig();
 
 const PORT = parseInt(arg("--port") || process.env.BRIDGE_PORT || "3777", 10);
 const RUNTIME_TYPE = arg("--runtime") || process.env.BRIDGE_RUNTIME || "generic";
-const RUNTIME_URL = arg("--runtime-url") || process.env.BRIDGE_RUNTIME_URL;
+const DEFAULT_RUNTIME_URLS = { grok: "https://api.x.ai/v1/responses" };
+const RUNTIME_URL = arg("--runtime-url") || process.env.BRIDGE_RUNTIME_URL || DEFAULT_RUNTIME_URLS[RUNTIME_TYPE];
 const WEBHOOK_SECRET = arg("--webhook-secret") || process.env.BRIDGE_WEBHOOK_SECRET || agentGuildConfig.webhook?.secret || null;
 const HUB_URL = arg("--hub") || process.env.AGENT_GUILD_HUB_URL || agentGuildConfig.hubUrl || "https://api.agent-guild.com";
 const AGENT_ID = arg("--agent-id") || process.env.AGENT_GUILD_AGENT_ID || agentGuildConfig.agentId || null;
 const API_KEY = arg("--api-key") || process.env.AGENT_GUILD_API_KEY || null;
 const ELIZA_AGENT_ID = arg("--eliza-agent-id") || process.env.ELIZA_AGENT_ID || null;
-const RUNTIME_API_KEY = arg("--runtime-api-key") || process.env.RUNTIME_API_KEY || null;
+const RUNTIME_API_KEY = arg("--runtime-api-key") || process.env.RUNTIME_API_KEY || process.env.XAI_API_KEY || null;
+const GROK_MODEL = arg("--model") || process.env.XAI_MODEL || "grok-4.7";
 const TIMEOUT_MS = parseInt(arg("--timeout") || process.env.BRIDGE_TIMEOUT || "120000", 10);
 
 // Ed25519 signing for /api/v1/send (preferred over API key)
@@ -191,6 +196,36 @@ const adapters = {
       return data.choices[0].message.content;
     }
     return data.response || data.text || JSON.stringify(data);
+  },
+
+  // ── Grok (xAI) ───────────────────────────────────────────────────────────
+  // POST /v1/responses with { model, input: [{ role, content }, ...] }
+  // Response: { output: [{ type: "message", content: [{ type: "output_text", text }] }] }
+  async grok(msg) {
+    if (!RUNTIME_API_KEY) {
+      throw new Error("Grok runtime requires an API key — set --runtime-api-key or XAI_API_KEY");
+    }
+    const resp = await fetchRuntime(RUNTIME_URL, {
+      method: "POST",
+      headers: runtimeHeaders(),
+      body: JSON.stringify({
+        model: GROK_MODEL,
+        input: [
+          {
+            role: "system",
+            content: `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`,
+          },
+          {
+            role: "user",
+            content: `[${msg.fromType}] ${msg.from}: ${msg.text}`,
+          },
+        ],
+      }),
+    });
+    const data = await resp.json();
+    const message = data.output?.find(o => o.type === "message");
+    const text = message?.content?.find(c => c.type === "output_text")?.text;
+    return text || data.output_text || JSON.stringify(data);
   },
 
   // ── Generic / Custom ─────────────────────────────────────────────────────
@@ -409,12 +444,13 @@ if (!RUNTIME_URL) {
   console.error("Error: --runtime-url is required");
   console.error("\nUsage:");
   console.error("  node bridge.mjs --runtime <type> --runtime-url <url> [--port <port>]");
-  console.error("\nRuntimes: openclaw, eliza, agent-zero, hermes, generic");
+  console.error("\nRuntimes: openclaw, eliza, agent-zero, hermes, grok, generic");
   console.error("\nExamples:");
   console.error("  node bridge.mjs --runtime openclaw --runtime-url http://localhost:8080/chat");
   console.error("  node bridge.mjs --runtime eliza --runtime-url http://localhost:3000 --eliza-agent-id <id>");
   console.error("  node bridge.mjs --runtime agent-zero --runtime-url http://localhost:50001/message");
   console.error("  node bridge.mjs --runtime hermes --runtime-url http://localhost:8000/v1/chat/completions");
+  console.error("  XAI_API_KEY=<key> node bridge.mjs --runtime grok");
   console.error("  node bridge.mjs --runtime generic --runtime-url http://localhost:5000/message");
   process.exit(1);
 }
@@ -443,6 +479,9 @@ server.listen(PORT, () => {
   console.log(`  Timeout:    ${TIMEOUT_MS}ms`);
   if (RUNTIME_TYPE === "eliza" && ELIZA_AGENT_ID) {
     console.log(`  Eliza ID:   ${ELIZA_AGENT_ID}`);
+  }
+  if (RUNTIME_TYPE === "grok") {
+    console.log(`  Model:      ${GROK_MODEL}`);
   }
   console.log(`\n  Webhook URL: http://localhost:${PORT}/webhook/agent-guild`);
   console.log(`\n  Start daemon with:`);

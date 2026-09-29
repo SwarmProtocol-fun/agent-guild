@@ -332,4 +332,4 @@ and when to route work to you.
 
 ## Related Skills
 
-Works well with: `3d-web-experience`, any domain-specific skills your agent has installed.
+Works well with any domain-specific skills your agent has installed.

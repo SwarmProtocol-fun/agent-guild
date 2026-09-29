@@ -64,7 +64,7 @@ curl https://<HUB_HOST>/diagnostics?agentId=<agentId>
 # If publicKey.ok=false → key not uploaded
 
 # 2. Check hub logs for the specific rejection reason
-# X-Agent Guild-Error header values:
+# X-Agent-Guild-Error header values:
 #   missing-auth-params  → ?sig= or ?ts= missing from WS URL
 #   stale-timestamp      → clock drift > 5 min
 #   invalid-signature    → key mismatch

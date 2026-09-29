@@ -16,7 +16,10 @@ contract AgentGuildTaskBoardLink is Ownable {
 
     IERC20 public immutable linkToken;
 
-    enum TaskStatus { Open, Claimed, Completed, Expired, Disputed }
+    enum TaskStatus { Open, Claimed, Completed, Expired, Disputed, Resolved }
+
+    /// @dev Denominator for resolveDispute's agentBps split (10000 = 100%).
+    uint256 private constant BPS_DENOMINATOR = 10000;
 
     struct Task {
         uint256 taskId;
@@ -40,6 +43,7 @@ contract AgentGuildTaskBoardLink is Ownable {
     event DeliverySubmitted(uint256 indexed taskId, address indexed agent, bytes32 deliveryHash, uint256 timestamp);
     event DeliveryApproved(uint256 indexed taskId, address indexed agent, uint256 payout, uint256 timestamp);
     event DeliveryDisputed(uint256 indexed taskId, address indexed poster, uint256 timestamp);
+    event DisputeResolved(uint256 indexed taskId, address indexed agent, address indexed poster, uint256 agentPayout, uint256 posterRefund, uint256 timestamp);
 
     constructor(address _linkToken) Ownable(msg.sender) {
         require(_linkToken != address(0), "Invalid LINK address");
@@ -134,6 +138,39 @@ contract AgentGuildTaskBoardLink is Ownable {
         task.status = uint8(TaskStatus.Disputed);
 
         emit DeliveryDisputed(taskId, msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice Resolve a disputed task, splitting the escrowed budget between
+     *         the agent and the poster. Previously a dispute permanently
+     *         locked the budget in the contract with no way out; this gives
+     *         the contract owner (intended to be a multisig in production)
+     *         an escape hatch.
+     * @param taskId The disputed task to resolve.
+     * @param agentBps Share of the budget (in basis points, 0-10000) paid to
+     *        the agent who did the work; the remainder is refunded to the
+     *        poster. 10000 = pay the agent in full, 0 = full refund to the
+     *        poster, anything between = a split.
+     */
+    function resolveDispute(uint256 taskId, uint256 agentBps) external onlyOwner {
+        require(taskId < tasks.length, "Invalid task");
+        Task storage task = tasks[taskId];
+        require(task.status == uint8(TaskStatus.Disputed), "Not disputed");
+        require(agentBps <= BPS_DENOMINATOR, "agentBps exceeds 100%");
+
+        task.status = uint8(TaskStatus.Resolved);
+
+        uint256 agentPayout = (task.budget * agentBps) / BPS_DENOMINATOR;
+        uint256 posterRefund = task.budget - agentPayout;
+
+        if (agentPayout > 0) {
+            linkToken.safeTransfer(task.claimedBy, agentPayout);
+        }
+        if (posterRefund > 0) {
+            linkToken.safeTransfer(task.poster, posterRefund);
+        }
+
+        emit DisputeResolved(taskId, task.claimedBy, task.poster, agentPayout, posterRefund, block.timestamp);
     }
 
     function getTask(uint256 taskId) external view returns (Task memory) {

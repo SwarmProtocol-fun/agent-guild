@@ -141,3 +141,17 @@ vite.config.ts.timestamp-*
 
 # Local Netlify folder
 .netlify
+
+# Private keys / credentials — GatewayAgent, AgentGuildConnect, and the
+# bundled connect scripts write Ed25519 keys to keys/private.pem at runtime;
+# never let one get committed by accident.
+*.pem
+*.key
+!*.pub.key
+keys/
+*serviceAccount*.json
+*service-account*.json
+
+# Agent Guild Fleet — per-agent runtime state (keys, config.json, copied scripts)
+# generated at startup for each entry in AGENTS_JSON; never source-controlled.
+AgentGuildConnect/fleet/instances/
