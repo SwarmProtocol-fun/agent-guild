@@ -33,32 +33,9 @@
 import { NextRequest } from "next/server";
 import { requireAgentAuth } from "@/lib/auth-guard";
 import { rateLimit } from "../rate-limit";
-import { getExistingMemory, getDailyNoteIfExists, type MemoryDoc } from "@/lib/agent-memory-server";
-import { getRecentMessagesForAgent, type ContextMessage, type ResolvedChannel } from "@/lib/agent-context";
-import { hybridSearchMemory } from "@/lib/compute/memory";
-import { buildContextPack, type RankedMemoryInput, type ContextMessageInput } from "@/lib/context-pack";
-
-const DEFAULT_TOKEN_BUDGET = 8000;
-const MIN_TOKEN_BUDGET = 500;
-const MAX_TOKEN_BUDGET = 32_000;
-
-function clampTokenBudget(raw: string | null): number {
-  const n = raw ? parseInt(raw, 10) : NaN;
-  if (!Number.isFinite(n)) return DEFAULT_TOKEN_BUDGET;
-  return Math.min(MAX_TOKEN_BUDGET, Math.max(MIN_TOKEN_BUDGET, n));
-}
-
-function todayUTC(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-/** Return only the ##/### sections (heading + body) whose heading or body
- *  contains `q`. Returns null if the doc has no matching section. */
-function filterSections(content: string, q: string): string | null {
-  const parts = content.split(/(?=^#{2,3} .+$)/m);
-  const matches = parts.filter((p) => p.toLowerCase().includes(q));
-  return matches.length > 0 ? matches.join("").trim() : null;
-}
+import { type ResolvedChannel } from "@/lib/agent-context";
+import { assembleAgentContext } from "@/lib/agent-context-pack";
+import { clampTokenBudget, type RankedMemoryInput, type ContextMessageInput } from "@/lib/context-pack";
 
 export async function GET(request: NextRequest) {
   const sp = request.nextUrl.searchParams;
@@ -83,56 +60,22 @@ export async function GET(request: NextRequest) {
   const format = sp.get("format");
 
   try {
-    const [memory, daily, recent, ranked] = await Promise.all([
-      getExistingMemory(auth.agent),
-      getDailyNoteIfExists(auth.agent, todayUTC()),
-      getRecentMessagesForAgent(auth.agent.agentId, { limit, sinceMs }),
-      task ? hybridSearchMemory("agent", auth.agent.agentId, task, { limit: 20 }) : Promise.resolve([]),
-    ]);
-
-    let working: MemoryDoc | null = memory.working;
-    let longTerm: MemoryDoc | null = memory.longTerm;
-    let dailyNote: MemoryDoc | null = daily;
-    let messages: ContextMessage[] = recent.messages;
-    let rankedMemories: RankedMemoryInput[] = ranked.map((m) => ({ id: m.id, content: m.content, score: m.score }));
-
-    if (q) {
-      const narrowed = working ? filterSections(working.content, q) : null;
-      working = narrowed && working ? { ...working, content: narrowed } : null;
-      const narrowedLT = longTerm ? filterSections(longTerm.content, q) : null;
-      longTerm = narrowedLT && longTerm ? { ...longTerm, content: narrowedLT } : null;
-      const narrowedDaily = dailyNote ? filterSections(dailyNote.content, q) : null;
-      dailyNote = narrowedDaily && dailyNote ? { ...dailyNote, content: narrowedDaily } : null;
-      messages = messages.filter((m) => m.content.toLowerCase().includes(q));
-      // `q` and `task` are independent filters; when both are given, `q`
-      // narrows the same way it always has and rankedMemories (already
-      // relevance-sorted for `task`) is left as-is rather than re-filtered
-      // by an unrelated keyword.
-    }
-
-    const pack = buildContextPack({
-      working: working?.content ?? null,
-      longTerm: longTerm?.content ?? null,
-      daily: dailyNote?.content ?? null,
-      rankedMemories,
-      messages: messages.map((m) => ({ from: m.from, channelName: m.channelName, content: m.content, timestamp: m.timestamp })),
-      tokenBudget,
-    });
+    const assembled = await assembleAgentContext(auth.agent, { task, tokenBudget, q, messageLimit: limit, sinceMs });
 
     const payload = {
       agent: { agentId: auth.agent.agentId, agentName: auth.agent.agentName, orgId: auth.agent.orgId },
       memory: {
-        working: pack.working,
-        longTerm: pack.longTerm,
-        daily: pack.daily,
+        working: assembled.working,
+        longTerm: assembled.longTerm,
+        daily: assembled.daily,
       },
-      rankedMemories: pack.rankedMemories,
-      messages: pack.messages,
-      channels: recent.channels,
-      tokenBudget: pack.tokenBudget,
-      tokenCount: pack.tokenCount,
-      truncated: pack.truncated,
-      omitted: pack.omitted,
+      rankedMemories: assembled.rankedMemories,
+      messages: assembled.messages,
+      channels: assembled.channels,
+      tokenBudget: assembled.tokenBudget,
+      tokenCount: assembled.tokenCount,
+      truncated: assembled.truncated,
+      omitted: assembled.omitted,
       generatedAt: Date.now(),
     };
 

@@ -4,7 +4,9 @@ import { useState, useEffect } from "react";
 import { Plus } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import type { Workspace } from "@/lib/compute/types";
-const trackComputeEvent = (..._args: unknown[]) => {}; // posthog removed
+import { trackEvent } from "@/lib/posthog-client";
+const trackComputeEvent = (event: string, properties?: Record<string, unknown>) =>
+  trackEvent(`compute.${event}`, properties);
 import { WorkspaceCard } from "@/components/compute/workspace-card";
 
 export default function WorkspacesPage() {

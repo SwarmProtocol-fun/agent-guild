@@ -10,6 +10,7 @@
 import crypto from "crypto";
 import { db } from "@/lib/firebase";
 import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { logAgentCall } from "@/lib/agent-call-log";
 
 export interface AuthResult {
     agentId: string;
@@ -87,9 +88,14 @@ export async function authenticateAgent(
 
         if (!authenticated) return null;
 
+        const orgId = data.orgId || data.organizationId || "";
+        // No signed message to recover an endpoint from on this path —
+        // still counted, just without a per-endpoint breakdown.
+        logAgentCall({ agentId, orgId, authMethod: "apikey" });
+
         return {
             agentId,
-            orgId: data.orgId || data.organizationId || "",
+            orgId,
             agentName: data.name || agentId,
             agentType: data.type || "agent",
         };

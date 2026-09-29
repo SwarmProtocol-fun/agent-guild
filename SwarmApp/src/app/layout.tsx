@@ -12,6 +12,8 @@ import { SkinProvider } from "@/contexts/SkinContext";
 import { CommandBar } from "@/components/command-bar";
 import AutoSiwe from "@/components/AutoSiwe";
 import { QueryProvider } from "@/components/query-provider";
+import PostHogTracker from "@/components/analytics/PostHogTracker";
+import SessionHeartbeat from "@/components/analytics/SessionHeartbeat";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -51,6 +53,8 @@ export default function RootLayout({
           <Web3Provider>
             <SessionProvider>
             <AutoSiwe />
+            <PostHogTracker />
+            <SessionHeartbeat />
             <OrgProvider>
               <SparkleTrail>
                 <CommandBar />

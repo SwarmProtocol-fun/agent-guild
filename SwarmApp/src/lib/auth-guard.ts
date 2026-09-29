@@ -351,6 +351,16 @@ export async function requireGatewayAuth(
     return { ok: false, error: "Invalid gateway signature" };
   }
 
+  const { logAgentCall } = await import("./agent-call-log");
+  const [method, endpoint] = signedMessagePrefix.split(":");
+  logAgentCall({
+    agentId: result.gatewayId,
+    orgId: result.orgId,
+    authMethod: "gateway",
+    method,
+    endpoint,
+  });
+
   return { ok: true, gateway: result };
 }
 

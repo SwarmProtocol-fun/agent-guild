@@ -36,7 +36,9 @@ import {
     getMarketplaceAgents,
 } from "@/lib/skills";
 import { computeRankingScore } from "@/lib/submission-scoring";
-const trackMarketplaceEvent = (..._args: unknown[]) => {}; // posthog removed
+import { trackEvent } from "@/lib/posthog-client";
+const trackMarketplaceEvent = (event: string, properties?: Record<string, unknown>) =>
+    trackEvent(`marketplace.${event}`, properties);
 import { type Agent, getAgentsByOrg } from "@/lib/firestore";
 import { PERSONA_REGISTRY, PERSONA_CATEGORIES } from "@/lib/personas";
 import type { MarketView, MarketCategory, SortOption, SourceFilter, MarketFilters } from "@/lib/market/types";

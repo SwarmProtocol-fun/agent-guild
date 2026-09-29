@@ -23,7 +23,9 @@ import { ApplyPersonaDialog } from "@/components/market/apply-persona-dialog";
 import { SubscribeDialog } from "@/components/market/subscribe-dialog";
 import { RatingDialog } from "@/components/market/rating-dialog";
 import { CryptoCheckoutDialog } from "@/components/marketplace/crypto-checkout-dialog";
-const trackMarketplaceEvent = (..._args: unknown[]) => {}; // posthog removed
+import { trackEvent } from "@/lib/posthog-client";
+const trackMarketplaceEvent = (event: string, properties?: Record<string, unknown>) =>
+  trackEvent(`marketplace.${event}`, properties);
 import type { Agent } from "@/lib/firestore";
 
 // ── Category labels ──

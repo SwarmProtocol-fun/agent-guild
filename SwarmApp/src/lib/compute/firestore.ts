@@ -29,6 +29,8 @@ import type {
   Region,
   TransferStatus,
   OpenClawVariant,
+  GraphEdge,
+  GraphEntityRef,
 } from "./types";
 import { TRANSFER_FEE_PERCENT } from "./types";
 
@@ -52,6 +54,7 @@ const COLLECTIONS = {
   pricingSettings: "computePricingSettings",
   entitlements: "computeEntitlements",
   transfers: "computeTransfers",
+  graphEdges: "graphEdges",
 } as const;
 
 // ═══════════════════════════════════════════════════════════════
@@ -536,6 +539,62 @@ export async function updateMemoryEntry(id: string, data: Partial<MemoryEntry>):
 
 export async function deleteMemoryEntry(id: string): Promise<void> {
   await adminDb().collection(COLLECTIONS.memory).doc(id).delete();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Knowledge Graph — memory/agent/task/project edges (types.ts's
+// GraphEdge doc comment; PRD §139 — no graph DB, plain Firestore docs)
+// ═══════════════════════════════════════════════════════════════
+
+function parseGraphEdge(id: string, d: FirebaseFirestore.DocumentData): GraphEdge {
+  return {
+    id,
+    orgId: d.orgId as string,
+    from: d.from as GraphEntityRef,
+    to: d.to as GraphEntityRef,
+    relation: (d.relation as string) || "",
+    createdBy: (d.createdBy as GraphEntityRef) || null,
+    createdAt: toDate(d.createdAt),
+  };
+}
+
+export async function createGraphEdge(
+  data: Omit<GraphEdge, "id" | "createdAt">,
+): Promise<string> {
+  const ref = await adminDb().collection(COLLECTIONS.graphEdges).add({
+    ...data,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return ref.id;
+}
+
+/** Edges where `entity` is either endpoint, newest first. Two queries
+ *  (Firestore has no OR-across-fields) merged and deduped by id — fine at
+ *  this collection's expected size; revisit only if it becomes a hot path. */
+export async function getGraphEdgesForEntity(
+  orgId: string,
+  entity: GraphEntityRef,
+  opts?: { relation?: string; limit?: number },
+): Promise<GraphEdge[]> {
+  const base = adminDb().collection(COLLECTIONS.graphEdges).where("orgId", "==", orgId);
+  let fromQ: Query = base.where("from.type", "==", entity.type).where("from.id", "==", entity.id);
+  let toQ: Query = base.where("to.type", "==", entity.type).where("to.id", "==", entity.id);
+  if (opts?.relation) {
+    fromQ = fromQ.where("relation", "==", opts.relation);
+    toQ = toQ.where("relation", "==", opts.relation);
+  }
+  const [fromSnap, toSnap] = await Promise.all([fromQ.get(), toQ.get()]);
+  const byId = new Map<string, GraphEdge>();
+  for (const s of [...fromSnap.docs, ...toSnap.docs]) {
+    byId.set(s.id, parseGraphEdge(s.id, s.data()));
+  }
+  const edges = [...byId.values()];
+  edges.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  return edges.slice(0, opts?.limit || 100);
+}
+
+export async function deleteGraphEdge(id: string): Promise<void> {
+  await adminDb().collection(COLLECTIONS.graphEdges).doc(id).delete();
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -10,7 +10,9 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { SubmitMarketItemDialog } from "@/components/market/submit-dialog";
 import type { CommunityMarketItem } from "@/lib/market/types";
-const trackMarketplaceEvent = (..._args: unknown[]) => {}; // posthog removed
+import { trackEvent } from "@/lib/posthog-client";
+const trackMarketplaceEvent = (event: string, properties?: Record<string, unknown>) =>
+    trackEvent(`marketplace.${event}`, properties);
 
 // ── Publisher Tier Badge ──
 

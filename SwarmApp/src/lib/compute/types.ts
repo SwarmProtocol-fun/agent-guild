@@ -434,6 +434,38 @@ export interface MemoryEntry {
   updatedAt: Date | null;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Knowledge Graph — lightweight entity relationships
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Context Vault PRD §27/§76/§139 — a knowledge graph, scoped down per the
+ * source PRD's own §139 instruction: "do not introduce Neo4j on day one,
+ * store graph edges in the existing persistence layer." No new
+ * infrastructure — edges are plain Firestore docs, queried in two passes
+ * (from == entity, then to == entity) rather than a graph traversal engine.
+ * Answers "what is connected to X," not general multi-hop graph queries.
+ */
+export type GraphEntityType = "agent" | "task" | "project" | "memory" | "document";
+
+export interface GraphEntityRef {
+  type: GraphEntityType;
+  id: string;
+}
+
+export interface GraphEdge {
+  id: string;
+  orgId: string;
+  from: GraphEntityRef;
+  to: GraphEntityRef;
+  /** Free-text relation label (e.g. "works_on", "related_to", "derived_from")
+   *  — not a closed enum. PRD §27 lists common values as examples, not a
+   *  required vocabulary. Capped at 100 chars, see linkEntities(). */
+  relation: string;
+  createdBy: GraphEntityRef | null;
+  createdAt: Date | null;
+}
+
 export interface EmbedToken {
   id: string;
   workspaceId: string;

@@ -13,7 +13,9 @@ import {
   DEFAULT_AUTO_STOP_MINUTES,
 } from "@/lib/compute/types";
 import { estimateHourlyCost, estimateMonthlyCost } from "@/lib/compute/pricing";
-const trackComputeEvent = (..._args: unknown[]) => {}; // posthog removed
+import { trackEvent } from "@/lib/posthog-client";
+const trackComputeEvent = (event: string, properties?: Record<string, unknown>) =>
+  trackEvent(`compute.${event}`, properties);
 import { StatusBadge } from "@/components/compute/status-badge";
 import { DesktopViewer } from "@/components/compute/desktop-viewer";
 import { TerminalViewer } from "@/components/compute/terminal-viewer";

@@ -11,6 +11,7 @@
 
 import { adminDb } from "./firebase-admin";
 import { Timestamp } from "firebase-admin/firestore";
+import { getAgentCallStats, type AgentCallStats } from "./agent-call-log";
 
 // ── Types ──
 
@@ -56,6 +57,8 @@ export interface AgentPerformanceOverview {
   delegations: OutcomeCounts;
   dailyThroughput: DailyThroughputPoint[];
   topAgents: TopAgent[];
+  /** Every agent-authenticated API call through the platform (v1 routes + gateway workers). */
+  apiCalls: AgentCallStats;
 }
 
 // ── Helpers ──

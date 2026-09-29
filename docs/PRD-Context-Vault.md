@@ -1,9 +1,9 @@
 # Context Vault — Persistent Memory for Swarm Agents
 
 > **Component:** Core service (`src/lib/*`, `app/api/*`) — not a mod
-> **Version:** 2.2 (supersedes the 155-section greenfield PRD it was derived from; revised against `gitnexus impact`/`context` findings — see §1's verification note and §8)
-> **Date:** 2026-09-28
-> **Status:** All three phases shipped (§6) — one Definition-of-Done item (§9) remains explicitly unverified: no real embedding-provider API key has been exercised in this environment
+> **Version:** 2.3 (supersedes the 155-section greenfield PRD it was derived from; revised against `gitnexus impact`/`context` findings — see §1's verification note and §8)
+> **Date:** 2026-09-29
+> **Status:** All four phases shipped (§6) — one Definition-of-Done item (§9) remains explicitly unverified: no real embedding-provider API key has been exercised in this environment. Phase 4 (§4.6/§4.7) added the knowledge graph and MCP server surface on top of v2.2's Phases 1–3, both previously listed in §7 as non-goals, once requested directly.
 > **Source doc:** an uploaded vision PRD for `@swarm/mod-context-vault` (Firestore + Redis + pgvector + GCS + blockchain proofs + marketplace). This document keeps that PRD's good ideas and drops everything that doesn't match what's actually running.
 
 ---
@@ -171,21 +171,47 @@ Implemented in `src/lib/agent-memory-server.ts`:
 
 **Phase 3 — ✅ Done:** Token-budgeted, task-aware context (§4.4) — shipped as an extension of the pre-existing `GET /api/v1/context` endpoint rather than a new one, once impact analysis surfaced that it already existed.
 
+**Phase 4 — ✅ Done:** Knowledge graph (§4.6) + MCP server surface (§4.7) — requested explicitly after Phase 1–3 shipped, reversing this document's original "no caller need identified" / "building the adapter before the feature it adapts is backwards" calls for those two items. Both built as thin additive layers on the same primitives Phases 1–3 already shipped, not new infrastructure.
+
 **Still open, not scheduled as a phase:** a live check of the OpenAI embeddings path once `OPENAI_API_KEY` is actually configured somewhere it can be tested end-to-end — every embedding-dependent code path (Phase 2 and 3) has only been verified against a stubbed provider/`fetch` in this environment, never the real API.
 
 **Explicitly not scheduled:** everything in §7.
 
+### 4.6 Knowledge graph — ✅ SHIPPED
+
+Source PRD §27/§28/§76/§139, scoped exactly to §139's own instruction: no graph database, edges live in the existing Firestore persistence layer as plain docs — a two-query lookup ("what's connected to X"), not a traversal engine.
+
+- New `graphEdges` collection (`compute/firestore.ts`: `createGraphEdge`, `getGraphEdgesForEntity` — two queries, `from`-match and `to`-match, merged and deduped since Firestore has no OR-across-fields; `deleteGraphEdge`).
+- Business-logic layer `compute/graph.ts`: `linkEntities(orgId, from, to, relation, createdBy?)` and `getRelatedEntities(orgId, entity, opts?)`. Validates entity type (`agent | task | project | memory | document`) and bounds id/relation length — doesn't verify the referenced entity actually exists, same trust level this codebase already gives other cross-collection references (e.g. `Task.assigneeAgentId`).
+- REST: `POST /api/compute/memory/link`, `GET /api/compute/memory/graph` — wallet + `requireOrgMember`, matching the `/api/compute/workspaces` auth tier (org-scoped resource, not admin-only).
+- No `firestore.rules` change needed — the ruleset's own catch-all denies any collection not explicitly allow-listed, so `graphEdges` is deny-by-default automatically (confirmed by reading the rules file, not assumed).
+- Tests: `compute/__tests__/graph.test.ts`, 10 cases (valid link, relation trimming, createdBy pass-through, invalid entity type, empty id, empty/oversized relation, invalid createdBy, delegation + validation-before-firestore-call on the read side).
+
+### 4.7 MCP server surface — ✅ SHIPPED
+
+Source PRD §43/§44, reversing this doc's earlier "revisit once ... an actual MCP-based caller exists" call — requested directly rather than waiting for one.
+
+- `POST/GET/DELETE /api/v1/mcp` using `@modelcontextprotocol/sdk`'s `WebStandardStreamableHTTPServerTransport` (Web-standard `Request`/`Response`, not the Node-`http`-specific transport) — one `McpServer` + transport instance per request, stateless (`sessionIdGenerator: undefined`), matching every other route in this app being a stateless serverless function with no in-memory session store to leak across invocations.
+- Auth: `x-agent-id` + `x-agent-api-key` headers, checked via the same `authenticateAgent()` primitive `requireAgentAuth`'s API-key tier already uses — the header-based equivalent of that tier (MCP clients configure headers on their transport, not query params), not a new auth mechanism.
+- Five tools, each a thin wrapper (`src/lib/mcp-tools.ts`, unit-tested independent of the transport) over an already-shipped capability:
+  - `context_remember` → `rememberMemory()` (Phase 2), defaults to the calling agent's own scope. New write path, so it gets the same secret-redaction treatment as the three paths in §4.5 (scan → warn on type, never log the value → `sanitizeText`) rather than being exempted as a fourth unredacted path.
+  - `context_recall` → `hybridSearchMemory()` (Phase 2).
+  - `context_pack` → `assembleAgentContext()`, a function extracted from `GET /api/v1/context`'s handler body (§4.4) so the REST route and this tool share one implementation instead of two that can drift. Verified via `mcp__gitnexus__impact` that the route's `GET` has zero upstream callers before refactoring its internals; the extraction preserves the exact same fetch → optional `q`-narrow → `buildContextPack` sequence and is covered by its own test file (`agent-context-pack.test.ts`, 8 cases) in addition to the pre-existing `context-pack.test.ts`.
+  - `context_link` / `context_graph` → §4.6's `linkEntities`/`getRelatedEntities`, defaulting the "from" entity to the calling agent.
+  - Not included: `context_forget`/`context_update`/`context_search_documents` — deletion/update already exist as REST (`PATCH`/`DELETE /api/compute/memory/[id]`) and document ingestion isn't built; growing the MCP surface to match the source PRD's full tool list wasn't asked for.
+- `@modelcontextprotocol/sdk` and `zod` added as direct dependencies (zod was already present transitively via the SDK; pinned explicitly since route code imports it directly).
+- Tests: `mcp-tools.test.ts`, 14 cases covering defaulting, validation, redaction, and error-wrapping for all five tools' logic. The route itself (transport wiring) is intentionally thin and untested directly — same "logic in lib, routes are thin glue" split as the rest of this codebase.
+- Full suite after Phase 4: 286/286 passing (was 247/247 after Phase 3). `tsc --noEmit`: no new errors from any Context Vault file (verified by diffing the error list before/after against filenames, not just a raw count — the raw count did move, from 25 to 28, but all three new lines are `.next/`-generated typegen artifacts and an unrelated already-modified `layout.tsx`, none touching this feature).
+
 ---
 
-## 7. Non-Goals (cut from the source PRD)
+## 7. Non-Goals
 
-These were in the original 155-section doc as future phases (its own §100–110, §140+). They stay out of scope here because nothing in this codebase or its users is asking for them, and each one is a multi-week project in its own right:
+These were in the original 155-section doc as future phases (its own §100–110, §140+). Two items that were listed here as non-goals in earlier drafts of this document — the knowledge graph and the MCP server surface — shipped in Phase 4 (§4.6/§4.7) once actually requested; the remainder stay out of scope because nothing in this codebase or its users is asking for them, and each is a multi-week project in its own right:
 
-- Knowledge graph / entity relationships (source §27–28) — no caller need identified; revisit only if the flat ranked-list Context Pack proves insufficient in practice.
 - Blockchain memory proofs, agent-owned wallets, on-chain hashes (source §106–108) — no product requirement, adds a dependency (`contracts/`) this feature doesn't need.
 - Context/knowledge marketplace (source §110–111).
 - Cross-Swarm federation, vault export/import portability (source §104–105, §109).
-- MCP server surface (source §43–44) — revisit once this ships as REST and an actual MCP-based caller exists; building the protocol adapter before the feature it adapts is backwards.
 - Packaging this as a `SwarmApp/mods/` package (source §101–103) — memory is core infrastructure other core code already depends on (`agent-memory-server.ts` is imported outside any mod boundary); moving it into the mod system's trust boundary (see `docs/mod-sdk.md` — mods are unsandboxed but still a separate install unit) would be a regression, not a packaging improvement.
 
 ---

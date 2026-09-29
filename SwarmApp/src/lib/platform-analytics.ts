@@ -24,6 +24,8 @@ export interface PlatformSession {
   role: UserRole;
   loginAt: Date | null;
   logoutAt?: Date | null;
+  /** Last heartbeat ping from the client tab, while the session is still open (no explicit logout yet). */
+  lastActiveAt?: Date | null;
   durationMs?: number;
   userAgent?: string;
   ipHash?: string;
@@ -159,6 +161,35 @@ export async function recordLogin(
   return sessionRef.id;
 }
 
+// ── Record Heartbeat ──
+// A lightweight ping from an open tab, sent on an interval while the tab is
+// visible. Lets duration/active-now be estimated for sessions that never get
+// an explicit logout (closed tab, browser quit, expired cookie) — the
+// overwhelming majority of real sessions.
+
+export async function recordHeartbeat(sessionId: string): Promise<void> {
+  const db = adminDb();
+  const snap = await db
+    .collection(SESSIONS_COL)
+    .where("sessionId", "==", sessionId)
+    .limit(1)
+    .get();
+  if (snap.empty) return;
+
+  const sessionDoc = snap.docs[0];
+  const now = Timestamp.now();
+  await sessionDoc.ref.update({ lastActiveAt: now });
+
+  const wallet = sessionDoc.data().walletAddress as string | undefined;
+  if (wallet) {
+    await db
+      .collection(PROFILES_COL)
+      .doc(wallet)
+      .update({ lastSeen: now })
+      .catch(() => {}); // non-critical
+  }
+}
+
 // ── Record Logout ──
 
 export async function recordLogout(sessionId: string): Promise<void> {
@@ -227,6 +258,7 @@ export async function getRecentSessions(opts: {
       role: data.role,
       loginAt: toDate(data.loginAt),
       logoutAt: toDate(data.logoutAt),
+      lastActiveAt: toDate(data.lastActiveAt),
       durationMs: data.durationMs,
       userAgent: data.userAgent,
       ipHash: data.ipHash,
@@ -299,6 +331,7 @@ export async function getAnalyticsOverview(): Promise<OverviewMetrics> {
       walletAddress: data.walletAddress as string,
       loginAt: toDate(data.loginAt),
       logoutAt: toDate(data.logoutAt),
+      lastActiveAt: toDate(data.lastActiveAt),
       durationMs: (data.durationMs as number) || 0,
     };
   });
@@ -331,13 +364,21 @@ export async function getAnalyticsOverview(): Promise<OverviewMetrics> {
       sessionsToday++;
     }
 
-    if (s.durationMs > 0) {
-      totalDuration += s.durationMs;
+    // Duration: prefer the explicit logout-derived value; for sessions still
+    // open (no logout, e.g. tab just closed instead), estimate from the last
+    // heartbeat ping instead of dropping them from the average entirely.
+    const estimatedMs = s.lastActiveAt ? s.lastActiveAt.getTime() - s.loginAt.getTime() : 0;
+    const effectiveDurationMs = s.durationMs > 0 ? s.durationMs : estimatedMs;
+    if (effectiveDurationMs > 0) {
+      totalDuration += effectiveDurationMs;
       durationCount++;
     }
 
-    // Active now: logged in within 24h and no logout
-    if (!s.logoutAt && s.loginAt >= new Date(now.getTime() - 24 * 60 * 60 * 1000)) {
+    // Active now: no logout yet, and either heartbeating within the last 5
+    // minutes or (no heartbeat received yet) logged in within the last 5
+    // minutes — not "no logout within 24h", which overcounts abandoned tabs.
+    const lastSeenAt = s.lastActiveAt || s.loginAt;
+    if (!s.logoutAt && lastSeenAt >= new Date(now.getTime() - 5 * 60 * 1000)) {
       activeNow++;
     }
 

@@ -18,6 +18,18 @@
  */
 import { estimateTokens } from "./token-estimate";
 
+export const DEFAULT_TOKEN_BUDGET = 8000;
+export const MIN_TOKEN_BUDGET = 500;
+export const MAX_TOKEN_BUDGET = 32_000;
+
+/** Shared by the REST route (`?tokenBudget=`) and the MCP `context_pack`
+ *  tool, so both callers clamp to the same range instead of drifting. */
+export function clampTokenBudget(raw: number | string | null | undefined): number {
+  const n = typeof raw === "string" ? parseInt(raw, 10) : raw;
+  if (typeof n !== "number" || !Number.isFinite(n)) return DEFAULT_TOKEN_BUDGET;
+  return Math.min(MAX_TOKEN_BUDGET, Math.max(MIN_TOKEN_BUDGET, n));
+}
+
 export interface RankedMemoryInput {
   id: string;
   content: string;
