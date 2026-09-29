@@ -107,7 +107,7 @@ function AgentDetailPage() {
   const agentId = params.id as string;
   const { currentOrg } = useOrg();
   const { address: sessionAddress } = useSession();
-  const agent-guild = useAgentGuildData();
+  const agentGuild = useAgentGuildData();
   const agentGuildWrite = useAgentGuildWrite();
 
 
@@ -347,7 +347,7 @@ function AgentDetailPage() {
     if (isNaN(feeRate) || feeRate < 0) return;
     const txHash = await agentGuildWrite.registerAgent(registerName.trim(), registerSkills.trim(), agent?.asn || "", feeRate);
     if (txHash) {
-      agent-guild.refetch();
+      agentGuild.refetch();
     }
   };
 
@@ -569,7 +569,7 @@ function AgentDetailPage() {
     .reduce((sum, j) => sum + parseReward(j.reward), 0);
 
   // On-chain matching — Hedera
-  const onchainMatch = agent-guild.agents.find(
+  const onchainMatch = agentGuild.agents.find(
     a => a.name.toLowerCase() === agent.name.toLowerCase()
   );
   // Credit scoring
