@@ -228,7 +228,7 @@ export async function POST(req: NextRequest) {
                     rentalUsage: agentPricing?.rentalUsage as number | undefined,
                     rentalPerformance: agentPricing?.rentalPerformance as number | undefined,
                     hirePerTask: agentPricing?.hirePerTask as number | undefined,
-                    currency: ((agentPricing?.currency as string) === "HBAR" ? "HBAR" : "USD"),
+                    currency: ((agentPricing?.currency as string) === "SOL" ? "SOL" : "USD"),
                 },
                 identity: {
                     agentType: (identity?.agentType as string) || "General",

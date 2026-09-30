@@ -10,25 +10,59 @@
  * - Agent capacity limits (max concurrent assignments)
  * - Work mode tracking (available/busy/offline/paused)
  * - Multi-channel notifications (WebSocket + Agent Hub + persistent docs)
+ *
+ * Server-side only — reads and writes go through the Admin SDK (adminDb()),
+ * not the browser client SDK. /api/v1/* routes call an agent's signature
+ * verification, not a signed-in Firestore user, so the client SDK (which
+ * firestore.rules gates on request.auth) has no user here and every read or
+ * write it attempted returned PERMISSION_DENIED even after a valid
+ * signature check. Signed-in dashboard widgets that need this data still go
+ * through the client-SDK helpers in @/lib/firestore — this module is the
+ * separate server-side data path for /api/v1/*.
  */
 
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  doc,
-  addDoc,
-  getDoc,
-  getDocs,
-  updateDoc,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-  serverTimestamp,
-  Timestamp,
-  increment,
-} from "firebase/firestore";
-import { getAgent, type Agent } from "@/lib/firestore";
+import { adminDb } from "@/lib/firebase-admin";
+import { FieldValue, Timestamp, type Query } from "firebase-admin/firestore";
+import { getAgent } from "@/lib/firestore-admin";
+
+// ─── Stable error codes ─────────────────────────────────────
+// Routes branch on `err.code` to return a stable response instead of
+// forwarding whatever the data layer's message happened to be.
+
+export type AssignmentErrorCode =
+  | "AGENT_NOT_FOUND"
+  | "FORBIDDEN"
+  | "AT_CAPACITY"
+  | "NOT_FOUND"
+  | "INVALID_STATUS"
+  | "VALIDATION_ERROR";
+
+export class AssignmentError extends Error {
+  code: AssignmentErrorCode;
+  constructor(code: AssignmentErrorCode, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "AssignmentError";
+  }
+}
+
+function fail(code: AssignmentErrorCode, message: string): never {
+  throw new AssignmentError(code, message);
+}
+
+const ERROR_STATUS: Record<AssignmentErrorCode, number> = {
+  AGENT_NOT_FOUND: 404,
+  NOT_FOUND: 404,
+  FORBIDDEN: 403,
+  AT_CAPACITY: 409,
+  INVALID_STATUS: 409,
+  VALIDATION_ERROR: 400,
+};
+
+/** HTTP status a route should return for a given AssignmentError code. */
+export function assignmentErrorStatus(code: AssignmentErrorCode): number {
+  return ERROR_STATUS[code] ?? 500;
+}
 
 // ─── TypeScript Interfaces ──────────────────────────────────
 
@@ -125,6 +159,10 @@ export interface CreateAssignmentParams {
   channelId?: string;
 }
 
+const assignmentsCol = () => adminDb().collection("taskAssignments");
+const agentsCol = () => adminDb().collection("agents");
+const notificationsCol = () => adminDb().collection("assignmentNotifications");
+
 // ─── Core CRUD Functions ────────────────────────────────────
 
 /**
@@ -152,18 +190,18 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
 
   // Validate: must have either fromAgentId or fromHumanId
   if (!fromAgentId && !fromHumanId) {
-    throw new Error("Assignment must have either fromAgentId or fromHumanId");
+    fail("VALIDATION_ERROR", "Assignment must have either fromAgentId or fromHumanId");
   }
 
   // Check target agent exists and belongs to same org
   const agent = await getAgent(toAgentId);
   if (!agent) {
-    throw new Error(`Agent ${toAgentId} not found`);
+    fail("AGENT_NOT_FOUND", `Agent ${toAgentId} not found`);
   }
 
   // SECURITY: Prevent cross-organization assignment
   if (agent.orgId !== orgId) {
-    throw new Error(`Agent ${toAgentId} not found in organization ${orgId}`);
+    fail("FORBIDDEN", `Agent ${toAgentId} not found in organization ${orgId}`);
   }
 
   const workMode = (agent as any).workMode || "available";
@@ -201,7 +239,7 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
   // Handle capacity overflow
   if (currentLoad >= capacity) {
     if (capacityOverflowPolicy === "reject") {
-      throw new Error(`Agent ${toAgentName} is at capacity (${currentLoad}/${capacity})`);
+      fail("AT_CAPACITY", `Agent ${toAgentName} is at capacity (${currentLoad}/${capacity})`);
     } else if (capacityOverflowPolicy === "warn") {
       console.warn(`Agent ${toAgentName} is at capacity (${currentLoad}/${capacity}), but policy is 'warn'`);
     }
@@ -234,11 +272,11 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
     rejectionReason: null,
     completedAt: null,
     completionNotes: null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   };
 
-  const assignmentRef = await addDoc(collection(db, "taskAssignments"), assignmentData);
+  const assignmentRef = await assignmentsCol().add(assignmentData);
 
   // Auto-accept if configured
   if (autoAcceptAssignments && requiresAcceptance === true) {
@@ -262,17 +300,9 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
  * Get a task assignment by ID.
  */
 export async function getAssignment(assignmentId: string): Promise<TaskAssignment | null> {
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
-
-  if (!assignmentSnap.exists()) {
-    return null;
-  }
-
-  return {
-    id: assignmentSnap.id,
-    ...assignmentSnap.data(),
-  } as TaskAssignment;
+  const snap = await assignmentsCol().doc(assignmentId).get();
+  if (!snap.exists) return null;
+  return { id: snap.id, ...snap.data() } as TaskAssignment;
 }
 
 /**
@@ -284,24 +314,13 @@ export async function listAssignments(
   status?: string,
   limitCount: number = 50
 ): Promise<TaskAssignment[]> {
-  let q = query(
-    collection(db, "taskAssignments"),
-    where("toAgentId", "==", agentId),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(limitCount)
-  );
-
+  let q: Query = assignmentsCol().where("toAgentId", "==", agentId);
   if (status) {
-    q = query(
-      collection(db, "taskAssignments"),
-      where("toAgentId", "==", agentId),
-      where("status", "==", status),
-      orderBy("createdAt", "desc"),
-      firestoreLimit(limitCount)
-    );
+    q = q.where("status", "==", status);
   }
+  q = q.orderBy("createdAt", "desc").limit(limitCount);
 
-  const snapshot = await getDocs(q);
+  const snapshot = await q.get();
   return snapshot.docs.map((doc) => ({
     id: doc.id,
     ...doc.data(),
@@ -317,37 +336,36 @@ export async function acceptAssignment(
   agentId: string,
   notes?: string
 ): Promise<void> {
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
+  const assignmentRef = assignmentsCol().doc(assignmentId);
+  const assignmentSnap = await assignmentRef.get();
 
-  if (!assignmentSnap.exists()) {
-    throw new Error(`Assignment ${assignmentId} not found`);
+  if (!assignmentSnap.exists) {
+    fail("NOT_FOUND", `Assignment ${assignmentId} not found`);
   }
 
   const assignment = assignmentSnap.data() as TaskAssignment;
 
   // Verify agent is the recipient
   if (assignment.toAgentId !== agentId) {
-    throw new Error(`Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
+    fail("FORBIDDEN", `Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
   }
 
   // Verify status is pending
   if (assignment.status !== "pending") {
-    throw new Error(`Assignment ${assignmentId} is not pending (current status: ${assignment.status})`);
+    fail("INVALID_STATUS", `Assignment ${assignmentId} is not pending (current status: ${assignment.status})`);
   }
 
   // Update assignment
-  await updateDoc(assignmentRef, {
+  await assignmentRef.update({
     status: "accepted",
     response: "accepted",
-    respondedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    respondedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   // Increment agent currentLoad
-  const agentRef = doc(db, "agents", agentId);
-  await updateDoc(agentRef, {
-    currentLoad: increment(1),
+  await agentsCol().doc(agentId).update({
+    currentLoad: FieldValue.increment(1),
   });
 
   // Create notification for assigner
@@ -374,41 +392,40 @@ export async function rejectAssignment(
   reason: string
 ): Promise<void> {
   if (!reason || reason.trim().length === 0) {
-    throw new Error("Rejection reason is required");
+    fail("VALIDATION_ERROR", "Rejection reason is required");
   }
 
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
+  const assignmentRef = assignmentsCol().doc(assignmentId);
+  const assignmentSnap = await assignmentRef.get();
 
-  if (!assignmentSnap.exists()) {
-    throw new Error(`Assignment ${assignmentId} not found`);
+  if (!assignmentSnap.exists) {
+    fail("NOT_FOUND", `Assignment ${assignmentId} not found`);
   }
 
   const assignment = assignmentSnap.data() as TaskAssignment;
 
   // Verify agent is the recipient
   if (assignment.toAgentId !== agentId) {
-    throw new Error(`Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
+    fail("FORBIDDEN", `Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
   }
 
   // Verify status is pending
   if (assignment.status !== "pending") {
-    throw new Error(`Assignment ${assignmentId} is not pending (current status: ${assignment.status})`);
+    fail("INVALID_STATUS", `Assignment ${assignmentId} is not pending (current status: ${assignment.status})`);
   }
 
   // Update assignment
-  await updateDoc(assignmentRef, {
+  await assignmentRef.update({
     status: "rejected",
     response: "rejected",
     rejectionReason: reason,
-    respondedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+    respondedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   // Increment agent rejection stats
-  const agentRef = doc(db, "agents", agentId);
-  await updateDoc(agentRef, {
-    assignmentsRejected: increment(1),
+  await agentsCol().doc(agentId).update({
+    assignmentsRejected: FieldValue.increment(1),
   });
 
   // Create notification for assigner
@@ -429,26 +446,26 @@ export async function rejectAssignment(
  * Mark assignment as in progress.
  */
 export async function startAssignment(assignmentId: string, agentId: string): Promise<void> {
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
+  const assignmentRef = assignmentsCol().doc(assignmentId);
+  const assignmentSnap = await assignmentRef.get();
 
-  if (!assignmentSnap.exists()) {
-    throw new Error(`Assignment ${assignmentId} not found`);
+  if (!assignmentSnap.exists) {
+    fail("NOT_FOUND", `Assignment ${assignmentId} not found`);
   }
 
   const assignment = assignmentSnap.data() as TaskAssignment;
 
   if (assignment.toAgentId !== agentId) {
-    throw new Error(`Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
+    fail("FORBIDDEN", `Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
   }
 
   if (assignment.status !== "accepted") {
-    throw new Error(`Assignment ${assignmentId} is not accepted (current status: ${assignment.status})`);
+    fail("INVALID_STATUS", `Assignment ${assignmentId} is not accepted (current status: ${assignment.status})`);
   }
 
-  await updateDoc(assignmentRef, {
+  await assignmentRef.update({
     status: "in_progress",
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 }
 
@@ -461,25 +478,23 @@ export async function completeAssignment(
   agentId: string,
   completionNotes?: string
 ): Promise<void> {
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
+  const assignmentRef = assignmentsCol().doc(assignmentId);
+  const assignmentSnap = await assignmentRef.get();
 
-  if (!assignmentSnap.exists()) {
-    throw new Error(`Assignment ${assignmentId} not found`);
+  if (!assignmentSnap.exists) {
+    fail("NOT_FOUND", `Assignment ${assignmentId} not found`);
   }
 
   const assignment = assignmentSnap.data() as TaskAssignment;
 
   // Verify agent is the recipient
   if (assignment.toAgentId !== agentId) {
-    throw new Error(`Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
+    fail("FORBIDDEN", `Agent ${agentId} is not the recipient of assignment ${assignmentId}`);
   }
 
   // Verify status is accepted or in_progress
   if (assignment.status !== "accepted" && assignment.status !== "in_progress") {
-    throw new Error(
-      `Assignment ${assignmentId} is not in progress (current status: ${assignment.status})`
-    );
+    fail("INVALID_STATUS", `Assignment ${assignmentId} is not in progress (current status: ${assignment.status})`);
   }
 
   const completedAt = new Date();
@@ -487,19 +502,19 @@ export async function completeAssignment(
   const completionTimeMs = completedAt.getTime() - createdAt.getTime();
 
   // Update assignment
-  await updateDoc(assignmentRef, {
+  await assignmentRef.update({
     status: "completed",
     completedAt: Timestamp.fromDate(completedAt),
     completionNotes: completionNotes || null,
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   // Update agent stats
-  const agentRef = doc(db, "agents", agentId);
-  const agentSnap = await getDoc(agentRef);
+  const agentRef = agentsCol().doc(agentId);
+  const agentSnap = await agentRef.get();
 
-  if (agentSnap.exists()) {
-    const agentData = agentSnap.data();
+  if (agentSnap.exists) {
+    const agentData = agentSnap.data()!;
     const currentLoad = (agentData.currentLoad || 1) - 1;
     const assignmentsCompleted = (agentData.assignmentsCompleted || 0) + 1;
     const currentAvgTime = agentData.averageCompletionTimeMs || 0;
@@ -507,7 +522,7 @@ export async function completeAssignment(
       (currentAvgTime * (assignmentsCompleted - 1) + completionTimeMs) / assignmentsCompleted
     );
 
-    await updateDoc(agentRef, {
+    await agentRef.update({
       currentLoad: Math.max(0, currentLoad),
       assignmentsCompleted,
       averageCompletionTimeMs: newAvgTime,
@@ -535,36 +550,35 @@ export async function cancelAssignment(
   assignmentId: string,
   cancellingAgentId: string
 ): Promise<void> {
-  const assignmentRef = doc(db, "taskAssignments", assignmentId);
-  const assignmentSnap = await getDoc(assignmentRef);
+  const assignmentRef = assignmentsCol().doc(assignmentId);
+  const assignmentSnap = await assignmentRef.get();
 
-  if (!assignmentSnap.exists()) {
-    throw new Error(`Assignment ${assignmentId} not found`);
+  if (!assignmentSnap.exists) {
+    fail("NOT_FOUND", `Assignment ${assignmentId} not found`);
   }
 
   const assignment = assignmentSnap.data() as TaskAssignment;
 
   // Verify agent is the assigner
   if (assignment.fromAgentId !== cancellingAgentId && assignment.fromHumanId !== cancellingAgentId) {
-    throw new Error(`Agent ${cancellingAgentId} is not the assigner of assignment ${assignmentId}`);
+    fail("FORBIDDEN", `Agent ${cancellingAgentId} is not the assigner of assignment ${assignmentId}`);
   }
 
   // Can only cancel pending or accepted assignments
   if (assignment.status !== "pending" && assignment.status !== "accepted") {
-    throw new Error(`Cannot cancel assignment in status: ${assignment.status}`);
+    fail("INVALID_STATUS", `Cannot cancel assignment in status: ${assignment.status}`);
   }
 
   // Update assignment
-  await updateDoc(assignmentRef, {
+  await assignmentRef.update({
     status: "cancelled",
-    updatedAt: serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
   });
 
   // Decrement currentLoad if it was accepted
   if (assignment.status === "accepted") {
-    const agentRef = doc(db, "agents", assignment.toAgentId);
-    await updateDoc(agentRef, {
-      currentLoad: increment(-1),
+    await agentsCol().doc(assignment.toAgentId).update({
+      currentLoad: FieldValue.increment(-1),
     });
   }
 
@@ -585,14 +599,13 @@ export async function cancelAssignment(
  * Get agent's work mode and capacity info.
  */
 export async function getAgentWorkMode(agentId: string): Promise<AgentWorkMode | null> {
-  const agentRef = doc(db, "agents", agentId);
-  const agentSnap = await getDoc(agentRef);
+  const agentSnap = await agentsCol().doc(agentId).get();
 
-  if (!agentSnap.exists()) {
+  if (!agentSnap.exists) {
     return null;
   }
 
-  const data = agentSnap.data();
+  const data = agentSnap.data()!;
 
   return {
     workMode: data.workMode || "available",
@@ -620,11 +633,14 @@ export async function updateAgentWorkMode(
     capacityOverflowPolicy: "warn" | "reject" | "queue";
   }>
 ): Promise<void> {
-  const agentRef = doc(db, "agents", agentId);
+  const agentSnap = await agentsCol().doc(agentId).get();
+  if (!agentSnap.exists) {
+    fail("AGENT_NOT_FOUND", `Agent ${agentId} not found`);
+  }
 
-  await updateDoc(agentRef, {
+  await agentsCol().doc(agentId).update({
     ...updates,
-    lastStatusUpdate: serverTimestamp(),
+    lastStatusUpdate: FieldValue.serverTimestamp(),
   });
 }
 
@@ -645,7 +661,7 @@ interface CreateNotificationParams {
 export async function createNotification(params: CreateNotificationParams): Promise<string> {
   const { orgId, assignmentId, agentId, type, message, channelId } = params;
 
-  const notificationRef = await addDoc(collection(db, "assignmentNotifications"), {
+  const notificationRef = await notificationsCol().add({
     orgId,
     assignmentId,
     agentId,
@@ -653,7 +669,7 @@ export async function createNotification(params: CreateNotificationParams): Prom
     message,
     read: false,
     channelId: channelId || null,
-    createdAt: serverTimestamp(),
+    createdAt: FieldValue.serverTimestamp(),
   });
 
   return notificationRef.id;
@@ -667,24 +683,13 @@ export async function listNotifications(
   unreadOnly: boolean = false,
   limitCount: number = 50
 ): Promise<AssignmentNotification[]> {
-  let q = query(
-    collection(db, "assignmentNotifications"),
-    where("agentId", "==", agentId),
-    orderBy("createdAt", "desc"),
-    firestoreLimit(limitCount)
-  );
-
+  let q: Query = notificationsCol().where("agentId", "==", agentId);
   if (unreadOnly) {
-    q = query(
-      collection(db, "assignmentNotifications"),
-      where("agentId", "==", agentId),
-      where("read", "==", false),
-      orderBy("createdAt", "desc"),
-      firestoreLimit(limitCount)
-    );
+    q = q.where("read", "==", false);
   }
+  q = q.orderBy("createdAt", "desc").limit(limitCount);
 
-  const snapshot = await getDocs(q);
+  const snapshot = await q.get();
   return snapshot.docs.map((doc) => ({
     id: doc.id,
     ...doc.data(),
@@ -695,8 +700,7 @@ export async function listNotifications(
  * Mark notification as read.
  */
 export async function markNotificationRead(notificationId: string): Promise<void> {
-  const notificationRef = doc(db, "assignmentNotifications", notificationId);
-  await updateDoc(notificationRef, {
+  await notificationsCol().doc(notificationId).update({
     read: true,
   });
 }

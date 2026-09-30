@@ -1,7 +1,7 @@
 /**
  * Credit Event Ingestion Pipeline
  *
- * Core pipeline: validate → dedup → store → optional HCS forward.
+ * Core pipeline: validate → dedup → store → optional on-chain forward.
  * Includes normalizers for each source system.
  */
 
@@ -16,10 +16,10 @@ import type {
 import { SOURCE_EVENT_MAP } from "./types";
 import { validateCreditEvent, computeIdempotencyKey } from "./validation";
 import { isDuplicate, storeCreditEvent } from "./store";
-// [agent-guild-core] Hedera HCS removed — install agent-guild-hedera mod
 import type { ScoreEvent } from "@/lib/credit-types";
-const isHCSConfigured = () => false;
-const submitScoreEvent = async (..._args: unknown[]) => ({});
+import { emitScoreEventOnChain, getPlatformKeypair } from "@/lib/solana/platform";
+
+const isOnChainForwardingConfigured = () => getPlatformKeypair() !== null;
 
 // ═══════════════════════════════════════════════════════════════
 // Core Ingestion Pipeline
@@ -27,7 +27,10 @@ const submitScoreEvent = async (..._args: unknown[]) => ({});
 
 /**
  * Ingest a single credit event through the full pipeline:
- * validate → dedup → store → optional HCS forward.
+ * validate → dedup → store → optional on-chain forward.
+ *
+ * `forwardToHCS` is the historical option/wire-field name (kept for API
+ * backward compatibility) — it now forwards to a Solana memo, not HCS.
  */
 export async function ingestCreditEvent(
   event: CreditEventInput,
@@ -52,10 +55,10 @@ export async function ingestCreditEvent(
   // Step 3: Store
   const eventId = await storeCreditEvent(event);
 
-  // Step 4: Optional HCS forward (non-blocking)
-  if (options?.forwardToHCS && isHCSConfigured()) {
-    forwardToHCS(event).catch((err) => {
-      console.error("Failed to forward credit event to HCS:", err);
+  // Step 4: Optional on-chain forward (non-blocking)
+  if (options?.forwardToHCS && isOnChainForwardingConfigured()) {
+    forwardOnChain(event).catch((err) => {
+      console.error("Failed to forward credit event on-chain:", err);
     });
   }
 
@@ -97,14 +100,16 @@ export async function ingestCreditEventBatch(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HCS Forwarding (non-blocking, fire-and-forget)
+// On-Chain Forwarding (non-blocking, fire-and-forget)
 // ═══════════════════════════════════════════════════════════════
 
-async function forwardToHCS(event: CreditEventInput): Promise<void> {
+async function forwardOnChain(event: CreditEventInput): Promise<void> {
+  if (!event.agentAddress) return;
+
   const scoreEvent: ScoreEvent = {
     type: mapToScoreEventType(event.eventType),
     asn: event.asn || "",
-    agentAddress: event.agentAddress || "",
+    agentAddress: event.agentAddress,
     creditDelta: event.creditDelta,
     trustDelta: event.trustDelta,
     timestamp: event.timestamp,
@@ -115,7 +120,7 @@ async function forwardToHCS(event: CreditEventInput): Promise<void> {
     },
   };
 
-  await submitScoreEvent(scoreEvent);
+  await emitScoreEventOnChain(event.agentAddress, scoreEvent);
 }
 
 function mapToScoreEventType(eventType: CreditEventType): ScoreEvent["type"] {
@@ -130,7 +135,6 @@ function mapToScoreEventType(eventType: CreditEventType): ScoreEvent["type"] {
 // Normalizers — Convert source system events to CreditEventInput
 // ═══════════════════════════════════════════════════════════════
 
-// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
 export function normalizeScoreEvent(
   scoreEvent: ScoreEvent,
   agentId: string,
@@ -148,12 +152,12 @@ export function normalizeScoreEvent(
     provenance: "on_chain",
     severity: deriveSeverity(scoreEvent.creditDelta),
     source: {
-      system: "hedera-hcs",
+      system: "on-chain-memo",
       sourceEventId: `${scoreEvent.asn}-${scoreEvent.timestamp}-${scoreEvent.type}`,
       sourceEventType: scoreEvent.type,
     },
     timestamp: scoreEvent.timestamp,
-    description: `HCS score event: ${scoreEvent.type} (credit: ${scoreEvent.creditDelta > 0 ? "+" : ""}${scoreEvent.creditDelta})`,
+    description: `On-chain score event: ${scoreEvent.type} (credit: ${scoreEvent.creditDelta > 0 ? "+" : ""}${scoreEvent.creditDelta})`,
     metadata: scoreEvent.metadata,
   };
 }
@@ -183,7 +187,7 @@ export function normalizeSlashingEvent(
     provenance: "system",
     severity: slashingEvent.reason === "abandoned" ? "high" : "medium",
     source: {
-      system: "hedera-slashing",
+      system: "auto-slashing",
       sourceEventId: `slash-${slashingEvent.taskId}-${slashingEvent.reason}`,
       sourceEventType: slashingEvent.reason,
     },
@@ -268,7 +272,7 @@ export function normalizeJobBountyEvent(
     provenance: bountyEvent.type.startsWith("bounty") ? "on_chain" : "marketplace",
     severity: bountyEvent.type === "bounty_refunded" ? "medium" : "info",
     source: {
-      system: "hedera-job-bounty",
+      system: "job-bounty",
       sourceEventId: `job-${bountyEvent.jobId}-${bountyEvent.type}`,
       sourceEventType: bountyEvent.type,
     },

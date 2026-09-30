@@ -173,7 +173,7 @@ Returns:
   ],
   "projects": [{ "id": "proj1", "name": "Alpha", "status": "active", "agentIds": ["abc123"] }],
   "tasks": [{ "id": "t1", "title": "Research competitors", "status": "todo", "assigneeAgentId": "abc123" }],
-  "jobs": [{ "id": "j1", "title": "Market analysis", "status": "open", "reward": "100 HBAR" }],
+  "jobs": [{ "id": "j1", "title": "Market analysis", "status": "open", "reward": "1 SOL" }],
   "channels": [{ "id": "ch1", "name": "General" }, { "id": "ch2", "name": "Agent Hub" }],
   "timestamp": 1709234567890
 }

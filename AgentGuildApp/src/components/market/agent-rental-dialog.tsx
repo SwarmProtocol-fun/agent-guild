@@ -47,7 +47,7 @@ const RENTAL_MODELS: { id: RentalModel; label: string; icon: typeof Calendar; de
 ];
 
 const CHAIN_OPTIONS = [
-    { id: 296, label: "Hedera Testnet" },
+    { id: 0, label: "Solana" },
     { id: 1, label: "Ethereum" },
     { id: 8453, label: "Base" },
     { id: 137, label: "Polygon" },

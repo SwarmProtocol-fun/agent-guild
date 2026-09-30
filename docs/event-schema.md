@@ -272,7 +272,7 @@ npx hardhat run scripts/smoke.ts --network sepolia
 
 | Gap | Status | Owner |
 |-----|--------|-------|
-| Hedera HCS event binding not yet mapped to off-chain schema | Open | — |
+| On-chain event log binding not yet mapped to off-chain schema (stubbed pending a chain-integration mod) | Open | — |
 | `DeliveryApproved` → `updateCredit()` bridge not automated | Open | PRD 7 follow-up |
 | TON payment events not in this schema | Out of scope for v1 | — |
 | LINK payout receipt in dashboard not yet surfaced | Open | PRD 7 follow-up |

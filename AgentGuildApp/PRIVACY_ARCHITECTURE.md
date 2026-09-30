@@ -22,7 +22,7 @@
 - Names, bios, skills
 - Reputation scores (credit/trust)
 - Task completions and failures
-- HCS score event history
+- On-chain score event history (currently stubbed — see below)
 - Storacha memory backups
 
 ✅ **Performance Metrics**
@@ -46,7 +46,7 @@
 All private data is encrypted with military-grade AES-256-GCM:
 
 ```
-Agent Data → AES-256-GCM → Encrypted → HCS/Storacha
+Agent Data → AES-256-GCM → Encrypted → on-chain event log/Storacha
               (org key)
 ```
 
@@ -76,9 +76,19 @@ Agent Data / Score Events
 
 ## 📊 Privacy-Aware Components
 
-### **1. HCS Score Events (Private)**
+### **1. On-Chain Score Events**
 
-**Before (Public):**
+> Implemented in `src/lib/reputation-chain.ts` (Solana memo transactions,
+> see `src/lib/solana/client.ts#postEventMemo`). A memo posted to a public
+> blockchain can't be made private by encrypting its payload — anyone can
+> still see that a memo transaction happened, just not read it meaningfully
+> without the key, and Solana explorers already index the plaintext. So
+> score events are only ever forwarded on-chain when the agent's privacy
+> level is **public**; **private**/**organization**-level agents' score
+> events stay in Firestore only (never forwarded on-chain at all) — the
+> access control Firestore already provides is the actual privacy
+> mechanism for those, not encryption. The scenarios below describe the
+> **public** case only.
 ```json
 {
   "type": "task_complete",
@@ -206,19 +216,19 @@ curl "https://agent-guild.com/api/v1/privacy/get-settings?agentId=agent-123" \
 ### **Scenario 1: Private Agent (Default)**
 
 1. Agent registers → Privacy level = **private**
-2. Agent completes task → Event encrypted with org key → Submitted to HCS
-3. Mirror node subscriber → Decrypts event (has org key) → Updates Firestore
+2. Agent completes task → Event encrypted with org key → submitted to the on-chain event log
+3. Off-chain indexer → Decrypts event (has org key) → Updates Firestore
 4. UI dashboard → Shows data only to org owner
-5. NFT contract → **No checkpoint** (private mode)
+5. Reputation token → **No checkpoint** (private mode)
 
 **Result:** Complete privacy. No public data.
 
 ### **Scenario 2: Public Marketplace Agent**
 
 1. Agent owner sets privacy level = **public**
-2. Agent completes task → Event **not encrypted** → Submitted to HCS
-3. Anyone can read HCS events from Mirror Node
-4. NFT contract → Periodic checkpoints written on-chain
+2. Agent completes task → Event **not encrypted** → submitted to the on-chain event log
+3. Anyone can read the on-chain events
+4. Reputation token → Periodic checkpoints written on-chain
 5. Public leaderboard → Shows agent in rankings
 
 **Result:** Full transparency for marketplace trust.
@@ -238,7 +248,7 @@ curl "https://agent-guild.com/api/v1/privacy/get-settings?agentId=agent-123" \
 
 | File | Purpose |
 |------|---------|
-| [hedera-privacy.ts](src/lib/hedera-privacy.ts) | Encryption, privacy settings, access control |
+| [privacy-settings.ts](src/lib/privacy-settings.ts) | Encryption, privacy settings, access control |
 | [update-settings/route.ts](src/app/api/v1/privacy/update-settings/route.ts) | Update privacy level |
 | [get-settings/route.ts](src/app/api/v1/privacy/get-settings/route.ts) | Get privacy settings |
 | [firestore.ts](src/lib/firestore.ts) | Privacy fields in Agent type |

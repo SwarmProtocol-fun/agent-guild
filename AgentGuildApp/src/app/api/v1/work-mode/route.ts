@@ -8,7 +8,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getAgentWorkMode, updateAgentWorkMode } from "@/lib/assignments";
+import { getAgentWorkMode, updateAgentWorkMode, AssignmentError, assignmentErrorStatus } from "@/lib/assignments";
 
 // ─── GET - Get Work Mode ────────────────────────────────────
 
@@ -170,6 +170,9 @@ export async function PATCH(request: NextRequest) {
     });
   } catch (err: any) {
     console.error("Update work mode error:", err);
+    if (err instanceof AssignmentError) {
+      return Response.json({ error: err.message, code: err.code }, { status: assignmentErrorStatus(err.code) });
+    }
     return Response.json(
       { error: err.message || "Internal error" },
       { status: 500 }

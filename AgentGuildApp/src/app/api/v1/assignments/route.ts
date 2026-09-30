@@ -12,6 +12,8 @@ import {
   createAssignment,
   listAssignments,
   getAssignmentStats,
+  AssignmentError,
+  assignmentErrorStatus,
 } from "@/lib/assignments";
 import { getAgent } from "@/lib/firestore-admin";
 
@@ -141,9 +143,8 @@ export async function POST(request: NextRequest) {
   } catch (err: any) {
     console.error("Create assignment error:", err);
 
-    // Handle specific errors
-    if (err.message?.includes("at capacity")) {
-      return Response.json({ error: err.message }, { status: 409 });
+    if (err instanceof AssignmentError) {
+      return Response.json({ error: err.message, code: err.code }, { status: assignmentErrorStatus(err.code) });
     }
 
     return Response.json(

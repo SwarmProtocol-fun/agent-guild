@@ -7,7 +7,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { acceptAssignment, getAgentWorkMode } from "@/lib/assignments";
+import { acceptAssignment, getAgentWorkMode, AssignmentError, assignmentErrorStatus } from "@/lib/assignments";
 
 export async function POST(
   request: NextRequest,
@@ -67,12 +67,8 @@ export async function POST(
   } catch (err: any) {
     console.error("Accept assignment error:", err);
 
-    // Handle specific errors
-    if (err.message?.includes("not found")) {
-      return Response.json({ error: err.message }, { status: 404 });
-    }
-    if (err.message?.includes("not the recipient") || err.message?.includes("not pending")) {
-      return Response.json({ error: err.message }, { status: 403 });
+    if (err instanceof AssignmentError) {
+      return Response.json({ error: err.message, code: err.code }, { status: assignmentErrorStatus(err.code) });
     }
 
     return Response.json(

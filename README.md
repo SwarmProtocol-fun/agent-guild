@@ -61,7 +61,7 @@ The minimum to boot is **Firebase + a Reown (WalletConnect) project ID + a sessi
 
 These were extracted into separate mods so the community can swap, fork, or replace them:
 
-- **Blockchain integrations** — Hedera, Flow, Solana, TON, Ethereum L2s, Base
+- **Blockchain integrations** — Flow, TON, Ethereum L2s, Base
 - **Decentralized storage** — Storacha, Filecoin, IPFS
 - **P2P networking** — libp2p, GossipSub
 - **AI/ML mods** — ComfyUI, Meshy, Gemini, Bittensor
@@ -81,7 +81,6 @@ A mod is a directory in `AgentGuildApp/mods/` with a `agent-guild.mod.json` mani
 
 Official mods (separate repos):
 
-- `@agent-guild/mod-hedera` — Hedera HCS reputation + memory
 - `@agent-guild/mod-flow` — Flow DeFi (bounties, staking, swaps)
 - `@agent-guild/mod-storacha` — Decentralized storage with UCAN auth
 - `@agent-guild/mod-libp2p` — P2P agent mesh

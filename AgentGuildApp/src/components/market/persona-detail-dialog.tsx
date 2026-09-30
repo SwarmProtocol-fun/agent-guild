@@ -41,7 +41,7 @@ export function PersonaDetailDialog({ open, onOpenChange, persona, onApply }: Pe
     const price = persona.pricing.configPurchase;
     const isFree = !price || price === 0;
     const currency = persona.pricing.currency || "USD";
-    const currencySymbol = currency === "HBAR" ? "ℏ" : "$";
+    const currencySymbol = currency === "SOL" ? "◎" : "$";
     const allSkills = [...(persona.requiredSkills || []), ...(persona.requiredMods || [])];
 
     return (

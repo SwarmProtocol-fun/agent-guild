@@ -20,9 +20,7 @@ import {
   saveRiskProfile,
 } from "@/lib/fraud-detection";
 import { computeRiskProfile } from "@/lib/fraud-risk-scoring";
-import { createPenaltyProposal, emitPenalty } from "@/lib/mod-stubs";
-// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
-// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
+import { createPenaltyProposal, emitPenalty } from "@/lib/reputation-chain";
 
 /** GET — Fetch single case with full details */
 export async function GET(

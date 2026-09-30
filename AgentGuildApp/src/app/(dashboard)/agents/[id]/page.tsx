@@ -4,6 +4,11 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import {
+  ArrowLeft, ArrowRight, Frown, Pencil, Trash2, MessageSquare, Zap, Folder,
+  Puzzle, X, Radio, Wrench, IdCard, Brain, Blocks, CheckCircle2, XCircle,
+  ExternalLink, RefreshCw, Link2, Briefcase, ClipboardList, Pause, Play,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,10 +16,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useOrg } from "@/contexts/OrgContext";
 import { useAgentGuildData } from "@/hooks/useAgentGuildData";
 import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { getScoreBand } from "@/lib/credit-scoring";
+import { getTier, type PolicyTierName } from "@/lib/credit-policy";
 import {
   getAgent,
   getProjectsByOrg,
@@ -46,6 +53,36 @@ import { useSession } from "@/contexts/SessionContext";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES } from "@/lib/agent-types";
 
 // ---------------------------------------------------------------------------
+// Lightweight loading skeleton for the profile page — same "real skeleton
+// instead of plain text" pattern as MarketSkeleton (market/page.tsx) and
+// AgentsGridSkeleton (agents/page.tsx), shaped for this page's header +
+// KPI row + card layout instead of a card grid.
+// ---------------------------------------------------------------------------
+function AgentDetailSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start gap-4">
+        <div className="w-16 h-16 rounded-full bg-muted/40 animate-pulse shrink-0" />
+        <div className="flex-1 space-y-2 pt-1">
+          <div className="h-6 w-48 rounded bg-muted/40 animate-pulse" />
+          <div className="h-3 w-64 rounded bg-muted/30 animate-pulse" />
+        </div>
+      </div>
+      <div className="grid gap-3 grid-cols-2 sm:grid-cols-4 lg:grid-cols-8">
+        {Array.from({ length: 8 }, (_, i) => (
+          <div key={i} className="h-16 rounded-lg border border-border bg-muted/20 animate-pulse" />
+        ))}
+      </div>
+      <div className="grid gap-6 md:grid-cols-2">
+        {Array.from({ length: 2 }, (_, i) => (
+          <div key={i} className="h-32 rounded-lg border border-border bg-muted/20 animate-pulse" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Error Boundary — prevents uncaught errors from crashing the entire React
 // tree (which would destroy ProtectedRoute context and log the user out).
 // ---------------------------------------------------------------------------
@@ -68,12 +105,12 @@ class AgentDetailErrorBoundary extends React.Component<
       return (
         <div className="flex items-center justify-center min-h-[60vh]">
           <div className="text-center max-w-md">
-            <div className="text-4xl mb-4">😕</div>
+            <Frown className="w-10 h-10 mx-auto mb-4 text-muted-foreground" aria-hidden="true" />
             <h2 className="text-xl font-bold mb-2">Something went wrong</h2>
             <p className="text-sm text-muted-foreground mb-4">{this.state.message}</p>
             <div className="flex gap-2 justify-center">
               <Button variant="outline" asChild>
-                <Link href="/agents">← Back to Fleet</Link>
+                <Link href="/agents"><ArrowLeft className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Back to Fleet</Link>
               </Button>
               <Button
                 onClick={() => {
@@ -156,8 +193,6 @@ function AgentDetailPage() {
     lastBackup?: string;
     messageCount?: number;
     cid?: string;
-    hederaTopicId?: string;
-    hederaMemoryEnabled?: boolean;
   } | null>(null);
   const [memoryStatusLoading, setMemoryStatusLoading] = useState(false);
   const [suspendingASN, setSuspendingASN] = useState(false);
@@ -532,25 +567,26 @@ function AgentDetailPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="text-center">
-          <p>Loading agent...</p>
-        </div>
-      </div>
-    );
+    return <AgentDetailSkeleton />;
   }
 
   if (error || !agent) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center">
-          <div className="text-4xl mb-4">😕</div>
+          <Frown className="w-10 h-10 mx-auto mb-4 text-muted-foreground" aria-hidden="true" />
           <h2 className="text-xl font-bold mb-2">Agent Not Found</h2>
           <p className="text-muted-foreground mb-4">{error}</p>
-          <Button asChild variant="outline">
-            <Link href="/agents">← Back to Fleet</Link>
-          </Button>
+          <div className="flex gap-2 justify-center">
+            <Button asChild variant="outline">
+              <Link href="/agents"><ArrowLeft className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Back to Fleet</Link>
+            </Button>
+            {error && (
+              <Button onClick={loadAgentData}>
+                <RefreshCw className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Retry
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -576,6 +612,7 @@ function AgentDetailPage() {
   const creditScore = agent.creditScore ?? 680;
   const trustScore = agent.trustScore ?? 50;
   const scoreBand = getScoreBand(creditScore);
+  const policyTier = getTier((agent.policyTier ?? "standard") as PolicyTierName);
 
   // Skills — agent-level skills (installed on THIS agent)
   const agentSkillIds = new Set(agentSkills.map(s => s.skillId));
@@ -590,8 +627,8 @@ function AgentDetailPage() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-start gap-4">
-        <Link href="/agents" className="text-muted-foreground hover:text-amber-600 transition-colors text-lg mt-2">
-          ←
+        <Link href="/agents" className="text-muted-foreground hover:text-amber-600 transition-colors mt-2" aria-label="Back to Fleet">
+          <ArrowLeft className="w-5 h-5" aria-hidden="true" />
         </Link>
         <div className="flex items-center gap-4 flex-1">
           <div className="w-16 h-16 rounded-full bg-amber-100 dark:bg-amber-950/40 flex items-center justify-center text-2xl font-bold text-amber-700 dark:text-amber-400 overflow-hidden">
@@ -602,10 +639,10 @@ function AgentDetailPage() {
               <h1 className="text-3xl font-bold tracking-tight">{agent.name}</h1>
               <Badge className={getTypeColor(agent.type)}>{getTypeLabel(agent.type)}</Badge>
               <span className={`text-sm flex items-center gap-1.5 ${agent.status === "online" ? "text-emerald-600 dark:text-emerald-400" :
-                  agent.status === "busy" ? "text-orange-600 dark:text-orange-400" : "text-muted-foreground"
+                  agent.status === "busy" ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"
                 }`}>
                 <span className={`w-2.5 h-2.5 rounded-full ${agent.status === "online" ? "bg-emerald-500" :
-                    agent.status === "busy" ? "bg-orange-500" : "bg-muted"
+                    agent.status === "busy" ? "bg-amber-500" : "bg-red-500"
                   }`} />
                 {agent.status}
               </span>
@@ -616,7 +653,7 @@ function AgentDetailPage() {
               )}
             </div>
             <p className="text-muted-foreground mt-1">{agent.description}</p>
-            <p className="text-[10px] font-mono text-muted-foreground mt-1" title={agent.id}>
+            <p className="text-xs font-mono text-muted-foreground mt-1" title={agent.id}>
               ID: {agent.id}
             </p>
           </div>
@@ -636,7 +673,7 @@ function AgentDetailPage() {
                 onClick={handleResumeConfirm}
                 disabled={pausing}
               >
-                {pausing ? 'Resuming...' : '▶️ Resume'}
+                <Play className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> {pausing ? 'Resuming...' : 'Resume'}
               </Button>
             ) : (
               <Button
@@ -645,22 +682,25 @@ function AgentDetailPage() {
                 onClick={() => setShowPause(true)}
                 disabled={agent.status === 'offline'}
               >
-                ⏸️ Pause
+                <Pause className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Pause
               </Button>
             )}
             <Button variant="outline" onClick={handleEditOpen}>
-              ✏️ Edit
+              <Pencil className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Edit
             </Button>
             <Button variant="outline" className="text-red-600 border-red-300 hover:bg-red-50 hover:text-red-700" onClick={() => setShowDelete(true)}>
-              🗑️ Remove
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Remove
             </Button>
           </div>
         </div>
       </div>
 
       {error && (
-        <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600">
-          {error}
+        <div className="flex items-center justify-between gap-3 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
+          <span>{error}</span>
+          <Button variant="outline" size="sm" onClick={loadAgentData} className="shrink-0">
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Retry
+          </Button>
         </div>
       )}
 
@@ -669,7 +709,7 @@ function AgentDetailPage() {
         <Card>
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
-              <span className="text-lg mt-0.5">💬</span>
+              <MessageSquare className="w-4 h-4 mt-0.5 text-muted-foreground shrink-0" aria-hidden="true" />
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Agent Bio</p>
                 <p className="text-sm leading-relaxed">{agent.bio}</p>
@@ -684,37 +724,37 @@ function AgentDetailPage() {
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold text-amber-600 dark:text-amber-400">{assignedProjects.length}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Projects</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Projects</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold">{agentTasks.length}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Tasks</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Tasks</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold text-emerald-600 dark:text-emerald-400">{completedTasks}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Done</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Done</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold text-amber-600 dark:text-amber-400">{activeTasks}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Active</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Active</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold text-muted-foreground">{todoTasks}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Todo</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Todo</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3 text-center">
             <div className="text-xl font-bold">{agentJobs.length}</div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Jobs</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Jobs</div>
           </CardContent>
         </Card>
         <Card>
@@ -722,7 +762,7 @@ function AgentDetailPage() {
             <div className="text-xl font-bold text-amber-600 dark:text-amber-400">
               {completionRate}%
             </div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Completion</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Completion</div>
           </CardContent>
         </Card>
         <Card>
@@ -730,11 +770,20 @@ function AgentDetailPage() {
             <div className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
               {totalEarnings > 0 ? totalEarnings.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}
             </div>
-            <div className="text-[10px] text-muted-foreground mt-0.5">Earnings</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Earnings</div>
           </CardContent>
         </Card>
       </div>
 
+      <Tabs defaultValue="overview" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="passport" className="gap-1.5">
+            <IdCard className="w-3.5 h-3.5" aria-hidden="true" /> Agent Passport
+          </TabsTrigger>
+        </TabsList>
+
+      <TabsContent value="overview" className="space-y-6">
       {/* Task completion progress */}
       {agentTasks.length > 0 && (
         <Card>
@@ -745,13 +794,13 @@ function AgentDetailPage() {
             </div>
             <div className="h-2.5 bg-muted rounded-full overflow-hidden flex">
               {completedTasks > 0 && (
-                <div className="h-full bg-emerald-500 transition-all" style={{ width: `${(completedTasks / agentTasks.length) * 100}%` }} />
+                <div className="h-full bg-emerald-500 transition-[width]" style={{ width: `${(completedTasks / agentTasks.length) * 100}%` }} />
               )}
               {activeTasks > 0 && (
-                <div className="h-full bg-amber-500 transition-all" style={{ width: `${(activeTasks / agentTasks.length) * 100}%` }} />
+                <div className="h-full bg-amber-500 transition-[width]" style={{ width: `${(activeTasks / agentTasks.length) * 100}%` }} />
               )}
             </div>
-            <div className="flex items-center gap-4 mt-2 text-[11px] text-muted-foreground">
+            <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />{completedTasks} done</span>
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500" />{activeTasks} active</span>
               <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-muted-foreground/30" />{todoTasks} todo</span>
@@ -764,7 +813,7 @@ function AgentDetailPage() {
         {/* Capabilities */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">⚡ Capabilities</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><Zap className="w-4 h-4" aria-hidden="true" /> Capabilities</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-2">
@@ -783,7 +832,7 @@ function AgentDetailPage() {
         {/* Project Assignments */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">📁 Project Assignments</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><Folder className="w-4 h-4" aria-hidden="true" /> Project Assignments</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
@@ -819,7 +868,7 @@ function AgentDetailPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">🧩 Agent Skills & Plugins</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><Puzzle className="w-4 h-4" aria-hidden="true" /> Agent Skills & Plugins</CardTitle>
             <div className="flex items-center gap-2">
               <Badge variant="secondary" className="text-xs">{activeSkills.length} installed</Badge>
               {availableForAgent.length > 0 && (
@@ -847,15 +896,15 @@ function AgentDetailPage() {
                     key={skill.id}
                     onClick={() => handleInstallSkill(skill.id)}
                     disabled={skillBusy === skill.id}
-                    className="flex items-center gap-3 p-2.5 rounded-lg border border-border bg-card hover:border-amber-500/30 transition-all text-left"
+                    className="flex items-center gap-3 p-2.5 rounded-lg border border-border bg-card hover:border-amber-500/30 transition-colors text-left"
                   >
                     <span className="text-lg flex-shrink-0">{skill.icon}</span>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium truncate">{skill.name}</span>
-                        <Badge variant="outline" className="text-[9px] capitalize">{skill.type}</Badge>
+                        <Badge variant="outline" className="text-xs capitalize">{skill.type}</Badge>
                       </div>
-                      <p className="text-[11px] text-muted-foreground truncate">{skill.description}</p>
+                      <p className="text-xs text-muted-foreground truncate">{skill.description}</p>
                     </div>
                     {skillBusy === skill.id ? (
                       <span className="text-amber-500 text-xs">...</span>
@@ -882,21 +931,21 @@ function AgentDetailPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium truncate">{skill.name}</span>
-                        <span className="text-[10px] text-muted-foreground">v{skill.version}</span>
+                        <span className="text-xs text-muted-foreground">v{skill.version}</span>
                       </div>
-                      <p className="text-[11px] text-muted-foreground truncate">{skill.description}</p>
+                      <p className="text-xs text-muted-foreground truncate">{skill.description}</p>
                     </div>
                     {agentSkill && (
                       <button
                         onClick={() => handleRemoveSkill(agentSkill)}
                         disabled={skillBusy === skill.id}
-                        className="opacity-0 group-hover:opacity-100 p-1 rounded text-red-400 hover:bg-red-500/10 transition-all flex-shrink-0"
+                        className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 p-1.5 rounded text-red-400 hover:bg-red-500/10 transition-opacity flex-shrink-0"
                         title="Remove from agent"
                       >
                         {skillBusy === skill.id ? (
                           <span className="text-xs">...</span>
                         ) : (
-                          <span className="text-xs">✕</span>
+                          <X className="w-3.5 h-3.5" aria-hidden="true" />
                         )}
                       </button>
                     )}
@@ -906,7 +955,7 @@ function AgentDetailPage() {
             </div>
           ) : (
             <div className="text-center py-6 text-muted-foreground">
-              <div className="text-2xl mb-2">🧩</div>
+              <Puzzle className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
               <p className="text-sm">No skills installed on this agent</p>
               <p className="text-xs mt-1">
                 {availableForAgent.length > 0
@@ -923,7 +972,7 @@ function AgentDetailPage() {
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-base">📡 Reported Skills</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Radio className="w-4 h-4" aria-hidden="true" /> Reported Skills</CardTitle>
               <Badge variant="secondary" className="text-xs">{(agent.reportedSkills ?? []).length} reported</Badge>
             </div>
             <CardDescription>Skills and plugins this agent reported when it connected to the platform</CardDescription>
@@ -942,12 +991,12 @@ function AgentDetailPage() {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium truncate">{rs.name}</span>
-                        {rs.version && <span className="text-[10px] text-muted-foreground">v{rs.version}</span>}
+                        {rs.version && <span className="text-xs text-muted-foreground">v{rs.version}</span>}
                       </div>
                       <div className="flex items-center gap-1.5">
-                        <Badge variant="outline" className="text-[9px] capitalize">{rs.type}</Badge>
+                        <Badge variant="outline" className="text-xs capitalize">{rs.type}</Badge>
                         {registryMatch && (
-                          <span className="text-[9px] text-emerald-600 dark:text-emerald-400">verified</span>
+                          <span className="text-xs text-emerald-600 dark:text-emerald-400">verified</span>
                         )}
                       </div>
                     </div>
@@ -966,7 +1015,7 @@ function AgentDetailPage() {
         return (
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">🔧 Active Protocol Mods</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Wrench className="w-4 h-4" aria-hidden="true" /> Active Protocol Mods</CardTitle>
               <CardDescription>Organization-wide mods applied to all agents</CardDescription>
             </CardHeader>
             <CardContent>
@@ -976,7 +1025,7 @@ function AgentDetailPage() {
                     <span className="text-lg flex-shrink-0">{mod.icon}</span>
                     <div className="min-w-0 flex-1">
                       <span className="text-sm font-medium truncate block">{mod.name}</span>
-                      <p className="text-[11px] text-muted-foreground truncate">{mod.description}</p>
+                      <p className="text-xs text-muted-foreground truncate">{mod.description}</p>
                     </div>
                   </div>
                 ))}
@@ -986,41 +1035,85 @@ function AgentDetailPage() {
         );
       })()}
 
+      </TabsContent>
+
+      <TabsContent value="passport" className="space-y-6">
+      {/* Spending Policy — economic consequences of the resolved credit tier */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2"><IdCard className="w-4 h-4" aria-hidden="true" /> Spending Policy</CardTitle>
+            <Badge className="bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-950/40 dark:text-slate-300 dark:border-slate-800">
+              {policyTier.label} Tier
+            </Badge>
+          </div>
+          <CardDescription>Economic consequences of this agent&apos;s resolved credit policy tier</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold">${policyTier.spendingCapUsd.toLocaleString()}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Spending Cap</div>
+            </div>
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold">{Math.round(policyTier.escrowRatio * 100)}%</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Escrow Ratio</div>
+            </div>
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold">{policyTier.maxConcurrentTasks}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Max Concurrent</div>
+            </div>
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold">{policyTier.feeMultiplier}x</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Fee Multiplier</div>
+            </div>
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold capitalize">{policyTier.payoutSpeed}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Payout Speed</div>
+            </div>
+            <div className="text-center p-3 rounded-lg border border-border">
+              <div className="text-lg font-bold">{policyTier.canClaimHighValueJobs ? "Yes" : "No"}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">High-Value Jobs</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ASN Identity & Credit Score */}
       {agent.asn && (
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-base">🪪 Agent Identity (ASN)</CardTitle>
-              <Badge className="bg-cyan-100 text-cyan-700 border-cyan-200 dark:bg-cyan-950/40 dark:text-cyan-400 dark:border-cyan-800 font-mono text-[10px]">
+              <CardTitle className="text-base flex items-center gap-2"><IdCard className="w-4 h-4" aria-hidden="true" /> Agent Identity (ASN)</CardTitle>
+              <Badge className="bg-cyan-100 text-cyan-700 border-cyan-200 dark:bg-cyan-950/40 dark:text-cyan-400 dark:border-cyan-800 font-mono text-xs">
                 {agent.asn}
               </Badge>
             </div>
             <CardDescription>Agent Social Number — on-chain identity and credit scoring</CardDescription>
-            <Link href={`/agents/${agentId}/credit`} className="text-xs text-amber-600 hover:text-amber-500 hover:underline transition-colors mt-1 inline-block">
-              View Credit Details →
+            <Link href={`/agents/${agentId}/credit`} className="text-xs text-amber-600 hover:text-amber-500 hover:underline transition-colors mt-1 inline-flex items-center gap-1">
+              View Credit Details <ArrowRight className="w-3 h-3" aria-hidden="true" />
             </Link>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div className="text-center p-3 rounded-lg border border-border">
                 <div className={`text-2xl font-bold ${scoreBand.color}`}>{creditScore}</div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">Credit Score</div>
-                <Badge className={`mt-1 text-[9px] ${scoreBand.bgColor} ${scoreBand.color} ${scoreBand.borderColor}`}>
+                <div className="text-xs text-muted-foreground mt-0.5">Credit Score</div>
+                <Badge className={`mt-1 text-xs ${scoreBand.bgColor} ${scoreBand.color} ${scoreBand.borderColor}`}>
                   {scoreBand.label} ({scoreBand.range})
                 </Badge>
               </div>
               <div className="text-center p-3 rounded-lg border border-border">
                 <div className="text-2xl font-bold text-blue-500">{trustScore}</div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">Trust Score</div>
+                <div className="text-xs text-muted-foreground mt-0.5">Trust Score</div>
                 <div className="w-full bg-muted rounded-full h-1.5 mt-2">
                   <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${trustScore}%` }} />
                 </div>
               </div>
               <div className="text-center p-3 rounded-lg border border-border">
                 <div className="text-2xl font-bold text-purple-500">{agent.tasksCompleted ?? 0}</div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">Tasks Completed</div>
-                <div className="text-[9px] text-muted-foreground mt-1">On-chain verified</div>
+                <div className="text-xs text-muted-foreground mt-0.5">Tasks Completed</div>
+                <div className="text-xs text-muted-foreground mt-1">On-chain verified</div>
               </div>
               <div className="text-center p-3 rounded-lg border border-border">
                 <div className="flex items-center justify-center gap-1">
@@ -1032,13 +1125,13 @@ function AgentDetailPage() {
                     <span className="text-muted-foreground text-lg font-bold">Off-Chain</span>
                   )}
                 </div>
-                <div className="text-[10px] text-muted-foreground mt-0.5">ASN Status</div>
+                <div className="text-xs text-muted-foreground mt-0.5">ASN Status</div>
                 {agent.asnOnChainTxHash && (
                   <a
                     href={`https://sepolia.etherscan.io/tx/${agent.asnOnChainTxHash}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[9px] text-cyan-600 hover:underline mt-1 block"
+                    className="text-xs text-cyan-600 hover:underline mt-1 block"
                   >
                     View TX
                   </a>
@@ -1054,7 +1147,7 @@ function AgentDetailPage() {
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-base">🧠 Memory & ASN Management</CardTitle>
+              <CardTitle className="text-base flex items-center gap-2"><Brain className="w-4 h-4" aria-hidden="true" /> Memory & ASN Management</CardTitle>
               <div className="flex gap-2">
                 {(agent.status === "online" || agent.status === "busy") && (
                   <Button
@@ -1083,13 +1176,13 @@ function AgentDetailPage() {
           <CardContent>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div className="p-3 rounded-lg border border-border">
-                <div className="text-[10px] text-muted-foreground mb-1">Backup Status</div>
+                <div className="text-xs text-muted-foreground mb-1">Backup Status</div>
                 {memoryStatusLoading ? (
                   <div className="text-xs text-muted-foreground">Loading...</div>
                 ) : memoryStatus?.hasBackup ? (
                   <>
                     <div className="text-sm font-medium text-emerald-600 dark:text-emerald-400">Backed Up</div>
-                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                    <div className="text-xs text-muted-foreground mt-0.5">
                       {memoryStatus.lastBackup ? new Date(memoryStatus.lastBackup).toLocaleDateString() : "—"}
                     </div>
                   </>
@@ -1098,26 +1191,26 @@ function AgentDetailPage() {
                 )}
               </div>
               <div className="p-3 rounded-lg border border-border">
-                <div className="text-[10px] text-muted-foreground mb-1">Messages</div>
+                <div className="text-xs text-muted-foreground mb-1">Messages</div>
                 <div className="text-xl font-bold">{memoryStatus?.messageCount ?? 0}</div>
               </div>
               <div className="p-3 rounded-lg border border-border">
-                <div className="text-[10px] text-muted-foreground mb-1">Memory Topic</div>
-                <div className={`text-sm font-medium ${agent.hederaMemoryEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
-                  {agent.hederaMemoryEnabled ? "Enabled" : "Not Set Up"}
+                <div className="text-xs text-muted-foreground mb-1">Memory Topic</div>
+                <div className={`text-sm font-medium ${agent.memoryEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
+                  {agent.memoryEnabled ? "Enabled" : "Not Set Up"}
                 </div>
-                {agent.hederaMemoryTopicId && (
-                  <div className="text-[9px] font-mono text-muted-foreground mt-0.5 truncate" title={agent.hederaMemoryTopicId}>
-                    {agent.hederaMemoryTopicId}
+                {agent.memoryTopicId && (
+                  <div className="text-xs font-mono text-muted-foreground mt-0.5 truncate" title={agent.memoryTopicId}>
+                    {agent.memoryTopicId}
                   </div>
                 )}
               </div>
               <div className="p-3 rounded-lg border border-border">
-                <div className="text-[10px] text-muted-foreground mb-1">ASN Active</div>
+                <div className="text-xs text-muted-foreground mb-1">ASN Active</div>
                 <div className={`text-sm font-medium ${agent.status === "online" || agent.status === "busy" ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"}`}>
                   {agent.status === "online" || agent.status === "busy" ? "Yes" : "Suspended"}
                 </div>
-                <div className="text-[9px] text-muted-foreground mt-0.5">
+                <div className="text-xs text-muted-foreground mt-0.5">
                   {agent.status === "online" || agent.status === "busy"
                     ? "Suspend to release ASN"
                     : "ASN available for reassignment"}
@@ -1127,7 +1220,7 @@ function AgentDetailPage() {
             {memoryStatus?.cid && (
               <div className="mt-3 p-2 rounded-lg bg-muted/50 text-xs">
                 <span className="text-muted-foreground">Backup CID: </span>
-                <span className="font-mono text-[10px] break-all">{memoryStatus.cid}</span>
+                <span className="font-mono text-xs break-all">{memoryStatus.cid}</span>
               </div>
             )}
           </CardContent>
@@ -1138,19 +1231,19 @@ function AgentDetailPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">⛓️ On-Chain Status</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><Blocks className="w-4 h-4" aria-hidden="true" /> On-Chain Status</CardTitle>
             <div className="flex gap-1.5">
-              <Badge className={onchainMatch
+              <Badge className={`gap-1 ${onchainMatch
                 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
                 : "bg-muted text-muted-foreground"
-              }>
-                Registry {onchainMatch ? "✓" : "✗"}
+              }`}>
+                Registry {onchainMatch ? <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> : <XCircle className="w-3 h-3" aria-hidden="true" />}
               </Badge>
-              <Badge className={agent.nftMintAddress
+              <Badge className={`gap-1 ${agent.nftMintAddress
                 ? "bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-400"
                 : "bg-muted text-muted-foreground"
-              }>
-                Reputation Token {agent.nftMintAddress ? "✓" : "✗"}
+              }`}>
+                Reputation Token {agent.nftMintAddress ? <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> : <XCircle className="w-3 h-3" aria-hidden="true" />}
               </Badge>
             </div>
           </div>
@@ -1162,7 +1255,7 @@ function AgentDetailPage() {
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-xs font-medium">Agent Registry</span>
-                <Badge variant="outline" className="text-[9px]">SOL</Badge>
+                <Badge variant="outline" className="text-xs">SOL</Badge>
               </div>
               {onchainMatch ? (
                 <div className="grid grid-cols-2 gap-3 text-sm pl-2 border-l-2 border-emerald-500/30">
@@ -1207,7 +1300,7 @@ function AgentDetailPage() {
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-xs font-medium">Reputation Token</span>
-                <Badge variant="outline" className="text-[9px]">SOL</Badge>
+                <Badge variant="outline" className="text-xs">SOL</Badge>
               </div>
               {agent.nftMintAddress ? (
                 <div className="grid grid-cols-2 gap-3 text-sm pl-2 border-l-2 border-purple-500/30">
@@ -1233,17 +1326,17 @@ function AgentDetailPage() {
                       href={`https://solscan.io/token/${agent.nftMintAddress}?cluster=devnet`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-[10px] text-purple-600 dark:text-purple-400 hover:underline"
+                      className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline"
                     >
-                      View on Solscan ↗
+                      View on Solscan <ExternalLink className="w-3 h-3" aria-hidden="true" />
                     </a>
                     <br />
                     <button
                       onClick={handleUpdateSolanaMetadata}
                       disabled={solanaLoading}
-                      className="text-[10px] text-purple-600 dark:text-purple-400 hover:underline disabled:opacity-50"
+                      className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline disabled:opacity-50"
                     >
-                      {solanaLoading ? "Updating..." : "Update Metadata ↻"}
+                      {solanaLoading ? "Updating..." : <>Update Metadata <RefreshCw className="w-3 h-3" aria-hidden="true" /></>}
                     </button>
                   </div>
                 </div>
@@ -1282,7 +1375,7 @@ function AgentDetailPage() {
                 <span className="text-xs text-muted-foreground">On-Chain Skills</span>
                 <div className="flex flex-wrap gap-1.5 mt-1">
                   {onchainMatch.skills.split(',').map(s => s.trim()).filter(Boolean).map(skill => (
-                    <Badge key={skill} variant="outline" className="text-[10px]">{skill}</Badge>
+                    <Badge key={skill} variant="outline" className="text-xs">{skill}</Badge>
                   ))}
                 </div>
               </div>
@@ -1294,7 +1387,7 @@ function AgentDetailPage() {
       {/* AgentGuildConnect / OpenClaw Connection */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">🔗 AgentGuildConnect</CardTitle>
+          <CardTitle className="text-base flex items-center gap-2"><Link2 className="w-4 h-4" aria-hidden="true" /> AgentGuildConnect</CardTitle>
           <CardDescription>Agent connection details for OpenClaw integration</CardDescription>
         </CardHeader>
         <CardContent>
@@ -1303,14 +1396,6 @@ function AgentDetailPage() {
               <div>
                 <span className="text-xs text-muted-foreground">Agent ID</span>
                 <p className="font-mono text-xs break-all mt-0.5">{agent.id}</p>
-              </div>
-              <div>
-                <span className="text-xs text-muted-foreground">API Key</span>
-                <p className="font-mono text-xs mt-0.5">
-                  {agent.apiKey
-                    ? `${agent.apiKey.slice(0, 8)}${'•'.repeat(20)}${agent.apiKey.slice(-4)}`
-                    : 'Not set'}
-                </p>
               </div>
               <div>
                 <span className="text-xs text-muted-foreground">Organization</span>
@@ -1323,7 +1408,7 @@ function AgentDetailPage() {
             </div>
             <div className="border-t border-border pt-3">
               <span className="text-xs text-muted-foreground block mb-1.5">Quick Setup</span>
-              <div className="bg-muted rounded-md p-3 font-mono text-[11px] space-y-1">
+              <div className="bg-muted rounded-md p-3 font-mono text-xs space-y-1">
                 <p className="text-muted-foreground"># Install the AgentGuildConnect skill</p>
                 <p>npm install -g @agent-guild/agent-skill</p>
                 <p className="text-muted-foreground mt-2"># Register this agent (with skills)</p>
@@ -1338,11 +1423,14 @@ function AgentDetailPage() {
         </CardContent>
       </Card>
 
+      </TabsContent>
+
+      <TabsContent value="overview" className="space-y-6">
       {/* Jobs */}
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">💼 Assigned Jobs</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><Briefcase className="w-4 h-4" aria-hidden="true" /> Assigned Jobs</CardTitle>
             <div className="flex items-center gap-2">
               {jobsCompleted > 0 && <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">{jobsCompleted} completed</Badge>}
               {jobsInProgress > 0 && <Badge className="bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">{jobsInProgress} active</Badge>}
@@ -1364,7 +1452,7 @@ function AgentDetailPage() {
                       {job.description.substring(0, 100)}{job.description.length > 100 ? '...' : ''}
                     </div>
                   )}
-                  <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground">
+                  <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
                     <span>Priority: {job.priority}</span>
                     {job.reward && <span className="text-amber-600 dark:text-amber-400 font-medium">{job.reward}</span>}
                     {job.requiredSkills?.length > 0 && (
@@ -1390,7 +1478,7 @@ function AgentDetailPage() {
             ))}
             {agentJobs.length === 0 && (
               <div className="text-center py-6 text-muted-foreground">
-                <div className="text-2xl mb-2">💼</div>
+                <Briefcase className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
                 <p className="text-sm">No jobs assigned yet</p>
               </div>
             )}
@@ -1402,7 +1490,7 @@ function AgentDetailPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">📋 Assigned Tasks</CardTitle>
+            <CardTitle className="text-base flex items-center gap-2"><ClipboardList className="w-4 h-4" aria-hidden="true" /> Assigned Tasks</CardTitle>
             <Badge variant="secondary" className="text-xs">{agentTasks.length} total</Badge>
           </div>
           <CardDescription>Tasks currently assigned to this agent</CardDescription>
@@ -1441,13 +1529,15 @@ function AgentDetailPage() {
             ))}
             {agentTasks.length === 0 && (
               <div className="text-center py-6 text-muted-foreground">
-                <div className="text-2xl mb-2">📋</div>
+                <ClipboardList className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
                 <p className="text-sm">No tasks assigned yet</p>
               </div>
             )}
           </div>
         </CardContent>
       </Card>
+      </TabsContent>
+      </Tabs>
 
       {/* Edit Agent Dialog */}
       <Dialog open={showEdit} onOpenChange={setShowEdit}>
@@ -1482,14 +1572,14 @@ function AgentDetailPage() {
                     if (filtered.length === 0) return null;
                     return (
                       <div key={category}>
-                        <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
                           {info.icon} {info.label}
                         </div>
                         {filtered.map((t) => (
                           <SelectItem key={t.id} value={t.id}>
                             <div className="flex flex-col items-start">
                               <span className="font-medium text-sm">{t.label}</span>
-                              <span className="text-[11px] text-muted-foreground">{t.description}</span>
+                              <span className="text-xs text-muted-foreground">{t.description}</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -1525,7 +1615,7 @@ function AgentDetailPage() {
           <div className="flex gap-2 justify-end mt-4">
             <Button variant="outline" onClick={() => setShowDelete(false)} disabled={deleting}>Cancel</Button>
             <Button onClick={handleDeleteConfirm} disabled={deleting} className="bg-red-600 hover:bg-red-700 text-white">
-              {deleting ? 'Removing...' : '🗑️ Remove'}
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> {deleting ? 'Removing...' : 'Remove'}
             </Button>
           </div>
         </DialogContent>
@@ -1552,7 +1642,7 @@ function AgentDetailPage() {
           <div className="flex gap-2 justify-end mt-4">
             <Button variant="outline" onClick={() => { setShowPause(false); setPauseReason(''); }} disabled={pausing}>Cancel</Button>
             <Button onClick={handlePauseConfirm} disabled={pausing} className="bg-orange-600 hover:bg-orange-700 text-white">
-              {pausing ? 'Pausing...' : '⏸️ Pause Agent'}
+              <Pause className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> {pausing ? 'Pausing...' : 'Pause Agent'}
             </Button>
           </div>
         </DialogContent>
@@ -1562,11 +1652,11 @@ function AgentDetailPage() {
       <Dialog open={showRegister} onOpenChange={(open) => { setShowRegister(open); if (!open) agentGuildWrite.reset(); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>⛓️ Register Agent On-Chain</DialogTitle>
+            <DialogTitle className="flex items-center gap-2"><Blocks className="w-4 h-4" aria-hidden="true" /> Register Agent On-Chain</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Register <strong>{agent?.name}</strong> on the Hedera Agent Registry smart contract.
+              Register <strong>{agent?.name}</strong> on the Solana Agent Registry program.
             </p>
             <div>
               <label className="text-sm font-medium mb-1 block">Agent Name *</label>
@@ -1580,7 +1670,7 @@ function AgentDetailPage() {
                 placeholder="e.g. research, analysis, trading"
                 disabled={agentGuildWrite.state.isLoading}
               />
-              <p className="text-[11px] text-muted-foreground mt-1">Comma-separated list of skills stored onchain</p>
+              <p className="text-xs text-muted-foreground mt-1">Comma-separated list of skills stored onchain</p>
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Fee Rate (basis points)</label>
@@ -1592,7 +1682,7 @@ function AgentDetailPage() {
                 max={10000}
                 disabled={agentGuildWrite.state.isLoading}
               />
-              <p className="text-[11px] text-muted-foreground mt-1">500 bps = 5% fee on completed tasks</p>
+              <p className="text-xs text-muted-foreground mt-1">500 bps = 5% fee on completed tasks</p>
             </div>
 
             {agentGuildWrite.state.error && (
@@ -1618,7 +1708,7 @@ function AgentDetailPage() {
                   disabled={agentGuildWrite.state.isLoading || !registerName.trim()}
                   className="bg-amber-600 hover:bg-amber-700 text-white"
                 >
-                  {agentGuildWrite.state.isLoading ? 'Registering...' : '⛓️ Register'}
+                  {agentGuildWrite.state.isLoading ? 'Registering...' : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
                 </Button>
               )}
             </div>

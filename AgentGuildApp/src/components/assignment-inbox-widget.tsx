@@ -108,7 +108,7 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
     }
   };
 
-  const formatDeadline = (deadline?: Timestamp) => {
+  const formatDeadline = (deadline?: { toDate(): Date }) => {
     if (!deadline) return "No deadline";
     const date = deadline.toDate();
     const now = new Date();

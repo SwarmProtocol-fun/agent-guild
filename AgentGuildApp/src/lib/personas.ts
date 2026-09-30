@@ -300,7 +300,7 @@ export const PERSONA_REGISTRY: AgentPackage[] = [
             ],
         },
         requiredSkills: [],
-        requiredMods: ["hbar-onchain"],
+        requiredMods: ["solana-onchain"],
         status: "approved",
         source: "verified",
         installCount: 64,

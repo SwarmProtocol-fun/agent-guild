@@ -52,6 +52,13 @@ const TYPE_ICON: Record<string, typeof LayoutDashboard> = {
   skin: Palette,
 };
 
+/** Runtime mod ids (mods/<id>/) that are also marketplace items — their
+ *  sidebar entry comes from ownership (refreshModSidebar), not the
+ *  always-on runtime-mod list below. */
+const MARKETPLACE_MOD_IDS = new Set(
+  SKILL_REGISTRY.filter((s) => s.type === "mod").map((s) => s.id),
+);
+
 // ═══════════════════════════════════════════════════════════════
 // Navigation Model
 // ═══════════════════════════════════════════════════════════════
@@ -157,13 +164,16 @@ export const DEFAULT_SECTIONS: NavSection[] = [
       { id: "publisher", href: "/market/publisher", label: "Publisher", icon: Upload, maturity: "production" },
     ],
   },
-  // Panels contributed by installed runtime mods (mods/<id>/agent-guild.mod.json).
-  // Empty sections are hidden, so this only shows up once a mod adds a panel.
+  // Panels contributed by runtime mods (mods/<id>/agent-guild.mod.json) that
+  // aren't in the marketplace — always visible. Mods listed in SKILL_REGISTRY
+  // are marketplace-gated instead and only appear once an org owns them (see
+  // refreshModSidebar below), so orgs start with none and add them from the
+  // market.
   {
     id: "modifications",
     label: "Mods",
     collapsible: true,
-    items: MOD_MANIFESTS.flatMap((m) =>
+    items: MOD_MANIFESTS.filter((m) => !MARKETPLACE_MOD_IDS.has(m.id)).flatMap((m) =>
       (m.panels ?? []).map((p): NavItem => ({
         id: `runtime-mod-${m.id}-${p.id}`,
         href: `/mods/${m.id}/${p.id}`,

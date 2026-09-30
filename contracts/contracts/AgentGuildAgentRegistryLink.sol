@@ -6,7 +6,6 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title AgentGuildAgentRegistryLink
  * @notice Agent registry on Ethereum Sepolia with ASN identity and credit scoring.
- *         Mirrors the Hedera AgentRegistry but adds on-chain ASN + credit fields.
  */
 contract AgentGuildAgentRegistryLink is Ownable {
     struct Agent {

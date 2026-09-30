@@ -16,7 +16,6 @@ import { requirePlatformAdminOrAgent, unauthorized } from "@/lib/auth-guard";
 import { getCreditHistory } from "@/lib/credit-service";
 import type { ScoreEvent } from "@/lib/credit-types";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-// [agent-guild-core] Hedera type removed — install agent-guild-hedera mod
 
 const VALID_EVENT_TYPES = new Set([
     "task_complete", "task_fail", "skill_report", "penalty", "bonus", "checkpoint",

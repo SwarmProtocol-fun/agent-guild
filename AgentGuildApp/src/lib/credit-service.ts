@@ -6,7 +6,7 @@
  *
  * Depends on:
  *   - credit-scoring.ts: getScoreBand(), getDefaultPolicy(), PolicyState, ScoreBandInfo
- *   - hedera-hcs-client.ts: ScoreEvent, getReputationTopicId()
+ *   - solana/client.ts: ScoreEvent history read from on-chain memos
  *   - credit-cache.ts: getCached, setCache, invalidateCache
  *   - firebase.ts: Firestore db
  */
@@ -21,10 +21,7 @@ import {
 } from "@/lib/credit-scoring";
 import type { ScoreEvent } from "@/lib/credit-types";
 import { getCached, setCache } from "@/lib/credit-cache";
-
-// [agent-guild-core] Hedera HCS removed — install agent-guild-hedera mod.
-// No reputation topic is configured in core, so HCS history is always empty.
-const getReputationTopicId = (): string | null => null;
+import { getScoreEventHistoryForAsn } from "@/lib/solana/client";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -122,8 +119,6 @@ export interface SimulationResult {
 // Constants
 // ═══════════════════════════════════════════════════════════════
 
-// Dead unless a mod supplies a real getReputationTopicId() — see the stub note above.
-const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "";
 const DEFAULT_CREDIT_SCORE = 680;
 const DEFAULT_TRUST_SCORE = 50;
 const CREDIT_MIN = 300;
@@ -135,49 +130,24 @@ const TRUST_MAX = 100;
 // Internal Helpers
 // ═══════════════════════════════════════════════════════════════
 
-interface MirrorMessage {
-    consensus_timestamp: string;
-    message: string;
-    sequence_number: number;
-}
-
-/** Fetch and decode HCS events for a given ASN from Mirror Node. */
-async function fetchHCSEventsForASN(
+/** Fetch and decode on-chain score-event memos for a given ASN (replaces the Hedera Mirror Node read path). */
+async function fetchOnChainEventsForASN(
     asn: string,
     limit = 500,
 ): Promise<{ events: Array<{ event: ScoreEvent; timestamp: string; sequenceNumber: number }>; total: number }> {
-    const topicId = getReputationTopicId();
-    if (!topicId) {
-        return { events: [], total: 0 };
-    }
-
-    const url = `${MIRROR_NODE_URL}/api/v1/topics/${topicId.toString()}/messages?limit=${limit}&order=asc`;
-    const response = await fetch(url);
-
-    if (!response.ok) {
-        throw new Error(`Mirror Node API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const messages: MirrorMessage[] = data.messages || [];
+    const memos = await getScoreEventHistoryForAsn(asn, limit);
 
     const filtered: Array<{ event: ScoreEvent; timestamp: string; sequenceNumber: number }> = [];
-
-    for (const message of messages) {
-        try {
-            const jsonStr = Buffer.from(message.message, "base64").toString("utf-8");
-            const event = JSON.parse(jsonStr) as ScoreEvent;
-            if (event.asn === asn) {
-                filtered.push({
-                    event,
-                    timestamp: message.consensus_timestamp,
-                    sequenceNumber: message.sequence_number,
-                });
-            }
-        } catch {
-            // Skip invalid messages
+    memos.forEach((memo, index) => {
+        const event = memo.payload as ScoreEvent;
+        if (event && typeof event === "object" && event.asn === asn) {
+            filtered.push({
+                event,
+                timestamp: memo.blockTime ? new Date(memo.blockTime * 1000).toISOString() : "",
+                sequenceNumber: index,
+            });
         }
-    }
+    });
 
     return { events: filtered, total: filtered.length };
 }
@@ -293,7 +263,7 @@ export async function getCreditHistory(
     const limit = Math.min(opts.limit ?? 100, 500);
     const offset = opts.offset ?? 0;
 
-    const { events } = await fetchHCSEventsForASN(profile.asn, 500);
+    const { events } = await fetchOnChainEventsForASN(profile.asn, 500);
 
     // Filter by event type if specified
     const filtered = opts.eventType
@@ -327,7 +297,7 @@ export async function getCreditExplanation(agentId: string): Promise<CreditExpla
     // If agent has an ASN, analyze event history
     if (profile.asn) {
         try {
-            const { events } = await fetchHCSEventsForASN(profile.asn, 500);
+            const { events } = await fetchOnChainEventsForASN(profile.asn, 500);
 
             // Factor 1: Task completion rate
             const taskCompletes = events.filter(e => e.event.type === "task_complete").length;
@@ -407,7 +377,7 @@ export async function getCreditExplanation(agentId: string): Promise<CreditExpla
                 value: bonuses.length > 0 ? `+${totalBonusCredit}` : "None",
             });
         } catch (error) {
-            console.error("[credit-service] Failed to fetch HCS events for explanation:", error);
+            console.error("[credit-service] Failed to fetch on-chain events for explanation:", error);
             factors.push({
                 name: "Event History",
                 impact: "neutral",
@@ -475,7 +445,7 @@ export async function getPolicyTier(agentId: string): Promise<PolicyTierResult |
 }
 
 /**
- * Recompute an agent's credit score by replaying all HCS events from baseline.
+ * Recompute an agent's credit score by replaying all on-chain events from baseline.
  * Updates Firestore with the recomputed score.
  */
 export async function recomputeScore(agentId: string): Promise<RecomputeResult> {
@@ -489,17 +459,17 @@ export async function recomputeScore(agentId: string): Promise<RecomputeResult> 
     const data = agentSnap.data()!;
     const asn = data.asn as string;
     if (!asn) {
-        throw new Error("Agent does not have an ASN — cannot recompute from HCS");
+        throw new Error("Agent does not have an ASN — cannot recompute from on-chain events");
     }
 
     const previousCredit = (data.creditScore as number) ?? DEFAULT_CREDIT_SCORE;
     const previousTrust = (data.trustScore as number) ?? DEFAULT_TRUST_SCORE;
 
     // Fetch all events and replay
-    const { events } = await fetchHCSEventsForASN(asn, 1000);
+    const { events } = await fetchOnChainEventsForASN(asn, 1000);
     if (events.length === 0) {
         // Replaying zero events would reset the agent to the baseline score.
-        throw new Error("No HCS events available (reputation topic not configured) — refusing to overwrite score");
+        throw new Error("No on-chain events available for this ASN — refusing to overwrite score");
     }
     const { finalCredit, finalTrust } = buildScoreTimeline(events);
 
@@ -508,7 +478,7 @@ export async function recomputeScore(agentId: string): Promise<RecomputeResult> 
         creditScore: finalCredit,
         trustScore: finalTrust,
         lastCreditUpdate: FieldValue.serverTimestamp(),
-        lastCreditReason: `Recomputed from ${events.length} HCS events`,
+        lastCreditReason: `Recomputed from ${events.length} on-chain events`,
     });
 
     return {

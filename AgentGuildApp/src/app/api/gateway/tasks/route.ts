@@ -8,12 +8,21 @@ import { NextRequest } from "next/server";
 import {
   getWalletAddress,
   requireOrgMember,
+  requireOrgAdmin,
   requireInternalService,
 } from "@/lib/auth-guard";
 import { enqueueTask, getTask } from "@/lib/gateway/store";
 import { getRedis } from "@/lib/redis";
 import type { TaskPriority, TaskResourceRequirements } from "@/lib/gateway/types";
 import { validateCallbackUrl } from "@/lib/url-validation";
+
+// Task types that reach a raw executor (shell/docker/node — arbitrary code
+// execution on whichever worker picks up the task). Any org member could
+// otherwise enqueue one of these with a hand-crafted payload and run code on
+// the org's own gateway host, so — like every other org-wide-impact action
+// (see requireOrgAdmin) — they're restricted to the org owner rather than
+// any member.
+const EXEC_TASK_TYPES = new Set(["shell", "docker", "node"]);
 
 interface EnqueueBody {
   orgId: string;
@@ -41,7 +50,17 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "orgId is required" }, { status: 400 });
   }
 
-  // Auth: internal service OR org member
+  // Validate required fields
+  if (!body.taskType || !body.payload) {
+    return Response.json(
+      { error: "taskType and payload are required" },
+      { status: 400 },
+    );
+  }
+
+  // Auth: internal service OR org member — but raw-execution task types
+  // (shell/docker/node) require org-admin (owner), since they run
+  // attacker-controlled commands on the org's gateway worker.
   const serviceAuth = requireInternalService(req);
   if (!serviceAuth.ok) {
     const wallet = getWalletAddress(req);
@@ -49,18 +68,12 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const orgAuth = await requireOrgMember(req, body.orgId);
+    const orgAuth = EXEC_TASK_TYPES.has(body.taskType)
+      ? await requireOrgAdmin(req, body.orgId)
+      : await requireOrgMember(req, body.orgId);
     if (!orgAuth.ok) {
       return Response.json({ error: orgAuth.error }, { status: orgAuth.status || 403 });
     }
-  }
-
-  // Validate required fields
-  if (!body.taskType || !body.payload) {
-    return Response.json(
-      { error: "taskType and payload are required" },
-      { status: 400 },
-    );
   }
 
   // Validate callbackUrl if provided (SSRF protection)

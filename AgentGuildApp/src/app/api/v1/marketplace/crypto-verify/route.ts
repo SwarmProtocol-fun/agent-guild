@@ -4,7 +4,7 @@
  * Verifies an on-chain transaction for a crypto payment intent.
  * If verified, activates the subscription.
  *
- * Supports: Hedera (Mirror Node), Solana (RPC), all EVM chains (ethers).
+ * Supports: Solana (RPC), all EVM chains (ethers).
  *
  * Input: { paymentId, txHash }
  * Returns: { ok, verified, subscriptionId? }
@@ -20,50 +20,6 @@ import { CHAIN_CONFIGS } from "@/lib/chains";
 
 const CRYPTO_PAYMENTS_COLLECTION = "cryptoPayments";
 const EVM_CHAINS = new Set(["ethereum", "avalanche", "base", "sepolia", "filecoin"]);
-
-// ═══════════════════════════════════════════════════════════════
-// Hedera Verifier (existing — via Mirror Node REST API)
-// ═══════════════════════════════════════════════════════════════
-
-async function verifyHederaTx(
-    txHash: string,
-    expectedRecipient: string,
-    expectedAmount: number,
-): Promise<{ verified: boolean; error?: string }> {
-    try {
-        const mirrorUrl = process.env.HEDERA_MIRROR_URL || "https://testnet.mirrornode.hedera.com";
-        const res = await fetch(`${mirrorUrl}/api/v1/transactions/${txHash}`);
-        if (!res.ok) return { verified: false, error: "Transaction not found on Hedera" };
-
-        const data = await res.json();
-        const tx = data.transactions?.[0];
-        if (!tx) return { verified: false, error: "Transaction not found" };
-
-        if (tx.result !== "SUCCESS") {
-            return { verified: false, error: `Transaction status: ${tx.result}` };
-        }
-
-        const transfers = tx.transfers || [];
-        const recipientTransfer = transfers.find(
-            (t: { account: string; amount: number }) =>
-                t.account === expectedRecipient && t.amount > 0,
-        );
-
-        if (!recipientTransfer) {
-            return { verified: false, error: "Recipient not found in transaction transfers" };
-        }
-
-        // Convert tinybars to HBAR (1 HBAR = 100_000_000 tinybars)
-        const receivedHbar = recipientTransfer.amount / 100_000_000;
-        if (receivedHbar < expectedAmount * 0.95) {
-            return { verified: false, error: `Insufficient amount: expected ${expectedAmount} HBAR, got ${receivedHbar}` };
-        }
-
-        return { verified: true };
-    } catch (err) {
-        return { verified: false, error: err instanceof Error ? err.message : "Verification failed" };
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════
 // Solana Verifier (existing — via JSON-RPC)
@@ -254,9 +210,7 @@ export async function POST(req: NextRequest) {
     const chain = payment.chain as string;
     let result: { verified: boolean; error?: string };
 
-    if (chain === "hedera") {
-        result = await verifyHederaTx(txHash, payment.recipientAddress, payment.amount);
-    } else if (chain === "solana") {
+    if (chain === "solana") {
         result = await verifySolanaTx(txHash, payment.recipientAddress, payment.amount);
     } else if (EVM_CHAINS.has(chain)) {
         result = await verifyEvmTx(

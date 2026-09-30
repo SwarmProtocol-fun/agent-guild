@@ -305,12 +305,12 @@ export function AgentInstallDialog({
                                 </a>
                                 {resultTxHash && (
                                     <a
-                                        href={`https://hashscan.io/testnet/transaction/${resultTxHash}`}
+                                        href={`https://solscan.io/tx/${resultTxHash}?cluster=devnet`}
                                         target="_blank"
                                         rel="noopener noreferrer"
                                     >
                                         <Button size="sm" variant="outline" className="h-8 text-xs gap-1">
-                                            <ExternalLink className="h-3 w-3" /> HashScan
+                                            <ExternalLink className="h-3 w-3" /> Solscan
                                         </Button>
                                     </a>
                                 )}

@@ -96,7 +96,12 @@ export async function GET() {
     environment: process.env.NODE_ENV || "unknown",
   };
 
-  const httpStatus = allHealthy ? 200 : 503;
+  // Only Firestore being down means the process can't actually serve
+  // requests. Heap pressure alone is a `degraded` status and a log line —
+  // a naive installer (or a load balancer) that treats any non-200 as
+  // "do not register"/"kill the instance" would otherwise abort a
+  // perfectly capable process over memory headroom, not an outage.
+  const httpStatus = firestoreHealthy ? 200 : 503;
   const duration = Date.now() - startTime;
 
   // Log slow health checks

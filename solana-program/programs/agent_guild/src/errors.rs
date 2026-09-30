@@ -32,6 +32,10 @@ pub enum AgentGuildError {
     NoDeliverySubmitted,
     #[msg("Task is not disputed")]
     TaskNotDisputed,
+    #[msg("Task deadline has not passed yet")]
+    TaskNotExpired,
+    #[msg("Task deadline has already passed; call expire_task instead")]
+    TaskDeadlinePassed,
     #[msg("Cannot claim your own task")]
     CannotClaimOwnTask,
     #[msg("Agent split bps exceeds 10000")]
@@ -44,4 +48,8 @@ pub enum AgentGuildError {
     Unauthorized,
     #[msg("Arithmetic overflow")]
     Overflow,
+    #[msg("Reason exceeds maximum length")]
+    ReasonTooLong,
+    #[msg("Proposal is not pending")]
+    ProposalNotPending,
 }

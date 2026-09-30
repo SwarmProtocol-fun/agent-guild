@@ -19,6 +19,7 @@ import {
   arrayRemove,
 } from "firebase/firestore";
 import { db } from "./firebase";
+import { canonicalizeWalletAddress } from "./wallet-address";
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -131,8 +132,10 @@ export interface Agent {
   reportedSkills?: ReportedSkill[];
   /** Agent Social Number — unique identity assigned on registration */
   asn?: string;
-  /** On-chain registration tx hash (Hedera Testnet) */
+  /** On-chain registration tx hash (Solana devnet) */
   onChainTxHash?: string;
+  /** Set when on-chain registration failed or was skipped; cleared on a later success */
+  onChainError?: string;
   /** On-chain registration status */
   onChainRegistered?: boolean;
   /** On-chain registration tx hash (LINK / Sepolia) */
@@ -171,10 +174,10 @@ export interface Agent {
   soulVersion?: string;
   /** When SOUL was last updated */
   soulUpdatedAt?: unknown;
-  /** Whether Hedera memory is enabled for this agent */
-  hederaMemoryEnabled?: boolean;
-  /** Hedera Consensus Service topic ID for persistent memory */
-  hederaMemoryTopicId?: string;
+  /** Whether a private memory topic is set up for this agent */
+  memoryEnabled?: boolean;
+  /** Firestore-backed memory topic id (see reputation-chain.ts) for persistent memory */
+  memoryTopicId?: string;
   /** Wallet address that owns/controls this agent */
   walletAddress?: string;
   /** Solana NFT mint address (Metaplex agent identity) */
@@ -325,13 +328,13 @@ export interface Profile {
 }
 
 export async function getProfile(walletAddress: string): Promise<Profile | null> {
-  const snap = await getDoc(doc(db, "profiles", walletAddress.toLowerCase()));
+  const snap = await getDoc(doc(db, "profiles", canonicalizeWalletAddress(walletAddress)));
   if (!snap.exists()) return null;
   return snap.data() as Profile;
 }
 
 export async function setProfile(walletAddress: string, data: Partial<Profile>): Promise<void> {
-  const key = walletAddress.toLowerCase();
+  const key = canonicalizeWalletAddress(walletAddress);
   await setDoc(doc(db, "profiles", key), {
     ...data,
     walletAddress: key,
@@ -343,7 +346,7 @@ export async function getProfilesByAddresses(addresses: string[]): Promise<Map<s
   const map = new Map<string, Profile>();
   if (addresses.length === 0) return map;
   // Firestore 'in' queries limited to 30, batch if needed
-  const lowered = addresses.map(a => a.toLowerCase());
+  const lowered = addresses.map(canonicalizeWalletAddress);
   for (let i = 0; i < lowered.length; i += 30) {
     const batch = lowered.slice(i, i + 30);
     const q = query(collection(db, "profiles"), where("walletAddress", "in", batch));
@@ -384,8 +387,8 @@ export async function getOrganizationsByWallet(walletAddress: string): Promise<O
   // Firestore string matches are case-sensitive. Addresses may be stored
   // checksummed (mixed-case) or lowercase, so query with all three forms:
   // original, lowercase, and EIP-55 checksummed.
-  const lower = walletAddress.toLowerCase();
-  const variants = new Set([walletAddress, lower]);
+  const canonical = canonicalizeWalletAddress(walletAddress);
+  const variants = new Set([walletAddress, canonical]);
 
   // Add checksummed (EIP-55) form — handles the case where the session
   // stores lowercase but Firestore has the checksummed address.
@@ -561,8 +564,11 @@ export async function updateTask(taskId: string, data: Partial<Task>): Promise<v
         const agent = agentDoc.data() as Agent;
 
         if (agent?.asn && agent?.walletAddress) {
-          // [agent-guild-core] Hedera score emitter removed — install agent-guild-hedera mod for on-chain scoring
-          // Task completion events are a no-op in core
+          // Intentional no-op here: `reputation-chain.ts`'s on-chain emitters
+          // pull in server-only Solana signing code (env secrets) that must
+          // never end up in this file's client bundle, since firestore.ts is
+          // imported by client components too. Task-completion score events
+          // are emitted from the server-only credit/task-complete route instead.
         }
       }
     } catch (error) {

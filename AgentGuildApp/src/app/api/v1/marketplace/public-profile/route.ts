@@ -8,7 +8,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { getPrivacySettings } from "@/lib/privacy-settings";
-// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
 import type { Agent } from "@/lib/firestore";
 
 export async function GET(req: NextRequest) {

@@ -4,7 +4,7 @@
  * Steps: Select Chain → Review Payment → Sign Transaction → Verify → Success
  *
  * For EVM chains: uses window.ethereum (MetaMask/injected wallet) to sign.
- * For Solana/Hedera: shows recipient + amount for manual send with txHash input.
+ * For Solana: shows recipient + amount for manual send with txHash input.
  */
 "use client";
 

@@ -177,9 +177,13 @@ async function routeCoord(db, message, broadcastToAgent, log) {
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
-  // Increment coordinator load
+  // Increment coordinator load atomically — a plain read-then-write here
+  // (coordinator.currentLoad + 1) races when two concurrent coord messages
+  // hit the same coordinator: both read the same stale value, both write
+  // old+1, and one increment is lost, undercounting currentLoad below the
+  // true value (which the capacity check above relies on).
   await coordSnap.docs[0].ref.update({
-    currentLoad: coordinator.currentLoad + 1,
+    currentLoad: admin.firestore.FieldValue.increment(1),
   });
 
   log("info", "Coord message routed", {
@@ -312,10 +316,19 @@ async function routeSession(db, message, broadcastToAgent, log) {
     orgId,
   });
 
-  // Update session step if provided
-  if (step && step > session.currentStep) {
-    await sessionDoc.ref.update({
-      currentStep: step,
+  // Update session step if provided. Unlike routeCoord's plain +1 counter,
+  // currentStep is set to an explicit client-supplied value (not incremented
+  // by a fixed amount), so FieldValue.increment doesn't apply here — instead
+  // wrap the read-compare-write in a transaction so two concurrent session
+  // messages can't both race off the same stale `session.currentStep`
+  // snapshot and have the higher step silently overwritten by the lower one.
+  if (step) {
+    await db.runTransaction(async (tx) => {
+      const freshSnap = await tx.get(sessionDoc.ref);
+      const freshStep = freshSnap.exists ? freshSnap.data().currentStep : undefined;
+      if (step > freshStep) {
+        tx.update(sessionDoc.ref, { currentStep: step });
+      }
     });
   }
 

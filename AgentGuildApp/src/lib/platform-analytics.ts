@@ -13,6 +13,7 @@
 
 import { adminDb } from "./firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { canonicalizeWalletAddress } from "./wallet-address";
 
 // ── Types ──
 
@@ -96,7 +97,7 @@ export async function recordLogin(
   req: Request,
 ): Promise<string> {
   const db = adminDb();
-  const wallet = walletAddress.toLowerCase();
+  const wallet = canonicalizeWalletAddress(walletAddress);
   const now = Timestamp.now();
 
   // Extract request metadata

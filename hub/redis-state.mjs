@@ -13,6 +13,7 @@ const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 let redisClient = null;
 let pubClient = null;
 let subClient = null;
+let heartbeatInterval = null;
 
 /**
  * Initialize Redis connections
@@ -33,6 +34,14 @@ export async function initRedis() {
 
   // Cleanup on shutdown
   process.on('SIGINT', async () => {
+    // Stop the heartbeat first — otherwise it keeps firing every 30s
+    // against already-closed Redis connections after this handler quits
+    // the clients below, throwing repeated unhandled errors and keeping
+    // the event loop alive.
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
     await cleanupInstance();
     await redisClient.quit();
     await pubClient.quit();
@@ -88,8 +97,28 @@ export async function getInstanceAgents() {
   return await redisClient.smembers(`instance:${INSTANCE_ID}:agents`);
 }
 
+/**
+ * Cursor-based keyspace scan — a drop-in replacement for `KEYS <pattern>`.
+ * KEYS is O(N) over the entire keyspace and blocks Redis's single-threaded
+ * event loop for its whole duration, causing latency spikes on every other
+ * Redis operation (from every hub instance sharing that Redis) as the
+ * key count grows. SCAN walks the keyspace incrementally via a cursor
+ * instead, so no single call blocks for long.
+ */
+async function scanKeys(pattern) {
+  return new Promise((resolve, reject) => {
+    const found = new Set();
+    const stream = redisClient.scanStream({ match: pattern, count: 100 });
+    stream.on('data', (resultKeys) => {
+      for (const key of resultKeys) found.add(key);
+    });
+    stream.on('end', () => resolve([...found]));
+    stream.on('error', (err) => reject(err));
+  });
+}
+
 export async function getAllOnlineAgents() {
-  const keys = await redisClient.keys('agent:*:instance');
+  const keys = await scanKeys('agent:*:instance');
   const agents = [];
 
   for (const key of keys) {
@@ -287,14 +316,16 @@ export async function registerInstance() {
   const key = `instance:${INSTANCE_ID}:heartbeat`;
   await redisClient.setex(key, 60, Date.now().toString());
 
-  // Periodic heartbeat every 30s
-  setInterval(async () => {
+  // Periodic heartbeat every 30s — handle is captured so shutdown (SIGINT,
+  // above) can clear it; previously it was never captured, so it kept
+  // firing indefinitely, including after the Redis clients were quit.
+  heartbeatInterval = setInterval(async () => {
     await redisClient.setex(key, 60, Date.now().toString());
   }, 30000);
 }
 
 export async function getActiveInstances() {
-  const keys = await redisClient.keys('instance:*:heartbeat');
+  const keys = await scanKeys('instance:*:heartbeat');
   return keys.map((k) => k.split(':')[1]);
 }
 

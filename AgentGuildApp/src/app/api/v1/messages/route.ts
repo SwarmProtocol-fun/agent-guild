@@ -1,11 +1,23 @@
 /**
- * GET /api/v1/messages?agent=<agentId>&since=<timestampMs>&sig=<signature>
+ * GET /api/v1/messages?agent=<agentId>&since=<timestampMs>&sig=<signature>&ts=<timestampMs>&nonce=<uuid>
  *
  * Poll for new messages. Signature-verified.
- * Signature = Ed25519.sign("GET:/v1/messages:<since_timestamp>")
+ * Signature = Ed25519.sign("GET:/v1/messages:<since>:<ts>:<nonce>")
+ *
+ * `since` is a cursor (last poll watermark) and can legitimately repeat
+ * across calls (an empty poll doesn't advance it) — it must never be the
+ * value replay protection keys on. `ts`+`nonce` are a fresh-per-attempt pair
+ * so the signed message (and therefore the signature) differs on every call
+ * even when `since` doesn't move.
+ *
+ * Legacy support: a CLI that still signs the old two-part form
+ * `GET:/v1/messages:<since>` (no ts/nonce) is accepted for one release, but
+ * with replay tracking skipped for that call — see the nonce-tracking note
+ * in verify.ts for why the old form can't be replay-checked without false
+ * positives.
  */
 import { NextRequest } from "next/server";
-import { verifyAgentRequest, isTimestampFresh, unauthorized, configUnavailable, isAdminConfigError } from "../verify";
+import { verifyAgentRequestDetailed, isTimestampFresh, unauthorized, unauthorizedFor, configUnavailable, isAdminConfigError } from "../verify";
 import { rateLimit } from "../rate-limit";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp, type Query } from "firebase-admin/firestore";
@@ -15,6 +27,8 @@ export async function GET(request: NextRequest) {
     const agentId = searchParams.get("agent");
     const sinceParam = searchParams.get("since") || "0";
     const sig = searchParams.get("sig");
+    const tsParam = searchParams.get("ts");
+    const nonceParam = searchParams.get("nonce");
 
     const limited = await rateLimit(agentId || "anon");
     if (limited) return limited;
@@ -23,22 +37,36 @@ export async function GET(request: NextRequest) {
         return unauthorized("agent and sig parameters are required");
     }
 
-    // Verify signature: agent signed "GET:/v1/messages:<since>"
-    const signedMessage = `GET:/v1/messages:${sinceParam}`;
+    const hasFreshAttemptId = !!(tsParam && nonceParam);
+
+    if (tsParam) {
+        const tsNum = parseInt(tsParam, 10);
+        if (!isTimestampFresh(tsNum)) {
+            return unauthorized("Stale timestamp", "STALE_TIMESTAMP");
+        }
+    }
+
+    // Verify signature: agent signed "GET:/v1/messages:<since>:<ts>:<nonce>",
+    // or the legacy "GET:/v1/messages:<since>" form (replay check skipped).
+    const signedMessage = hasFreshAttemptId
+        ? `GET:/v1/messages:${sinceParam}:${tsParam}:${nonceParam}`
+        : `GET:/v1/messages:${sinceParam}`;
     let agent;
     try {
-        agent = await verifyAgentRequest(agentId, signedMessage, sig);
+        const result = await verifyAgentRequestDetailed(agentId, signedMessage, sig, {
+            skipReplayCheck: !hasFreshAttemptId,
+        });
+        if (!result.ok) return unauthorizedFor(result.reason);
+        agent = result;
     } catch (err) {
-        // verify.ts only ever rethrows an Admin-SDK-not-configured error —
-        // every other failure is already swallowed there and returns null.
         if (isAdminConfigError(err)) return configUnavailable();
         return unauthorized();
     }
-    if (!agent) return unauthorized();
 
     // Note: `since` is a query cursor (last poll timestamp), NOT a request
     // timestamp. An agent that polls hourly or daily will have an old `since`
-    // and that's fine. Replay protection is handled by signature verification.
+    // and that's fine. Replay protection is handled by `ts`+`nonce` above,
+    // not by `since`.
     const sinceMs = parseInt(sinceParam, 10);
 
     try {

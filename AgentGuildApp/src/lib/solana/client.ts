@@ -5,7 +5,9 @@
  * Program source: /solana-program (Anchor workspace, sibling to /contracts).
  */
 import { AnchorProvider, BN, Program } from "@coral-xyz/anchor";
-import { Connection, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
+import { MEMO_PROGRAM_ID } from "@solana/spl-memo";
+import bs58 from "bs58";
 
 import idl from "./idl/agent_guild.json";
 import type { AgentGuild } from "./idl/agent_guild";
@@ -104,6 +106,14 @@ export function taskPda(taskId: number | BN): [PublicKey, number] {
     );
 }
 
+export function proposalPda(proposalId: number | BN): [PublicKey, number] {
+    const id = BN.isBN(proposalId) ? proposalId : new BN(proposalId);
+    return PublicKey.findProgramAddressSync(
+        [Buffer.from("proposal"), id.toArrayLike(Buffer, "le", 8)],
+        AGENT_GUILD_PROGRAM_ID,
+    );
+}
+
 // ── Reads ───────────────────────────────────────────────────────────────
 
 export async function getAllAgents(connection?: Connection) {
@@ -126,6 +136,25 @@ export async function getAgentByWallet(agentWallet: PublicKey, connection?: Conn
     const program = getReadonlyProgram(connection);
     const [pda] = agentPda(agentWallet);
     return program.account.agentAccount.fetchNullable(pda);
+}
+
+export async function getAllPenaltyProposals(connection?: Connection) {
+    const program = getReadonlyProgram(connection);
+    return program.account.penaltyProposal.all();
+}
+
+/** Approved penalty proposals for an agent — this IS its on-chain slashing history. */
+export async function getSlashingHistory(agentWallet: PublicKey, connection?: Connection) {
+    const proposals = await getAllPenaltyProposals(connection);
+    return proposals.filter(
+        (p) => p.account.agent.equals(agentWallet) && "approved" in p.account.status,
+    );
+}
+
+/** Same as `getSlashingHistory`, keyed by ASN instead of wallet — the `PenaltyProposal` account stores both. */
+export async function getSlashingHistoryByAsn(asn: string, connection?: Connection) {
+    const proposals = await getAllPenaltyProposals(connection);
+    return proposals.filter((p) => p.account.asn === asn && "approved" in p.account.status);
 }
 
 // ── Writes (require a connected wallet) ──────────────────────────────
@@ -220,4 +249,145 @@ export async function approveDelivery(wallet: SolanaWallet, task: PublicKey, cla
         .approveDelivery()
         .accounts({ poster: wallet.publicKey, taskAccount: task, claimant })
         .rpc();
+}
+
+// ── Governance / slashing ─────────────────────────────────────────────
+
+export async function createPenaltyProposal(
+    wallet: SolanaWallet,
+    args: { agentWallet: PublicKey; asn: string; amount: number; reason: string },
+) {
+    const program = getProgram(wallet);
+    const [config] = guildConfigPda();
+    const configAccount = await program.account.guildConfig.fetch(config);
+    const [proposal] = proposalPda(configAccount.proposalCounter);
+    const [agentAccount] = agentPda(args.agentWallet);
+    await program.methods
+        .createPenaltyProposal(args.asn, args.amount, args.reason)
+        .accounts({ proposer: wallet.publicKey, agentAccount })
+        .rpc();
+    return proposal;
+}
+
+/** Authority-only. Approving slashes the agent's credit score by `amount`. */
+export async function resolvePenaltyProposal(wallet: SolanaWallet, proposal: PublicKey, approve: boolean) {
+    const program = getProgram(wallet);
+    return program.methods
+        .resolvePenaltyProposal(approve)
+        .accounts({ authority: wallet.publicKey, proposal })
+        .rpc();
+}
+
+// ── On-chain event memos (replaces HCS score-event topics) ───────────
+//
+// A transaction carrying a standard Memo-program instruction, with the
+// agent's AgentAccount PDA included as a read-only (non-signing) account so
+// `getSignaturesForAddress(agentPda)` surfaces it later — no bespoke program
+// instruction needed. Anyone can read these events back; there is nothing
+// private about them (matches the "public" HCS topic case only — see
+// mod-stubs.ts for why private events aren't posted this way).
+
+const MAX_MEMO_BYTES = 560; // well under the ~1232-byte transaction size limit
+
+export async function postEventMemo(
+    wallet: SolanaWallet,
+    agentWallet: PublicKey,
+    payload: unknown,
+    connection: Connection = getConnection(),
+): Promise<string> {
+    const memoText = JSON.stringify(payload);
+    if (Buffer.byteLength(memoText, "utf8") > MAX_MEMO_BYTES) {
+        throw new Error(`Score event payload exceeds ${MAX_MEMO_BYTES} bytes for a single memo transaction`);
+    }
+    const [agentAccount] = agentPda(agentWallet);
+
+    const ix = new TransactionInstruction({
+        keys: [
+            { pubkey: wallet.publicKey, isSigner: true, isWritable: false },
+            { pubkey: agentAccount, isSigner: false, isWritable: false },
+        ],
+        programId: MEMO_PROGRAM_ID,
+        data: Buffer.from(memoText, "utf8"),
+    });
+
+    const tx = new Transaction().add(ix);
+    tx.feePayer = wallet.publicKey;
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+
+    const signed = await wallet.signTransaction(tx);
+    const signature = await connection.sendRawTransaction(signed.serialize());
+    await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+    return signature;
+}
+
+export interface OnChainEventMemo {
+    signature: string;
+    blockTime: number | null;
+    payload: unknown;
+}
+
+/** Reads back memo events tagged to an agent, newest first (paginated like the old Mirror Node). */
+export async function getEventMemosForAgent(
+    agentWallet: PublicKey,
+    limit = 50,
+    connection: Connection = getConnection(),
+): Promise<OnChainEventMemo[]> {
+    const [agentAccount] = agentPda(agentWallet);
+    const signatures = await connection.getSignaturesForAddress(agentAccount, { limit });
+
+    const events: OnChainEventMemo[] = [];
+    for (const sigInfo of signatures) {
+        if (sigInfo.err) continue;
+        const tx = await connection.getParsedTransaction(sigInfo.signature, { maxSupportedTransactionVersion: 0 });
+        if (!tx) continue;
+
+        for (const ix of tx.transaction.message.instructions) {
+            if (!("programId" in ix) || !ix.programId.equals(MEMO_PROGRAM_ID)) continue;
+
+            let memoText: string | undefined;
+            if ("parsed" in ix && typeof ix.parsed === "string") {
+                memoText = ix.parsed;
+            } else if ("data" in ix) {
+                try {
+                    memoText = Buffer.from(bs58.decode(ix.data)).toString("utf8");
+                } catch {
+                    continue;
+                }
+            }
+            if (!memoText) continue;
+
+            try {
+                events.push({ signature: sigInfo.signature, blockTime: tx.blockTime ?? null, payload: JSON.parse(memoText) });
+            } catch {
+                // Not one of our JSON memos — skip.
+            }
+        }
+    }
+    return events;
+}
+
+/** Resolves an ASN to its owning agent wallet via the on-chain `AsnRecord` PDA. */
+export async function getAgentWalletByAsn(asn: string, connection?: Connection): Promise<PublicKey | null> {
+    const program = getReadonlyProgram(connection);
+    const [pda] = asnPda(asn);
+    const record = await program.account.asnRecord.fetchNullable(pda);
+    return record ? record.agent : null;
+}
+
+/**
+ * Score-event history for an ASN — replaces the Hedera Mirror Node
+ * paginated-topic-messages read path. Returns oldest-first (matching the
+ * old `order=asc` Mirror Node call, since callers accumulate deltas
+ * forward from a starting score).
+ */
+export async function getScoreEventHistoryForAsn(
+    asn: string,
+    limit = 50,
+    connection?: Connection,
+): Promise<OnChainEventMemo[]> {
+    const wallet = await getAgentWalletByAsn(asn, connection);
+    if (!wallet) return [];
+    const memos = await getEventMemosForAgent(wallet, limit, connection);
+    return memos.reverse(); // getSignaturesForAddress is newest-first
 }

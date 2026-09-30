@@ -24,7 +24,7 @@ import { mintIdentityToken, registerAgentForOnChain } from "@/lib/solana/platfor
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
-import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/mod-stubs";
+import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/reputation-chain";
 import { isAdminConfigError } from "../verify";
 
 /**
@@ -201,9 +201,21 @@ async function reconnectAgent(
                 await adminDb().collection("agents").doc(docId).update({
                     onChainTxHash: result.txHash,
                     onChainRegistered: true,
+                    onChainError: FieldValue.delete(),
                 });
+            } else {
+                // Chain call completed but returned nothing to write (e.g. sponsor
+                // wallet unfunded, program not deployed on this cluster) — make that
+                // visible on the doc instead of silently leaving onChainRegistered false.
+                await adminDb().collection("agents").doc(docId).update({
+                    onChainError: "On-chain registration skipped (no transaction signature returned)",
+                }).catch(() => {});
             }
-        }).catch(() => {});
+        }).catch(async (err) => {
+            await adminDb().collection("agents").doc(docId).update({
+                onChainError: err instanceof Error ? err.message : String(err),
+            }).catch(() => {});
+        });
     }
 
     // Mint soulbound reputation token if not yet minted (non-blocking)
@@ -418,9 +430,18 @@ export async function POST(request: NextRequest) {
                 await adminDb().collection("agents").doc(ref.id).update({
                     onChainTxHash: result.txHash,
                     onChainRegistered: true,
+                    onChainError: FieldValue.delete(),
                 });
+            } else {
+                await adminDb().collection("agents").doc(ref.id).update({
+                    onChainError: "On-chain registration skipped (no transaction signature returned)",
+                }).catch(() => {});
             }
-        }).catch(() => {});
+        }).catch(async (err) => {
+            await adminDb().collection("agents").doc(ref.id).update({
+                onChainError: err instanceof Error ? err.message : String(err),
+            }).catch(() => {});
+        });
 
         // Mint soulbound reputation token on Solana (non-blocking, platform-sponsored)
         mintAgentIdentityToken(agentAddress).then(async (result) => {
@@ -433,14 +454,13 @@ export async function POST(request: NextRequest) {
         }).catch(() => {});
 
         // Create private memory topic + deposit first memory backup (non-blocking)
-        // — no-op today: agent-guild-hedera mod removed, no replacement mod installed yet.
         (async () => {
             try {
                 const memoryConfig = await createPrivateMemoryTopic(ref.id, asn);
                 await adminDb().collection("agents").doc(ref.id).update({
-                    hederaMemoryTopicId: memoryConfig.memoryTopicId,
-                    hederaMemoryEnabled: true,
-                    hederaMemoryCreatedAt: new Date(),
+                    memoryTopicId: memoryConfig.memoryTopicId,
+                    memoryEnabled: true,
+                    memoryCreatedAt: new Date(),
                 });
                 // Deposit first memory: registration event
                 await postPrivateMemory(memoryConfig.memoryTopicId, asn, {

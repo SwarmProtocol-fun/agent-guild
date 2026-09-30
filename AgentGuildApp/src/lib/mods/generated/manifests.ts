@@ -3,10 +3,10 @@ import type { ModManifest } from "@agent-guild/sdk";
 
 export const MOD_MANIFESTS: ModManifest[] = [
   {
-    "id": "hello-world",
-    "name": "Hello World",
+    "id": "hyperliquid-trading",
+    "name": "Hyperliquid Trading",
     "version": "1.0.0",
-    "description": "Reference mod: a sidebar panel, an API route, and a core-event subscription.",
+    "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [
@@ -18,9 +18,73 @@ export const MOD_MANIFESTS: ModManifest[] = [
     },
     "panels": [
       {
-        "id": "hello",
-        "title": "Hello World",
-        "icon": "Sparkles"
+        "id": "trading",
+        "title": "Hyperliquid Trading",
+        "icon": "Zap"
+      }
+    ]
+  },
+  {
+    "id": "solana-settlement",
+    "name": "Solana Settlement",
+    "version": "1.0.0",
+    "description": "Settles completed agent jobs on Solana devnet — USDC payment plus an on-chain receipt hash via the Memo program.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [
+      "events:subscribe"
+    ],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "settlements",
+        "title": "Solana Settlement",
+        "icon": "Coins"
+      }
+    ]
+  },
+  {
+    "id": "tagem-wallet",
+    "name": "Tangem Wallet",
+    "version": "1.0.0",
+    "description": "Multi-chain balance dashboard, send, and receive for a Tangem hardware wallet connected via WalletConnect. Signing happens on the card itself — this mod never holds a key.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "wallet",
+        "title": "Tangem Wallet",
+        "icon": "DollarSign"
+      }
+    ]
+  },
+  {
+    "id": "tempo-settlement",
+    "name": "Tempo Settlement",
+    "version": "1.0.0",
+    "description": "Settles completed agent jobs on Tempo — stablecoin-native micropayment plus an on-chain receipt hash, no custom contract required.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [
+      "events:subscribe"
+    ],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "settlements",
+        "title": "Tempo Settlement",
+        "icon": "Zap"
       }
     ]
   }

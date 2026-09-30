@@ -1,32 +1,32 @@
 /**
  * Hook that returns the native currency symbol based on the
- * connected wallet's chain. When connected to Hedera → "HBAR",
- * otherwise → "$" (treated as USD display).
+ * connected wallet's chain. Defaults to "SOL" (Solana is the
+ * primary chain), otherwise → "$" (treated as USD display).
  */
 
 "use client";
 
 import { useWallet } from "@/lib/wallet";
-import { getCurrencySymbol } from "@/lib/chains";
+import { getCurrencySymbol, formatChainCurrency } from "@/lib/chains";
 
 export function useChainCurrency() {
   const chainId = useWallet().chainId ?? undefined;
   const symbol = getCurrencySymbol(chainId);
-  const isHedera = chainId === 295 || chainId === 296;
+  const isToken = symbol === "SOL" || symbol === "AVAX" || symbol === "FIL";
 
-  /** Format a numeric value with the correct currency prefix/suffix */
-  const fmt = (value: number | string, decimals = 2): string => {
+  /**
+   * Format a numeric value with the correct currency prefix/suffix.
+   * `decimals`, when passed, overrides the default precision (chain-derived
+   * for token amounts, 2dp for the fiat-style "$" display) — shared with
+   * market-item-card and crypto-checkout-dialog via `formatChainCurrency`
+   * so the same underlying value renders identically across pages.
+   */
+  const fmt = (value: number | string, decimals?: number): string => {
     const num = typeof value === "string" ? parseFloat(value) || 0 : value;
-    const formatted = num.toLocaleString(undefined, {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: decimals,
-    });
+    const formatted = formatChainCurrency(num, chainId, decimals ?? (isToken ? undefined : 2));
     // Token symbols go after the number; fiat-style uses $ prefix
-    if (symbol === "HBAR" || symbol === "AVAX" || symbol === "FIL") {
-      return `${formatted} ${symbol}`;
-    }
-    return `$${formatted}`;
+    return isToken ? `${formatted} ${symbol}` : `$${formatted}`;
   };
 
-  return { symbol, isHedera, chainId, fmt };
+  return { symbol, chainId, fmt };
 }

@@ -3,16 +3,15 @@
  *
  * Computes human-readable explanations for an agent's credit score.
  * Derives sub-scores, top drivers, movement summaries, and confidence
- * from the existing HCS event stream and Firestore data.
+ * from the on-chain score-event history (Solana memos) and Firestore data.
  *
  * Designed to work with the current basic scoring model and to be
  * enriched when PRD 2 (scoring engine) and PRD 4 (policy tiers) land.
  */
 
 import { adminDb } from "@/lib/firebase-admin";
-// [agent-guild-core] Hedera removed
 import type { ScoreEvent } from "@/lib/credit-types";
-const getReputationTopicId = (): string | null => null;
+import { getScoreEventHistoryForAsn } from "@/lib/solana/client";
 import {
     getTierForScore,
     getConfidenceInfo,
@@ -75,40 +74,21 @@ export interface ScoreHistoryPoint {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Mirror Node Helpers
+// On-Chain Event Helpers
 // ═══════════════════════════════════════════════════════════════
 
-// Dead unless a mod supplies a real getReputationTopicId() — see the stub note above.
-const MIRROR_NODE_URL = process.env.HEDERA_MIRROR_NODE_URL || "";
-
-interface MirrorMessage {
-    consensus_timestamp: string;
-    message: string;
-    sequence_number: number;
-}
-
-/** Fetch all HCS events for a given ASN. */
+/** Fetch all on-chain score-event memos for a given ASN. */
 async function fetchEventsForASN(asn: string, limit = 500): Promise<Array<{ event: ScoreEvent; timestamp: string }>> {
-    const topicId = getReputationTopicId();
-    if (!topicId) return [];
-
-    const url = `${MIRROR_NODE_URL}/api/v1/topics/${topicId.toString()}/messages?limit=${limit}&order=asc`;
-    const response = await fetch(url);
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const messages: MirrorMessage[] = data.messages || [];
+    const memos = await getScoreEventHistoryForAsn(asn, limit);
     const events: Array<{ event: ScoreEvent; timestamp: string }> = [];
 
-    for (const msg of messages) {
-        try {
-            const jsonStr = Buffer.from(msg.message, "base64").toString("utf-8");
-            const event = JSON.parse(jsonStr) as ScoreEvent;
-            if (event.asn === asn) {
-                events.push({ event, timestamp: msg.consensus_timestamp });
-            }
-        } catch {
-            continue;
+    for (const memo of memos) {
+        const event = memo.payload as ScoreEvent;
+        if (event && typeof event === "object" && event.asn === asn) {
+            events.push({
+                event,
+                timestamp: memo.blockTime ? new Date(memo.blockTime * 1000).toISOString() : "",
+            });
         }
     }
 
@@ -121,7 +101,7 @@ async function fetchEventsForASN(asn: string, limit = 500): Promise<Array<{ even
 
 /**
  * Generate a full score explanation for an agent.
- * Fetches current scores from Firestore and event history from HCS Mirror Node.
+ * Fetches current scores from Firestore and event history from on-chain memos.
  */
 export async function explainScore(agentId: string): Promise<ScoreExplanation> {
     // 1. Load agent from Firestore
@@ -135,7 +115,7 @@ export async function explainScore(agentId: string): Promise<ScoreExplanation> {
     const currentCredit = (agentData.creditScore as number) || CREDIT_SCORE_DEFAULT;
     const currentTrust = (agentData.trustScore as number) || TRUST_SCORE_DEFAULT;
 
-    // 2. Fetch HCS event history
+    // 2. Fetch on-chain event history
     const events = asn ? await fetchEventsForASN(asn) : [];
 
     // 3. Compute sub-scores from event aggregation
@@ -246,7 +226,7 @@ export async function explainScore(agentId: string): Promise<ScoreExplanation> {
 
 /**
  * Generate a daily time-series of credit/trust scores for charting.
- * Aggregates HCS events by day, computing running totals.
+ * Aggregates on-chain events by day, computing running totals.
  */
 export async function getScoreHistory(agentId: string, days = 30): Promise<ScoreHistoryPoint[]> {
     // Load agent for ASN and current scores
@@ -259,7 +239,7 @@ export async function getScoreHistory(agentId: string, days = 30): Promise<Score
     const asn = (agentData.asn as string) || "";
 
     if (!asn) {
-        // No ASN = no HCS history — return current score as flat line
+        // No ASN = no on-chain history — return current score as flat line
         const credit = (agentData.creditScore as number) || CREDIT_SCORE_DEFAULT;
         const trust = (agentData.trustScore as number) || TRUST_SCORE_DEFAULT;
         const today = new Date().toISOString().slice(0, 10);

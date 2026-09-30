@@ -77,6 +77,42 @@ pub fn post_task(
     Ok(())
 }
 
+// ── Expire task (reclaim escrow for an unclaimed, past-deadline task) ──
+//
+// `post_task` pulls `budget_lamports` into escrow immediately. Before this
+// instruction existed, a task nobody claimed before its `deadline` had no
+// way back to its poster — the escrow was locked on the TaskAccount PDA
+// forever (`TaskStatus::Expired` was declared but never reachable). This
+// only covers the unclaimed case: once a task is `Claimed`, it's on the
+// approve/dispute path instead, which is a separate, already-covered flow.
+
+#[derive(Accounts)]
+pub struct ExpireTask<'info> {
+    /// Must be the original poster — they're the only one who can be a
+    /// refund destination for their own escrow (mirrors the `address =`
+    /// checks on `ApproveDelivery`/`ResolveDispute`'s payout accounts).
+    #[account(mut, address = task_account.poster @ AgentGuildError::NotPoster)]
+    pub poster: Signer<'info>,
+    #[account(mut)]
+    pub task_account: Account<'info, TaskAccount>,
+}
+
+pub fn expire_task(ctx: Context<ExpireTask>) -> Result<()> {
+    {
+        let task = &ctx.accounts.task_account;
+        require!(task.status == TaskStatus::Open, AgentGuildError::TaskNotOpen);
+        let now = Clock::get()?.unix_timestamp;
+        require!(now > task.deadline, AgentGuildError::TaskNotExpired);
+    }
+
+    let budget = ctx.accounts.task_account.budget_lamports;
+    **ctx.accounts.task_account.to_account_info().try_borrow_mut_lamports()? -= budget;
+    **ctx.accounts.poster.to_account_info().try_borrow_mut_lamports()? += budget;
+
+    ctx.accounts.task_account.status = TaskStatus::Expired;
+    Ok(())
+}
+
 // ── Claim task ────────────────────────────────────────────────────────
 
 #[derive(Accounts)]
@@ -93,6 +129,12 @@ pub fn claim_task(ctx: Context<ClaimTask>) -> Result<()> {
         task.poster != ctx.accounts.claimant.key(),
         AgentGuildError::CannotClaimOwnTask
     );
+    // Once the deadline passes, an Open task can only go through
+    // `expire_task`, not be claimed — otherwise a claim that lands right
+    // after the deadline flips status to Claimed and blocks expiry forever,
+    // since expire_task only accepts TaskStatus::Open.
+    let now = Clock::get()?.unix_timestamp;
+    require!(now <= task.deadline, AgentGuildError::TaskDeadlinePassed);
 
     task.claimed_by = Some(ctx.accounts.claimant.key());
     task.status = TaskStatus::Claimed;

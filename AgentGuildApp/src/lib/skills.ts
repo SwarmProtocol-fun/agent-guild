@@ -40,7 +40,7 @@ export type SubscriptionPlan = "monthly" | "yearly" | "lifetime";
 export interface PricingTier {
     plan: SubscriptionPlan;
     price: number;
-    currency: string; // "USD" | "HBAR"
+    currency: string; // "USD" | "SOL"
 }
 
 export interface MarketPricing {
@@ -273,7 +273,7 @@ export interface AgentPricing {
     rentalUsage?: number;
     rentalPerformance?: number;
     hirePerTask?: number;
-    currency: "USD" | "HBAR";
+    currency: "USD" | "SOL";
 }
 
 /** Identity config — who the agent is (identity.json) */
@@ -422,9 +422,66 @@ export const COMPUTE_CATEGORIES = [
 // ═══════════════════════════════════════════════════════════════
 
 export const SKILL_REGISTRY: Skill[] = [
-    // ── Mods are loaded dynamically from the mod gateway registry ──
-    // Install paid mods from the marketplace at agent-guild.com
-    // See: loadRemoteModRegistry() below
+    // ── Mods ── (free, first-party — panels live in mods/<id>/, gated by
+    // ownership here so orgs start with none and add them from the market)
+    // Paid third-party mods load dynamically from the mod gateway registry —
+    // see: loadRemoteModRegistry() below.
+    {
+        id: "hyperliquid-trading",
+        name: "Hyperliquid Trading",
+        description: "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt.",
+        type: "mod",
+        source: "verified",
+        category: "Trading",
+        icon: "⚡",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["hyperliquid", "trading", "defi", "perps"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Hyperliquid Trading", href: "/mods/hyperliquid-trading/trading", iconName: "Zap" },
+    },
+    {
+        id: "solana-settlement",
+        name: "Solana Settlement",
+        description: "Settles completed agent jobs on Solana devnet — USDC payment plus an on-chain receipt hash via the Memo program.",
+        type: "mod",
+        source: "verified",
+        category: "Settlement",
+        icon: "◎",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["solana", "settlement", "usdc", "payments"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Solana Settlement", href: "/mods/solana-settlement/settlements", iconName: "Coins" },
+    },
+    {
+        id: "tempo-settlement",
+        name: "Tempo Settlement",
+        description: "Settles completed agent jobs on Tempo — stablecoin-native micropayment plus an on-chain receipt hash, no custom contract required.",
+        type: "mod",
+        source: "verified",
+        category: "Settlement",
+        icon: "⚡",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["tempo", "settlement", "stablecoin", "payments"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Tempo Settlement", href: "/mods/tempo-settlement/settlements", iconName: "Zap" },
+    },
+    {
+        id: "tagem-wallet",
+        name: "Tangem Wallet",
+        description: "Multi-chain balance dashboard, send, and receive for a Tangem hardware wallet connected via WalletConnect. Signing happens on the card itself — this mod never holds a key.",
+        type: "mod",
+        source: "verified",
+        category: "Wallet",
+        icon: "💳",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["wallet", "tangem", "hardware-wallet", "multi-chain"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Tangem Wallet", href: "/mods/tagem-wallet/wallet", iconName: "DollarSign" },
+    },
 
     // ── Plugins ── (free, included in core)
     {

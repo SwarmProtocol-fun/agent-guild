@@ -7,6 +7,8 @@
  * Both should be comma-separated wallet addresses in .env.
  */
 
+import { canonicalizeWalletAddress } from "./wallet-address";
+
 const envValue =
   typeof process !== "undefined"
     ? process.env.NEXT_PUBLIC_PLATFORM_ADMIN_WALLETS ||
@@ -17,12 +19,12 @@ const envValue =
 const PLATFORM_ADMIN_SET = new Set(
   envValue
     .split(",")
-    .map((a) => a.trim().toLowerCase())
+    .map((a) => canonicalizeWalletAddress(a.trim()))
     .filter(Boolean),
 );
 
 /** Check if a wallet address is a platform admin */
 export function isPlatformAdmin(address: string | null | undefined): boolean {
   if (!address) return false;
-  return PLATFORM_ADMIN_SET.has(address.toLowerCase());
+  return PLATFORM_ADMIN_SET.has(canonicalizeWalletAddress(address));
 }

@@ -75,6 +75,98 @@ export type AgentGuild = {
       "args": []
     },
     {
+      "name": "createPenaltyProposal",
+      "discriminator": [
+        144,
+        61,
+        85,
+        173,
+        131,
+        0,
+        49,
+        248
+      ],
+      "accounts": [
+        {
+          "name": "proposer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  117,
+                  105,
+                  108,
+                  100,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "agentAccount"
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "config.proposal_counter",
+                "account": "guildConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "asn",
+          "type": "string"
+        },
+        {
+          "name": "amount",
+          "type": "u16"
+        },
+        {
+          "name": "reason",
+          "type": "string"
+        }
+      ]
+    },
+    {
       "name": "deactivateAgent",
       "discriminator": [
         205,
@@ -182,6 +274,36 @@ export type AgentGuild = {
       "accounts": [
         {
           "name": "poster",
+          "signer": true
+        },
+        {
+          "name": "taskAccount",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "expireTask",
+      "discriminator": [
+        116,
+        94,
+        206,
+        205,
+        170,
+        51,
+        156,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "poster",
+          "docs": [
+            "Must be the original poster — they're the only one who can be a",
+            "refund destination for their own escrow (mirrors the `address =`",
+            "checks on `ApproveDelivery`/`ResolveDispute`'s payout accounts)."
+          ],
+          "writable": true,
           "signer": true
         },
         {
@@ -662,6 +784,82 @@ export type AgentGuild = {
       ]
     },
     {
+      "name": "resolvePenaltyProposal",
+      "discriminator": [
+        191,
+        186,
+        227,
+        32,
+        194,
+        145,
+        250,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  117,
+                  105,
+                  108,
+                  100,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true
+        },
+        {
+          "name": "agentAccount",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  103,
+                  101,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "proposal.agent",
+                "account": "penaltyProposal"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "approve",
+          "type": "bool"
+        }
+      ]
+    },
+    {
       "name": "setAgentAddress",
       "discriminator": [
         38,
@@ -985,6 +1183,19 @@ export type AgentGuild = {
       ]
     },
     {
+      "name": "penaltyProposal",
+      "discriminator": [
+        244,
+        150,
+        111,
+        49,
+        8,
+        206,
+        64,
+        117
+      ]
+    },
+    {
       "name": "taskAccount",
       "discriminator": [
         235,
@@ -1089,33 +1300,53 @@ export type AgentGuild = {
     },
     {
       "code": 6015,
+      "name": "taskNotExpired",
+      "msg": "Task deadline has not passed yet"
+    },
+    {
+      "code": 6016,
+      "name": "taskDeadlinePassed",
+      "msg": "Task deadline has already passed; call expire_task instead"
+    },
+    {
+      "code": 6017,
       "name": "cannotClaimOwnTask",
       "msg": "Cannot claim your own task"
     },
     {
-      "code": 6016,
+      "code": 6018,
       "name": "invalidSplitBps",
       "msg": "Agent split bps exceeds 10000"
     },
     {
-      "code": 6017,
+      "code": 6019,
       "name": "invalidDepositAmount",
       "msg": "Deposit amount must be greater than zero"
     },
     {
-      "code": 6018,
+      "code": 6020,
       "name": "insufficientTreasuryBalance",
       "msg": "Withdrawal amount exceeds available treasury balance"
     },
     {
-      "code": 6019,
+      "code": 6021,
       "name": "unauthorized",
       "msg": "Unauthorized: caller is not the program authority"
     },
     {
-      "code": 6020,
+      "code": 6022,
       "name": "overflow",
       "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6023,
+      "name": "reasonTooLong",
+      "msg": "Reason exceeds maximum length"
+    },
+    {
+      "code": 6024,
+      "name": "proposalNotPending",
+      "msg": "Proposal is not pending"
     }
   ],
   "types": [
@@ -1142,6 +1373,20 @@ export type AgentGuild = {
           },
           {
             "name": "feeRateBps",
+            "docs": [
+              "Validated (<= 10_000) and stored at registration, but currently",
+              "UNUSED by task_board's payout logic — approve_delivery and",
+              "resolve_dispute send the full budget/split to the claimant with no",
+              "fee deducted. This mirrors the original Solidity",
+              "AgentGuildAgentRegistryLink.feeRate, which was also stored and never",
+              "consumed by AgentGuildTaskBoardLink/AgentGuildTreasuryLink — so this",
+              "isn't a Solana-port regression, it's a field reserved for a fee",
+              "mechanism that was never implemented in either codebase. Don't wire",
+              "in a fee deduction here without first deciding, as a product",
+              "question, who collects it (treasury vs. per-agent), whether",
+              "resolve_dispute's split is fee-exempt, and how existing registered",
+              "agents' already-set fee_rate_bps should be treated on rollout."
+            ],
             "type": "u16"
           },
           {
@@ -1200,8 +1445,9 @@ export type AgentGuild = {
       "docs": [
         "Global program config — replaces OpenZeppelin `Ownable` from the Solidity",
         "contracts. `authority` gates every admin-only instruction (registerAgentFor,",
-        "updateCredit, resolveDispute, withdraw). `task_counter` is the monotonically",
-        "increasing id used to seed each `TaskAccount` PDA."
+        "updateCredit, resolveDispute, withdraw, resolvePenaltyProposal). `task_counter`",
+        "and `proposal_counter` are monotonically increasing ids seeding `TaskAccount`",
+        "and `PenaltyProposal` PDAs respectively."
       ],
       "type": {
         "kind": "struct",
@@ -1215,8 +1461,89 @@ export type AgentGuild = {
             "type": "u64"
           },
           {
+            "name": "proposalCounter",
+            "type": "u64"
+          },
+          {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "penaltyProposal",
+      "docs": [
+        "A penalty-governance proposal — replaces the Hedera governance/slashing",
+        "mods. Single-authority approval (matches how the app is already",
+        "admin-driven elsewhere, e.g. `requirePlatformAdmin`), not a multi-sig vote.",
+        "Approved proposals ARE the on-chain slashing history for an agent —",
+        "`getAgentSlashingHistory` reads them back by filtering on `agent` +",
+        "`status == Approved`, no separate history account needed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "proposalId",
+            "type": "u64"
+          },
+          {
+            "name": "asn",
+            "type": "string"
+          },
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u16"
+          },
+          {
+            "name": "reason",
+            "type": "string"
+          },
+          {
+            "name": "proposer",
+            "type": "pubkey"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "proposalStatus"
+              }
+            }
+          },
+          {
+            "name": "createdAt",
+            "type": "i64"
+          },
+          {
+            "name": "resolvedAt",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "proposalStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "pending"
+          },
+          {
+            "name": "approved"
+          },
+          {
+            "name": "rejected"
           }
         ]
       }

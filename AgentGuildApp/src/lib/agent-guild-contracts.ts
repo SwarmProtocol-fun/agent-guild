@@ -188,12 +188,12 @@ export const STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; b
 /** Shorten an address (backwards compat) */
 export const shortAddr = shortAddress;
 
-/** HashScan link for a contract (backwards compat) */
+/** Explorer link for a contract (backwards compat) */
 export function explorerContract(addr: string): string {
   return getExplorerContractUrl(addr);
 }
 
-/** HashScan link for a transaction (backwards compat) */
+/** Explorer link for a transaction (backwards compat) */
 export function explorerTx(hash: string): string {
   return getExplorerTxUrl(hash);
 }

@@ -10,7 +10,7 @@
  * API key query params: agentId, apiKey
  */
 import { NextRequest } from "next/server";
-import { verifyAgentRequest, isTimestampFresh, unauthorized, configUnavailable, isAdminConfigError } from "../verify";
+import { verifyAgentRequestDetailed, isTimestampFresh, unauthorized, unauthorizedFor, configUnavailable, isAdminConfigError } from "../verify";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
@@ -60,19 +60,18 @@ export async function POST(req: NextRequest) {
     if (agent && sig && ts) {
         const tsNum = parseInt(ts, 10);
         if (!isTimestampFresh(tsNum)) {
-            return unauthorized("Stale timestamp");
+            return unauthorized("Stale timestamp", "STALE_TIMESTAMP");
         }
 
         const message = `POST:/v1/report-skills:${ts}`;
-        let verified;
         try {
-            verified = await verifyAgentRequest(agent, message, sig);
+            const result = await verifyAgentRequestDetailed(agent, message, sig);
+            if (!result.ok) return unauthorizedFor(result.reason);
+            agentId = result.agentId;
         } catch (err) {
             if (isAdminConfigError(err)) return configUnavailable();
             return unauthorized();
         }
-        if (!verified) return unauthorized();
-        agentId = verified.agentId;
     } else {
         // Fallback: API key auth
         const paramAgentId = url.searchParams.get("agentId");
@@ -83,16 +82,29 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-        await adminDb().collection("agents").doc(agentId!).update({
+        const agentRef = adminDb().collection("agents").doc(agentId!);
+        await agentRef.update({
             reportedSkills: skills,
             ...(bio ? { bio } : {}),
             lastSeen: FieldValue.serverTimestamp(),
         });
 
+        // The heartbeat is the one signed call the CLI's daemon and `status`
+        // make on every tick — piggyback the agent's current on-chain state
+        // on it so `agent-guild status` can show a live txHash/error without
+        // a second round trip (registerOnChain runs non-blocking after
+        // register returns, so its result isn't known at register time).
+        const agentSnap = await agentRef.get();
+        const agentData = agentSnap.data();
+
         return Response.json({
             ok: true,
             agentId,
             reportedSkills: skills.length,
+            asn: agentData?.asn ?? null,
+            onChainRegistered: agentData?.onChainRegistered === true,
+            onChainTxHash: agentData?.onChainTxHash ?? null,
+            onChainError: agentData?.onChainError ?? null,
         });
     } catch (err) {
         console.error("v1/report-skills error:", err);

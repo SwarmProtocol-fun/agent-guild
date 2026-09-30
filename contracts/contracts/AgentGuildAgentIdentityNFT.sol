@@ -15,8 +15,6 @@ import "@openzeppelin/contracts/utils/Strings.sol";
  * - Immutable ASN (Agent Social Number) identifier
  * - Visual badge tier (Bronze/Silver/Gold/Platinum)
  * - On-chain verification of agent reputation
- *
- * For Hedera Hackathon 2026 — AI & Agents Track + OpenClaw Bounty
  */
 contract AgentGuildAgentIdentityNFT is ERC721, Ownable {
     using Strings for uint256;

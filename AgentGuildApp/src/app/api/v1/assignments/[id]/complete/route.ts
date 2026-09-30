@@ -7,7 +7,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { completeAssignment, getAgentWorkMode } from "@/lib/assignments";
+import { completeAssignment, getAgentWorkMode, AssignmentError, assignmentErrorStatus } from "@/lib/assignments";
 
 export async function PATCH(
   request: NextRequest,
@@ -67,12 +67,8 @@ export async function PATCH(
   } catch (err: any) {
     console.error("Complete assignment error:", err);
 
-    // Handle specific errors
-    if (err.message?.includes("not found")) {
-      return Response.json({ error: err.message }, { status: 404 });
-    }
-    if (err.message?.includes("not the recipient") || err.message?.includes("not in progress")) {
-      return Response.json({ error: err.message }, { status: 403 });
+    if (err instanceof AssignmentError) {
+      return Response.json({ error: err.message, code: err.code }, { status: assignmentErrorStatus(err.code) });
     }
 
     return Response.json(

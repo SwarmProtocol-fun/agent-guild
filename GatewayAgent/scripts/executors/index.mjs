@@ -11,6 +11,7 @@ import * as shellExecutor from "./shell.mjs";
 import * as dockerExecutor from "./docker.mjs";
 import * as comfyuiExecutor from "./comfyui.mjs";
 import * as workflowExecutor from "./workflow.mjs";
+import * as hyperliquidExecutor from "./hyperliquid.mjs";
 
 /** Built-in executor registry */
 const executors = new Map([
@@ -32,6 +33,7 @@ const executors = new Map([
   }],
   ["comfyui", comfyuiExecutor],
   ["workflow", workflowExecutor],
+  ["hyperliquid", hyperliquidExecutor],
 ]);
 
 /**

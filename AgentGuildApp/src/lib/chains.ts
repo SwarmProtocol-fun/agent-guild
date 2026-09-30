@@ -9,7 +9,7 @@
 // Types
 // ═══════════════════════════════════════════════════════════════
 
-export type ChainKey = "ethereum" | "avalanche" | "base" | "filecoin" | "sepolia" | "solana" | "baseSepolia";
+export type ChainKey = "ethereum" | "avalanche" | "base" | "filecoin" | "sepolia" | "solana" | "baseSepolia" | "tempo" | "hyperliquid";
 
 export interface ChainConfig {
     /** Internal key */
@@ -50,6 +50,8 @@ export interface ChainConfig {
         agentWallet?: string;
         /** Billing registry contract address */
         billingRegistry?: string;
+        /** Agent identity NFT contract address */
+        agentIdentityNFT?: string;
     };
     /** Whether this chain is active in the UI */
     enabled: boolean;
@@ -220,6 +222,56 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         paymentEnabled: true,
         logo: "/chains/solana.svg",
     },
+
+    tempo: {
+        key: "tempo",
+        name: "Tempo Testnet (Moderato)",
+        chainId: 42431,
+        rpc: process.env.TEMPO_RPC_URL || "https://rpc.moderato.tempo.xyz",
+        // Tempo pays gas in USD stablecoins rather than a native token — this
+        // field is kept for ChainConfig shape parity, not used for fees.
+        nativeCurrency: { name: "Tempo", symbol: "TEMPO", decimals: 18 },
+        explorer: {
+            name: "Tempo Explorer",
+            baseUrl: "https://explore.testnet.tempo.xyz",
+            txUrl: (h) => `https://explore.testnet.tempo.xyz/tx/${h}`,
+            addressUrl: (a) => `https://explore.testnet.tempo.xyz/address/${a}`,
+            contractUrl: (a) => `https://explore.testnet.tempo.xyz/address/${a}`,
+        },
+        contracts: {
+            treasury: process.env.TEMPO_TREASURY_ADDRESS,
+            // No AgentRegistry deployed on Tempo yet — settlement falls back
+            // to the calldata-memo path (see settlement/evm-adapter.ts).
+            usdc: process.env.TEMPO_USDC_ADDRESS,
+        },
+        enabled: true,
+        paymentEnabled: true,
+        logo: "/chains/tempo.svg",
+    },
+
+    hyperliquid: {
+        key: "hyperliquid",
+        name: "HyperEVM Testnet",
+        // Best-known HyperEVM testnet chain id at time of writing (998; mainnet
+        // is 999) — confirm against Hyperliquid's current docs before deploying.
+        chainId: 998,
+        rpc: process.env.HYPERLIQUID_RPC_URL || "https://rpc.hyperliquid-testnet.xyz/evm",
+        nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
+        explorer: {
+            name: "Purrsec",
+            baseUrl: "https://testnet.purrsec.com",
+            txUrl: (h) => `https://testnet.purrsec.com/tx/${h}`,
+            addressUrl: (a) => `https://testnet.purrsec.com/address/${a}`,
+            contractUrl: (a) => `https://testnet.purrsec.com/address/${a}`,
+        },
+        contracts: {
+            treasury: process.env.HYPERLIQUID_TREASURY_ADDRESS,
+            agentIdentityNFT: process.env.HYPERLIQUID_AGENT_IDENTITY_NFT,
+        },
+        enabled: true,
+        paymentEnabled: false,
+        logo: "/chains/hyperliquid.svg",
+    },
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -255,6 +307,29 @@ export function getCurrencyDecimals(chainId?: number): number {
 export function toNative(rawAmount: bigint | number, chainId?: number): number {
     const decimals = getCurrencyDecimals(chainId);
     return Number(rawAmount) / Math.pow(10, decimals);
+}
+
+/**
+ * Format a human-readable (already-native, not raw/lamports) currency
+ * amount for display, sized to the chain's real precision instead of a
+ * flat hardcoded value.
+ *
+ * `maxDecimals`, when given, overrides the chain-derived precision — useful
+ * for fiat-style display (2dp) where the value isn't actually a chain's
+ * native token. Left unset, precision is `getCurrencyDecimals(chainId)`
+ * capped at 4: full on-chain precision (9 for SOL, 18 for ETH) is raw-unit
+ * precision, not a useful display width.
+ *
+ * This is the single source of truth for "how many decimal places" — the
+ * three call sites that used to each hardcode their own (useChainCurrency,
+ * market-item-card, and previously a flat 2dp everywhere) now share it.
+ */
+export function formatChainCurrency(amount: number, chainId?: number, maxDecimals?: number): string {
+    const decimals = maxDecimals ?? Math.min(getCurrencyDecimals(chainId), 4);
+    return amount.toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: decimals,
+    });
 }
 
 /** Get explorer TX link for a chain */

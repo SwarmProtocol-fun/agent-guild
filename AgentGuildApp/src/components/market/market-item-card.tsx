@@ -12,10 +12,20 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { Skill, OwnedItem, MarketSubscription } from "@/lib/market/types";
 import { MOD_REGISTRY } from "@/lib/skills";
+import { CHAIN_CONFIGS, formatChainCurrency } from "@/lib/chains";
 
+/**
+ * Number formatting is delegated to the same `formatChainCurrency` shared
+ * with useChainCurrency (Agent-Guilds/Agent-Map pages) so a given amount
+ * doesn't render with different precision depending on which page shows
+ * it \u2014 only the glyph choice (\u25CE vs $) stays local to this card.
+ */
 function formatPrice(price: number, currency: string = "USD"): string {
-    const symbol = currency === "HBAR" ? "\u210F" : "$";
-    return price % 1 === 0 ? `${symbol}${price}` : `${symbol}${price.toFixed(2)}`;
+    const isSol = currency === "SOL";
+    const formatted = isSol
+        ? formatChainCurrency(price, CHAIN_CONFIGS.solana.chainId)
+        : formatChainCurrency(price, undefined, 2);
+    return `${isSol ? "\u25CE" : "$"}${formatted}`;
 }
 
 function getCheapestLabel(item: Skill): string | null {

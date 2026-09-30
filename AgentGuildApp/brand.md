@@ -22,7 +22,7 @@ This app has a runtime "skin" system (`src/contexts/SkinContext.tsx` + `src/app/
 
 - Primary brand actions, focus rings, active/glow states → violet (`--primary`, `text-amber-500` etc. via the remap).
 - Secondary accent / gradient partner / connectors / highlights → blue `#27A0FD`.
-- Don't touch the other skins' amber remaps (hedera, futuristic, jrpg, pokemon, mecha, etc.) — those are separate opt-in themes, unrelated to brand identity.
+- Don't touch the other skins' amber remaps (futuristic, jrpg, pokemon, mecha, etc.) — those are separate opt-in themes, unrelated to brand identity.
 - Genuine semantic colors (success green, destructive red, chart "warning" hue in most other skins) are unaffected by this change.
 
 ## Assets

@@ -8,7 +8,17 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/w
 import { createMint, freezeAccount, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import bs58 from "bs58";
 
-import { agentPda, getConnection, getProgram, registerAgentFor, updateCredit, type SolanaWallet } from "./client";
+import {
+    agentPda,
+    createPenaltyProposal,
+    getConnection,
+    getProgram,
+    getSlashingHistoryByAsn,
+    postEventMemo,
+    registerAgentFor,
+    updateCredit,
+    type SolanaWallet,
+} from "./client";
 
 let cachedKeypair: Keypair | null | undefined;
 
@@ -108,6 +118,76 @@ export async function mintIdentityToken(agentAddr: string): Promise<{ mint?: str
     } catch (err) {
         console.error("mintIdentityToken (soulbound SPL token) failed:", err);
         return {};
+    }
+}
+
+/**
+ * Posts a score event as an on-chain memo, tagged to the agent's registry
+ * PDA — replaces the old Hedera HCS score-event forwarding. Returns
+ * `{txSignature: undefined}` (never throws) when there's no platform
+ * keypair or agent address, matching the original "warn and return" stub
+ * behavior for the score-emitter functions.
+ */
+export async function emitScoreEventOnChain(
+    agentAddr: string,
+    payload: unknown,
+): Promise<{ txSignature?: string }> {
+    const keypair = getPlatformKeypair();
+    if (!keypair || !agentAddr) return {};
+
+    try {
+        const wallet = platformWallet(keypair);
+        const agentWallet = new PublicKey(agentAddr);
+        const txSignature = await postEventMemo(wallet, agentWallet, payload);
+        return { txSignature };
+    } catch (err) {
+        console.error("postEventMemo on Solana failed:", err);
+        return {};
+    }
+}
+
+/**
+ * Creates a real on-chain penalty-governance proposal — throws (never
+ * fabricates an id) if the platform keypair isn't configured, matching the
+ * original stub's contract.
+ */
+export async function createPenaltyProposalOnChain(args: {
+    agentAddress: string;
+    asn: string;
+    amount: number;
+    reason: string;
+}): Promise<string> {
+    const keypair = getPlatformKeypair();
+    if (!keypair) throw new Error("SOLANA_PLATFORM_KEYPAIR not configured — cannot create penalty proposal");
+
+    const wallet = platformWallet(keypair);
+    const agentWallet = new PublicKey(args.agentAddress);
+    const proposal = await createPenaltyProposal(wallet, {
+        agentWallet,
+        asn: args.asn,
+        amount: args.amount,
+        reason: args.reason,
+    });
+    return proposal.toBase58();
+}
+
+/** Approved penalty proposals for an ASN — the on-chain slashing history. */
+export async function getAgentSlashingHistoryOnChain(asn: string): Promise<unknown[]> {
+    try {
+        const history = await getSlashingHistoryByAsn(asn);
+        return history.map((p) => ({
+            proposalId: p.account.proposalId.toString(),
+            asn: p.account.asn,
+            agent: p.account.agent.toBase58(),
+            amount: p.account.amount,
+            reason: p.account.reason,
+            proposer: p.account.proposer.toBase58(),
+            resolvedAt: p.account.resolvedAt.toNumber(),
+            proposalAddress: p.publicKey.toBase58(),
+        }));
+    } catch (err) {
+        console.error("getSlashingHistoryByAsn on Solana failed:", err);
+        return [];
     }
 }
 

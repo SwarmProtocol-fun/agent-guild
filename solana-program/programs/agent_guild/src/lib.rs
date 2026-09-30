@@ -1,11 +1,13 @@
 use anchor_lang::prelude::*;
 
 pub mod errors;
+pub mod governance;
 pub mod registry;
 pub mod state;
 pub mod task_board;
 pub mod treasury;
 
+use governance::*;
 use registry::*;
 use task_board::*;
 use treasury::*;
@@ -74,6 +76,10 @@ pub mod agent_guild {
         task_board::post_task(ctx, title, description, required_skills, deadline, budget_lamports)
     }
 
+    pub fn expire_task(ctx: Context<ExpireTask>) -> Result<()> {
+        task_board::expire_task(ctx)
+    }
+
     pub fn claim_task(ctx: Context<ClaimTask>) -> Result<()> {
         task_board::claim_task(ctx)
     }
@@ -92,6 +98,21 @@ pub mod agent_guild {
 
     pub fn resolve_dispute(ctx: Context<ResolveDispute>, agent_bps: u16) -> Result<()> {
         task_board::resolve_dispute(ctx, agent_bps)
+    }
+
+    // ── Governance / slashing ─────────────────────────────────────
+
+    pub fn create_penalty_proposal(
+        ctx: Context<CreatePenaltyProposal>,
+        asn: String,
+        amount: u16,
+        reason: String,
+    ) -> Result<()> {
+        governance::create_penalty_proposal(ctx, asn, amount, reason)
+    }
+
+    pub fn resolve_penalty_proposal(ctx: Context<ResolvePenaltyProposal>, approve: bool) -> Result<()> {
+        governance::resolve_penalty_proposal(ctx, approve)
     }
 
     // ── Treasury ──────────────────────────────────────────────────

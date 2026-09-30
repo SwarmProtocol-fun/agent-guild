@@ -22,20 +22,20 @@ describe("isTimestampFresh", () => {
 });
 
 describe("checkAndRecordNonce", () => {
-  it("accepts a new nonce", () => {
+  it("accepts a new nonce", async () => {
     const sig = "unique-sig-" + Math.random();
-    expect(checkAndRecordNonce(sig)).toBe(true);
+    expect(await checkAndRecordNonce(sig)).toBe(true);
   });
 
-  it("rejects a replayed nonce", () => {
+  it("rejects a replayed nonce", async () => {
     const sig = "replay-test-sig-" + Math.random();
-    expect(checkAndRecordNonce(sig)).toBe(true);
-    expect(checkAndRecordNonce(sig)).toBe(false); // replay
+    expect(await checkAndRecordNonce(sig)).toBe(true);
+    expect(await checkAndRecordNonce(sig)).toBe(false); // replay
   });
 
-  it("accepts different signatures", () => {
-    expect(checkAndRecordNonce("sig-a-" + Math.random())).toBe(true);
-    expect(checkAndRecordNonce("sig-b-" + Math.random())).toBe(true);
-    expect(checkAndRecordNonce("sig-c-" + Math.random())).toBe(true);
+  it("accepts different signatures", async () => {
+    expect(await checkAndRecordNonce("sig-a-" + Math.random())).toBe(true);
+    expect(await checkAndRecordNonce("sig-b-" + Math.random())).toBe(true);
+    expect(await checkAndRecordNonce("sig-c-" + Math.random())).toBe(true);
   });
 });

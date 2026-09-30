@@ -17,6 +17,7 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { authenticateAgent, type AuthResult } from "@/app/api/webhooks/auth";
 import { getOrganization, type Organization } from "@/lib/firestore";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import crypto from "crypto";
 
 // ─── Standard error responses ────────────────────────────
@@ -142,7 +143,8 @@ export interface OrgAuthResult {
 
 /** Extract wallet address from request headers. */
 export function getWalletAddress(req: NextRequest): string | null {
-  return req.headers.get("x-wallet-address")?.toLowerCase() || null;
+  const raw = req.headers.get("x-wallet-address");
+  return raw ? canonicalizeWalletAddress(raw) : null;
 }
 
 /**
@@ -163,8 +165,8 @@ export async function requireOrgMember(
     return { ok: false, error: "Organization not found", status: 404 };
   }
 
-  const isOwner = org.ownerAddress?.toLowerCase() === wallet;
-  const isMember = org.members?.some((m) => m.toLowerCase() === wallet);
+  const isOwner = org.ownerAddress != null && canonicalizeWalletAddress(org.ownerAddress) === wallet;
+  const isMember = org.members?.some((m) => canonicalizeWalletAddress(m) === wallet);
 
   if (!isOwner && !isMember) {
     return { ok: false, error: "Not a member of this organization", status: 403 };
@@ -191,7 +193,7 @@ export async function requireOrgAdmin(
     return { ok: false, error: "Organization not found", status: 404 };
   }
 
-  if (org.ownerAddress?.toLowerCase() !== wallet) {
+  if (org.ownerAddress == null || canonicalizeWalletAddress(org.ownerAddress) !== wallet) {
     return { ok: false, error: "Only the organization owner can perform this action", status: 403 };
   }
 

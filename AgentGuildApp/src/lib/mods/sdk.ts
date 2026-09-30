@@ -86,6 +86,14 @@ export interface RouteContext extends ModContext {
   params: Record<string, string>;
   /** Null only on routes declared `public: true`. */
   session: ModSession | null;
+  /**
+   * Set when the request carries a verified agent signature (not the
+   * session's human operator). Not wired up by the runtime yet — always
+   * undefined today — but declared so mods can write `ctx.agent?.agentId
+   * ?? body.agentId` now and get the verified value for free once agent
+   * signature verification lands, instead of trusting the body outright.
+   */
+  agent?: { agentId: string; orgId: string } | null;
 }
 
 /** Return a Response, or any JSON-serialisable value (sent as 200 JSON). */

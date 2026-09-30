@@ -37,6 +37,21 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  // PRD-GROK-JOIN FR-1: GET /agent-guild.mjs must serve the Connect CLI
+  // (a static copy of AgentGuildConnect/scripts/agent-guild.mjs under
+  // public/) with an explicit script content-type and a short cache TTL —
+  // Next's default static-asset headers don't guarantee either.
+  async headers() {
+    return [
+      {
+        source: "/agent-guild.mjs",
+        headers: [
+          { key: "Content-Type", value: "text/javascript; charset=utf-8" },
+          { key: "Cache-Control", value: "public, max-age=60" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

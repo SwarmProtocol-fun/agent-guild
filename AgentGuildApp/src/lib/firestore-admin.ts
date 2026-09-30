@@ -28,6 +28,7 @@ import type {
   ReportedSkill,
 } from "./firestore";
 import { estimateCost, type UsageRecord } from "./usage";
+import { canonicalizeWalletAddress } from "./wallet-address";
 import type { ActivityEvent } from "./activity";
 import { validateSOUL } from "./soul";
 import { parseCronToHuman, type CronJob, type CronJobUpdateInput } from "./cron";
@@ -56,8 +57,8 @@ import {
 export async function getOrganizationsByWalletAdmin(
   walletAddress: string
 ): Promise<Organization[]> {
-  const lower = walletAddress.toLowerCase();
-  const variants = new Set([walletAddress, lower]);
+  const canonical = canonicalizeWalletAddress(walletAddress);
+  const variants = new Set([walletAddress, canonical]);
 
   try {
     const { ethers } = await import("ethers");
@@ -697,6 +698,24 @@ export async function getAgentInviteByCode(code: string): Promise<AgentInvite | 
   if (snap.empty) return null;
   const doc = snap.docs[0];
   return { id: doc.id, ...doc.data() } as AgentInvite;
+}
+
+/**
+ * Look up an organization by its human-member invite code
+ * (organizations.inviteCode — see the comment above AgentInvite). Used only
+ * to tell an operator who pasted the wrong kind of code apart: an org code
+ * 404s at /api/v1/invite/:code because that route resolves agent invites,
+ * not org invites.
+ */
+export async function getOrganizationByInviteCode(code: string): Promise<Organization | null> {
+  const snap = await adminDb()
+    .collection("organizations")
+    .where("inviteCode", "==", code.toUpperCase())
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  return { id: doc.id, ...doc.data() } as Organization;
 }
 
 // ─── Agents ─────────────────────────────────────────────

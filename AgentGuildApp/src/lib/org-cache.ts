@@ -4,6 +4,7 @@
  */
 
 import type { Organization } from "./firestore";
+import { canonicalizeWalletAddress } from "./wallet-address";
 
 interface CacheEntry {
   orgs: Organization[];
@@ -20,7 +21,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
  * Returns null if not in cache or expired
  */
 export function getCachedOrgs(address: string): Organization[] | null {
-  const key = address.toLowerCase();
+  const key = canonicalizeWalletAddress(address);
   const entry = cache.get(key);
 
   if (!entry) return null;
@@ -38,7 +39,7 @@ export function getCachedOrgs(address: string): Organization[] | null {
  * Cache organizations for a wallet address
  */
 export function cacheOrgs(address: string, orgs: Organization[]): void {
-  const key = address.toLowerCase();
+  const key = canonicalizeWalletAddress(address);
   cache.set(key, {
     orgs,
     timestamp: Date.now(),
@@ -49,7 +50,7 @@ export function cacheOrgs(address: string, orgs: Organization[]): void {
  * Clear cached entry for a specific address
  */
 export function clearCachedOrgs(address: string): void {
-  cache.delete(address.toLowerCase());
+  cache.delete(canonicalizeWalletAddress(address));
 }
 
 /**

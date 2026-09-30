@@ -22,7 +22,9 @@ export async function POST(req: Request) {
     const domain = getDomainFromRequest(req);
     const result = generateSiwePayload({
       address,
-      chainId: body.chainId ? Number(body.chainId) : undefined,
+      // `!== undefined` (not a truthiness check) — chainId 0 is Solana's
+      // non-EVM sentinel and must survive this, not collapse to "omitted".
+      chainId: body.chainId !== undefined ? Number(body.chainId) : undefined,
       domain,
       uri: getOriginFromRequest(req, domain),
     });

@@ -103,7 +103,7 @@ export default function OnboardingPage() {
       const apiKeyHash = await hashApiKeyClient(apiKey);
       const asn = generateASN();
 
-      await createAgent({
+      const newAgentId = await createAgent({
         orgId: currentOrg.id,
         name: agentName.trim(),
         type: agentType,
@@ -111,7 +111,7 @@ export default function OnboardingPage() {
         capabilities: [getTypeDescription(agentType)],
         status: 'offline',
         projectIds: [],
-        apiKey: apiKeyHash,
+        apiKeyHash,
         asn,
         creditScore: 680,
         trustScore: 50,
@@ -122,7 +122,11 @@ export default function OnboardingPage() {
       });
 
       await refreshAgentCount();
-      router.push('/dashboard');
+      // Route to the Agents page and auto-open the CLI setup dialog for the
+      // agent we just created, instead of silently dropping the user on an
+      // empty dashboard (the copy above promises the setup command "right
+      // after this").
+      router.push(`/agents?setup=${newAgentId}`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to register agent';
       setError(message);
@@ -146,10 +150,12 @@ export default function OnboardingPage() {
       <main className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-6 pb-20">
         <Card className="w-full max-w-lg border-amber-500/30">
           <CardHeader className="text-center pb-4">
+            <p className="text-xs font-medium text-amber-500 tracking-wide mb-2">STEP 2 OF 2</p>
             <div className="text-5xl mb-4">🤖</div>
             <CardTitle className="text-2xl">Register Your First Agent</CardTitle>
             <CardDescription>
-              {currentOrg?.name ? `${currentOrg.name} is ready — a` : 'A'}n agent is required before you can enter the workspace.
+              {currentOrg?.name ? `${currentOrg.name} is ready. ` : ''}An agent is the AI worker that does the work in your
+              org — it picks up tasks, runs your workflows, and reports back. You need at least one to enter the workspace.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -208,7 +214,7 @@ export default function OnboardingPage() {
                   {registering ? 'Registering...' : 'Register Agent'}
                 </Button>
                 <p className="text-xs text-muted-foreground text-center">
-                  You&apos;ll get your API key and CLI setup command on the Agents page right after this.
+                  Next you&apos;ll land on the Agents page with everything set up — connecting a CLI is optional and can be done anytime.
                 </p>
               </div>
             )}
@@ -216,9 +222,9 @@ export default function OnboardingPage() {
             <div className="flex items-center justify-center gap-4 mt-8 pt-4 border-t border-white/5">
               <button
                 onClick={() => { disconnectWallet(); router.push('/'); }}
-                className="text-xs text-red-500/70 hover:text-red-500 transition-colors"
+                className="text-xs text-muted-foreground/70 hover:text-red-500 transition-colors"
               >
-                Disconnect Wallet
+                Wrong account? Disconnect wallet
               </button>
             </div>
           </CardContent>
@@ -231,10 +237,11 @@ export default function OnboardingPage() {
     <main className="min-h-[calc(100vh-4rem)] flex items-center justify-center p-6 pb-20">
       <Card className="w-full max-w-lg border-amber-500/30">
         <CardHeader className="text-center pb-4">
+          <p className="text-xs font-medium text-amber-500 tracking-wide mb-2">STEP 1 OF 2</p>
           <div className="text-5xl mb-4">⚡</div>
           <CardTitle className="text-2xl">Setup Your Workspace</CardTitle>
           <CardDescription>
-            Join an existing team or create a new organization.
+            Join an existing team or create a new organization. Next, you&apos;ll register your first AI agent.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -193,7 +193,7 @@ export default function ProjectsPage() {
       </div>
 
       {error && (
-        <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600">
+        <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
           {error}
         </div>
       )}

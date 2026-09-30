@@ -10,7 +10,7 @@ import {
 import type { Skill, SubscriptionPlan } from "@/lib/market/types";
 
 function formatPrice(price: number, currency: string = "USD"): string {
-    const symbol = currency === "HBAR" ? "\u210F" : "$";
+    const symbol = currency === "SOL" ? "\u25CE" : "$";
     return price % 1 === 0 ? `${symbol}${price}` : `${symbol}${price.toFixed(2)}`;
 }
 
@@ -66,13 +66,13 @@ export function SubscribeDialog({ open, onOpenChange, item, busyId, onSubscribe 
                                         </div>
                                     </div>
                                     <div className="flex gap-2">
-                                        {tier.currency === "HBAR" ? (
+                                        {tier.currency === "SOL" ? (
                                             <button
                                                 onClick={() => onSubscribe(subKey, tier.plan, "crypto")}
                                                 disabled={!!busyId}
                                                 className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-xs font-medium transition-colors disabled:opacity-50"
                                             >
-                                                <Zap className="h-3.5 w-3.5" /> Pay with HBAR
+                                                <Zap className="h-3.5 w-3.5" /> Pay with SOL
                                             </button>
                                         ) : (
                                             <>

@@ -34,7 +34,8 @@
  */
 
 import crypto from "node:crypto";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -101,8 +102,39 @@ function setIdentityPaths(dir, { legacy = false } = {}) {
   STATE_PATH = join(dir, "state.json");
 }
 
-/** For commands that operate on "the" already-registered identity (check, status, send, daemon, ...). */
+/**
+ * Resolve an `--as` value (or `agent-guild use <value>`) to an agentId.
+ * Accepts either an agentId directly (a directory already exists for it) or
+ * an agentName, resolved by scanning the index for the first org+name entry
+ * whose name matches. Returns null if nothing matches.
+ */
+function resolveIdentityByNameOrId(value) {
+  if (existsSync(identityDir(value))) return value;
+  const index = loadIdentityIndex();
+  for (const [key, agentId] of Object.entries(index)) {
+    const name = key.slice(key.indexOf(":") + 1);
+    if (name === value) return agentId;
+  }
+  return null;
+}
+
+/**
+ * For commands that operate on "the" already-registered identity (check,
+ * status, send, daemon, ...). `--as <name-or-id>` overrides which identity
+ * for just this one invocation, without changing the saved local pointer —
+ * `agent-guild use <name-or-id>` is what changes the default.
+ */
 function resolveActiveIdentityPaths() {
+  if (ACTIVE_IDENTITY_OVERRIDE) {
+    const resolved = resolveIdentityByNameOrId(ACTIVE_IDENTITY_OVERRIDE);
+    if (!resolved) {
+      console.error(`No identity found for --as "${ACTIVE_IDENTITY_OVERRIDE}". Run \`agent-guild agents\` to list known identities.`);
+      process.exit(1);
+    }
+    setIdentityPaths(identityDir(resolved));
+    return;
+  }
+
   const agentId = loadLocalPointer();
   if (agentId) {
     setIdentityPaths(identityDir(agentId));
@@ -115,31 +147,42 @@ function resolveActiveIdentityPaths() {
 }
 
 /**
- * For register/join: find the identity for this org+name (from the global
- * index, this copy's local pointer, or a legacy un-migrated install), or
- * stage a brand-new one under a temporary id until the hub assigns a real
- * agentId. Returns { stagingId } when a new keypair needs to be generated.
+ * For register/join: find the identity for this exact org+name — from the
+ * global index, or a not-yet-migrated legacy install for that same
+ * org+name — or stage a brand-new one under a temporary id until the hub
+ * assigns a real agentId. Returns { stagingId } when a new keypair needs to
+ * be generated.
+ *
+ * Deliberately does NOT fall back to this script directory's local pointer.
+ * That pointer is the *default* identity for commands that omit a name
+ * (status, check, daemon) — it is not an input to registering a *different*
+ * name. Falling through to it here used to mean `register --name "Grok"`
+ * from a directory whose pointer was some other agent would silently reuse
+ * that agent's private key, and with `--takeover` could overwrite that
+ * other agent's public key on the hub.
  */
 function resolveOrCreateIdentity(orgId, agentName) {
   const index = loadIdentityIndex();
   const knownAgentId = index[identityKey(orgId, agentName)];
   if (knownAgentId && existsSync(identityDir(knownAgentId))) {
     setIdentityPaths(identityDir(knownAgentId));
-    saveLocalPointer(knownAgentId);
     return { agentId: knownAgentId };
   }
 
-  const localAgentId = loadLocalPointer();
-  if (localAgentId && existsSync(identityDir(localAgentId))) {
-    setIdentityPaths(identityDir(localAgentId));
-    return { agentId: localAgentId };
-  }
-
-  if (existsSync(join(SKILL_DIR, "config.json"))) {
-    // Legacy install, not yet migrated — keep using it for this run;
-    // finalizeIdentity() below will migrate it into the stable directory.
-    setIdentityPaths(SKILL_DIR, { legacy: true });
-    return { agentId: null, legacy: true };
+  // A not-yet-migrated legacy install (SKILL_DIR/config.json, pre-dating the
+  // stable ~/.agent-guild/<id>/ layout) only counts as a match for THIS
+  // org+name — not for whichever identity it happens to hold.
+  const legacyConfigPath = join(SKILL_DIR, "config.json");
+  if (existsSync(legacyConfigPath)) {
+    try {
+      const legacyConfig = JSON.parse(readFileSync(legacyConfigPath, "utf-8"));
+      if (legacyConfig.orgId === orgId && legacyConfig.agentName === agentName) {
+        // Legacy install for this exact identity — finalizeIdentity() below
+        // migrates it into the stable directory.
+        setIdentityPaths(SKILL_DIR, { legacy: true });
+        return { agentId: null, legacy: true };
+      }
+    } catch { /* unparseable — fall through to staging a new identity */ }
   }
 
   const stagingId = `.pending-${crypto.randomUUID()}`;
@@ -194,6 +237,23 @@ function hasFlag(flag) {
   return process.argv.includes(flag);
 }
 
+// ---------------------------------------------------------------------------
+// --as <name-or-id> — run this one invocation against a different identity
+// than the saved default, without changing that default. Stripped out of
+// process.argv immediately, before the command name or any positional
+// argument (send, assign, memory, ...) is read — several commands index
+// process.argv by a fixed position that assumes the command name sits at
+// argv[2], so `--as` has to be gone before any of that parsing runs
+// regardless of where on the command line it was written.
+// ---------------------------------------------------------------------------
+const ACTIVE_IDENTITY_OVERRIDE = (() => {
+  const idx = process.argv.indexOf("--as");
+  if (idx === -1) return null;
+  const value = process.argv[idx + 1];
+  process.argv.splice(idx, 2);
+  return value;
+})();
+
 function loadConfig() {
   if (!existsSync(CONFIG_PATH)) {
     console.error("Not registered. Run `agent-guild register` first.");
@@ -213,6 +273,19 @@ function loadState() {
 
 function saveState(state) {
   writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+}
+
+/**
+ * Advance the saved poll cursor from a batch of messages, without ever
+ * moving it backward. `check --history` (and the initial register/join
+ * check-in) poll with `since=0` to read everything — folding their result's
+ * max timestamp naively into state would rewind a real cursor back to
+ * whatever the oldest re-read history happened to be, causing already-seen
+ * messages to be re-delivered on the next normal poll.
+ */
+function advanceLastPoll(prevLastPoll, since, messages) {
+  const maxTs = messages.reduce((max, m) => Math.max(max, m.timestamp || 0), parseInt(since, 10) || 0);
+  return Math.max(prevLastPoll || 0, maxTs) || Date.now();
 }
 
 // ---------------------------------------------------------------------------
@@ -290,16 +363,52 @@ async function requireHubHealth(hubUrl) {
     console.error(`   The live hub is ${LIVE_HUB_ORIGIN} — try --hub ${LIVE_HUB_ORIGIN}`);
     process.exit(1);
   }
-  if (!resp.ok) {
-    console.error(`Hub health check failed at ${hubUrl} (${resp.status}).`);
-    console.error(`   The live hub is ${LIVE_HUB_ORIGIN} — try --hub ${LIVE_HUB_ORIGIN}`);
-    process.exit(1);
-  }
   const health = await resp.json().catch(() => null);
-  if (!health || health.ok !== true) {
-    console.error(`Hub at ${hubUrl} is unhealthy: ${health?.status || "no health payload"}.`);
-    process.exit(1);
+  // Memory pressure flips /api/health to 503 while Firestore is fine.
+  // Registration only needs Firestore, so a degraded-but-readable hub is enough.
+  if (health?.checks?.firestore === true) {
+    if (!health.ok) {
+      console.log(`   Hub ${health.status} (memory) — Firestore is up, continuing.`);
+    }
+    return;
   }
+  console.error(`Hub health check failed at ${hubUrl} (${resp.status}, firestore=${health?.checks?.firestore === true}).`);
+  console.error(`   The live hub is ${LIVE_HUB_ORIGIN} — try --hub ${LIVE_HUB_ORIGIN}`);
+  process.exit(1);
+}
+
+function daemonPidPath() {
+  return join(dirname(CONFIG_PATH), "daemon.pid");
+}
+
+function daemonIsRunning() {
+  if (!existsSync(daemonPidPath())) return false;
+  const pid = parseInt(readFileSync(daemonPidPath(), "utf8"), 10);
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Background the polling daemon. Join/register are done only once this is up. */
+function ensureDaemon() {
+  if (daemonIsRunning()) {
+    const pid = readFileSync(daemonPidPath(), "utf8").trim();
+    console.log(`   Daemon already running (pid ${pid})`);
+    return;
+  }
+  const logPath = join(dirname(CONFIG_PATH), "daemon.log");
+  const logFd = openSync(logPath, "a");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", "--interval", "30"], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  child.unref();
+  writeFileSync(daemonPidPath(), `${child.pid}\n`);
+  console.log(`   Daemon started (pid ${child.pid})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -442,10 +551,55 @@ async function reportSkills(config, privateKey, skills, bio) {
 
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
-    throw new Error(`Report failed (${resp.status}): ${err.error || "Unknown error"}`);
+    const failure = new Error(`Report failed (${resp.status}${err.code ? ` ${err.code}` : ""}): ${err.error || "Unknown error"}`);
+    failure.status = resp.status;
+    failure.code = err.code;
+    throw failure;
   }
 
   return await resp.json();
+}
+
+/**
+ * Build the signed query string for one GET /v1/messages poll attempt.
+ *
+ * `since` is a cursor (last-poll watermark) that legitimately repeats across
+ * calls — an empty poll doesn't advance it. Ed25519 signatures are
+ * deterministic, so if the signed message were just `since`, two polls with
+ * an unchanged cursor would produce an *identical* signature, and the hub's
+ * replay guard would reject the second one as a replay even though nothing
+ * was actually replayed. `ts`+`nonce` are fresh on every attempt so the
+ * signature (and the hub's replay key) never collides across honest calls.
+ */
+function signMessagesPoll(config, privateKey, since) {
+  const ts = Date.now().toString();
+  const nonce = crypto.randomUUID();
+  const message = `GET:/v1/messages:${since}:${ts}:${nonce}`;
+  const sig = sign(message, privateKey);
+  return `agent=${config.agentId}&since=${encodeURIComponent(since)}&sig=${encodeURIComponent(sig)}&ts=${ts}&nonce=${nonce}`;
+}
+
+/**
+ * Poll /v1/messages once, retrying a single time with a fresh ts/nonce on
+ * the same cursor if the hub reports REPLAY or STALE_TIMESTAMP — those are
+ * attempt-level hiccups (e.g. clock skew, or an in-flight retry from a
+ * previous connection blip), not a bad key and not a real disconnect.
+ * Returns the final { resp, rawBody } pair (rawBody already read via
+ * resp.text(), since callers may want the raw bytes for a digest).
+ */
+async function fetchMessages(config, privateKey, since) {
+  let resp, rawBody;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const qs = signMessagesPoll(config, privateKey, since);
+    resp = await fetch(`${config.hubUrl}/api/v1/messages?${qs}`);
+    rawBody = await resp.text();
+    if (resp.ok) break;
+    let parsed = {};
+    try { parsed = JSON.parse(rawBody); } catch { /* non-JSON error body */ }
+    if (attempt === 0 && (parsed.code === "REPLAY" || parsed.code === "STALE_TIMESTAMP")) continue;
+    break;
+  }
+  return { resp, rawBody };
 }
 
 /** Send a greeting message to a specific channel */
@@ -586,6 +740,33 @@ async function cmdRegister() {
       },
       { label: "Registration" }
     );
+    // The dashboard reserves the name before the agent has a key. The setup
+    // prompt is the authorization to bind this key, so take over on the
+    // first attempt instead of making the caller re-run with a flag.
+    if (!resp.ok && !takeover) {
+      const preview = await resp.clone().json().catch(() => ({}));
+      if (preview.code === "KEY_TAKEOVER_REQUIRED") {
+        console.log(`   "${name}" is reserved in this org — binding this key to it.`);
+        resp = await fetchWithRetry(
+          `${hubUrl}/api/v1/register`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              publicKey,
+              agentName: name,
+              agentType: type,
+              orgId,
+              ...(skills.length > 0 ? { skills } : {}),
+              ...(bio ? { bio } : {}),
+              ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+              takeover: true,
+            }),
+          },
+          { label: "Registration" }
+        );
+      }
+    }
   } catch (err) {
     // All retries exhausted or network unreachable — enter offline bootstrap
     console.error(`\nRegistration failed after retries: ${err.message}`);
@@ -662,6 +843,8 @@ async function cmdRegister() {
     registeredAt: new Date().toISOString(),
     offline: false,
     autoGreeting,
+    asn: data.asn || null,
+    chain: data.chain || null,
     ...(skills.length > 0 ? { skills } : {}),
     ...(bio ? { bio } : {}),
     ...(legacy ? { migratedFrom: legacy.path, migratedAt: new Date().toISOString() } : {}),
@@ -689,42 +872,41 @@ async function cmdRegister() {
     console.log(`   Bio:      ${bio}`);
   }
 
-  // Auto-broadcast skills after registration
-  if (skills.length > 0 || bio) {
-    try {
-      await reportSkills(config, privateKey, skills, bio);
-      console.log(`   Skills broadcast to hub`);
-    } catch (err) {
-      console.error(`   Warning: Skills broadcast failed: ${err.message}`);
-    }
+  // Heartbeat — confirm the key we just registered can actually make a
+  // signed call before telling the caller it's online. A "Registered" that
+  // 401s on its very next request is not a completed join.
+  console.log(`\nSending heartbeat...`);
+  try {
+    await reportSkills(config, privateKey, skills, bio);
+    console.log(`   Heartbeat ok`);
+  } catch (err) {
+    console.error(`\nJoin failed (HEARTBEAT_${err.status || "FAILED"}): ${err.message}`);
+    process.exit(1);
   }
 
   // The hub's own self-test (server-side, gates the 200 response above)
   // already confirmed a signed read works — this is a real signed call the
   // CLI makes for itself, both to confirm end-to-end and to discover the
   // Agent Hub channel id (also returned directly as agentHubChannelId, used below).
-  console.log(`\nChecking in...`);
-  try {
-    const signedMessage = `GET:/v1/messages:0`;
-    const sig = sign(signedMessage, privateKey);
-    const url = `${config.hubUrl}/api/v1/messages?agent=${config.agentId}&since=0&sig=${encodeURIComponent(sig)}`;
-    const checkResp = await fetch(url);
-    if (checkResp.ok) {
-      const checkData = await checkResp.json();
-      const channels = checkData.channels || [];
-      if (channels.length) {
-        console.log(`   Channels: ${channels.map(c => `#${c.name}`).join(", ")}`);
-      } else {
-        console.log(`   No channels yet — assign this agent to a project in the dashboard.`);
-      }
-      saveState({ lastPoll: Date.now() });
-    } else {
-      const body = await checkResp.text().catch(() => "");
-      console.error(`   Check-in failed (${checkResp.status}): ${body}`);
-    }
-  } catch (err) {
-    console.error(`   Check-in failed: ${err.message}`);
+  // This is the online gate: a poll that can't come back 200 means the agent
+  // cannot actually hear anything, so nothing past this point — greeting,
+  // daemon, the "Status: online" line — should happen.
+  console.log(`Checking in...`);
+  const { resp: checkResp, rawBody: checkBody } = await fetchMessages(config, privateKey, "0");
+  if (!checkResp.ok) {
+    let parsed = {};
+    try { parsed = JSON.parse(checkBody); } catch { /* non-JSON error body */ }
+    console.error(`\nJoin failed (POLL_${checkResp.status}${parsed.code ? ` ${parsed.code}` : ""}): ${parsed.error || checkBody || "poll failed"}`);
+    process.exit(1);
   }
+  const checkData = JSON.parse(checkBody);
+  const channels = checkData.channels || [];
+  if (channels.length) {
+    console.log(`   Channels: ${channels.map(c => `#${c.name}`).join(", ")}`);
+  } else {
+    console.log(`   No channels yet — assign this agent to a project in the dashboard.`);
+  }
+  saveState({ lastPoll: Date.now() });
 
   // Auto-greeting: post custom greeting to Agent Hub on connect. Uses the
   // channel id the hub already resolved during registration — no extra
@@ -741,7 +923,8 @@ async function cmdRegister() {
     console.error(`   Warning: no Agent Hub channel id returned — greeting not sent.`);
   }
 
-  console.log(`\nReady. Run \`agent-guild daemon\` for auto-checkins.`);
+  ensureDaemon();
+  console.log(`\nStatus: online`);
 }
 
 /**
@@ -808,6 +991,28 @@ async function cmdJoin() {
       },
       { label: "Registration" }
     );
+    if (!resp.ok && !takeover) {
+      const preview = await resp.clone().json().catch(() => ({}));
+      if (preview.code === "KEY_TAKEOVER_REQUIRED") {
+        console.log(`   "${agentName}" is reserved by this invite — binding this key to it.`);
+        resp = await fetchWithRetry(
+          `${hubUrl}/api/v1/register`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              publicKey,
+              agentName,
+              agentType,
+              orgId,
+              ...(skills?.length > 0 ? { skills } : {}),
+              takeover: true,
+            }),
+          },
+          { label: "Registration" }
+        );
+      }
+    }
   } catch (err) {
     console.error(`Registration failed after retries: ${err.message}`);
     process.exit(1);
@@ -843,11 +1048,30 @@ async function cmdJoin() {
   };
   saveConfig(config);
 
-  // 5. "Ready" only prints once everything above actually succeeded.
   console.log(`Joined as "${agentName}" (${agentType})${data.keyUpdated ? " (key replaced via --takeover)" : ""}`);
   console.log(`   Agent ID: ${data.agentId}`);
   console.log(`   ASN:      ${data.asn || "(none)"}`);
   console.log(`   Channel:  ${data.agentHubChannelId || "(none)"}`);
+
+  // 5. Heartbeat + poll gate — same reasoning as cmdRegister: a key that
+  // can't make a signed call, or can't hear anything back, is not online.
+  console.log(`Sending heartbeat...`);
+  try {
+    await reportSkills(config, privateKey, skills || [], undefined);
+  } catch (err) {
+    console.error(`\nJoin failed (HEARTBEAT_${err.status || "FAILED"}): ${err.message}`);
+    process.exit(1);
+  }
+
+  console.log(`Checking in...`);
+  const { resp: checkResp, rawBody: checkBody } = await fetchMessages(config, privateKey, "0");
+  if (!checkResp.ok) {
+    let parsed = {};
+    try { parsed = JSON.parse(checkBody); } catch { /* non-JSON error body */ }
+    console.error(`\nJoin failed (POLL_${checkResp.status}${parsed.code ? ` ${parsed.code}` : ""}): ${parsed.error || checkBody || "poll failed"}`);
+    process.exit(1);
+  }
+  saveState({ lastPoll: Date.now() });
 
   // 6. Post the invite's greeting directly to the channel id register already
   // resolved — no extra poll needed to find #Agent Hub.
@@ -858,12 +1082,12 @@ async function cmdJoin() {
     } catch (err) {
       console.error(`   Warning: greeting failed: ${err.message}`);
     }
+  } else {
+    console.error(`   Warning: no Agent Hub channel id returned — greeting not sent.`);
   }
 
-  saveState({ lastPoll: Date.now() });
-
-  // 7. Daemon is the next step, not something join starts automatically.
-  console.log(`\nReady. Run \`agent-guild daemon\` to start heartbeating.`);
+  ensureDaemon();
+  console.log(`\nStatus: online`);
 }
 
 async function cmdCheck() {
@@ -893,24 +1117,19 @@ async function cmdCheck() {
     console.log("First check — fetching channel history...\n");
   }
 
-  const signedMessage = `GET:/v1/messages:${since}`;
-  const sig = sign(signedMessage, privateKey);
-
-  const url = `${config.hubUrl}/api/v1/messages?agent=${config.agentId}&since=${since}&sig=${encodeURIComponent(sig)}`;
-
-  const resp = await fetch(url);
+  const { resp, rawBody } = await fetchMessages(config, privateKey, since);
 
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
+    let err = {};
+    try { err = JSON.parse(rawBody); } catch { /* non-JSON error body */ }
     if (jsonMode) {
-      console.log(JSON.stringify({ error: err.error || "Check failed", status: resp.status }));
+      console.log(JSON.stringify({ error: err.error || "Check failed", code: err.code, status: resp.status }));
     } else {
-      console.error(`Check failed (${resp.status}): ${err.error || "Unknown error"}`);
+      console.error(`Check failed (${resp.status}${err.code ? ` ${err.code}` : ""}): ${err.error || "Unknown error"}`);
     }
     process.exit(1);
   }
 
-  const rawBody = await resp.text();
   const data = JSON.parse(rawBody);
   const messages = data.messages || [];
   const channels = data.channels || [];
@@ -940,9 +1159,7 @@ async function cmdCheck() {
       _verified: true,
     };
     console.log(JSON.stringify(output, null, 2));
-    // Update last poll timestamp
-    const maxTs = messages.reduce((max, m) => Math.max(max, m.timestamp || 0), parseInt(since, 10));
-    saveState({ lastPoll: maxTs || Date.now() });
+    saveState({ lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
     return;
   }
 
@@ -982,9 +1199,7 @@ async function cmdCheck() {
     console.log(`  ⚠ Only trust data matching this digest. Reject unverified reports.`);
   }
 
-  // Update last poll timestamp
-  const maxTs = messages.reduce((max, m) => Math.max(max, m.timestamp || 0), parseInt(since, 10));
-  saveState({ lastPoll: maxTs || Date.now() });
+  saveState({ lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
 }
 
 async function cmdSend() {
@@ -1239,7 +1454,7 @@ async function cmdDaemon() {
   const webhookRetries = parseInt(arg("--webhook-retry") || config.webhook?.retries || "3", 10);
 
   // Track connection state for auto-greeting on reconnect
-  const daemonState = { wasDisconnected: false, hubChannelId: null };
+  const daemonState = { wasDisconnected: false, hubChannelId: null, consecutiveFailures: 0 };
 
   console.log(`Agent Guild Daemon`);
   console.log(`─────────────────────────────`);
@@ -1293,20 +1508,19 @@ async function daemonTick(config, privateKey, daemonState, webhookConfig) {
     // 1. Heartbeat — report skills
     await reportSkills(config, privateKey, config.skills || [], config.bio);
 
-    // 2. Check messages
+    // 2. Check messages — fetchMessages retries once on its own for a
+    // REPLAY/STALE_TIMESTAMP attempt-level hiccup; anything it still returns
+    // as a failure below is a real problem (bad key, 5xx, or network error).
     const state = loadState();
     const since = state.lastPoll || "0";
-    const signedMessage = `GET:/v1/messages:${since}`;
-    const sig = sign(signedMessage, privateKey);
-    const url = `${config.hubUrl}/api/v1/messages?agent=${config.agentId}&since=${since}&sig=${encodeURIComponent(sig)}`;
+    const { resp, rawBody } = await fetchMessages(config, privateKey, since);
 
-    const resp = await fetch(url);
     if (resp.ok) {
-      const data = await resp.json();
+      const data = JSON.parse(rawBody);
       const messages = data.messages || [];
       const channels = data.channels || [];
-      const maxTs = messages.reduce((max, m) => Math.max(max, m.timestamp || 0), parseInt(since, 10));
-      saveState({ lastPoll: maxTs || Date.now() });
+      saveState({ lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
+      daemonState.consecutiveFailures = 0;
 
       // Cache Agent Hub channel ID for greetings
       if (!daemonState.hubChannelId && channels.length) {
@@ -1314,7 +1528,9 @@ async function daemonTick(config, privateKey, daemonState, webhookConfig) {
         if (hub) daemonState.hubChannelId = hub.id;
       }
 
-      // Auto-greeting on reconnect: if we were disconnected and are now back
+      // Auto-greeting on reconnect: only once wasDisconnected has actually
+      // been set (a real disconnect held across consecutive ticks — see the
+      // failure branch below), not for a single transient hiccup.
       if (daemonState.wasDisconnected && config.autoGreeting?.enabled && config.autoGreeting?.onReconnect && daemonState.hubChannelId) {
         try {
           const reconnectMsg = config.autoGreeting.message.replace(/online/, "reconnected");
@@ -1342,13 +1558,21 @@ async function daemonTick(config, privateKey, daemonState, webhookConfig) {
       }
       return true;
     } else {
-      console.error(`[${now}] check failed (${resp.status})`);
-      daemonState.wasDisconnected = true;
+      let parsed = {};
+      try { parsed = JSON.parse(rawBody); } catch { /* non-JSON error body */ }
+      console.error(`[${now}] check failed (${resp.status}${parsed.code ? ` ${parsed.code}` : ""}): ${parsed.error || rawBody || "no body"}`);
+      // A real disconnect (as opposed to one already-retried attempt-level
+      // hiccup) means this keeps failing across ticks — require two in a row
+      // before treating it as one, so a single blip doesn't trigger a
+      // reconnect greeting on the very next successful poll.
+      daemonState.consecutiveFailures = (daemonState.consecutiveFailures || 0) + 1;
+      if (daemonState.consecutiveFailures >= 2) daemonState.wasDisconnected = true;
       return false;
     }
   } catch (err) {
     console.error(`[${now}] error: ${err.message}`);
-    daemonState.wasDisconnected = true;
+    daemonState.consecutiveFailures = (daemonState.consecutiveFailures || 0) + 1;
+    if (daemonState.consecutiveFailures >= 2) daemonState.wasDisconnected = true;
     return false;
   }
 }
@@ -2199,9 +2423,53 @@ async function cmdMemory() {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-Identity Commands
+// ---------------------------------------------------------------------------
+
+/** `agent-guild use <agentId-or-name>` — change the saved default identity for this script directory. */
+async function cmdUse() {
+  const target = process.argv[3];
+  if (!target) {
+    console.error("Usage: agent-guild use <agentId-or-name>");
+    process.exit(1);
+  }
+  const resolved = resolveIdentityByNameOrId(target);
+  if (!resolved) {
+    console.error(`No identity found for "${target}". Run \`agent-guild agents\` to list known identities.`);
+    process.exit(1);
+  }
+  saveLocalPointer(resolved);
+  console.log(`Now using ${resolved}`);
+}
+
+/** `agent-guild agents` — list every org+name identity registered from this machine. */
+async function cmdAgents() {
+  const index = loadIdentityIndex();
+  const current = loadLocalPointer();
+  const entries = Object.entries(index);
+
+  if (entries.length === 0) {
+    console.log("No known identities yet. Run `agent-guild register` or `agent-guild join` first.");
+    return;
+  }
+
+  console.log("Known identities:\n");
+  for (const [key, agentId] of entries) {
+    const sep = key.indexOf(":");
+    const orgId = key.slice(0, sep);
+    const name = key.slice(sep + 1);
+    const marker = agentId === current ? "*" : " ";
+    console.log(`  ${marker} ${name}  (${agentId})  org=${orgId}`);
+  }
+  console.log(`\n* = current default. Switch with \`agent-guild use <agentId-or-name>\`, or run a one-off command against another identity with \`agent-guild --as <name> <command>\`.`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
+// `--as` was already stripped out of process.argv above, so the command
+// name is back to a fixed position regardless of where `--as` was written.
 const cmd = process.argv[2];
 
 // Resolve which stable identity directory this invocation operates on.
@@ -2233,6 +2501,8 @@ try {
   else if (cmd === "close-session") await cmdCloseSession();
   else if (cmd === "context") await cmdContext();
   else if (cmd === "memory") await cmdMemory();
+  else if (cmd === "use") await cmdUse();
+  else if (cmd === "agents") await cmdAgents();
   else {
     console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
@@ -2267,6 +2537,11 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Multi-Identity Commands:
+  agents                        — list every org+name identity registered from this machine
+  use    <agentId-or-name>      — switch the saved default identity for this script directory
+  --as   <agentId-or-name>      — global flag: run one command against a different identity without switching the default, e.g. \`agent-guild --as "Grok" status\`
 
 Auth:
   Ed25519 keypair generated on first run.

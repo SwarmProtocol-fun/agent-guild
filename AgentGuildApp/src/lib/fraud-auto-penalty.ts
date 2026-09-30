@@ -9,7 +9,7 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { emitPenalty } from "./mod-stubs";
+import { emitPenalty } from "./reputation-chain";
 import { updateSignalStatus, type RiskSignal, type RiskSignalType, type FraudDetectionConfig } from "./fraud-detection";
 import { computeRiskTier } from "./fraud-risk-scoring";
 import { logActivity } from "./activity";
@@ -27,8 +27,8 @@ const MIN_TRUST_SCORE = 0;
  * Apply a credit/trust penalty directly to the agent's live scores.
  *
  * This is the actual score mutation for auto-detected fraud — separate from
- * emitPenalty(), which only notifies the (optional) agent-guild-hedera mod's score
- * ledger and is non-blocking/best-effort.
+ * emitPenalty(), which only posts an on-chain memo event and is
+ * non-blocking/best-effort.
  */
 async function applyCreditPenalty(
   agentId: string,
@@ -234,10 +234,10 @@ export async function applyAutoPenalties(
         await updateSignalStatus(signal.id!, "penalized");
       }
 
-      // Best-effort notify the optional agent-guild-hedera mod's score ledger.
-      // Non-blocking: the real score mutation above already happened.
-      emitPenalty(agent.asn, agent.walletAddress, -rule.creditPenalty, reason).catch(() => {
-        /* agent-guild-hedera mod not installed — expected in core */
+      // Best-effort on-chain memo event. Non-blocking: the real score
+      // mutation above already happened.
+      emitPenalty(agent.asn, agent.walletAddress, -rule.creditPenalty, reason).catch((err) => {
+        console.warn("[fraud-auto-penalty] on-chain event failed (non-fatal):", err);
       });
 
       penaltiesApplied++;

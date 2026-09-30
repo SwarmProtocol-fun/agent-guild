@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { safeSubprocessEnv } from "./safe-env.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(__dirname, "../..");
@@ -40,7 +41,7 @@ export async function execute(task, logCallback) {
     const proc = spawn(command, args, {
       shell,
       cwd: cwd || AGENT_DIR,
-      env: { ...process.env, ...env },
+      env: safeSubprocessEnv(env),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -14,6 +14,7 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { cookies } from "next/headers";
 import { adminDb } from "./firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { canonicalizeWalletAddress } from "./wallet-address";
 
 // ─── Constants ──────────────────────────────────────────
 
@@ -59,14 +60,14 @@ function isProd(): boolean {
 
 const PLATFORM_ADMINS = (process.env.PLATFORM_ADMIN_WALLETS || "")
   .split(",")
-  .map((a) => a.trim().toLowerCase())
+  .map((a) => canonicalizeWalletAddress(a.trim()))
   .filter(Boolean);
 
 export function resolveRole(
   walletAddress: string,
   ownedOrgIds: string[]
 ): UserRole {
-  if (PLATFORM_ADMINS.includes(walletAddress.toLowerCase())) {
+  if (PLATFORM_ADMINS.includes(canonicalizeWalletAddress(walletAddress))) {
     return "platform_admin";
   }
   if (ownedOrgIds.length > 0) {
@@ -87,7 +88,7 @@ export async function createSession(
   );
 
   const record: SessionRecord = {
-    walletAddress: walletAddress.toLowerCase(),
+    walletAddress: canonicalizeWalletAddress(walletAddress),
     role,
     createdAt: FieldValue.serverTimestamp(),
     expiresAt,
@@ -129,7 +130,7 @@ export async function signSessionJWT(
 ): Promise<string> {
   return new SignJWT({ sid: sessionId, role } as unknown as JWTPayload)
     .setProtectedHeader({ alg: "HS256" })
-    .setSubject(walletAddress.toLowerCase())
+    .setSubject(canonicalizeWalletAddress(walletAddress))
     .setIssuedAt()
     .setExpirationTime(`${SESSION_MAX_AGE}s`)
     .sign(getSecret());

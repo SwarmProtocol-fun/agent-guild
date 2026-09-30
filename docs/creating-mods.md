@@ -42,7 +42,7 @@ interface Mod {
     tiers?: {            // only if subscription
       plan: "monthly" | "yearly" | "lifetime";
       price: number;
-      currency: string;  // "USD" or "HBAR"
+      currency: string;  // "USD" or "SOL"
     }[];
   };
   manifest?: ModManifest; // optional: structured capability declaration
@@ -370,7 +370,7 @@ Mods can be free or subscription-based:
 - **Yearly** — Annual billing (typically discounted vs monthly)
 - **Lifetime** — One-time payment for permanent access
 
-Set pricing in your submission. Currency can be USD or HBAR.
+Set pricing in your submission. Currency can be USD or SOL.
 
 ---
 

@@ -4,7 +4,7 @@
  * Creates a crypto payment intent for mod subscriptions.
  * Returns a payment ID, recipient address, and amount for the user to pay on-chain.
  *
- * Supports all payment-enabled chains: Ethereum, Avalanche, Base, Hedera, Sepolia, Solana.
+ * Supports all payment-enabled chains: Ethereum, Avalanche, Base, Sepolia, Solana.
  * Accepts native currency or USDC as payment token.
  *
  * Input: { modId, plan, orgId, chain, paymentToken?: "native" | "usdc" }

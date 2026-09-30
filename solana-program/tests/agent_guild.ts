@@ -235,6 +235,174 @@ describe("agent_guild", () => {
     assert.equal(posterBalanceAfter - posterBalanceBefore, posterShare);
   });
 
+  it("returns escrow to the poster once an unclaimed task's deadline passes", async () => {
+    const poster = Keypair.generate();
+    const claimant = Keypair.generate();
+    await airdrop(poster.publicKey, 2);
+    await airdrop(claimant.publicKey, 1);
+
+    const configBefore = await program.account.guildConfig.fetch(configPda);
+    const taskId = configBefore.taskCounter;
+    const [taskPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("task"), taskId.toArrayLike(Buffer, "le", 8)],
+      program.programId,
+    );
+
+    // Short deadline so the test can wait it out on a local validator.
+    const deadline = Math.floor(Date.now() / 1000) + 2;
+    const budget = 0.25 * LAMPORTS_PER_SOL;
+
+    await program.methods
+      .postTask("Unclaimed task", "desc", "skills", new anchor.BN(deadline), new anchor.BN(budget))
+      .accounts({ poster: poster.publicKey, config: configPda, taskAccount: taskPda, systemProgram: SystemProgram.programId })
+      .signers([poster])
+      .rpc();
+
+    // Before the deadline: expire_task must fail...
+    let expireFailedBeforeDeadline = false;
+    try {
+      await program.methods
+        .expireTask()
+        .accounts({ poster: poster.publicKey, taskAccount: taskPda })
+        .signers([poster])
+        .rpc();
+    } catch {
+      expireFailedBeforeDeadline = true;
+    }
+    assert.isTrue(expireFailedBeforeDeadline, "expire_task should fail before the deadline passes");
+
+    // ...and claim_task must still succeed and then be undone isn't
+    // possible, so use a *second* task to prove claim_task rejects a
+    // claim attempted after its own deadline has passed.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    let claimAfterDeadlineFailed = false;
+    try {
+      await program.methods
+        .claimTask()
+        .accounts({ claimant: claimant.publicKey, taskAccount: taskPda })
+        .signers([claimant])
+        .rpc();
+    } catch {
+      claimAfterDeadlineFailed = true;
+    }
+    assert.isTrue(claimAfterDeadlineFailed, "claim_task should fail once the deadline has passed");
+
+    const posterBalanceBefore = await provider.connection.getBalance(poster.publicKey);
+
+    await program.methods
+      .expireTask()
+      .accounts({ poster: poster.publicKey, taskAccount: taskPda })
+      .signers([poster])
+      .rpc();
+
+    const task = await program.account.taskAccount.fetch(taskPda);
+    assert.deepEqual(task.status, { expired: {} });
+
+    const posterBalanceAfter = await provider.connection.getBalance(poster.publicKey);
+    // Refund minus the tx fee for the expire_task call itself.
+    assert.isAtLeast(posterBalanceAfter - posterBalanceBefore, budget - 10_000);
+  });
+
+  it("creates and resolves a penalty proposal (approved — slashes credit)", async () => {
+    const agentWallet = Keypair.generate();
+    await airdrop(agentWallet.publicKey, 1);
+
+    const [agentPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("agent"), agentWallet.publicKey.toBuffer()],
+      program.programId,
+    );
+    const [asnPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("asn"), Buffer.from("ASN-GOV-1")],
+      program.programId,
+    );
+    await program.methods
+      .registerAgent("Gov Test Agent", "rust", "ASN-GOV-1", 0)
+      .accounts({ agentWallet: agentWallet.publicKey, agentAccount: agentPda, asnRecord: asnPda, systemProgram: SystemProgram.programId })
+      .signers([agentWallet])
+      .rpc();
+
+    const configBefore = await program.account.guildConfig.fetch(configPda);
+    const proposalId = configBefore.proposalCounter;
+    const [proposalPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("proposal"), proposalId.toArrayLike(Buffer, "le", 8)],
+      program.programId,
+    );
+
+    const proposer = Keypair.generate();
+    await airdrop(proposer.publicKey, 1);
+
+    await program.methods
+      .createPenaltyProposal("ASN-GOV-1", 50, "Missed deadline")
+      .accounts({ proposer: proposer.publicKey, agentAccount: agentPda, proposal: proposalPda })
+      .signers([proposer])
+      .rpc();
+
+    let proposal = await program.account.penaltyProposal.fetch(proposalPda);
+    assert.deepEqual(proposal.status, { pending: {} });
+    assert.equal(proposal.agent.toBase58(), agentWallet.publicKey.toBase58());
+
+    await program.methods
+      .resolvePenaltyProposal(true)
+      .accounts({ authority: wallet.publicKey, proposal: proposalPda })
+      .rpc();
+
+    proposal = await program.account.penaltyProposal.fetch(proposalPda);
+    assert.deepEqual(proposal.status, { approved: {} });
+
+    const agent = await program.account.agentAccount.fetch(agentPda);
+    assert.equal(agent.creditScore, 630); // 680 default - 50
+
+    // getAgentSlashingHistory(asn) equivalent: approved proposals for this agent
+    const history = await program.account.penaltyProposal.all();
+    const approvedForAgent = history.filter(
+      (p) => p.account.agent.toBase58() === agentWallet.publicKey.toBase58() && "approved" in p.account.status,
+    );
+    assert.equal(approvedForAgent.length, 1);
+  });
+
+  it("creates and resolves a penalty proposal (rejected — no credit change)", async () => {
+    const agentWallet = Keypair.generate();
+    await airdrop(agentWallet.publicKey, 1);
+
+    const [agentPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("agent"), agentWallet.publicKey.toBuffer()],
+      program.programId,
+    );
+    const [asnPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("asn"), Buffer.from("ASN-GOV-2")],
+      program.programId,
+    );
+    await program.methods
+      .registerAgent("Gov Test Agent 2", "rust", "ASN-GOV-2", 0)
+      .accounts({ agentWallet: agentWallet.publicKey, agentAccount: agentPda, asnRecord: asnPda, systemProgram: SystemProgram.programId })
+      .signers([agentWallet])
+      .rpc();
+
+    const configBefore = await program.account.guildConfig.fetch(configPda);
+    const proposalId = configBefore.proposalCounter;
+    const [proposalPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("proposal"), proposalId.toArrayLike(Buffer, "le", 8)],
+      program.programId,
+    );
+
+    await program.methods
+      .createPenaltyProposal("ASN-GOV-2", 50, "Disputed claim")
+      .accounts({ proposer: wallet.publicKey, agentAccount: agentPda, proposal: proposalPda })
+      .rpc();
+
+    await program.methods
+      .resolvePenaltyProposal(false)
+      .accounts({ authority: wallet.publicKey, proposal: proposalPda })
+      .rpc();
+
+    const proposal = await program.account.penaltyProposal.fetch(proposalPda);
+    assert.deepEqual(proposal.status, { rejected: {} });
+
+    const agent = await program.account.agentAccount.fetch(agentPda);
+    assert.equal(agent.creditScore, 680); // unchanged
+  });
+
   it("deposits revenue into the treasury with a 50/30/20 split and withdraws", async () => {
     const depositor = Keypair.generate();
     await airdrop(depositor.publicKey, 2);

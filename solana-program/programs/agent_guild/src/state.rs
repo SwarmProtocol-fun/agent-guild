@@ -6,20 +6,23 @@ pub const MAX_ASN_LEN: usize = 32;
 pub const MAX_TITLE_LEN: usize = 128;
 pub const MAX_DESCRIPTION_LEN: usize = 512;
 pub const MAX_REQUIRED_SKILLS_LEN: usize = 256;
+pub const MAX_REASON_LEN: usize = 256;
 
 /// Global program config — replaces OpenZeppelin `Ownable` from the Solidity
 /// contracts. `authority` gates every admin-only instruction (registerAgentFor,
-/// updateCredit, resolveDispute, withdraw). `task_counter` is the monotonically
-/// increasing id used to seed each `TaskAccount` PDA.
+/// updateCredit, resolveDispute, withdraw, resolvePenaltyProposal). `task_counter`
+/// and `proposal_counter` are monotonically increasing ids seeding `TaskAccount`
+/// and `PenaltyProposal` PDAs respectively.
 #[account]
 pub struct GuildConfig {
     pub authority: Pubkey,
     pub task_counter: u64,
+    pub proposal_counter: u64,
     pub bump: u8,
 }
 
 impl GuildConfig {
-    pub const SIZE: usize = 8 + 32 + 8 + 1;
+    pub const SIZE: usize = 8 + 32 + 8 + 8 + 1;
 }
 
 #[account]
@@ -28,6 +31,18 @@ pub struct AgentAccount {
     pub name: String,
     pub skills: String,
     pub asn: String,
+    /// Validated (<= 10_000) and stored at registration, but currently
+    /// UNUSED by task_board's payout logic — approve_delivery and
+    /// resolve_dispute send the full budget/split to the claimant with no
+    /// fee deducted. This mirrors the original Solidity
+    /// AgentGuildAgentRegistryLink.feeRate, which was also stored and never
+    /// consumed by AgentGuildTaskBoardLink/AgentGuildTreasuryLink — so this
+    /// isn't a Solana-port regression, it's a field reserved for a fee
+    /// mechanism that was never implemented in either codebase. Don't wire
+    /// in a fee deduction here without first deciding, as a product
+    /// question, who collects it (treasury vs. per-agent), whether
+    /// resolve_dispute's split is fee-exempt, and how existing registered
+    /// agents' already-set fee_rate_bps should be treated on rollout.
     pub fee_rate_bps: u16,
     pub credit_score: u16,
     pub trust_score: u8,
@@ -107,6 +122,47 @@ impl TaskAccount {
         + 8
         + (1 + 32)
         + 1
+        + 8
+        + 1;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProposalStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// A penalty-governance proposal — replaces the Hedera governance/slashing
+/// mods. Single-authority approval (matches how the app is already
+/// admin-driven elsewhere, e.g. `requirePlatformAdmin`), not a multi-sig vote.
+/// Approved proposals ARE the on-chain slashing history for an agent —
+/// `getAgentSlashingHistory` reads them back by filtering on `agent` +
+/// `status == Approved`, no separate history account needed.
+#[account]
+pub struct PenaltyProposal {
+    pub proposal_id: u64,
+    pub asn: String,
+    pub agent: Pubkey,
+    pub amount: u16,
+    pub reason: String,
+    pub proposer: Pubkey,
+    pub status: ProposalStatus,
+    pub created_at: i64,
+    pub resolved_at: i64,
+    pub bump: u8,
+}
+
+impl PenaltyProposal {
+    pub const SIZE: usize = 8
+        + 8
+        + (4 + MAX_ASN_LEN)
+        + 32
+        + 2
+        + (4 + MAX_REASON_LEN)
+        + 32
+        + 1
+        + 8
         + 8
         + 1;
 }

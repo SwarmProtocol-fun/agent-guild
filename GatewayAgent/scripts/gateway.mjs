@@ -24,6 +24,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { spawn } from "node:child_process";
+import { safeSubprocessEnv } from "./executors/safe-env.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths — everything within skill directory, never outside
@@ -224,12 +225,12 @@ function getSystemMetrics() {
  * Execute a shell command with timeout and output capture.
  * Returns { stdout, stderr, exitCode }.
  */
-function executeShell(command, args = [], { timeoutMs = 60000, cwd, env } = {}) {
+function executeShell(command, args = [], { timeoutMs = 60000, cwd, env, shell = true } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(command, args, {
-      shell: true,
+      shell,
       cwd: cwd || AGENT_DIR,
-      env: { ...process.env, ...env },
+      env: safeSubprocessEnv(env),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -298,14 +299,14 @@ async function executeDocker(image, command = [], { timeoutMs = 120000, volumes 
 
   args.push(image, ...command);
 
-  return executeShell("docker", args, { timeoutMs: timeoutMs + 10000 });
+  return executeShell("docker", args, { timeoutMs: timeoutMs + 10000, shell: false });
 }
 
 /**
  * Execute a Node.js script inline.
  */
 async function executeNode(script, { timeoutMs = 60000 } = {}) {
-  return executeShell("node", ["-e", script], { timeoutMs });
+  return executeShell("node", ["-e", script], { timeoutMs, shell: false });
 }
 
 /**
@@ -797,7 +798,7 @@ async function cmdStatus() {
 
   // Check if Docker is available
   try {
-    await executeShell("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5000 });
+    await executeShell("docker", ["info", "--format", "{{.ServerVersion}}"], { timeoutMs: 5000, shell: false });
     console.log(`  Docker:      available`);
   } catch {
     console.log(`  Docker:      not available`);

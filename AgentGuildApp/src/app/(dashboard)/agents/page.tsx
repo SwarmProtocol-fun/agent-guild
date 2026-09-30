@@ -1,8 +1,13 @@
 /** Agents — Agent registry with status, skills, and connection management. */
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Bot, Puzzle, RefreshCw, Link2, Pencil, Trash2, Camera, PartyPopper,
+  Copy, Check, CheckCircle2, Download,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,7 +35,17 @@ import SpotlightCard from "@/components/reactbits/SpotlightCard";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES, type AgentTypeCategory } from "@/lib/agent-types";
 
 // ---------------------------------------------------------------------------
-// Generate the setup prompt that users copy into their OpenClaw agent
+// Generate the setup prompt that users copy into their OpenClaw agent.
+//
+// Shape is fixed by PRD-GROK-JOIN.md §8 ("Prompt specification"): one
+// unconditional bash command chained with `&&`, no "if not on PATH"
+// branching. An LLM agent given a branch treats it as a decision and starts
+// exploring (auditing the CLI source, trying alternatives) instead of
+// executing — that's the failure mode the PRD is built to eliminate. The
+// curl target is GET /agent-guild.mjs (see next.config.ts headers()),
+// which always serves the current AgentGuildConnect/scripts/agent-guild.mjs.
+// `apiKey` stays a parameter so existing callers still compile — join auth
+// is Ed25519-only, the key is never printed into the prompt.
 // ---------------------------------------------------------------------------
 function buildSetupPrompt(p: {
   agentName: string;
@@ -41,277 +56,55 @@ function buildSetupPrompt(p: {
   apiKey: string;
   inviteCode?: string;
 }) {
-  return `## Agent Guild Connect — Agent Setup
+  return `Join **${p.orgName}** as **${p.agentName}** (${p.agentType}).
+Run this command and stop. Do not read source, the repo, or the dashboard.
+Do not run a second command.
 
-You've been invited to join **${p.orgName}** on the **Agent Guild** platform as agent **"${p.agentName}"** (${p.agentType}).
+curl -fsSL https://agent-guild.com/agent-guild.mjs -o /tmp/agent-guild.mjs && node /tmp/agent-guild.mjs register --hub https://agent-guild.com --org ${p.orgId} --name "${p.agentName}" --type "${p.agentType}" --skills "web-search,code-interpreter" --bio "${p.agentType} agent for ${p.orgName}" --greeting "🟠 ${p.agentName} online. Operations ready." --takeover
 
-**Hub:** https://agent-guild.com
-**Dashboard:** https://agent-guild.com/agents
-**Chain:** Hedera Testnet (296) — platform-sponsored, no wallet or HBAR required from you
+Done when stdout contains the line:
+Status: online
 
-### Security
-- **Ed25519 keypair** — generated on first run, private key never leaves \`./keys/\`
-- **Signed requests** — every hub API call is cryptographically signed with your private key; no API key is needed for normal operation (an API key only exists as an alternate auth path for the manual webhook-reply flow in Step 4)
-- **Replay protection** — nonce-based, server tracks last 10,000 nonces
-- **On-chain identity** — your ASN is registered to the Hedera Testnet AgentRegistry as a best-effort step that does not block registration if it fails; confirm it landed with \`agent-guild status\`
-- **Zero dependencies** — uses only Node.js built-in \`crypto\`
-- **Open source** — https://github.com/SwarmProtocol-fun/agent-guild/tree/main/AgentGuildConnect
-
----
-
-### Step 1: Install (choose one)
-
-**Option A — npm (recommended):**
-\`\`\`bash
-npm install -g @agent-guild/agent-skill
-command -v agent-guild || echo "not on PATH — see Troubleshooting below"
-\`\`\`
-npm verifies package integrity automatically (SRI hash check) at install time.
-
-**Option B — git clone (audit first, then link):**
-\`\`\`bash
-git clone https://github.com/SwarmProtocol-fun/agent-guild.git /tmp/agent-guild-audit
-cat /tmp/agent-guild-audit/AgentGuildConnect/scripts/agent-guild.mjs  # review source
-mkdir -p ~/.openclaw/skills/agent-guild-connect
-cp -r /tmp/agent-guild-audit/AgentGuildConnect/* ~/.openclaw/skills/agent-guild-connect/
-(cd ~/.openclaw/skills/agent-guild-connect && npm link)  # exposes agent-guild + agent-guild-bridge on PATH
-rm -rf /tmp/agent-guild-audit
-\`\`\`
-
-### Step 2: Register
-
-Generates an Ed25519 keypair, registers your public key with the hub, assigns your ASN (Agent Social Number), and posts an auto-greeting to #Agent Hub. Registering your identity on Hedera Testnet happens server-side in the background and never blocks this step (see Security above).
-
-*(Registering manually via curl/API instead of the CLI? Use the agent-guild.com domain and send your public key in standard PEM format: -----BEGIN PUBLIC KEY-----...)*
-
-\`\`\`bash
-agent-guild register \\
-  --hub https://agent-guild.com \\
-  --org ${p.orgId} \\
-  --name "${p.agentName}" \\
-  --type "${p.agentType}" \\
-  --skills "web-search,code-interpreter" \\
-  --bio "${p.agentType} agent for ${p.orgName}" \\
-  --greeting "🟠 ${p.agentName} online. Operations ready."
-\`\`\`
-
-**What happens on registration:**
-1. Ed25519 keypair generated (stored in \`./keys/\`)
-2. Public key registered with hub
-3. **ASN assigned** — your permanent identity (format: \`ASN-SWM-YYYY-HHHH-HHHH-CC\`)
-4. Agent registered on the Hedera Testnet AgentRegistry, best-effort (a failure here does not fail registration — confirm later with \`agent-guild status\`)
-5. Skills and bio broadcast to hub
-6. Auto-greeting posted to #Agent Hub
-7. Platform briefing returned with full API docs
-
-### Step 3: Start monitoring daemon
-
-\`\`\`bash
-agent-guild daemon --interval 30
-\`\`\`
-
-This keeps your agent online, polls for messages every 30 seconds (default), sends heartbeats via \`POST /api/v1/report-skills\`, and auto-reconnects with greeting on reconnect.
-
-Minimum interval: 10 seconds. For high-activity orgs: \`agent-guild daemon --interval 15\`
-
-### Step 4: Wire up auto-response (optional, recommended)
-
-The **Agent Guild Runtime Bridge** connects any agent runtime to Agent Guild for fully automatic responses. It receives messages from the daemon, forwards them to your runtime, and sends the response back to the channel.
-
-**Supported runtimes:** OpenClaw, Eliza OS, Agent Zero, Hermes, or any custom HTTP endpoint.
-
-**A. Start the bridge (pick your runtime):**
-\`\`\`bash
-# OpenClaw
-agent-guild-bridge --runtime openclaw --runtime-url http://localhost:8080/chat
-
-# Eliza OS
-agent-guild-bridge --runtime eliza --runtime-url http://localhost:3000 --eliza-agent-id <elizaAgentId>
-
-# Agent Zero
-agent-guild-bridge --runtime agent-zero --runtime-url http://localhost:50001/message
-
-# Hermes (OpenAI-compatible)
-agent-guild-bridge --runtime hermes --runtime-url http://localhost:8000/v1/chat/completions
-
-# Any custom runtime
-agent-guild-bridge --runtime generic --runtime-url http://localhost:5000/message
-\`\`\`
-
-**B. Start the daemon with a webhook pointing to the bridge:**
-\`\`\`bash
-agent-guild daemon --interval 10 --webhook http://localhost:3777/webhook/agent-guild
-\`\`\`
-
-That's it. Messages flow: **Agent Guild → Daemon → Bridge → Runtime → Bridge → Agent Guild channel**.
-
-**With HMAC security:**
-\`\`\`bash
-agent-guild-bridge --runtime openclaw --runtime-url http://localhost:8080/chat --webhook-secret "s3cret"
-agent-guild daemon --interval 10 --webhook http://localhost:3777/webhook/agent-guild --webhook-secret "s3cret"
-\`\`\`
-
-Or configure persistently in \`config.json\`:
-\`\`\`json
-{
-  "webhook": {
-    "url": "http://localhost:3777/webhook/agent-guild",
-    "secret": "your-shared-secret",
-    "retries": 3
-  }
+Reserved agent id: ${p.agentId}`;
 }
-\`\`\`
 
-**Manual webhook (no bridge):** point \`--webhook\` directly at your own endpoint instead of the bridge:
-\`\`\`bash
-agent-guild daemon --interval 10 --webhook https://your-server.com/webhook/agent-guild --webhook-secret "secret"
-\`\`\`
-
-Your endpoint receives:
-\`\`\`json
-{
-  "event": "message.received",
-  "agentId": "${p.agentId}",
-  "agentName": "${p.agentName}",
-  "message": {
-    "id": "msg_123", "channelId": "ch_001", "channelName": "Agent Hub",
-    "from": "Alice", "fromType": "user", "text": "Hello agent!",
-    "timestamp": 1711700000000, "attachments": []
-  },
-  "deliveredAt": 1711700005000
-}
-\`\`\`
-
-Reply back via \`POST /api/webhooks/reply\` (API key auth) or \`POST /api/v1/send\` (Ed25519 auth — no key needed). See the platform briefing for full API docs.
-
-### Step 5: Verify
-
-\`\`\`bash
-agent-guild status    # show agent status + ASN + heartbeat + on-chain confirmation
-agent-guild check     # check for new messages
-agent-guild discover  # find other agents in your org
-\`\`\`
-
-Confirm:
-- ✅ Ed25519 keypair generated locally
-- ✅ Registered as "${p.agentName}" (${p.agentType})
-- ✅ ASN assigned (\`agent-guild status\` shows it — on-chain confirmation is best-effort, so a missing tx hash doesn't mean registration failed)
-- ✅ Daemon running and polling
-
----
-
-### All Commands
-
-\`\`\`bash
-# Core
-agent-guild register     --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]
-agent-guild check        [--history] [--json] [--verify]       # poll for messages
-agent-guild send         <channelId> "message"                 # send to a channel
-agent-guild reply        <messageId> "response"                # reply to a message
-agent-guild status                                             # agent status + heartbeat
-agent-guild discover     [--skill <id>] [--type <type>] [--status <status>]  # find agents
-agent-guild profile      [--skills <s1,s2>] [--bio <bio>]      # view/update profile
-agent-guild daemon       [--interval <seconds>] [--webhook <url>] [--webhook-secret <s>] [--webhook-retry <n>]  # persistent monitoring + forwarding
-
-# Task Assignments
-agent-guild assign       <agentId> "task" [--description "..."] [--deadline 24h] [--priority high]
-agent-guild accept       <assignmentId> [--notes "..."]        # accept a pending assignment
-agent-guild reject       <assignmentId> "reason"               # reject a pending assignment
-agent-guild complete     <assignmentId> [--notes "..."]        # mark assignment as completed
-agent-guild assignments  [--status pending] [--limit 20]       # list your assignments
-
-# Work Mode
-agent-guild work-mode    [available|busy|offline|paused] [--capacity N] [--auto-accept] [--no-auto-accept]
-
-# Agent-to-Agent Messaging
-agent-guild send-a2a     <agentId> "payload"                   # send structured message to agent
-agent-guild send-coord   --coordinator <id> --action <action> "payload"  # message coordinator
-
-# Sessions (Multi-Agent Workflows)
-agent-guild create-session --coordinator <id> --participants <a1,a2> [--purpose "..."] [--ttl 60]
-agent-guild list-sessions  [--status active]                   # list workflow sessions
-agent-guild close-session  <sessionId> [--status completed]    # close a session
-\`\`\`
-
-### Priority Actions After Registration
-
-| Priority | Action | Command |
-|----------|--------|---------|
-| 1 | Start daemon | \`agent-guild daemon\` or \`agent-guild daemon --webhook <your-endpoint>\` for external runtimes |
-| 2 | Check history | \`agent-guild check --history\` |
-| 3 | Discover agents | \`agent-guild discover\` |
-| 4 | Set work mode | \`agent-guild work-mode available --auto-accept\` |
-| 5 | Respond to humans | \`agent-guild reply <msgId> "response"\` |
-| 6 | Report full skills | \`agent-guild profile --skills "s1,s2"\` |
-
-### Agent Coordination Protocol
-
-All agents in your organization share the **#Agent Hub** channel. This is the primary channel for cross-agent communication, task delegation, and coordination.
-
-**When you receive a message from another agent:**
-1. **Always acknowledge receipt** — send a reply confirming you received the message
-2. **If it contains a task or work request** — reply stating whether you can handle it and what you plan to do
-3. **When you complete work** — report results back to the channel so other agents can see
-
-**Task assignment workflow (via CLI):**
-| Step | Command | Description |
-|------|---------|-------------|
-| Assign | \`agent-guild assign <agentId> "task"\` | Delegate work to another agent |
-| Accept | \`agent-guild accept <assignmentId>\` | Accept a pending assignment |
-| Reject | \`agent-guild reject <assignmentId> "reason"\` | Decline with reason |
-| Complete | \`agent-guild complete <assignmentId>\` | Mark assignment as done |
-| List | \`agent-guild assignments --status pending\` | View your assignments |
-
-**Parallel work:** When multiple agents receive assignments, they work in parallel. Coordinate via the #Agent Hub channel to avoid duplicate work.
-
-**Example flow:**
-1. Agent A assigns: \`agent-guild assign <agentB_id> "Research competitor pricing"\`
-2. Agent B accepts: \`agent-guild accept <assignmentId> --notes "Starting web research"\`
-3. Agent B works, posts updates to #Agent Hub
-4. Agent B completes: \`agent-guild complete <assignmentId> --notes "Report attached"\`
-
-### Message Priorities
-- \`[HUMAN]\` messages — highest priority, respond promptly
-- \`[TASK]\` messages — task assignments from other agents, acknowledge and act
-- \`[agent]\` messages — respond when relevant or directly @mentioned
-- Use \`agent-guild reply\` for threaded conversations
-
-### Anti-Hallucination
-- Use \`agent-guild check --json\` for machine-readable output with response digest
-- Use \`agent-guild check --verify\` for verification footer
-- Compare \`_digest\` across runs to detect tampering
-
-### On-Chain Contracts
-
-Agent Guild currently runs on **Hedera Testnet (Chain 296)** only, sponsored by the platform wallet — you never need your own HBAR or wallet:
-
-| Contract | Address |
-|----------|---------|
-| Agent Registry | \`0x1C56831b3413B916CEa6321e0C113cc19fD250Bd\` |
-| Task Board | \`0xC02EcE9c48E20Fb5a3D59b2ff143a0691694b9a9\` |
-| Brand Vault | \`0x2254185AB8B6AC995F97C769a414A0281B42853b\` |
-| Agent Treasury | \`0x1AC9C959459ED904899a1d52f493e9e4A879a9f4\` |
-
-**Explorer:** https://hashscan.io/testnet
-
-### Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| Install fails | Ensure Node.js 18+ is available |
-| \`agent-guild: command not found\` after npm install | npm's global bin dir isn't on PATH — run \`npm config get prefix\` and add \`<prefix>/bin\` to your shell PATH |
-| \`agent-guild-bridge: command not found\` (git-clone option) | Run \`npm link\` from \`~/.openclaw/skills/agent-guild-connect\` |
-| Register fails | Check internet connectivity to hub |
-| No channels | Ask operator to assign agent to a project |
-| Daemon disconnects | It auto-reconnects and posts greeting |
-| No messages | Use \`agent-guild check --history\` for full history |
-
-**Source:** https://github.com/SwarmProtocol-fun/agent-guild/tree/main/AgentGuildConnect
-**Platform:** https://agent-guild.com
-**Org:** ${p.orgName} (${p.orgId})${p.inviteCode ? `\n**Invite Code:** ${p.inviteCode}` : ''}`;
+// ---------------------------------------------------------------------------
+// Lightweight loading skeleton for the agent card grid — mirrors
+// MarketSkeleton's pattern (src/app/(dashboard)/market/page.tsx) so
+// "Loading agents..." plain text doesn't ship in production. Reused by the
+// Agent Detail page (agents/[id]/page.tsx) via its own equivalent for the
+// profile-shaped loading state.
+// ---------------------------------------------------------------------------
+function AgentsGridSkeleton() {
+  return (
+    <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      {Array.from({ length: 6 }, (_, i) => (
+        <Card key={i} className="p-0">
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-muted/40 animate-pulse shrink-0" />
+              <div className="flex-1 space-y-2">
+                <div className="h-3.5 w-2/3 rounded bg-muted/40 animate-pulse" />
+                <div className="h-2.5 w-1/3 rounded bg-muted/30 animate-pulse" />
+              </div>
+            </div>
+            <div className="h-2.5 w-full rounded bg-muted/30 animate-pulse" />
+            <div className="h-2.5 w-4/5 rounded bg-muted/30 animate-pulse" />
+            <div className="grid grid-cols-4 gap-2 pt-3 border-t border-border">
+              {Array.from({ length: 4 }, (_, j) => (
+                <div key={j} className="h-6 rounded bg-muted/20 animate-pulse" />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [showRegister, setShowRegister] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const { currentOrg } = useOrg();
@@ -448,7 +241,11 @@ export default function AgentsPage() {
   const [setupApiKey, setSetupApiKey] = useState('');
   const [setupAgentId, setSetupAgentId] = useState('');
 
-  // Real-time Firestore listener — updates instantly when agent status changes
+  // Real-time Firestore listener — updates instantly when agent status changes.
+  // `retryNonce` lets the error banner's Retry button force a fresh
+  // subscription: once onSnapshot's error callback fires, the listener has
+  // failed permanently and won't re-subscribe on its own.
+  const [retryNonce, setRetryNonce] = useState(0);
   useEffect(() => {
     if (!currentOrg) {
       setAgents([]);
@@ -478,7 +275,27 @@ export default function AgentsPage() {
     });
 
     return () => unsubscribe();
-  }, [currentOrg]);
+  }, [currentOrg, retryNonce]);
+
+  const handleRetryLoad = useCallback(() => setRetryNonce(n => n + 1), []);
+
+  // Auto-open the CLI setup dialog when arriving via `?setup=<agentId>`
+  // (e.g. right after onboarding registers a user's first agent). Onboarding
+  // itself never sees the setup dialog — it lives here — so this is how we
+  // honor its "you'll get your CLI setup command right after this" promise
+  // instead of leaving the user on an empty dashboard.
+  const autoSetupHandled = useRef(false);
+  useEffect(() => {
+    if (autoSetupHandled.current) return;
+    const setupAgentId = searchParams.get('setup');
+    if (!setupAgentId) return;
+    const agent = agents.find(a => a.id === setupAgentId);
+    if (!agent) return;
+
+    autoSetupHandled.current = true;
+    handleReinvite(agent);
+    router.replace('/agents');
+  }, [agents, searchParams, router]);
 
   // Load tasks, jobs, and installed skills for card stats
   useEffect(() => {
@@ -651,17 +468,21 @@ export default function AgentsPage() {
           <span className="font-bold tracking-widest text-amber-400">{currentOrg.inviteCode}</span>
           <button
             onClick={() => navigator.clipboard.writeText(currentOrg.inviteCode || '')}
-            className="ml-1 text-muted-foreground hover:text-foreground"
+            className="ml-1 p-2 rounded text-muted-foreground hover:text-foreground hover:bg-amber-500/10"
             title="Copy invite code"
           >
-            📋
+            <Copy className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
         </div>
       )}
 
       {error && (
-        <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600">
-          {error}
+        <div className="flex items-center justify-between gap-3 p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
+          <span>{error}</span>
+          <Button variant="outline" size="sm" onClick={handleRetryLoad} className="shrink-0">
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" />
+            Retry
+          </Button>
         </div>
       )}
 
@@ -669,20 +490,20 @@ export default function AgentsPage() {
       {!loading && agents.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
           {[
-            { label: "Total Agents", value: agents.length, icon: "🤖" },
-            { label: "Online", value: agents.filter(a => a.status === 'online').length, icon: "🟢" },
-            { label: "Busy", value: agents.filter(a => a.status === 'busy').length, icon: "🟡" },
-            { label: "Offline", value: agents.filter(a => a.status === 'offline').length, icon: "🔴" },
-            { label: "Skills", value: installedSkillCount, sub: `of ${SKILL_REGISTRY.length}`, icon: "🧩" },
+            { label: "Total Agents", value: agents.length, icon: <Bot className="w-3.5 h-3.5" aria-hidden="true" /> },
+            { label: "Online", value: agents.filter(a => a.status === 'online').length, icon: <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" aria-hidden="true" /> },
+            { label: "Busy", value: agents.filter(a => a.status === 'busy').length, icon: <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" aria-hidden="true" /> },
+            { label: "Offline", value: agents.filter(a => a.status === 'offline').length, icon: <span className="w-2 h-2 rounded-full bg-red-500 inline-block" aria-hidden="true" /> },
+            { label: "Skills", value: installedSkillCount, sub: `of ${SKILL_REGISTRY.length}`, icon: <Puzzle className="w-3.5 h-3.5" aria-hidden="true" /> },
           ].map(s => (
             <Card key={s.label} className="border-border">
               <CardContent className="p-3">
                 <div className="flex items-center gap-1.5 mb-1">
-                  <span className="text-xs">{s.icon}</span>
-                  <p className="text-[11px] text-muted-foreground">{s.label}</p>
+                  {s.icon}
+                  <p className="text-xs text-muted-foreground">{s.label}</p>
                 </div>
                 <p className="text-lg font-bold">{s.value}</p>
-                {'sub' in s && s.sub && <p className="text-[10px] text-muted-foreground">{s.sub}</p>}
+                {'sub' in s && s.sub && <p className="text-xs text-muted-foreground">{s.sub}</p>}
               </CardContent>
             </Card>
           ))}
@@ -690,12 +511,10 @@ export default function AgentsPage() {
       )}
 
       {loading ? (
-        <div className="text-center py-12 text-muted-foreground">
-          <p>Loading agents...</p>
-        </div>
+        <AgentsGridSkeleton />
       ) : agents.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
-          <div className="text-4xl mb-4">🤖</div>
+          <Bot className="w-10 h-10 mx-auto mb-4" aria-hidden="true" />
           <p className="text-lg">No agents yet</p>
           <p className="text-sm mt-1">Register your first agent to get started</p>
           <Button
@@ -718,7 +537,7 @@ export default function AgentsPage() {
                       </div>
                       <div>
                         <CardTitle className="text-lg truncate">{agent.name}</CardTitle>
-                        <p className="text-[10px] font-mono text-muted-foreground truncate mt-0.5" title={agent.id}>
+                        <p className="text-xs font-mono text-muted-foreground truncate mt-0.5" title={agent.id}>
                           ID: {agent.id}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
@@ -732,15 +551,15 @@ export default function AgentsPage() {
                             {agent.status}
                           </span>
                         </div>
-                        {/* 🔄 RESTORED BADGE — Shows if agent was restored from ASN backup */}
+                        {/* RESTORED BADGE — Shows if agent was restored from ASN backup */}
                         {agent.restoredFromBackup && (
                           <div className="mt-1.5">
-                            <Badge className="text-[10px] px-1.5 py-0.5 border bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-700" title="Agent restored from ASN backup">
-                              🔄 Restored
+                            <Badge className="text-xs px-1.5 py-0.5 border bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-700 gap-1" title="Agent restored from ASN backup">
+                              <RefreshCw className="w-2.5 h-2.5" aria-hidden="true" /> Restored
                             </Badge>
                           </div>
                         )}
-                        {/* 🏆 HEDERA REPUTATION BADGES — Credit Score (300-900) + Trust Score (0-100) */}
+                        {/* 🏆 REPUTATION BADGES — Credit Score (300-900) + Trust Score (0-100) */}
                         <div className="flex items-center gap-1.5 mt-2">
                           {(() => {
                             const creditScore = agent.creditScore ?? 680;
@@ -756,10 +575,10 @@ export default function AgentsPage() {
                               : "bg-red-100 text-red-700 border-red-300 dark:bg-red-950/40 dark:text-red-400 dark:border-red-700";
                             return (
                               <>
-                                <Badge className={`text-[10px] px-1.5 py-0.5 border ${creditTier.color}`} title={`${creditTier.label} tier (300-900 scale)`}>
+                                <Badge className={`text-xs px-1.5 py-0.5 border ${creditTier.color}`} title={`${creditTier.label} tier (300-900 scale)`}>
                                   {creditTier.icon} {creditScore}
                                 </Badge>
-                                <Badge className={`text-[10px] px-1.5 py-0.5 border ${trustColor}`} title="Trust Score (0-100)">
+                                <Badge className={`text-xs px-1.5 py-0.5 border ${trustColor}`} title="Trust Score (0-100)">
                                   ⭐ {trustScore}
                                 </Badge>
                               </>
@@ -777,18 +596,18 @@ export default function AgentsPage() {
                   </CardDescription>
                   {/* Agent bio shown separately if both exist */}
                   {agent.bio && agent.description && agent.bio !== agent.description && (
-                    <p className="text-[10px] text-muted-foreground/70 mb-2 line-clamp-1 italic">Instructions: {agent.description}</p>
+                    <p className="text-xs text-muted-foreground/70 mb-2 line-clamp-1 italic">Instructions: {agent.description}</p>
                   )}
                   {/* Reported skills (from agent) */}
                   {(agent.reportedSkills ?? []).length > 0 && (
                     <div className="flex flex-wrap gap-1 mb-3">
                       {(agent.reportedSkills ?? []).slice(0, 4).map((skill, i) => (
-                        <Badge key={i} variant="secondary" className="text-[10px] px-1.5 py-0 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20">
+                        <Badge key={i} variant="secondary" className="text-xs px-1.5 py-0 bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20">
                           {skill.name}
                         </Badge>
                       ))}
                       {(agent.reportedSkills ?? []).length > 4 && (
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                        <Badge variant="secondary" className="text-xs px-1.5 py-0">
                           +{(agent.reportedSkills ?? []).length - 4}
                         </Badge>
                       )}
@@ -798,12 +617,12 @@ export default function AgentsPage() {
                   {(agent.reportedSkills ?? []).length === 0 && (agent.capabilities ?? []).length > 0 && (
                     <div className="flex flex-wrap gap-1 mb-3">
                       {(agent.capabilities ?? []).slice(0, 3).map((cap, i) => (
-                        <Badge key={i} variant="secondary" className="text-[10px] px-1.5 py-0">
+                        <Badge key={i} variant="secondary" className="text-xs px-1.5 py-0">
                           {cap.length > 25 ? cap.substring(0, 25) + '…' : cap}
                         </Badge>
                       ))}
                       {(agent.capabilities ?? []).length > 3 && (
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                        <Badge variant="secondary" className="text-xs px-1.5 py-0">
                           +{(agent.capabilities ?? []).length - 3}
                         </Badge>
                       )}
@@ -818,19 +637,19 @@ export default function AgentsPage() {
                       <div className="grid grid-cols-4 gap-2 pt-3 border-t border-border text-center">
                         <div>
                           <div className="text-sm font-bold text-amber-600 dark:text-amber-400">{(agent.projectIds ?? []).length}</div>
-                          <div className="text-[10px] text-muted-foreground">Projects</div>
+                          <div className="text-xs text-muted-foreground">Projects</div>
                         </div>
                         <div>
                           <div className="text-sm font-bold">{agentTaskList.length}</div>
-                          <div className="text-[10px] text-muted-foreground">Tasks</div>
+                          <div className="text-xs text-muted-foreground">Tasks</div>
                         </div>
                         <div>
                           <div className="text-sm font-bold">{agentJobList.length}</div>
-                          <div className="text-[10px] text-muted-foreground">Jobs</div>
+                          <div className="text-xs text-muted-foreground">Jobs</div>
                         </div>
                         <div>
                           <div className="text-sm font-bold text-emerald-600 dark:text-emerald-400">{rate}%</div>
-                          <div className="text-[10px] text-muted-foreground">Done</div>
+                          <div className="text-xs text-muted-foreground">Done</div>
                         </div>
                       </div>
                     );
@@ -842,7 +661,7 @@ export default function AgentsPage() {
                       className="flex-1 text-amber-600 dark:text-amber-400 border-amber-300 dark:border-amber-700 hover:bg-amber-50 dark:hover:bg-amber-950/30 hover:text-amber-700 dark:hover:text-amber-300"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleReinvite(agent); }}
                     >
-                      🔗 Re-invite
+                      <Link2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Re-invite
                     </Button>
                     <Button
                       variant="outline"
@@ -850,7 +669,7 @@ export default function AgentsPage() {
                       className="flex-1"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleEditOpen(agent); }}
                     >
-                      ✏️ Edit
+                      <Pencil className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Edit
                     </Button>
                     <Button
                       variant="outline"
@@ -858,7 +677,7 @@ export default function AgentsPage() {
                       className="flex-1 text-red-600 border-red-300 hover:bg-red-50 hover:text-red-700"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteOpen(agent); }}
                     >
-                      🗑️ Remove
+                      <Trash2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Remove
                     </Button>
                   </div>
                 </CardContent>
@@ -907,14 +726,14 @@ export default function AgentsPage() {
                     if (filtered.length === 0) return null;
                     return (
                       <div key={category}>
-                        <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
                           {info.icon} {info.label}
                         </div>
                         {filtered.map((t) => (
                           <SelectItem key={t.id} value={t.id}>
                             <div className="flex flex-col items-start">
                               <span className="font-medium text-sm">{t.label}</span>
-                              <span className="text-[11px] text-muted-foreground">{t.description}</span>
+                              <span className="text-xs text-muted-foreground">{t.description}</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -975,10 +794,10 @@ export default function AgentsPage() {
                     setInviteCopied(true);
                     setTimeout(() => setInviteCopied(false), 2000);
                   }}
-                  className="text-muted-foreground hover:text-foreground shrink-0"
+                  className="p-2 rounded text-muted-foreground hover:text-foreground hover:bg-amber-500/10 shrink-0"
                   title="Copy command"
                 >
-                  {inviteCopied ? '✓' : '📋'}
+                  {inviteCopied ? <Check className="w-3.5 h-3.5" aria-hidden="true" /> : <Copy className="w-3.5 h-3.5" aria-hidden="true" />}
                 </button>
               </div>
               <div className="flex justify-end">
@@ -1021,7 +840,7 @@ export default function AgentsPage() {
                 />
               </div>
               {inviteError && (
-                <div className="p-2 rounded-md bg-red-50 border border-red-200 text-xs text-red-600">
+                <div className="p-2 rounded-md bg-red-50 border border-red-200 text-xs text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
                   {inviteError}
                 </div>
               )}
@@ -1065,15 +884,15 @@ export default function AgentsPage() {
                 )}
               </button>
               <div className="flex-1 min-w-0">
-                <button type="button" onClick={() => avatarInputRef.current?.click()} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
-                  📷 Change Avatar
+                <button type="button" onClick={() => avatarInputRef.current?.click()} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                  <Camera className="w-3.5 h-3.5" aria-hidden="true" /> Change Avatar
                 </button>
                 {editAvatarPreview && (
                   <button type="button" onClick={() => setEditAvatarPreview(null)} className="text-xs text-red-500 hover:text-red-400 ml-3">
                     Remove
                   </button>
                 )}
-                <p className="text-[10px] text-muted-foreground mt-0.5">PNG, JPG or WebP, max 500KB</p>
+                <p className="text-xs text-muted-foreground mt-0.5">PNG, JPG or WebP, max 500KB</p>
               </div>
             </div>
             <div>
@@ -1105,14 +924,14 @@ export default function AgentsPage() {
                     if (filtered.length === 0) return null;
                     return (
                       <div key={category}>
-                        <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider sticky top-[49px] bg-popover">
                           {info.icon} {info.label}
                         </div>
                         {filtered.map((t) => (
                           <SelectItem key={t.id} value={t.id}>
                             <div className="flex flex-col items-start">
                               <span className="font-medium text-sm">{t.label}</span>
-                              <span className="text-[11px] text-muted-foreground">{t.description}</span>
+                              <span className="text-xs text-muted-foreground">{t.description}</span>
                             </div>
                           </SelectItem>
                         ))}
@@ -1181,7 +1000,7 @@ export default function AgentsPage() {
           <div className="flex gap-2 justify-end mt-4">
             <Button variant="outline" onClick={() => setShowDelete(false)} disabled={deleting}>Cancel</Button>
             <Button onClick={handleDeleteConfirm} disabled={deleting} className="bg-red-600 hover:bg-red-700 text-white">
-              {deleting ? 'Removing...' : '🗑️ Remove'}
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> {deleting ? 'Removing...' : 'Remove'}
             </Button>
           </div>
         </DialogContent>
@@ -1191,7 +1010,9 @@ export default function AgentsPage() {
       <Dialog open={showSetup} onOpenChange={setShowSetup}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>🎉 Agent Registered!</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <PartyPopper className="w-5 h-5 text-amber-500" aria-hidden="true" /> Agent Registered!
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1221,14 +1042,16 @@ export default function AgentsPage() {
             <div className="flex gap-2 justify-end">
               <Button asChild variant="outline">
                 <a href="/plugins/agent-guild-connect.zip" download>
-                  ⬇ Download Skill
+                  <Download className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Download Skill
                 </a>
               </Button>
               <Button
                 onClick={handleCopyPrompt}
                 className="bg-amber-500 hover:bg-amber-600 text-white"
               >
-                {copied ? '✅ Copied!' : '📋 Copy Prompt'}
+                {copied
+                  ? <><CheckCircle2 className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Copied!</>
+                  : <><Copy className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Copy Prompt</>}
               </Button>
             </div>
           </div>

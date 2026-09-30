@@ -8,7 +8,6 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title AgentGuildTreasuryLink
  * @notice Treasury contract tracking LINK token balances.
- *         Mirrors the Hedera AgentTreasury but uses LINK ERC-20.
  *         Revenue is split into compute, growth, and reserve buckets.
  */
 contract AgentGuildTreasuryLink is Ownable {

@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title MockLINK
- * @notice Mock LINK token for testing/demo purposes on Hedera testnet
+ * @notice Mock LINK token for testing/demo purposes on EVM testnets
  */
 contract MockLINK is ERC20 {
     constructor() ERC20("Chainlink Token", "LINK") {

@@ -79,6 +79,13 @@ jobs:
           cache: npm
           cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
+      - uses: actions/cache@v4
+        name: Cache Next.js build
+        with:
+          path: AgentGuildApp/.next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('AgentGuildApp/package-lock.json') }}-${{ hashFiles('AgentGuildApp/src/**/*.[jt]s', 'AgentGuildApp/src/**/*.[jt]sx') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('AgentGuildApp/package-lock.json') }}-
       - run: npm run build
 
   # ── Deploy to Netlify from GitHub Actions (Netlify OOMs on 573 routes) ──
@@ -102,14 +109,8 @@ jobs:
       NEXT_PUBLIC_THIRDWEB_CLIENT_ID: ${{ secrets.NEXT_PUBLIC_THIRDWEB_CLIENT_ID }}
       NEXT_PUBLIC_APP_DOMAIN: ${{ secrets.NEXT_PUBLIC_APP_DOMAIN }}
       NEXT_PUBLIC_ADMIN_ADDRESS: ${{ secrets.NEXT_PUBLIC_ADMIN_ADDRESS }}
-      NEXT_PUBLIC_HEDERA_CHAIN_ID: ${{ secrets.NEXT_PUBLIC_HEDERA_CHAIN_ID }}
-      NEXT_PUBLIC_HEDERA_RPC_URL: ${{ secrets.NEXT_PUBLIC_HEDERA_RPC_URL }}
-      NEXT_PUBLIC_HEDERA_TREASURY: ${{ secrets.NEXT_PUBLIC_HEDERA_TREASURY }}
-      NEXT_PUBLIC_HEDERA_AGENT_REGISTRY: ${{ secrets.NEXT_PUBLIC_HEDERA_AGENT_REGISTRY }}
-      NEXT_PUBLIC_HEDERA_ASN_REGISTRY: ${{ secrets.NEXT_PUBLIC_HEDERA_ASN_REGISTRY }}
-      NEXT_PUBLIC_HEDERA_TASK_BOARD: ${{ secrets.NEXT_PUBLIC_HEDERA_TASK_BOARD }}
-      NEXT_PUBLIC_HEDERA_AGENT_NFT: ${{ secrets.NEXT_PUBLIC_HEDERA_AGENT_NFT }}
-      NEXT_PUBLIC_HEDERA_MOCK_LINK: ${{ secrets.NEXT_PUBLIC_HEDERA_MOCK_LINK }}
+      NEXT_PUBLIC_SOLANA_PROGRAM_ID: ${{ secrets.NEXT_PUBLIC_SOLANA_PROGRAM_ID }}
+      NEXT_PUBLIC_SOLANA_RPC_URL: ${{ secrets.NEXT_PUBLIC_SOLANA_RPC_URL }}
       NEXT_PUBLIC_GITHUB_APP_SLUG: ${{ secrets.NEXT_PUBLIC_GITHUB_APP_SLUG }}
       NEXT_PUBLIC_SUPER_ADMINS: ${{ secrets.NEXT_PUBLIC_SUPER_ADMINS }}
       NEXT_PUBLIC_OPENCLAW_WORKSPACE: ${{ secrets.NEXT_PUBLIC_OPENCLAW_WORKSPACE }}
@@ -119,6 +120,9 @@ jobs:
       # client JS bundle by the Next.js build this job runs. This is a
       # server-only Thirdweb secret key, not a publishable client ID.
       THIRDWEB_SECRET: ${{ secrets.NEXT_PUBLIC_THIRDWEB_SECRET }}
+      # Same reasoning — the platform's Solana fee-payer/authority keypair
+      # (base58 secret key) must never be inlined into the client bundle.
+      SOLANA_PLATFORM_KEYPAIR: ${{ secrets.SOLANA_PLATFORM_KEYPAIR }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -127,6 +131,13 @@ jobs:
           cache: npm
           cache-dependency-path: AgentGuildApp/package-lock.json
       - run: npm ci
+      - uses: actions/cache@v4
+        name: Cache Next.js build
+        with:
+          path: AgentGuildApp/.next/cache
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('AgentGuildApp/package-lock.json') }}-${{ hashFiles('AgentGuildApp/src/**/*.[jt]s', 'AgentGuildApp/src/**/*.[jt]sx') }}
+          restore-keys: |
+            ${{ runner.os }}-nextjs-${{ hashFiles('AgentGuildApp/package-lock.json') }}-
       - name: Build and Deploy to Netlify
         run: npx netlify-cli deploy --prod --build --site=${{ secrets.NETLIFY_SITE_ID }} --auth=${{ secrets.NETLIFY_AUTH_TOKEN }}
 
@@ -191,11 +202,48 @@ jobs:
       - run: npm test
         # Runs against Hardhat in-process network — no Sepolia required
 
+# ─── Solana program jobs ────────────────────────────────────────────────────────
+
+  solana-program-test:
+    name: Test (Solana Program)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: solana-program
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: solana-program/package-lock.json
+      # ubuntu-latest ships a Rust toolchain; Solana CLI + Anchor CLI are
+      # installed here since no official pinned-SHA action exists for them.
+      # NOTE: the Solana installer still floats on the "stable" release
+      # channel — Anza doesn't publish a version-pinned URL or checksum for
+      # it, so this step trusts release.anza.xyz's current content on every
+      # run. The Anchor install below is pinned to a fixed git tag, matching
+      # the anchor-lang = "0.31.1" version this program is written against
+      # (programs/agent_guild/Cargo.toml), rather than floating on HEAD of
+      # coral-xyz/anchor.
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Install Anchor CLI
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor --tag v0.31.1 avm --locked --force
+          avm install 0.31.1
+          avm use 0.31.1
+      - run: npm ci
+      - run: anchor test
+        # Spins up a local validator — no devnet/RPC access required.
+
 # ─── Release gate ──────────────────────────────────────────────────────────────
 
   gate:
     name: Release Gate
-    needs: [build, hub-test, deploy]
+    needs: [build, hub-test, deploy, solana-program-test]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -204,6 +252,7 @@ jobs:
           echo "✓ AgentGuildApp: lint, typecheck, test, build"
           echo "✓ Hub: unit tests"
           echo "✓ Contracts: compile + test"
+          echo "✓ Solana program: anchor test"
           echo "SHA: ${{ github.sha }}"
           echo "Ref: ${{ github.ref }}"
           echo "This commit is release-safe for staging/testnet deployment."

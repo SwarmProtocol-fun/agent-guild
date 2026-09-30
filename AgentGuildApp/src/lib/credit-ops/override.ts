@@ -7,8 +7,7 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue, type Query } from "firebase-admin/firestore";
-import { emitAdminOverride } from "@/lib/mod-stubs";
-// [agent-guild-core] Hedera integration removed — install agent-guild-hedera mod
+import { emitAdminOverride } from "@/lib/reputation-chain";
 import { recordCreditOpsAudit } from "./audit";
 import type { CreditOpsOverride, OverrideType } from "./types";
 
@@ -199,7 +198,7 @@ export async function applyOverride(overrideId: string): Promise<void> {
     `Admin override: ${data.reason}`,
   );
 
-  // Emit HCS event
+  // Emit on-chain override event
   try {
     await emitAdminOverride(
       data.asn,
@@ -210,7 +209,7 @@ export async function applyOverride(overrideId: string): Promise<void> {
       overrideId,
     );
   } catch (err) {
-    console.error("Failed to emit admin override HCS event:", err);
+    console.error("Failed to emit admin override on-chain event:", err);
   }
 
   await ref.update({
@@ -258,7 +257,7 @@ export async function rollbackOverride(
     `Rollback override: ${reason}`,
   );
 
-  // Emit reverse HCS event
+  // Emit reverse on-chain event
   try {
     await emitAdminOverride(
       data.asn,
@@ -269,7 +268,7 @@ export async function rollbackOverride(
       overrideId,
     );
   } catch (err) {
-    console.error("Failed to emit rollback HCS event:", err);
+    console.error("Failed to emit rollback on-chain event:", err);
   }
 
   await ref.update({
