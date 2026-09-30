@@ -432,7 +432,14 @@ function ensureDaemon() {
   }
   const logPath = join(dirname(CONFIG_PATH), "daemon.log");
   const logFd = openSync(logPath, "a");
-  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "daemon", "--interval", "30"], {
+  // Forward the resolved agent id. The child must not fall back to this
+  // script directory's pointer — that pointer belongs to a different copy
+  // and would attach this daemon to the wrong identity.
+  let spawnAgentId = null;
+  try { spawnAgentId = JSON.parse(readFileSync(CONFIG_PATH, "utf8")).agentId || null; } catch { /* config not readable yet */ }
+  const daemonArgs = [fileURLToPath(import.meta.url), "daemon", "--interval", "30"];
+  if (spawnAgentId) daemonArgs.push("--as", spawnAgentId);
+  const child = spawn(process.execPath, daemonArgs, {
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });
@@ -1437,6 +1444,12 @@ async function cmdProfile() {
 
 async function cmdDaemon() {
   let config = loadConfig();
+  const replyScript = join(__dirname, "grok-reply.mjs");
+  if (!config.replyCommand && existsSync(replyScript)) {
+    config.replyCommand = `node ${replyScript}`;
+    saveConfig(config);
+  }
+  writeFileSync(daemonPidPath(), `${process.pid}\n`);
   const { publicKey, privateKey } = ensureKeypair();
 
   // --- Auto-complete pending registration if agent was bootstrapped offline ---
@@ -1602,6 +1615,9 @@ const REPLY_TIMEOUT_MS = 60000;
  * flight for that id (FR-7).
  */
 const inFlightReplyIds = new Set();
+// One grok reply at a time. A poll can return several eligible messages, and
+// parallel `grok --single` processes contend on the same leader socket.
+let replyQueue = Promise.resolve();
 
 /**
  * Split a config-authored command string into argv. `command` comes from
@@ -1622,9 +1638,11 @@ function parseShellCommand(command) {
 /**
  * Run config.replyCommand with the message JSON piped to stdin (FR-5).
  * Stdout, trimmed, is the reply body. Never throws — failures come back as
- * { ok: false, error }.
+ * { ok: false, error }. `extraEnv` carries this agent's name/type/bio so a
+ * replyCommand wrapper (e.g. grok-reply.mjs) can identify itself without the
+ * identity being hardcoded per agent.
  */
-function runReplyCommand(command, payload, timeoutMs = REPLY_TIMEOUT_MS) {
+function runReplyCommand(command, payload, extraEnv = {}, timeoutMs = REPLY_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const argv = parseShellCommand(command);
     if (argv.length === 0) {
@@ -1634,7 +1652,7 @@ function runReplyCommand(command, payload, timeoutMs = REPLY_TIMEOUT_MS) {
 
     let child;
     try {
-      child = spawn(argv[0], argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(argv[0], argv.slice(1), { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
     } catch (err) {
       resolve({ ok: false, error: err.message });
       return;
@@ -1750,7 +1768,11 @@ async function processReply(config, privateKey, msg) {
     timestamp: msg.timestamp,
   };
 
-  const result = await runReplyCommand(replyCommand, payload);
+  const result = await runReplyCommand(replyCommand, payload, {
+    AGENT_GUILD_AGENT_NAME: config.agentName || "",
+    AGENT_GUILD_AGENT_TYPE: config.agentType || "",
+    AGENT_GUILD_AGENT_BIO: config.bio || "",
+  });
   if (!result.ok) {
     console.error(`[${now}] reply failed (${msg.id}): ${result.error}`);
     recordReplyFailure(msg.id);
@@ -1794,7 +1816,10 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     console.error(`[${now}] reply-poll error: ${err.message}`);
     return;
   }
-  if (!resp.ok) return; // daemonTick's heartbeat already surfaces connectivity problems
+  if (!resp.ok) {
+    console.error(`[${now}] reply-poll ${resp.status}: ${rawBody.slice(0, 200)}`);
+    return;
+  }
 
   const data = JSON.parse(rawBody);
   const messages = data.messages || [];
@@ -1838,7 +1863,10 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     if (inFlightReplyIds.has(msg.id)) continue; // a reply for this id is already generating
 
     inFlightReplyIds.add(msg.id);
-    processReply(config, privateKey, msg).finally(() => inFlightReplyIds.delete(msg.id));
+    replyQueue = replyQueue
+      .then(() => processReply(config, privateKey, msg))
+      .catch((err) => { console.error(`reply queue (${msg.id}): ${err.message}`); })
+      .finally(() => inFlightReplyIds.delete(msg.id));
   }
 }
 
