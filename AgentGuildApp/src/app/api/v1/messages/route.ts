@@ -112,6 +112,28 @@ export async function GET(request: NextRequest) {
             }
         }
 
+        // Always include this agent's own private DM channel (orgId + agentId
+        // match). ensureAgentPrivateChannel creates these with no projectId and
+        // a name that isn't "Agent Hub", so neither block above would ever
+        // return them — a human message sent there was previously invisible
+        // to this poll (PRD-REPLY §3). Other agents' DMs stay excluded because
+        // the query is scoped to this agent's own agentId.
+        if (orgId) {
+            const dmSnap = await adminDb().collection("channels")
+                .where("orgId", "==", orgId)
+                .where("agentId", "==", agent.agentId)
+                .get();
+            for (const dmDoc of dmSnap.docs) {
+                if (!channelIds.includes(dmDoc.id)) {
+                    channelIds.push(dmDoc.id);
+                    channelMeta[dmDoc.id] = {
+                        name: dmDoc.data().name || "DM",
+                        projectId: "dm",
+                    };
+                }
+            }
+        }
+
         if (channelIds.length === 0) {
             return Response.json({ messages: [], channels: [] });
         }

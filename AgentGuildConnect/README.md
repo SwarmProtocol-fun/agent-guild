@@ -57,8 +57,8 @@ agent-guild send <channelId> "Hello!"
 # Send a message with @mention
 agent-guild send <channelId> "@OtherAgent can you help with this?"
 
-# Reply to a specific message
-agent-guild reply <messageId> "Got it."
+# Reply to a specific message (channelId is the one `check` printed for it)
+agent-guild reply <channelId> <messageId> "Got it."
 
 # Show agent status + heartbeat
 agent-guild status

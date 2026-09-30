@@ -11,7 +11,7 @@
  *   agent-guild register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>]
  *   agent-guild check       [--since <timestamp>] [--history] [--json] [--verify]
  *   agent-guild send        <channelId> "<text>"
- *   agent-guild reply       <messageId> "<text>"
+ *   agent-guild reply       <channelId> <messageId> "<text>"
  *   agent-guild status      — show agent status + heartbeat
  *   agent-guild discover    [--skill <id>] [--type <type>] [--status <status>]
  *   agent-guild profile     [--skills <s1,s2>] [--bio <bio>]
@@ -1219,7 +1219,7 @@ async function cmdCheck() {
           console.log(`     📎 ${att.name} (${att.type}, ${att.size} bytes) — ${att.url}`);
         }
       }
-      console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.id} "<response>"`);
+      console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.channelId} ${msg.id} "<response>"`);
     }
   }
 
@@ -1277,44 +1277,31 @@ async function cmdSend() {
 }
 
 async function cmdReply() {
-  const messageId = process.argv[3];
-  const text = process.argv.slice(4).join(" ");
+  // FR-4: the old form sent `channelId: messageId` — the hub stores that
+  // straight into `messages.channelId`, so it silently posted the reply into
+  // a channel named after the message id instead of the channel the human
+  // actually used (PRD-REPLY §2). channelId must come from the poll, not be
+  // derived from the message id.
+  const channelId = process.argv[3];
+  const messageId = process.argv[4];
+  const text = process.argv.slice(5).join(" ");
 
-  if (!messageId || !text) {
-    console.error("Usage: agent-guild reply <messageId> \"<text>\"");
+  if (!channelId || !messageId || !text) {
+    console.error("Usage: agent-guild reply <channelId> <messageId> \"<text>\"");
     process.exit(1);
   }
 
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
 
-  const nonce = crypto.randomUUID();
-  // Server signature format: POST:/v1/send:<channelId>:<text>:<attachHash>:<nonce>
-  // attachHash is "" when no attachments — the empty segment is required
-  const signedMessage = `POST:/v1/send:${messageId}:${text}::${nonce}`;
-  const sig = sign(signedMessage, privateKey);
+  const sent = await sendChannelReply(config, privateKey, channelId, text, messageId);
 
-  const resp = await fetch(`${config.hubUrl}/api/v1/send`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agent: config.agentId,
-      channelId: messageId,
-      text,
-      nonce,
-      sig,
-      replyTo: messageId,
-    }),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    console.error(`Reply failed (${resp.status}): ${err.error || "Unknown error"}`);
+  if (!sent.ok) {
+    console.error(`Reply failed (${sent.status}): ${sent.data?.error || sent.rawBody || "Unknown error"}`);
     process.exit(1);
   }
 
-  const data = await resp.json();
-  console.log(`Reply sent (message: ${data.messageId})`);
+  console.log(`Reply sent (message: ${sent.data?.messageId})`);
 }
 
 async function cmdStatus() {
@@ -1506,7 +1493,8 @@ async function cmdDaemon() {
   console.log(`Agent Guild Daemon`);
   console.log(`─────────────────────────────`);
   console.log(`  Agent:    ${config.agentName} (${config.agentId})`);
-  console.log(`  Interval: ${intervalSec}s`);
+  console.log(`  Heartbeat: ${intervalSec}s`);
+  console.log(`  Reply poll: ${REPLY_POLL_INTERVAL_MS / 1000}s${config.replyCommand ? "" : " (no replyCommand configured — messages will be logged, not answered)"}`);
   console.log(`  Hub:      ${config.hubUrl}`);
   console.log(`  Mode:     ${config.offline ? "OFFLINE (pending registration)" : "online"}`);
   if (webhookUrl) {
@@ -1525,23 +1513,40 @@ async function cmdDaemon() {
   // commits to a long-running loop. A transient blip on a *later* tick stays
   // logged-only (see daemonTick) since killing a running agent process over
   // one bad poll would be worse than the blip itself.
-  const firstTickOk = await daemonTick(config, privateKey, daemonState, webhookConfig);
+  const firstTickOk = await daemonTick(config, privateKey, daemonState);
   if (!firstTickOk) {
     console.error(`\nFirst heartbeat failed — not starting the daemon loop. Check \`agent-guild status\` for details.`);
     process.exit(1);
   }
 
-  // Loop
-  const interval = setInterval(() => daemonTick(config, privateKey, daemonState, webhookConfig), intervalMs);
+  // FR-8: the first time this build's reply pipeline runs for this agent (no
+  // `repliedIds` in state.json yet), do one catch-up poll from
+  // config.registeredAt instead of the live cursor, so a message that
+  // arrived before this feature existed still gets answered exactly once.
+  // advanceLastPoll's monotonic max means this can't rewind state.lastPoll.
+  if (!("repliedIds" in loadState())) {
+    const registeredAtMs = config.registeredAt ? Date.parse(config.registeredAt) : 0;
+    console.log(`Catch-up poll since registration (${config.registeredAt || "unknown"})...`);
+    await replyPollTick(config, privateKey, daemonState, webhookConfig, String(registeredAtMs || 0));
+    const s = loadState();
+    s.repliedIds = s.repliedIds || {};
+    saveState(s);
+  }
+
+  // Loop — heartbeat every intervalSec, message poll + auto-reply every 2s.
+  const interval = setInterval(() => daemonTick(config, privateKey, daemonState), intervalMs);
+  const replyInterval = setInterval(() => replyPollTick(config, privateKey, daemonState, webhookConfig), REPLY_POLL_INTERVAL_MS);
 
   // Graceful shutdown
   process.on("SIGINT", () => {
     console.log("\nDaemon stopped.");
     clearInterval(interval);
+    clearInterval(replyInterval);
     process.exit(0);
   });
   process.on("SIGTERM", () => {
     clearInterval(interval);
+    clearInterval(replyInterval);
     process.exit(0);
   });
 
@@ -1549,78 +1554,291 @@ async function cmdDaemon() {
   await new Promise(() => { });
 }
 
-async function daemonTick(config, privateKey, daemonState, webhookConfig) {
+async function daemonTick(config, privateKey, daemonState) {
   const now = new Date().toISOString().replace("T", " ").slice(0, 19);
   try {
-    // 1. Heartbeat — report skills
+    // Heartbeat only — report skills. Message polling + replies run on their
+    // own faster timer (replyPollTick) so a slow LLM reply can never delay
+    // this, and vice versa (PRD-REPLY FR-2).
     await reportSkills(config, privateKey, config.skills || [], config.bio);
+    daemonState.consecutiveFailures = 0;
 
-    // 2. Check messages — fetchMessages retries once on its own for a
-    // REPLAY/STALE_TIMESTAMP attempt-level hiccup; anything it still returns
-    // as a failure below is a real problem (bad key, 5xx, or network error).
-    const state = loadState();
-    const since = state.lastPoll || "0";
-    const { resp, rawBody } = await fetchMessages(config, privateKey, since);
-
-    if (resp.ok) {
-      const data = JSON.parse(rawBody);
-      const messages = data.messages || [];
-      const channels = data.channels || [];
-      saveState({ lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
-      daemonState.consecutiveFailures = 0;
-
-      // Cache Agent Hub channel ID for greetings
-      if (!daemonState.hubChannelId && channels.length) {
-        const hub = channels.find(c => c.name === "Agent Hub");
-        if (hub) daemonState.hubChannelId = hub.id;
-      }
-
-      // Auto-greeting on reconnect: only once wasDisconnected has actually
-      // been set (a real disconnect held across consecutive ticks — see the
-      // failure branch below), not for a single transient hiccup.
-      if (daemonState.wasDisconnected && config.autoGreeting?.enabled && config.autoGreeting?.onReconnect && daemonState.hubChannelId) {
-        try {
-          const reconnectMsg = config.autoGreeting.message.replace(/online/, "reconnected");
-          await sendGreeting(config, privateKey, daemonState.hubChannelId, reconnectMsg);
-          console.log(`[${now}] auto-greeting sent (reconnected)`);
-        } catch { /* non-fatal */ }
-        daemonState.wasDisconnected = false;
-      }
-
-      if (messages.length > 0) {
-        console.log(`[${now}] ${messages.length} new message(s)`);
-        for (const msg of messages) {
-          const tag = msg.fromType === "agent" ? "agent" : "HUMAN";
-          const atts = msg.attachments?.length ? ` [${msg.attachments.length} attachment(s)]` : "";
-          console.log(`  [${tag}] [#${msg.channelName}] ${msg.from}: ${msg.text}${atts}`);
-          console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.id} "<response>"`);
-        }
-
-        // Forward messages to webhook if configured
-        if (webhookConfig) {
-          await forwardToWebhook(config, messages, webhookConfig, now);
-        }
-      } else {
-        console.log(`[${now}] heartbeat ok — no new messages`);
-      }
-      return true;
-    } else {
-      let parsed = {};
-      try { parsed = JSON.parse(rawBody); } catch { /* non-JSON error body */ }
-      console.error(`[${now}] check failed (${resp.status}${parsed.code ? ` ${parsed.code}` : ""}): ${parsed.error || rawBody || "no body"}`);
-      // A real disconnect (as opposed to one already-retried attempt-level
-      // hiccup) means this keeps failing across ticks — require two in a row
-      // before treating it as one, so a single blip doesn't trigger a
-      // reconnect greeting on the very next successful poll.
-      daemonState.consecutiveFailures = (daemonState.consecutiveFailures || 0) + 1;
-      if (daemonState.consecutiveFailures >= 2) daemonState.wasDisconnected = true;
-      return false;
+    // Auto-greeting on reconnect: only once wasDisconnected has actually
+    // been set (two consecutive heartbeat failures — see the catch branch
+    // below), not for a single transient hiccup.
+    if (daemonState.wasDisconnected && config.autoGreeting?.enabled && config.autoGreeting?.onReconnect && daemonState.hubChannelId) {
+      try {
+        const reconnectMsg = config.autoGreeting.message.replace(/online/, "reconnected");
+        await sendGreeting(config, privateKey, daemonState.hubChannelId, reconnectMsg);
+        console.log(`[${now}] auto-greeting sent (reconnected)`);
+      } catch { /* non-fatal */ }
+      daemonState.wasDisconnected = false;
     }
+
+    console.log(`[${now}] heartbeat ok`);
+    return true;
   } catch (err) {
-    console.error(`[${now}] error: ${err.message}`);
+    console.error(`[${now}] heartbeat failed: ${err.message}`);
+    // A real disconnect (as opposed to one already-retried attempt-level
+    // hiccup) means this keeps failing across ticks — require two in a row
+    // before treating it as one, so a single blip doesn't trigger a
+    // reconnect greeting on the very next successful heartbeat.
     daemonState.consecutiveFailures = (daemonState.consecutiveFailures || 0) + 1;
     if (daemonState.consecutiveFailures >= 2) daemonState.wasDisconnected = true;
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Message Poll + Auto-Reply (PRD-REPLY)
+// ---------------------------------------------------------------------------
+
+const REPLY_POLL_INTERVAL_MS = 2000;
+const REPLY_TIMEOUT_MS = 60000;
+
+/**
+ * Message ids currently being answered. Guards against a second poll tick
+ * starting a duplicate reply while runReplyCommand (up to 60s) is still in
+ * flight for that id (FR-7).
+ */
+const inFlightReplyIds = new Set();
+
+/**
+ * Split a config-authored command string into argv. `command` comes from
+ * this agent's own config.json (trusted, local) — the untrusted channel text
+ * never touches this parser, it travels on the child's stdin as JSON (FR-6),
+ * so there's nothing here for a hostile message body to inject into.
+ */
+function parseShellCommand(command) {
+  const args = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(command)) !== null) {
+    args.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+  }
+  return args;
+}
+
+/**
+ * Run config.replyCommand with the message JSON piped to stdin (FR-5).
+ * Stdout, trimmed, is the reply body. Never throws — failures come back as
+ * { ok: false, error }.
+ */
+function runReplyCommand(command, payload, timeoutMs = REPLY_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const argv = parseShellCommand(command);
+    if (argv.length === 0) {
+      resolve({ ok: false, error: "empty replyCommand" });
+      return;
+    }
+
+    let child;
+    try {
+      child = spawn(argv[0], argv.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
+    } catch (err) {
+      resolve({ ok: false, error: err.message });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      resolve({ ok: false, error: `timed out after ${Math.round(timeoutMs / 1000)}s` });
+    }, timeoutMs);
+
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, error: err.message });
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const text = stdout.trim();
+      if (code !== 0 || !text) {
+        resolve({ ok: false, error: `exit ${code}${stderr.trim() ? `: ${stderr.trim().slice(0, 200)}` : ""}` });
+        return;
+      }
+      resolve({ ok: true, text });
+    });
+
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  });
+}
+
+/**
+ * Post a reply. channelId is always the polled channel the human used —
+ * never the message id (that was the bug in the original cmdReply; see
+ * PRD-REPLY §2 and FR-4).
+ */
+async function sendChannelReply(config, privateKey, channelId, text, replyTo) {
+  const nonce = crypto.randomUUID();
+  const signedMessage = `POST:/v1/send:${channelId}:${text}::${nonce}`;
+  const sig = sign(signedMessage, privateKey);
+
+  const resp = await fetch(`${config.hubUrl}/api/v1/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent: config.agentId, channelId, text, nonce, sig, replyTo }),
+  });
+  const rawBody = await resp.text();
+  let data = {};
+  try { data = JSON.parse(rawBody); } catch { /* non-JSON error body */ }
+  return { ok: resp.ok, status: resp.status, data, rawBody };
+}
+
+/**
+ * FR-5: a first failure stays out of repliedIds so the next poll can retry
+ * once. A second failure for the same id poisons it into repliedIds as
+ * "error" so a message that can never be answered (e.g. reply text always
+ * empty) can't loop forever.
+ */
+function recordReplyFailure(messageId) {
+  const state = loadState();
+  state.repliedIds = state.repliedIds || {};
+  state.replyFailures = state.replyFailures || {};
+  if (state.replyFailures[messageId]) {
+    delete state.replyFailures[messageId];
+    state.repliedIds[messageId] = "error";
+  } else {
+    state.replyFailures[messageId] = true;
+  }
+  saveState(state);
+}
+
+function recordReplySuccess(messageId) {
+  const state = loadState();
+  state.repliedIds = state.repliedIds || {};
+  state.repliedIds[messageId] = true;
+  if (state.replyFailures) delete state.replyFailures[messageId];
+  saveState(state);
+}
+
+/**
+ * Generate and send one reply. Runs detached from the poll loop (fire and
+ * forget from replyPollTick's perspective) so a slow LLM call never blocks
+ * the next 2s tick; inFlightReplyIds is what stops that from double-replying.
+ */
+async function processReply(config, privateKey, msg) {
+  const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const replyCommand = config.replyCommand;
+  if (!replyCommand) {
+    console.error(`[${now}] reply failed (${msg.id}): no replyCommand configured`);
+    recordReplyFailure(msg.id);
+    return;
+  }
+
+  // FR-5 payload — the channel text is data for the reply process, not
+  // instructions to this daemon (FR-6, non-goals §5).
+  const payload = {
+    id: msg.id,
+    channelId: msg.channelId,
+    channelName: msg.channelName,
+    from: msg.from,
+    fromType: msg.fromType,
+    text: msg.text,
+    timestamp: msg.timestamp,
+  };
+
+  const result = await runReplyCommand(replyCommand, payload);
+  if (!result.ok) {
+    console.error(`[${now}] reply failed (${msg.id}): ${result.error}`);
+    recordReplyFailure(msg.id);
+    return;
+  }
+
+  const sent = await sendChannelReply(config, privateKey, msg.channelId, result.text, msg.id);
+  if (!sent.ok) {
+    console.error(`[${now}] reply failed (${msg.id}): send ${sent.status} ${sent.data?.error || sent.rawBody}`);
+    recordReplyFailure(msg.id);
+    return;
+  }
+
+  recordReplySuccess(msg.id);
+  console.log(`[${now}] replied: channel=${msg.channelId} humanMsg=${msg.id} sentMsg=${sent.data?.messageId}`);
+}
+
+/**
+ * Poll for new messages every REPLY_POLL_INTERVAL_MS and reply to eligible
+ * ones. Deliberately separate from daemonTick's 30s heartbeat, and exempt
+ * from the `Math.max(10, intervalSec)` floor that governs --interval — that
+ * floor is about how often we bother the hub with a heartbeat, not about how
+ * fast a human should get an answer.
+ *
+ * Eligible = fromType !== "agent", and the channel is Agent Hub or this
+ * agent's own DM (FR-3). A project channel this agent happens to poll for
+ * other reasons is left alone — auto-reply never touches it.
+ *
+ * `overrideSince` is used once, by cmdDaemon's FR-8 catch-up poll, to read
+ * from config.registeredAt instead of the live state.lastPoll cursor.
+ */
+async function replyPollTick(config, privateKey, daemonState, webhookConfig, overrideSince) {
+  const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+  const state = loadState();
+  const since = overrideSince !== undefined ? overrideSince : (state.lastPoll || "0");
+
+  let resp, rawBody;
+  try {
+    ({ resp, rawBody } = await fetchMessages(config, privateKey, since));
+  } catch (err) {
+    console.error(`[${now}] reply-poll error: ${err.message}`);
+    return;
+  }
+  if (!resp.ok) return; // daemonTick's heartbeat already surfaces connectivity problems
+
+  const data = JSON.parse(rawBody);
+  const messages = data.messages || [];
+  const channels = data.channels || [];
+  const channelById = Object.fromEntries(channels.map((c) => [c.id, c]));
+
+  // advanceLastPoll never moves the cursor backward, so a catch-up call with
+  // an old overrideSince can't rewind it (FR-8).
+  saveState({ ...loadState(), lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
+
+  if (!daemonState.hubChannelId) {
+    const hub = channels.find((c) => c.name === "Agent Hub" || c.projectId === "org");
+    if (hub) daemonState.hubChannelId = hub.id;
+  }
+
+  if (messages.length > 0) {
+    console.log(`[${now}] ${messages.length} new message(s)`);
+    for (const msg of messages) {
+      const tag = msg.fromType === "agent" ? "agent" : "HUMAN";
+      const atts = msg.attachments?.length ? ` [${msg.attachments.length} attachment(s)]` : "";
+      console.log(`  [${tag}] [#${msg.channelName}] ${msg.from}: ${msg.text}${atts}`);
+      console.log(`     -> channel: ${msg.channelId} | id: ${msg.id} | reply: agent-guild reply ${msg.channelId} ${msg.id} "<response>"`);
+    }
+
+    if (webhookConfig) {
+      await forwardToWebhook(config, messages, webhookConfig, now);
+    }
+  }
+
+  const repliedIds = loadState().repliedIds || {};
+
+  for (const msg of messages) {
+    if (msg.fromType === "agent") continue; // never reply to another agent (FR-3, non-goals §5)
+
+    const chan = channelById[msg.channelId];
+    const isHub = chan?.projectId === "org";
+    const isDm = chan?.projectId === "dm";
+    if (!isHub && !isDm) continue; // FR-3 scope — leave other channels alone
+
+    if (repliedIds[msg.id]) continue; // already answered, or poisoned as "error"
+    if (inFlightReplyIds.has(msg.id)) continue; // a reply for this id is already generating
+
+    inFlightReplyIds.add(msg.id);
+    processReply(config, privateKey, msg).finally(() => inFlightReplyIds.delete(msg.id));
   }
 }
 
@@ -2558,7 +2776,7 @@ Commands:
   register    --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--migrate] [--takeover]
   check       [--since <timestamp>] [--json] [--verify]  — poll for new messages
   send        <channelId> "<text>"                       — send a message to a channel
-  reply       <messageId> "<text>"                       — reply to a specific message
+  reply       <channelId> <messageId> "<text>"           — reply to a specific message
   status                                                 — show agent status + send heartbeat
   discover    [--skill <id>] [--type <type>] [--status <status>]  — find agents
   profile     [--skills <s1,s2>] [--bio <bio>]           — view/update agent profile
