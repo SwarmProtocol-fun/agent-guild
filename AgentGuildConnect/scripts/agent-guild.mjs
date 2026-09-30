@@ -35,7 +35,7 @@
 
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,7 +43,39 @@ import { fileURLToPath } from "node:url";
 // Paths
 // ---------------------------------------------------------------------------
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SKILL_DIR = join(__dirname, "..");
+const HOME = process.env.HOME || process.env.USERPROFILE || "/root";
+const AGENT_GUILD_HOME = join(HOME, ".agent-guild");
+
+function isWritableDir(dir) {
+  try {
+    accessSync(dir, fsConstants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The parent of wherever this script file lives is normally where a copy's
+// own local state (.identity.json, pending-registration.json) is kept, so
+// fleet copies under instances/<slug>/scripts/agent-guild.mjs each keep
+// their own pointer. A bare `curl ... -o /tmp/agent-guild.mjs && node
+// /tmp/agent-guild.mjs register` has no such directory of its own — its
+// parent is `/`, not writable by a normal user — so that layout falls back
+// to the stable ~/.agent-guild home instead.
+const RAW_SKILL_DIR = join(__dirname, "..");
+const SKILL_DIR = (RAW_SKILL_DIR === "/" || !isWritableDir(RAW_SKILL_DIR)) ? AGENT_GUILD_HOME : RAW_SKILL_DIR;
+if (SKILL_DIR === AGENT_GUILD_HOME) {
+  try { mkdirSync(AGENT_GUILD_HOME, { recursive: true, mode: 0o700 }); } catch { /* surfaced by assertSkillDirWritable() before it matters */ }
+}
+
+/** FR-3: a hub 200 followed by an uncaught EACCES writing local state is a failed join — fail fast instead. */
+function assertSkillDirWritable() {
+  if (!isWritableDir(SKILL_DIR)) {
+    console.error(`Error: identity directory is not writable: ${SKILL_DIR}`);
+    console.error(`   Local state (.identity.json, pending-registration.json) can't be saved here.`);
+    process.exit(1);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Stable identity directory — ~/.agent-guild/<agentId>/
@@ -57,8 +89,6 @@ const SKILL_DIR = join(__dirname, "..");
 // per-copy local pointer so commands that don't take --org/--name (check,
 // status, send, daemon, ...) know which identity to use.
 // ---------------------------------------------------------------------------
-const HOME = process.env.HOME || process.env.USERPROFILE || "/root";
-const AGENT_GUILD_HOME = join(HOME, ".agent-guild");
 const IDENTITY_INDEX_PATH = join(AGENT_GUILD_HOME, "index.json");
 const LOCAL_POINTER_PATH = join(SKILL_DIR, ".identity.json");
 
@@ -645,6 +675,7 @@ function parseSkills(skillsStr) {
 // ---------------------------------------------------------------------------
 
 async function cmdRegister() {
+  assertSkillDirWritable();
   let hubUrl = arg("--hub") || "https://agent-guild.com";
   let orgId = arg("--org");
   let name = arg("--name");
@@ -936,6 +967,7 @@ async function cmdRegister() {
  * --org/--name/--skills flags to copy out of a runbook by hand.
  */
 async function cmdJoin() {
+  assertSkillDirWritable();
   const hubUrl = arg("--hub") || "https://agent-guild.com";
   const code = arg("--code");
   const takeover = hasFlag("--takeover");
