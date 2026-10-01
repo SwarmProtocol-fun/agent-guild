@@ -116,16 +116,19 @@ export async function recordHeartbeat(
     data?: { agentName?: string; latencyMs?: number; version?: string; uptime?: number }
 ): Promise<void> {
     const ref = adminDb().collection(HEARTBEAT_COLLECTION).doc(`${orgId}_${agentId}`);
-    await ref.set({
+    // firebase-admin rejects undefined. The daemon ping calls this with no
+    // metrics, so those fields stay off the document instead of failing the write.
+    const patch: { [key: string]: unknown } = {
         orgId,
         agentId,
         agentName: data?.agentName || agentId,
         status: "online" as AgentStatus,
         lastSeen: FieldValue.serverTimestamp(),
-        latencyMs: data?.latencyMs,
-        version: data?.version,
-        uptime: data?.uptime,
-    }, { merge: true });
+    };
+    if (typeof data?.latencyMs === "number") patch.latencyMs = data.latencyMs;
+    if (data?.version) patch.version = data.version;
+    if (typeof data?.uptime === "number") patch.uptime = data.uptime;
+    await ref.set(patch, { merge: true });
 }
 
 /** Get all agent heartbeats for an org */
