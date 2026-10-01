@@ -17,6 +17,8 @@ import { requirePlatformAdminOrAgent, unauthorized } from "@/lib/auth-guard";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
 import { fireWebhooks } from "@/lib/credit-webhooks";
 import { invalidateCache } from "@/lib/credit-cache";
+import { ingestCreditEvent } from "@/lib/credit-events/ingest";
+import { recomputeAndSync } from "@/lib/scoring-engine";
 
 /** Update credit scores on-chain via the platform authority (Solana AgentGuild program) */
 async function updateCreditOnChain(
@@ -89,6 +91,29 @@ export async function POST(request: NextRequest) {
 
     // Invalidate credit cache
     invalidateCache(`credit:${agentId}`);
+
+    // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
+    // Scoring Engine's execution/reliability sub-scores read from here.
+    ingestCreditEvent({
+        eventType: "task.completed",
+        agentId,
+        asn,
+        agentAddress: (agentData.walletAddress as string) || undefined,
+        orgId: (agentData.orgId as string) || "platform",
+        creditDelta: newCredit - currentCredit,
+        trustDelta: newTrust - currentTrust,
+        provenance: "task_lifecycle",
+        severity: "info",
+        source: {
+            system: "credit-task-complete-api",
+            sourceEventId: `task-complete-${agentId}-${Date.now()}`,
+            sourceEventType: "task.completed",
+        },
+        timestamp: Math.floor(Date.now() / 1000),
+        description: `Task completion recorded for agent ${agentId}`,
+    }).then(() => {
+        if (asn) return recomputeAndSync(agentId, asn);
+    }).catch((err) => console.error("[credit/task-complete] Failed to ingest credit event:", err));
 
     // Fire webhooks (non-blocking)
     fireWebhooks(agentId, "score_change", {

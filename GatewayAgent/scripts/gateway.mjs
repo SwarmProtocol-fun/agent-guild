@@ -592,7 +592,7 @@ async function apiRegisterWorker(config, workerData) {
 async function apiRegisterWorkerEd25519(hubUrl, workerData, publicKeyPem, privateKeyPem) {
   const ts = Date.now();
   const proofMessage = `gateway:register:${workerData.orgId}:${ts}`;
-  const proofSig = sign(privateKeyPem, proofMessage);
+  const proofSig = sign(proofMessage, privateKeyPem);
 
   const url = `${hubUrl}/api/v1/gateway/register`;
   const body = {

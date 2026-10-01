@@ -23,6 +23,8 @@ import { FieldValue } from "firebase-admin/firestore";
 // [agent-guild-core] Hedera removed
 import type { ScoreEvent } from "@/lib/credit-types";
 import { getScoreBand, type ScoreBand } from "./credit-scoring";
+import { queryCreditEvents } from "./credit-events/store";
+import type { CreditEvent, CreditEventType } from "./credit-events/types";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -554,28 +556,55 @@ function computeComposite(
 // Data Fetching
 // ═══════════════════════════════════════════════════════════════
 
-/** Fetch all HCS score events for an agent from the event buffer + any historical source */
+/**
+ * Map a canonical CreditEventType (credit-events/types.ts) back to the
+ * flatter ScoreEvent["type"] taxonomy the sub-score functions below filter
+ * on. Several canonical types have no sub-score-relevant counterpart and
+ * fall through to "checkpoint", which none of the filters match.
+ */
+function toInternalEventType(eventType: CreditEventType): ScoreEvent["type"] {
+    switch (eventType) {
+        case "task.completed":
+            return "task_complete";
+        case "task.overdue":
+        case "task.disputed":
+            return "task_fail";
+        case "fraud.flagged":
+        case "payment.failed":
+            return "penalty";
+        case "agent.verified":
+            return "skill_report";
+        case "payment.settled":
+            return "bonus";
+        default:
+            return "checkpoint";
+    }
+}
+
+function creditEventToScoreEvent(event: CreditEvent): ScoreEvent {
+    return {
+        type: toInternalEventType(event.eventType),
+        asn: event.asn || "",
+        agentAddress: event.agentAddress || "",
+        creditDelta: event.creditDelta,
+        trustDelta: event.trustDelta,
+        timestamp: event.timestamp,
+        metadata: event.metadata,
+    };
+}
+
+/**
+ * Fetch all score-relevant events for an agent from the event buffer plus
+ * the canonical creditEvents collection (credit-events/store.ts) — the
+ * single source of truth for score-affecting agent behavior.
+ */
 async function fetchAgentEvents(asn: string): Promise<ScoreEvent[]> {
     // Start with buffered events
     const buffered = eventBuffer.get(asn) || [];
 
-    // Also fetch historical events from the activityEvents collection
-    // that have score-related metadata
     try {
-        const snap = await adminDb()
-            .collection("activityEvents")
-            .where("metadata.asn", "==", asn)
-            .orderBy("createdAt", "desc")
-            .limit(500)
-            .get();
-        const historicalEvents: ScoreEvent[] = [];
-
-        for (const docSnap of snap.docs) {
-            const data = docSnap.data();
-            if (data.metadata?.scoreEvent) {
-                historicalEvents.push(data.metadata.scoreEvent as ScoreEvent);
-            }
-        }
+        const events = await queryCreditEvents({ asn, limit: 1000, orderDirection: "asc" });
+        const historicalEvents = events.map(creditEventToScoreEvent);
 
         // Merge and deduplicate by timestamp + type
         const all = [...historicalEvents, ...buffered];
@@ -872,6 +901,36 @@ export async function syncCompositeToAgent(snapshot: ScoreSnapshot): Promise<voi
         });
     } catch (error) {
         console.error("Failed to sync composite score to agent:", error);
+    }
+}
+
+/**
+ * Below this overall confidence, a freshly computed snapshot is still
+ * persisted (visible via score history / simulation) but is NOT allowed to
+ * overwrite the agent's live creditScore/trustScore — with little event
+ * history, most sub-scores sit near the confidence-adjusted center (50),
+ * which would otherwise regress every sparsely-active agent toward a flat
+ * ~600 the moment its first event arrives, discarding whatever track record
+ * the legacy flat-delta system had already accumulated for it.
+ */
+const MIN_SYNC_CONFIDENCE = 0.3;
+
+/**
+ * Recompute an agent's composite score from the latest credit events and,
+ * once there's enough data to be meaningful, sync it as the agent's live
+ * score. Called after any credit-affecting event is ingested.
+ */
+export async function recomputeAndSync(agentId: string, asn: string): Promise<ScoreSnapshot | null> {
+    try {
+        const snapshot = await computeAgentScore(agentId, asn);
+        await persistScoreSnapshot(snapshot);
+        if (snapshot.confidence >= MIN_SYNC_CONFIDENCE) {
+            await syncCompositeToAgent(snapshot);
+        }
+        return snapshot;
+    } catch (error) {
+        console.error("[scoring-engine] Auto-recompute failed:", error);
+        return null;
     }
 }
 

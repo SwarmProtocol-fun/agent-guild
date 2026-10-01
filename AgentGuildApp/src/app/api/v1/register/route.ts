@@ -26,6 +26,8 @@ import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
 import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/lib/reputation-chain";
 import { isAdminConfigError } from "../verify";
+import { ingestCreditEvent, normalizeAgentRegistration } from "@/lib/credit-events/ingest";
+import { recomputeAndSync } from "@/lib/scoring-engine";
 
 /**
  * Read back the agent doc we just wrote, via the exact same Admin-SDK path
@@ -424,6 +426,12 @@ export async function POST(request: NextRequest) {
             createdAt: FieldValue.serverTimestamp(),
         });
 
+        // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
+        // Scoring Engine's trustNetwork sub-score reads registration events from here.
+        ingestCreditEvent(normalizeAgentRegistration(ref.id, orgId, asn, agentAddress, false))
+            .then(() => recomputeAndSync(ref.id, asn))
+            .catch((err) => console.error("[register] Failed to ingest credit event:", err));
+
         // Attempt on-chain registration on Solana (non-blocking)
         registerOnChain(agentName, asn, skillStr, publicKey).then(async (result) => {
             if (result) {
@@ -432,6 +440,9 @@ export async function POST(request: NextRequest) {
                     onChainRegistered: true,
                     onChainError: FieldValue.delete(),
                 });
+                ingestCreditEvent(normalizeAgentRegistration(ref.id, orgId, asn, agentAddress, true))
+                    .then(() => recomputeAndSync(ref.id, asn))
+                    .catch((err) => console.error("[register] Failed to ingest on-chain verification event:", err));
             } else {
                 await adminDb().collection("agents").doc(ref.id).update({
                     onChainError: "On-chain registration skipped (no transaction signature returned)",

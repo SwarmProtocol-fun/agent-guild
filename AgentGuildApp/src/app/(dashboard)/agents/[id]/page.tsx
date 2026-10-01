@@ -8,6 +8,7 @@ import {
   ArrowLeft, ArrowRight, Frown, Pencil, Trash2, MessageSquare, Zap, Folder,
   Puzzle, X, Radio, Wrench, IdCard, Brain, Blocks, CheckCircle2, XCircle,
   ExternalLink, RefreshCw, Link2, Briefcase, ClipboardList, Pause, Play,
+  Wallet, Copy, Check, Plus, KeyRound,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -51,6 +52,18 @@ import { shortAddress } from "@/lib/chains";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { useSession } from "@/contexts/SessionContext";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES } from "@/lib/agent-types";
+
+/** Custodial wallet the platform generated on this agent's behalf — see /api/v1/agents/[id]/wallets. */
+interface AgentWallet {
+  id: string;
+  publicKey: string;
+  chain: "solana" | "evm";
+  label?: string;
+  createdAt: string | null;
+  hyperliquidRegistered?: boolean;
+  hyperliquidNetwork?: "testnet" | "mainnet";
+  balance: { sol: number | null; usdc: number | null; hyperliquidEquity: number | null };
+}
 
 // ---------------------------------------------------------------------------
 // Lightweight loading skeleton for the profile page — same "real skeleton
@@ -174,6 +187,24 @@ function AgentDetailPage() {
 
   // Solana / Metaplex state
   const [solanaLoading, setSolanaLoading] = useState(false);
+
+  // Custodial agent wallets (platform-generated, separate from the identity wallet above)
+  const [wallets, setWallets] = useState<AgentWallet[]>([]);
+  const [walletsLoading, setWalletsLoading] = useState(false);
+  const [walletsMax, setWalletsMax] = useState(10);
+  const [generatingWallet, setGeneratingWallet] = useState(false);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const [copiedWalletId, setCopiedWalletId] = useState<string | null>(null);
+  const [showGenerateWallet, setShowGenerateWallet] = useState(false);
+  const [generateChain, setGenerateChain] = useState<"solana" | "evm">("solana");
+  const [registerHyperliquid, setRegisterHyperliquid] = useState(false);
+  const [hyperliquidPassphrase, setHyperliquidPassphrase] = useState('');
+  const [hyperliquidNetwork, setHyperliquidNetwork] = useState<"testnet" | "mainnet">("testnet");
+  const [resetPassphraseWallet, setResetPassphraseWallet] = useState<AgentWallet | null>(null);
+  const [resetPassphraseValue, setResetPassphraseValue] = useState('');
+  const [resetPassphraseNetwork, setResetPassphraseNetwork] = useState<"testnet" | "mainnet">("testnet");
+  const [resettingPassphrase, setResettingPassphrase] = useState(false);
+  const [resetPassphraseError, setResetPassphraseError] = useState<string | null>(null);
 
   // Pause/Resume state
   const [showPause, setShowPause] = useState(false);
@@ -537,6 +568,110 @@ function AgentDetailPage() {
       console.error("Metadata update failed:", err);
     } finally {
       setSolanaLoading(false);
+    }
+  };
+
+  // ── Custodial agent wallets ──
+  const loadWallets = async () => {
+    if (!agent || !currentOrg) return;
+    setWalletsLoading(true);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/wallets?org=${currentOrg.id}`, {
+        headers: solanaAuthHeaders,
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setWallets(data.wallets ?? []);
+        setWalletsMax(data.max ?? 10);
+      }
+    } catch (err) {
+      console.error("Failed to load agent wallets:", err);
+    } finally {
+      setWalletsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (agent?.id && currentOrg?.id) loadWallets();
+  }, [agent?.id, currentOrg?.id]);
+
+  const handleOpenGenerateWallet = () => {
+    setGenerateChain("solana");
+    setRegisterHyperliquid(false);
+    setHyperliquidPassphrase('');
+    setHyperliquidNetwork("testnet");
+    setWalletError(null);
+    setShowGenerateWallet(true);
+  };
+
+  const handleGenerateWallet = async () => {
+    if (!agent || !currentOrg) return;
+    setWalletError(null);
+    setGeneratingWallet(true);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/wallets`, {
+        method: "POST",
+        headers: solanaAuthHeaders,
+        body: JSON.stringify({
+          orgId: currentOrg.id,
+          chain: generateChain,
+          ...(generateChain === "evm" && registerHyperliquid
+            ? { hyperliquid: { masterSecret: hyperliquidPassphrase, network: hyperliquidNetwork } }
+            : {}),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setWallets((prev) => [...prev, data.wallet]);
+        setShowGenerateWallet(false);
+        setHyperliquidPassphrase('');
+      } else {
+        setWalletError(data.error || "Failed to generate wallet");
+      }
+    } catch (err) {
+      setWalletError(err instanceof Error ? err.message : "Failed to generate wallet");
+    } finally {
+      setGeneratingWallet(false);
+    }
+  };
+
+  const copyWalletAddress = (walletId: string, address: string) => {
+    navigator.clipboard.writeText(address);
+    setCopiedWalletId(walletId);
+    setTimeout(() => setCopiedWalletId(null), 2000);
+  };
+
+  const handleOpenResetPassphrase = (wallet: AgentWallet) => {
+    setResetPassphraseWallet(wallet);
+    setResetPassphraseValue('');
+    setResetPassphraseNetwork(wallet.hyperliquidNetwork ?? "testnet");
+    setResetPassphraseError(null);
+  };
+
+  const handleResetPassphrase = async () => {
+    if (!agent || !currentOrg || !resetPassphraseWallet) return;
+    setResetPassphraseError(null);
+    setResettingPassphrase(true);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/wallets/${resetPassphraseWallet.id}/hyperliquid-passphrase`, {
+        method: "POST",
+        headers: solanaAuthHeaders,
+        body: JSON.stringify({ orgId: currentOrg.id, masterSecret: resetPassphraseValue, network: resetPassphraseNetwork }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setWallets((prev) => prev.map((w) => w.id === resetPassphraseWallet.id
+          ? { ...w, hyperliquidRegistered: true, hyperliquidNetwork: resetPassphraseNetwork }
+          : w));
+        setResetPassphraseWallet(null);
+        setResetPassphraseValue('');
+      } else {
+        setResetPassphraseError(data.error || "Failed to reset passphrase");
+      }
+    } catch (err) {
+      setResetPassphraseError(err instanceof Error ? err.message : "Failed to reset passphrase");
+    } finally {
+      setResettingPassphrase(false);
     }
   };
 
@@ -1222,6 +1357,108 @@ function AgentDetailPage() {
         </Card>
       )}
 
+      {/* Agent Wallets — custodial, platform-generated */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2"><Wallet className="w-4 h-4" aria-hidden="true" /> Agent Wallets</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="text-xs">{wallets.length}/{walletsMax}</Badge>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleOpenGenerateWallet}
+                disabled={generatingWallet || walletsLoading || wallets.length >= walletsMax}
+                className="h-7 text-xs gap-1 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
+              >
+                <Plus className="w-3 h-3" aria-hidden="true" /> Generate Wallet
+              </Button>
+            </div>
+          </div>
+          <CardDescription>Platform-held Solana or EVM/Hyperliquid wallets generated for this agent — separate from its own identity key below</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {walletsLoading && wallets.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Loading wallets...</p>
+          ) : wallets.length > 0 ? (
+            <div className="space-y-2">
+              {wallets.map((w) => (
+                <div
+                  key={w.id}
+                  className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-border bg-muted/30"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant="outline" className="text-xs uppercase">{w.chain}</Badge>
+                      <code className="font-mono text-xs truncate">{shortAddress(w.publicKey)}</code>
+                      <button
+                        onClick={() => copyWalletAddress(w.id, w.publicKey)}
+                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        title="Copy address"
+                      >
+                        {copiedWalletId === w.id ? (
+                          <Check className="w-3 h-3 text-emerald-500" aria-hidden="true" />
+                        ) : (
+                          <Copy className="w-3 h-3" aria-hidden="true" />
+                        )}
+                      </button>
+                      <a
+                        href={w.chain === "solana"
+                          ? `https://solscan.io/account/${w.publicKey}?cluster=devnet`
+                          : `https://app.hyperliquid${w.hyperliquidNetwork === "mainnet" ? "" : "-testnet"}.xyz/trade`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        title={w.chain === "solana" ? "View on Solscan" : "Open on Hyperliquid"}
+                      >
+                        <ExternalLink className="w-3 h-3" aria-hidden="true" />
+                      </a>
+                      {w.chain === "evm" && (
+                        <Badge className={`text-xs ${w.hyperliquidRegistered
+                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                          : "bg-muted text-muted-foreground"}`}
+                        >
+                          {w.hyperliquidRegistered ? `Hyperliquid (${w.hyperliquidNetwork})` : "Not registered for trading"}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                      {w.chain === "solana" ? (
+                        <>
+                          <span>{(w.balance.sol ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</span>
+                          {w.balance.usdc != null && <span>{w.balance.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</span>}
+                        </>
+                      ) : (
+                        <span>
+                          {w.balance.hyperliquidEquity != null
+                            ? `$${w.balance.hyperliquidEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })} account equity`
+                            : "No Hyperliquid account yet"}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {w.chain === "evm" && (
+                    <button
+                      onClick={() => handleOpenResetPassphrase(w)}
+                      className="p-1.5 rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors shrink-0"
+                      title={w.hyperliquidRegistered ? "Reset trading passphrase" : "Set trading passphrase"}
+                    >
+                      <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-muted-foreground">
+              <Wallet className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
+              <p className="text-sm">No wallets generated yet</p>
+              <p className="text-xs mt-1">Click &quot;Generate Wallet&quot; to create one</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* On-Chain Registration — Solana */}
       <Card>
         <CardHeader className="pb-3">
@@ -1706,6 +1943,147 @@ function AgentDetailPage() {
                   {agentGuildWrite.state.isLoading ? 'Registering...' : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
                 </Button>
               )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Generate Agent Wallet Dialog */}
+      <Dialog open={showGenerateWallet} onOpenChange={(open) => { setShowGenerateWallet(open); if (!open) setHyperliquidPassphrase(''); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Wallet className="w-4 h-4" aria-hidden="true" /> Generate Agent Wallet</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium mb-1 block">Chain</label>
+              <Select value={generateChain} onValueChange={(v: string) => { setGenerateChain(v as "solana" | "evm"); setRegisterHyperliquid(false); }}>
+                <SelectTrigger>
+                  <SelectValue>{generateChain === "solana" ? "Solana" : "EVM (Hyperliquid-compatible)"}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="solana">Solana</SelectItem>
+                  <SelectItem value="evm">EVM (Hyperliquid-compatible)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {generateChain === "evm" && (
+              <div className="space-y-3 rounded-lg border border-border p-3">
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={registerHyperliquid}
+                    onChange={(e) => setRegisterHyperliquid(e.target.checked)}
+                    className="accent-amber-600"
+                  />
+                  Register for Hyperliquid trading
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Hands the new key to mods/hyperliquid-trading, encrypted with a passphrase only you supply here.
+                  The platform never stores this passphrase — you&apos;ll need to re-enter it every time this agent
+                  places a trade, same as pasting in your own key. Lose it and the wallet shown below is still
+                  yours (and still in the Agent Wallets list), but it won&apos;t be able to trade on Hyperliquid
+                  anymore until you register it again with a new passphrase.
+                </p>
+                {registerHyperliquid && (
+                  <>
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Trading Passphrase</label>
+                      <Input
+                        type="password"
+                        value={hyperliquidPassphrase}
+                        onChange={(e) => setHyperliquidPassphrase(e.target.value)}
+                        placeholder="Used to encrypt this key for trading — not stored"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium mb-1 block">Network</label>
+                      <Select value={hyperliquidNetwork} onValueChange={(v: string) => setHyperliquidNetwork(v as "testnet" | "mainnet")}>
+                        <SelectTrigger>
+                          <SelectValue>{hyperliquidNetwork === "mainnet" ? "Mainnet" : "Testnet"}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="testnet">Testnet</SelectItem>
+                          <SelectItem value="mainnet">Mainnet</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {walletError && (
+              <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
+                {walletError}
+              </div>
+            )}
+
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowGenerateWallet(false)} disabled={generatingWallet}>Cancel</Button>
+              <Button
+                onClick={handleGenerateWallet}
+                disabled={generatingWallet || (generateChain === "evm" && registerHyperliquid && !hyperliquidPassphrase.trim())}
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+              >
+                {generatingWallet ? "Generating..." : <><Plus className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Generate</>}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reset Hyperliquid Trading Passphrase Dialog */}
+      <Dialog open={!!resetPassphraseWallet} onOpenChange={(open) => { if (!open) { setResetPassphraseWallet(null); setResetPassphraseValue(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><KeyRound className="w-4 h-4" aria-hidden="true" /> {resetPassphraseWallet?.hyperliquidRegistered ? "Reset" : "Set"} Trading Passphrase</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              {resetPassphraseWallet?.hyperliquidRegistered
+                ? "This re-encrypts the wallet's key for Hyperliquid trading under a new passphrase. The old passphrase stops working immediately."
+                : "This wallet isn't registered for Hyperliquid trading yet. Setting a passphrase here hands its key to mods/hyperliquid-trading, encrypted so only this passphrase can use it."}
+              {" "}The platform never stores it — you&apos;ll need to re-enter it on every trade.
+            </p>
+            <div>
+              <label className="text-xs font-medium mb-1 block">New Trading Passphrase</label>
+              <Input
+                type="password"
+                value={resetPassphraseValue}
+                onChange={(e) => setResetPassphraseValue(e.target.value)}
+                placeholder="Used to encrypt this key for trading — not stored"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium mb-1 block">Network</label>
+              <Select value={resetPassphraseNetwork} onValueChange={(v: string) => setResetPassphraseNetwork(v as "testnet" | "mainnet")}>
+                <SelectTrigger>
+                  <SelectValue>{resetPassphraseNetwork === "mainnet" ? "Mainnet" : "Testnet"}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="testnet">Testnet</SelectItem>
+                  <SelectItem value="mainnet">Mainnet</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {resetPassphraseError && (
+              <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
+                {resetPassphraseError}
+              </div>
+            )}
+
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setResetPassphraseWallet(null)} disabled={resettingPassphrase}>Cancel</Button>
+              <Button
+                onClick={handleResetPassphrase}
+                disabled={resettingPassphrase || !resetPassphraseValue.trim()}
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+              >
+                {resettingPassphrase ? "Saving..." : (resetPassphraseWallet?.hyperliquidRegistered ? "Reset Passphrase" : "Set Passphrase")}
+              </Button>
             </div>
           </div>
         </DialogContent>

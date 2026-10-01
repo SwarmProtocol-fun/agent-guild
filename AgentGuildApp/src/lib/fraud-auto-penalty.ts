@@ -18,6 +18,8 @@ import { recordCreditAudit } from "./credit-audit-log";
 import { fireWebhooks } from "./credit-webhooks";
 import { invalidateCache } from "./credit-cache";
 import { requestOverride } from "./credit-ops/override";
+import { ingestCreditEvent, normalizeFraudEvent } from "./credit-events/ingest";
+import { recomputeAndSync } from "./scoring-engine";
 import type { Agent } from "./firestore";
 
 const MIN_CREDIT_SCORE = 300;
@@ -71,6 +73,20 @@ async function applyCreditPenalty(
     delta: { credit: creditAfter - creditBefore, trust: trustAfter - trustBefore },
     trigger: "fraud_auto_penalty",
   }).catch((err) => console.error("[fraud-auto-penalty] Webhook dispatch error:", err));
+
+  // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
+  // Scoring Engine's risk sub-score reads penalty events from here.
+  ingestCreditEvent(
+    normalizeFraudEvent(
+      agentId,
+      agent.orgId || "platform",
+      "flagged",
+      reason,
+      creditAfter - creditBefore,
+      trustAfter - trustBefore,
+    ),
+  ).then(() => recomputeAndSync(agentId, agent.asn!))
+    .catch((err) => console.error("[fraud-auto-penalty] Failed to ingest credit event:", err));
 
   return { creditBefore, creditAfter, trustBefore, trustAfter };
 }

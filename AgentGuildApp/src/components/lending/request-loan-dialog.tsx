@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import {
     Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { soloRateBand } from "@/lib/lending/eligibility";
 import type { KindEligibility, LoanKind, LoanSource } from "@/lib/lending/types";
 
 interface RequestLoanDialogProps {
@@ -34,6 +35,8 @@ export function RequestLoanDialog({
 }: RequestLoanDialogProps) {
     const [amount, setAmount] = useState(String(Math.min(gate.maxAmountUsd, 500)));
     const [source, setSource] = useState<LoanSource>("pool");
+    const band = soloRateBand(gate.rateBps);
+    const [ratePercent, setRatePercent] = useState(String(gate.rateBps / 100));
     const [termDays, setTermDays] = useState("30");
     const [purpose, setPurpose] = useState("");
     const [loading, setLoading] = useState(false);
@@ -57,6 +60,14 @@ export function RequestLoanDialog({
             setError(`Amount exceeds the maximum of $${gate.maxAmountUsd.toLocaleString()}`);
             return;
         }
+        let requestedRateBps: number | undefined;
+        if (source === "solo") {
+            requestedRateBps = Math.round(parseFloat(ratePercent) * 100);
+            if (!Number.isFinite(requestedRateBps) || requestedRateBps < band.minBps || requestedRateBps > band.maxBps) {
+                setError(`Rate must be between ${(band.minBps / 100).toFixed(1)}% and ${(band.maxBps / 100).toFixed(1)}% APR`);
+                return;
+            }
+        }
         setLoading(true);
         setError(null);
         try {
@@ -67,6 +78,7 @@ export function RequestLoanDialog({
                     agentId, orgId, kind, source,
                     amountUsd, termDays: parseInt(termDays, 10),
                     purpose: purpose || undefined,
+                    requestedRateBps,
                 }),
             });
             if (!res.ok) {
@@ -144,6 +156,22 @@ export function RequestLoanDialog({
                                 </button>
                             </div>
                         </div>
+
+                        {source === "solo" && (
+                            <div>
+                                <Label className="text-xs">Rate You're Offering (% APR)</Label>
+                                <Input
+                                    type="number"
+                                    step="0.1"
+                                    value={ratePercent}
+                                    onChange={(e) => setRatePercent(e.target.value)}
+                                    className="mt-1"
+                                />
+                                <p className="text-[10px] text-muted-foreground mt-1">
+                                    Negotiated directly with a lender — must be between {(band.minBps / 100).toFixed(1)}% and {(band.maxBps / 100).toFixed(1)}% APR. Pool loans are always fixed at {(gate.rateBps / 100).toFixed(1)}%.
+                                </p>
+                            </div>
+                        )}
 
                         <div>
                             <Label className="text-xs">Term</Label>

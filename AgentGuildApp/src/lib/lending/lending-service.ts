@@ -27,6 +27,7 @@ import {
     evaluateEligibility,
     kindEligibility,
     clampTermDays,
+    validateSoloRateBps,
 } from "./eligibility";
 import { accrue, applyPayment, clamp } from "./math";
 import type {
@@ -336,8 +337,9 @@ export async function getEligibility(agentId: string): Promise<EligibilitySummar
     const agentSnap = await adminDb().collection("agents").doc(agentId).get();
     const creditScore = (agentSnap.data()?.creditScore as number) ?? 680;
 
-    const [trustRepaidSnap, activeSnap, defaultedSnap] = await Promise.all([
+    const [trustRepaidSnap, unsecuredRepaidSnap, activeSnap, defaultedSnap] = await Promise.all([
         adminDb().collection(LOANS).where("borrowerAgentId", "==", agentId).where("kind", "==", "trust").where("status", "==", "repaid").get(),
+        adminDb().collection(LOANS).where("borrowerAgentId", "==", agentId).where("kind", "==", "unsecured").where("status", "==", "repaid").get(),
         adminDb().collection(LOANS).where("borrowerAgentId", "==", agentId).where("status", "in", ACTIVE_LOAN_STATUSES).get(),
         adminDb().collection(LOANS).where("borrowerAgentId", "==", agentId).where("status", "==", "defaulted").get(),
     ]);
@@ -346,6 +348,7 @@ export async function getEligibility(agentId: string): Promise<EligibilitySummar
         policy: policyResult.policy,
         creditScore,
         completedTrustLoans: trustRepaidSnap.size,
+        completedUnsecuredLoans: unsecuredRepaidSnap.size,
         activeLoanCount: activeSnap.size,
         hasUnresolvedDefault: defaultedSnap.size > 0,
     });
@@ -365,6 +368,8 @@ export interface RequestLoanInput {
     poolId?: string;
     purpose?: string;
     requestedByWallet?: string;
+    /** Solo loans only — the rate the borrower is offering, negotiated between the two parties within a band around the tier's algorithmic rate. Ignored for pool loans, which always use the fixed tier rate. */
+    requestedRateBps?: number;
 }
 
 export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
@@ -399,6 +404,17 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         throw new Error(`Maximum of ${MAX_CONCURRENT_LOANS} concurrent loans reached`);
     }
 
+    // Pool loans are always priced at the fixed, algorithmic tier rate — no
+    // negotiation. Solo loans can be priced differently (the two parties are
+    // negotiating directly), but still only within a band around that same
+    // tier rate, so it can't be used for a usurious or throwaway rate.
+    let interestRateBps = gate.rateBps;
+    if (source === "solo" && input.requestedRateBps !== undefined) {
+        const rateCheck = validateSoloRateBps(input.requestedRateBps, gate.rateBps);
+        if (!rateCheck.ok) throw new Error(rateCheck.error);
+        interestRateBps = Math.round(input.requestedRateBps);
+    }
+
     const collateralUsd = kind === "trust"
         ? Math.round(calculateRequiredEscrow(policy, amountUsd).escrowAmount * 100) / 100
         : 0;
@@ -413,7 +429,7 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         principalUsd: amountUsd,
         principalRemainingUsd: amountUsd,
         principalPaidUsd: 0,
-        interestRateBps: gate.rateBps,
+        interestRateBps,
         interestAccruedUsd: 0,
         interestPaidUsd: 0,
         collateralUsd,

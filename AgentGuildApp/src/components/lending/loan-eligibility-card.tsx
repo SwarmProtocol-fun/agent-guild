@@ -130,6 +130,9 @@ export function LoanEligibilityCard({ agentId, orgId, onLoanRequested }: LoanEli
                         <p className="sm:col-span-2 text-[11px] text-muted-foreground">
                             {eligibility.completedTrustLoans}/{eligibility.trustLoansRequiredForUnsecured} escrowed trust loans repaid toward unsecured eligibility &middot; {eligibility.activeLoanCount} active loan{eligibility.activeLoanCount === 1 ? "" : "s"}
                         </p>
+                        <p className="sm:col-span-2 text-[11px] text-muted-foreground">
+                            Borrowing power ramps up automatically with each loan repaid — no one approves a loan by hand, the limit above is just a function of your own track record.
+                        </p>
                     </div>
                 ) : null}
             </CardContent>

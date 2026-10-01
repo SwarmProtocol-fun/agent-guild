@@ -9,6 +9,13 @@ const nextConfig: NextConfig = {
   // preventing cold-start timeouts and 502s from oversized bundles.
   serverExternalPackages: [
     "ethers",
+    // mppx optionally imports @modelcontextprotocol/sdk/types.js at runtime
+    // (for MCP-flavored 402 challenges) behind a `'code' in first` check we
+    // never hit — that package isn't a dependency here. Bundled, webpack
+    // statically resolves the dynamic import and fails the build; external,
+    // it's a plain Node require that's only reached (and only matters) if
+    // the unused code path ever runs.
+    "mppx",
     "@azure/arm-compute",
     "@azure/arm-network",
     "@azure/arm-containerinstance",

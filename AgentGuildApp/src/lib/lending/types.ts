@@ -142,6 +142,7 @@ export interface EligibilitySummary {
     policyTier: PolicyTierName;
     creditScore: number;
     completedTrustLoans: number;
+    completedUnsecuredLoans: number;
     trustLoansRequiredForUnsecured: number;
     activeLoanCount: number;
     hasUnresolvedDefault: boolean;

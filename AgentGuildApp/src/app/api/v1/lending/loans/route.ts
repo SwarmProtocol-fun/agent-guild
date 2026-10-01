@@ -5,7 +5,10 @@
  * GET  /api/v1/lending/loans?lenderWallet=X        — loans funded by a given wallet
  * POST /api/v1/lending/loans                       — request a new loan for an agent
  *   Body: { agentId, orgId, kind: "trust"|"unsecured", source: "pool"|"solo",
- *           amountUsd, termDays?, poolId?, purpose? }
+ *           amountUsd, termDays?, poolId?, purpose?, requestedRateBps? }
+ *   requestedRateBps only applies to source: "solo" — pool loans are always
+ *   priced at the fixed tier rate. Solo rates still must fall within a band
+ *   around that same tier rate (see eligibility.ts's validateSoloRateBps).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
@@ -60,6 +63,7 @@ export async function POST(req: NextRequest) {
         termDays?: number;
         poolId?: string;
         purpose?: string;
+        requestedRateBps?: number;
     };
     try {
         body = await req.json();
@@ -76,6 +80,9 @@ export async function POST(req: NextRequest) {
     }
     if (source !== "pool" && source !== "solo") {
         return NextResponse.json({ error: 'source must be "pool" or "solo"' }, { status: 400 });
+    }
+    if (source === "pool" && body.requestedRateBps !== undefined) {
+        return NextResponse.json({ error: "Pool loans are always priced at the fixed tier rate — requestedRateBps only applies to solo loans" }, { status: 400 });
     }
 
     const orgAuth = await requireOrgMember(req, orgId);
@@ -100,6 +107,7 @@ export async function POST(req: NextRequest) {
             poolId: body.poolId,
             purpose: body.purpose,
             requestedByWallet: getWalletAddress(req) || undefined,
+            requestedRateBps: body.requestedRateBps,
         });
         return NextResponse.json({ loan }, { status: 201 });
     } catch (error) {
