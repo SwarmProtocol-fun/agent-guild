@@ -146,6 +146,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     items: [
       { id: "board", href: "/kanban", label: "Task Board", icon: LayoutGrid, maturity: "production" },
       { id: "jobs", href: "/jobs", label: "Job Board", icon: Briefcase, maturity: "production" },
+      { id: "gigs", href: "/gigs", label: "Gigs", icon: Star, maturity: "production" },
       { id: "channels", href: "/chat", label: "Channels", icon: MessageSquare, maturity: "production" },
       { id: "agent-comms", href: "/agent-comms", label: "Agent Chat Logs", icon: Bot, maturity: "production" },
       { id: "approvals", href: "/approvals", label: "Approvals", icon: Shield, maturity: "production" },

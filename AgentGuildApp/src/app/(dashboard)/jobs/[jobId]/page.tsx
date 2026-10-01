@@ -34,10 +34,13 @@ import {
   applyToJob,
   hireApplicant,
   getCompletedJobsByAgent,
+  getGigReviewByJob,
+  addGigReview,
   type Job,
   type JobComment,
   type Agent,
   type JobApplication,
+  type GigReview,
 } from "@/lib/firestore";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
@@ -119,6 +122,13 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [portfolios, setPortfolios] = useState<Record<string, Job[]>>({});
   const [portfolioLoading, setPortfolioLoading] = useState<string | null>(null);
 
+  // Gig order review (buyer rates the seller after approval)
+  const [gigReview, setGigReview] = useState<GigReview | null>(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewText, setReviewText] = useState("");
+  const [submittingReview, setSubmittingReview] = useState(false);
+  const [reviewSubmitError, setReviewSubmitError] = useState<string | null>(null);
+
   const loadComments = async () => {
     try {
       setComments(await getJobComments(resolvedParams.jobId));
@@ -154,6 +164,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         setJob(jobData);
         if (jobData?.completedByAgentName) setDeliveryAgentName(jobData.completedByAgentName);
         else if (jobData?.claimedByAgentName) setDeliveryAgentName(jobData.claimedByAgentName);
+        if (jobData?.gigId) setGigReview(await getGigReviewByJob(resolvedParams.jobId));
       } catch (error) {
         console.error("Failed to load job:", error);
       } finally {
@@ -229,6 +240,29 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       console.error("Failed to review job:", error);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSubmitReview = async () => {
+    if (!job || !job.gigId || !currentOrg) return;
+    setSubmittingReview(true);
+    setReviewSubmitError(null);
+    try {
+      await addGigReview({
+        gigId: job.gigId,
+        jobId: job.id,
+        orgId: currentOrg.id,
+        authorAddress: address || "",
+        rating: reviewRating,
+        review: reviewText.trim() || undefined,
+      });
+      setGigReview(await getGigReviewByJob(job.id));
+      setReviewText("");
+    } catch (error) {
+      console.error("Failed to submit review:", error);
+      setReviewSubmitError(error instanceof Error ? error.message : "Failed to submit review");
+    } finally {
+      setSubmittingReview(false);
     }
   };
 
@@ -607,6 +641,44 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                     {job.reviewedAt ? ` on ${fmtDateTime(job.reviewedAt)}` : ''}
                   </div>
                 ) : null}
+              </CardContent>
+            </Card>
+          )}
+
+          {job.gigId && job.reviewStatus === 'approved' && (
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><Star className="h-5 w-5 text-amber-500" />Rate {job.claimedByAgentName || "the seller"}</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                {gigReview ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-0.5">
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <Star key={n} className={cn("h-4 w-4", n <= gigReview.rating ? "fill-amber-400 text-amber-400" : "text-muted-foreground")} />
+                      ))}
+                    </div>
+                    {gigReview.review && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{gigReview.review}</p>}
+                    <div className="text-xs text-muted-foreground">Submitted {fmtDateTime(gigReview.createdAt)}</div>
+                  </div>
+                ) : (
+                  <>
+                    {reviewSubmitError && (
+                      <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                        {reviewSubmitError}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-1">
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <button key={n} type="button" onClick={() => setReviewRating(n)}>
+                          <Star className={cn("h-6 w-6 transition-colors", n <= reviewRating ? "fill-amber-400 text-amber-400" : "text-muted-foreground hover:text-amber-300")} />
+                        </button>
+                      ))}
+                    </div>
+                    <Textarea placeholder="How did it go? (optional)" value={reviewText} onChange={(e) => setReviewText(e.target.value)} rows={3} />
+                    <Button onClick={handleSubmitReview} disabled={submittingReview} className="bg-amber-600 hover:bg-amber-700 text-white">
+                      {submittingReview ? "Submitting..." : "Submit Review"}
+                    </Button>
+                  </>
+                )}
               </CardContent>
             </Card>
           )}

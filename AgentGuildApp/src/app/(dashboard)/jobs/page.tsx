@@ -14,6 +14,7 @@ import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import {
   getJobsByOrg,
+  getIncomingGigOrders,
   getProjectsByOrg,
   getAgentsByOrg,
   createJob,
@@ -74,6 +75,8 @@ export default function JobBoardPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // "posted" = jobs this org created; "orders" = gig orders this org's agents must fulfill
+  const [viewMode, setViewMode] = useState<"posted" | "orders">("posted");
 
   // Create job form
   const [jobTitle, setJobTitle] = useState("");
@@ -103,7 +106,7 @@ export default function JobBoardPage() {
       setLoading(true);
       setError(null);
       const [jobsData, projectsData, agentsData] = await Promise.all([
-        getJobsByOrg(currentOrg.id),
+        viewMode === "orders" ? getIncomingGigOrders(currentOrg.id) : getJobsByOrg(currentOrg.id),
         getProjectsByOrg(currentOrg.id),
         getAgentsByOrg(currentOrg.id),
       ]);
@@ -118,16 +121,19 @@ export default function JobBoardPage() {
     }
   };
 
-  useEffect(() => { loadData(); }, [currentOrg]);
+  useEffect(() => { loadData(); }, [currentOrg, viewMode]);
 
   const getProjectName = (projectId?: string) => {
     if (!projectId) return null;
     return projects.find((p) => p.id === projectId)?.name || "Unknown";
   };
 
-  const getAgentName = (agentId?: string) => {
+  // Falls back to the job's own denormalized name first — the assigned agent
+  // may belong to a different org entirely (gig orders), so it won't be in
+  // this org's `agents` list at all.
+  const getAgentName = (agentId?: string, job?: Job) => {
     if (!agentId) return "Unassigned";
-    return agents.find((a) => a.id === agentId)?.name || "Unknown";
+    return job?.completedByAgentName || job?.claimedByAgentName || agents.find((a) => a.id === agentId)?.name || "Unknown";
   };
 
   const getEligibleAgents = (job: Job) =>
@@ -271,15 +277,33 @@ export default function JobBoardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-end gap-2">
-        <QuickPostJobDialog onJobCreated={loadData} />
-        <Button
-          size="sm"
-          onClick={() => setCreateOpen(true)}
-          className="bg-amber-600 hover:bg-amber-700 text-white"
-        >
-          + Post Job
-        </Button>
+      <div className="flex items-center justify-between gap-2">
+        <div className="inline-flex rounded-md border p-0.5 bg-muted/40">
+          <button
+            onClick={() => setViewMode("posted")}
+            className={cn("px-3 py-1 text-xs rounded-sm transition-colors", viewMode === "posted" ? "bg-background shadow-sm font-medium" : "text-muted-foreground")}
+          >
+            Jobs We Posted
+          </button>
+          <button
+            onClick={() => setViewMode("orders")}
+            className={cn("px-3 py-1 text-xs rounded-sm transition-colors", viewMode === "orders" ? "bg-background shadow-sm font-medium" : "text-muted-foreground")}
+          >
+            Gig Orders To Fulfill
+          </button>
+        </div>
+        {viewMode === "posted" && (
+          <div className="flex items-center gap-2">
+            <QuickPostJobDialog onJobCreated={loadData} />
+            <Button
+              size="sm"
+              onClick={() => setCreateOpen(true)}
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+            >
+              + Post Job
+            </Button>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -298,11 +322,21 @@ export default function JobBoardPage() {
       ) : jobs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <div className="text-5xl mb-4">💼</div>
-          <h2 className="text-lg font-semibold mb-1">No jobs yet</h2>
-          <p className="text-sm text-muted-foreground mb-4">Post a job for your agents to pick up</p>
-          <Button onClick={() => setCreateOpen(true)} className="bg-amber-600 hover:bg-amber-700 text-white">
-            + Post First Job
-          </Button>
+          {viewMode === "orders" ? (
+            <>
+              <h2 className="text-lg font-semibold mb-1">No gig orders yet</h2>
+              <p className="text-sm text-muted-foreground mb-4">Orders placed on your agents' gigs will show up here</p>
+              <Link href="/gigs"><Button className="bg-amber-600 hover:bg-amber-700 text-white">List a Gig</Button></Link>
+            </>
+          ) : (
+            <>
+              <h2 className="text-lg font-semibold mb-1">No jobs yet</h2>
+              <p className="text-sm text-muted-foreground mb-4">Post a job for your agents to pick up</p>
+              <Button onClick={() => setCreateOpen(true)} className="bg-amber-600 hover:bg-amber-700 text-white">
+                + Post First Job
+              </Button>
+            </>
+          )}
         </div>
       ) : (
         <>
@@ -413,9 +447,16 @@ export default function JobBoardPage() {
                               )}
                               <h3 className="text-sm font-medium leading-snug line-clamp-2 min-w-0">{job.title}</h3>
                             </div>
-                            <Badge variant="outline" className={cn("text-[10px] shrink-0", priorityColors[job.priority])}>
-                              {job.priority}
-                            </Badge>
+                            <div className="flex items-center gap-1 shrink-0">
+                              {job.gigId && (
+                                <Badge variant="outline" className="text-[10px] bg-purple-50 dark:bg-purple-950/30 text-purple-700 dark:text-purple-400 border-purple-200 dark:border-purple-800">
+                                  🛒 Gig
+                                </Badge>
+                              )}
+                              <Badge variant="outline" className={cn("text-[10px]", priorityColors[job.priority])}>
+                                {job.priority}
+                              </Badge>
+                            </div>
                           </div>
                           {job.status === "in_progress" && (
                             <div className="text-[11px] text-amber-500 animate-processing font-medium">
@@ -480,7 +521,7 @@ export default function JobBoardPage() {
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
                             <div className="flex items-center gap-1.5 min-w-0 truncate">
                               {job.projectId && <span className="truncate">📁 {getProjectName(job.projectId)}</span>}
-                              {job.takenByAgentId && <span className="truncate">🤖 {getAgentName(job.takenByAgentId)}</span>}
+                              {job.takenByAgentId && <span className="truncate">🤖 {getAgentName(job.takenByAgentId, job)}</span>}
                               {!job.takenByAgentId && job.status === "open" && (
                                 <span className="text-amber-600 dark:text-amber-400">Awaiting agent</span>
                               )}

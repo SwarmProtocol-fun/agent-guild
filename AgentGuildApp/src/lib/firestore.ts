@@ -19,6 +19,8 @@ import {
   arrayRemove,
   increment,
   writeBatch,
+  runTransaction,
+  limit as fsLimit,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { canonicalizeWalletAddress } from "./wallet-address";
@@ -757,6 +759,11 @@ export interface Job {
   minTrustScore?: number;
   /** applications mode only: denormalized count, incremented on each application */
   applicationCount?: number;
+  /** Set when this job was created by ordering a Gig — links back to the listing. */
+  gigId?: string;
+  /** Gig orders only: the org that owns the fulfilling agent (may differ from `orgId`,
+   *  the buyer's org). Lets the seller org find orders to fulfill via getIncomingGigOrders. */
+  sellerOrgId?: string;
   // Delivery & Review
   deliveryNotes?: string;
   deliveryFiles?: string[]; // URLs to uploaded files
@@ -1015,6 +1022,180 @@ export async function getCompletedJobsByAgent(agentId: string): Promise<Job[]> {
   const q = query(collection(db, "jobs"), where("takenByAgentId", "==", agentId), where("status", "==", "completed"));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
+}
+
+/** Jobs assigned to any agent belonging to `sellerOrgId` via a gig order — the
+ *  seller org's "orders to fulfill" view. Jobs posted the normal way (not via
+ *  a gig) never set sellerOrgId, so they're excluded. */
+export async function getIncomingGigOrders(sellerOrgId: string): Promise<Job[]> {
+  const q = query(collection(db, "jobs"), where("sellerOrgId", "==", sellerOrgId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
+}
+
+// ─── Gigs (Fiverr-style service listings) ───────────────
+//
+// A Gig is a seller agent's standing offer to do a kind of work for a fixed
+// starting price. Ordering one skips the open/claim/application cycle
+// entirely: orderGig() creates the Job already `in_progress` and assigned to
+// the seller agent, then the existing deliver → review pipeline (above)
+// takes over unchanged. Gigs are cross-org by design — the buyer's org and
+// the seller agent's org are usually different, which is the whole point of
+// a marketplace rather than an internal job board.
+
+export interface Gig {
+  id: string;
+  agentId: string;
+  agentOrgId: string;
+  agentName: string;
+  title: string;
+  description: string;
+  category: string;
+  tags: string[];
+  /** Starting price, free text like Job.reward (e.g. "150") */
+  price: string;
+  deliveryDays: number;
+  status: 'active' | 'paused';
+  orderCount: number;
+  avgRating?: number;
+  ratingCount?: number;
+  createdAt: unknown;
+  updatedAt?: unknown;
+}
+
+export async function createGig(data: Omit<Gig, "id" | "orderCount" | "avgRating" | "ratingCount" | "createdAt" | "updatedAt">): Promise<string> {
+  const ref = await addDoc(collection(db, "gigs"), {
+    ...data,
+    orderCount: 0,
+    avgRating: 0,
+    ratingCount: 0,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function getGig(gigId: string): Promise<Gig | null> {
+  const snap = await getDoc(doc(db, "gigs", gigId));
+  if (!snap.exists()) return null;
+  return { id: snap.id, ...snap.data() } as Gig;
+}
+
+/** Browse listing — all active gigs across every org. */
+export async function getActiveGigs(): Promise<Gig[]> {
+  const q = query(collection(db, "gigs"), where("status", "==", "active"));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Gig));
+}
+
+/** Seller-side management view — every gig owned by an org, any status. */
+export async function getGigsByOrg(agentOrgId: string): Promise<Gig[]> {
+  const q = query(collection(db, "gigs"), where("agentOrgId", "==", agentOrgId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Gig));
+}
+
+export async function getGigsByAgent(agentId: string): Promise<Gig[]> {
+  const q = query(collection(db, "gigs"), where("agentId", "==", agentId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Gig));
+}
+
+export async function setGigStatus(gigId: string, status: Gig["status"]): Promise<void> {
+  await updateDoc(doc(db, "gigs", gigId), { status, updatedAt: serverTimestamp() });
+}
+
+export async function updateGig(gigId: string, data: Partial<Pick<Gig, "title" | "description" | "category" | "tags" | "price" | "deliveryDays">>): Promise<void> {
+  await updateDoc(doc(db, "gigs", gigId), { ...data, updatedAt: serverTimestamp() });
+}
+
+/** Place an order on a gig: creates the Job already in_progress & assigned to
+ *  the seller agent (no open/claim/application step — the buyer chose this
+ *  seller directly, same as hireApplicant() skips straight to assignment). */
+export async function orderGig(
+  gigId: string,
+  buyer: { orgId: string; address: string },
+  requirements?: string
+): Promise<string> {
+  const gig = await getGig(gigId);
+  if (!gig) throw new Error("Gig not found");
+  if (gig.status !== "active") throw new Error("This gig is not currently active");
+
+  const jobRef = await addDoc(collection(db, "jobs"), {
+    orgId: buyer.orgId,
+    projectId: "",
+    title: gig.title,
+    description: requirements?.trim() || gig.description,
+    status: "in_progress",
+    reward: gig.price,
+    requiredSkills: gig.tags,
+    postedByAddress: buyer.address,
+    takenByAgentId: gig.agentId,
+    priority: "medium",
+    claimedAt: serverTimestamp(),
+    claimedByAgentName: gig.agentName,
+    hiringMode: "instant",
+    gigId: gig.id,
+    sellerOrgId: gig.agentOrgId,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  await updateDoc(doc(db, "gigs", gigId), { orderCount: increment(1) });
+
+  return jobRef.id;
+}
+
+// ─── Gig Reviews ─────────────────────────────────────────
+
+export interface GigReview {
+  id: string;
+  gigId: string;
+  jobId: string;
+  orgId: string; // buyer org
+  authorAddress: string;
+  rating: number; // 1-5
+  review?: string;
+  createdAt: unknown;
+}
+
+/** One review per completed order. */
+export async function getGigReviewByJob(jobId: string): Promise<GigReview | null> {
+  const q = query(collection(db, "gigReviews"), where("jobId", "==", jobId), fsLimit(1));
+  const snap = await getDocs(q);
+  if (snap.empty) return null;
+  const d = snap.docs[0];
+  return { id: d.id, ...d.data() } as GigReview;
+}
+
+export async function getGigReviews(gigId: string): Promise<GigReview[]> {
+  const q = query(collection(db, "gigReviews"), where("gigId", "==", gigId), orderBy("createdAt", "desc"));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as GigReview));
+}
+
+/** Adds a review and atomically rolls it into the gig's avgRating/ratingCount. */
+export async function addGigReview(data: Omit<GigReview, "id" | "createdAt">): Promise<string> {
+  const existing = await getGigReviewByJob(data.jobId);
+  if (existing) throw new Error("This order has already been reviewed");
+
+  const reviewRef = doc(collection(db, "gigReviews"));
+  const gigRef = doc(db, "gigs", data.gigId);
+
+  await runTransaction(db, async (tx) => {
+    const gigSnap = await tx.get(gigRef);
+    if (!gigSnap.exists()) throw new Error("Gig not found");
+    const gigData = gigSnap.data() as Gig;
+    const prevCount = gigData.ratingCount ?? 0;
+    const prevAvg = gigData.avgRating ?? 0;
+    const nextCount = prevCount + 1;
+    const nextAvg = (prevAvg * prevCount + data.rating) / nextCount;
+
+    tx.set(reviewRef, { ...data, createdAt: serverTimestamp() });
+    tx.update(gigRef, { avgRating: nextAvg, ratingCount: nextCount });
+  });
+
+  return reviewRef.id;
 }
 
 // ─── Agent Communications ───────────────────────────────

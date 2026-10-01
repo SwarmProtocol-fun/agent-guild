@@ -104,6 +104,7 @@ const PROTECTED_PAGE_PREFIXES = [
   "/agents",
   "/agent-guilds",
   "/jobs",
+  "/gigs",
   "/missions",
   "/chat",
   "/settings",
