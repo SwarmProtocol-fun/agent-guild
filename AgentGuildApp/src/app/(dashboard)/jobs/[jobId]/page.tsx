@@ -10,6 +10,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -22,8 +24,23 @@ import { useSession } from "@/contexts/SessionContext";
 import {
   getJob,
   updateJob,
+  submitJobDelivery,
+  getChannelsByProject,
+  getJobComments,
+  addJobComment,
+  getAgentsByOrg,
+  getAgent,
+  getJobApplications,
+  applyToJob,
+  hireApplicant,
+  getCompletedJobsByAgent,
   type Job,
+  type JobComment,
+  type Agent,
+  type JobApplication,
 } from "@/lib/firestore";
+import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import {
   CheckCircle2,
   XCircle,
@@ -32,8 +49,33 @@ import {
   ExternalLink,
   ChevronLeft,
   AlertCircle,
+  PackageCheck,
+  MessageSquare,
+  Send,
+  Clock,
+  Briefcase,
+  Star,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const toDateSafe = (timestamp: unknown): Date | null => {
+  if (!timestamp) return null;
+  if (typeof timestamp === "object" && "seconds" in (timestamp as any)) {
+    return new Date((timestamp as any).seconds * 1000);
+  }
+  const d = new Date(timestamp as any);
+  return isNaN(d.getTime()) ? null : d;
+};
+const fmtDateTime = (timestamp: unknown) => toDateSafe(timestamp)?.toLocaleString() ?? "Unknown";
+const fmtDate = (timestamp: unknown) => toDateSafe(timestamp)?.toLocaleDateString() ?? "Unknown";
+const getTimeMs = (timestamp: unknown) => toDateSafe(timestamp)?.getTime() ?? 0;
+const parseQuoteValue = (quote?: string): number => {
+  if (!quote) return 0;
+  const n = parseFloat(quote.replace(/[^0-9.]/g, ''));
+  return isNaN(n) ? 0 : n;
+};
 
 export default function JobDetailPage({ params }: { params: Promise<{ jobId: string }> }) {
   const resolvedParams = use(params);
@@ -47,6 +89,62 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [reviewNotes, setReviewNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Delivery submission
+  const [deliveryDialogOpen, setDeliveryDialogOpen] = useState(false);
+  const [deliveryNotesInput, setDeliveryNotesInput] = useState("");
+  const [deliveryFilesInput, setDeliveryFilesInput] = useState("");
+  const [deliveryAgentName, setDeliveryAgentName] = useState("");
+  const [submittingDelivery, setSubmittingDelivery] = useState(false);
+
+  // Comments
+  const [comments, setComments] = useState<JobComment[]>([]);
+  const [commentBody, setCommentBody] = useState("");
+  const [postingComment, setPostingComment] = useState(false);
+
+  // Applications (quotes)
+  const [orgAgents, setOrgAgents] = useState<Agent[]>([]);
+  const [applications, setApplications] = useState<JobApplication[]>([]);
+  const [applicantAgents, setApplicantAgents] = useState<Record<string, Agent>>({});
+  const [applySort, setApplySort] = useState<"newest" | "quote_asc" | "quote_desc" | "trust_desc">("newest");
+  const [applyDialogOpen, setApplyDialogOpen] = useState(false);
+  const [applyAgentId, setApplyAgentId] = useState("");
+  const [applyQuote, setApplyQuote] = useState("");
+  const [applyMessage, setApplyMessage] = useState("");
+  const [submittingApplication, setSubmittingApplication] = useState(false);
+  const [hiringApplicationId, setHiringApplicationId] = useState<string | null>(null);
+  const [hireError, setHireError] = useState<string | null>(null);
+
+  // Portfolio (expandable per applicant)
+  const [expandedPortfolio, setExpandedPortfolio] = useState<string | null>(null);
+  const [portfolios, setPortfolios] = useState<Record<string, Job[]>>({});
+  const [portfolioLoading, setPortfolioLoading] = useState<string | null>(null);
+
+  const loadComments = async () => {
+    try {
+      setComments(await getJobComments(resolvedParams.jobId));
+    } catch (error) {
+      console.error("Failed to load job comments:", error);
+    }
+  };
+
+  const loadApplications = async () => {
+    try {
+      const apps = await getJobApplications(resolvedParams.jobId);
+      setApplications(apps);
+      const missingIds = Array.from(new Set(apps.map(a => a.agentId))).filter(id => !applicantAgents[id]);
+      if (missingIds.length > 0) {
+        const fetched = await Promise.all(missingIds.map(id => getAgent(id)));
+        setApplicantAgents(prev => {
+          const next = { ...prev };
+          fetched.forEach((a, i) => { if (a) next[missingIds[i]] = a; });
+          return next;
+        });
+      }
+    } catch (error) {
+      console.error("Failed to load job applications:", error);
+    }
+  };
+
   useEffect(() => {
     if (!resolvedParams.jobId) return;
     const load = async () => {
@@ -54,6 +152,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       try {
         const jobData = await getJob(resolvedParams.jobId);
         setJob(jobData);
+        if (jobData?.completedByAgentName) setDeliveryAgentName(jobData.completedByAgentName);
+        else if (jobData?.claimedByAgentName) setDeliveryAgentName(jobData.claimedByAgentName);
       } catch (error) {
         console.error("Failed to load job:", error);
       } finally {
@@ -61,7 +161,33 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       }
     };
     load();
+    loadComments();
+    loadApplications();
   }, [resolvedParams.jobId]);
+
+  useEffect(() => {
+    if (!currentOrg) return;
+    getAgentsByOrg(currentOrg.id).then(setOrgAgents).catch((error) => console.error("Failed to load agents:", error));
+  }, [currentOrg]);
+
+  const togglePortfolio = async (agentId: string) => {
+    if (expandedPortfolio === agentId) {
+      setExpandedPortfolio(null);
+      return;
+    }
+    setExpandedPortfolio(agentId);
+    if (!portfolios[agentId]) {
+      setPortfolioLoading(agentId);
+      try {
+        const jobs = await getCompletedJobsByAgent(agentId);
+        setPortfolios(prev => ({ ...prev, [agentId]: jobs }));
+      } catch (error) {
+        console.error("Failed to load agent portfolio:", error);
+      } finally {
+        setPortfolioLoading(null);
+      }
+    }
+  };
 
   const handleReview = async () => {
     if (!job) return;
@@ -75,6 +201,26 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         status: reviewAction === 'approve' ? 'completed' : 'in_progress',
       });
 
+      if (job.projectId && currentOrg) {
+        try {
+          const channels = await getChannelsByProject(job.projectId);
+          if (channels.length > 0) {
+            const verb = reviewAction === 'approve' ? '✅ **Job Approved**' : '↩️ **Job Sent Back for Revisions**';
+            await addDoc(collection(db, "messages"), {
+              channelId: channels[0].id,
+              senderId: "system",
+              senderName: "Agent Guild",
+              senderType: "system",
+              content: `${verb}\n\nJob: "${job.title}"${reviewNotes.trim() ? `\n\n${reviewNotes.trim()}` : ""}`,
+              orgId: currentOrg.id,
+              createdAt: serverTimestamp(),
+            });
+          }
+        } catch (notifyErr) {
+          console.error("Failed to send review notification:", notifyErr);
+        }
+      }
+
       const updated = await getJob(job.id);
       setJob(updated);
       setReviewDialogOpen(false);
@@ -83,6 +229,134 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       console.error("Failed to review job:", error);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSubmitDelivery = async () => {
+    if (!job || !deliveryNotesInput.trim()) return;
+    setSubmittingDelivery(true);
+    try {
+      const files = deliveryFilesInput
+        .split("\n")
+        .map((f) => f.trim())
+        .filter(Boolean);
+      await submitJobDelivery(job.id, {
+        deliveryNotes: deliveryNotesInput.trim(),
+        deliveryFiles: files,
+        completedByAgentName: deliveryAgentName.trim() || "Unknown agent",
+      });
+
+      if (job.projectId && currentOrg) {
+        try {
+          const channels = await getChannelsByProject(job.projectId);
+          if (channels.length > 0) {
+            await addDoc(collection(db, "messages"), {
+              channelId: channels[0].id,
+              senderId: "system",
+              senderName: "Agent Guild",
+              senderType: "system",
+              content: `📦 **Job Delivered**\n\nJob: "${job.title}"\nDelivered by: @${deliveryAgentName.trim() || "Unknown agent"}\n\n${deliveryNotesInput.trim()}`,
+              orgId: currentOrg.id,
+              createdAt: serverTimestamp(),
+            });
+          }
+        } catch (notifyErr) {
+          console.error("Failed to send delivery notification:", notifyErr);
+        }
+      }
+
+      const updated = await getJob(job.id);
+      setJob(updated);
+      setDeliveryDialogOpen(false);
+      setDeliveryNotesInput("");
+      setDeliveryFilesInput("");
+    } catch (error) {
+      console.error("Failed to submit delivery:", error);
+    } finally {
+      setSubmittingDelivery(false);
+    }
+  };
+
+  const handlePostComment = async () => {
+    if (!job || !currentOrg || !commentBody.trim()) return;
+    setPostingComment(true);
+    try {
+      await addJobComment({
+        jobId: job.id,
+        orgId: currentOrg.id,
+        authorAddress: address || "",
+        authorName: address ? `${address.slice(0, 6)}...${address.slice(-4)}` : "Unknown",
+        body: commentBody.trim(),
+      });
+      setCommentBody("");
+      await loadComments();
+    } catch (error) {
+      console.error("Failed to post comment:", error);
+    } finally {
+      setPostingComment(false);
+    }
+  };
+
+  const handleApply = async () => {
+    if (!job || !currentOrg || !applyAgentId) return;
+    const agent = orgAgents.find(a => a.id === applyAgentId);
+    if (!agent) return;
+    setSubmittingApplication(true);
+    try {
+      await applyToJob({
+        jobId: job.id,
+        orgId: currentOrg.id,
+        agentId: agent.id,
+        agentName: agent.name,
+        quote: applyQuote.trim() || undefined,
+        message: applyMessage.trim() || undefined,
+      });
+      setApplyDialogOpen(false);
+      setApplyAgentId(""); setApplyQuote(""); setApplyMessage("");
+      const updated = await getJob(job.id);
+      setJob(updated);
+      await loadApplications();
+    } catch (error) {
+      console.error("Failed to submit application:", error);
+    } finally {
+      setSubmittingApplication(false);
+    }
+  };
+
+  const handleHire = async (application: JobApplication) => {
+    if (!job || !currentOrg) return;
+    setHiringApplicationId(application.id);
+    setHireError(null);
+    try {
+      await hireApplicant(job.id, application, currentOrg.id, job.projectId || "");
+
+      if (job.projectId && currentOrg) {
+        try {
+          const channels = await getChannelsByProject(job.projectId);
+          if (channels.length > 0) {
+            await addDoc(collection(db, "messages"), {
+              channelId: channels[0].id,
+              senderId: "system",
+              senderName: "Agent Guild",
+              senderType: "system",
+              content: `🤝 **Job Awarded**\n\nJob: "${job.title}"\nHired: @${application.agentName}${application.quote ? ` at ${application.quote}` : ""}\n\nPlease work on this and post your deliverables here when complete.`,
+              orgId: currentOrg.id,
+              createdAt: serverTimestamp(),
+            });
+          }
+        } catch (notifyErr) {
+          console.error("Failed to send hire notification:", notifyErr);
+        }
+      }
+
+      const updated = await getJob(job.id);
+      setJob(updated);
+      await loadApplications();
+    } catch (error) {
+      console.error("Failed to hire applicant:", error);
+      setHireError(error instanceof Error ? error.message : "Failed to hire applicant");
+    } finally {
+      setHiringApplicationId(null);
     }
   };
 
@@ -109,6 +383,15 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   };
 
   const canReview = job.status === 'completed' && job.deliveryNotes && !job.reviewStatus;
+  const canDeliver = job.status === 'in_progress';
+  const canApply = job.status === 'open' && job.hiringMode === 'applications';
+
+  const sortedApplications = [...applications].sort((a, b) => {
+    if (applySort === 'quote_asc') return parseQuoteValue(a.quote) - parseQuoteValue(b.quote);
+    if (applySort === 'quote_desc') return parseQuoteValue(b.quote) - parseQuoteValue(a.quote);
+    if (applySort === 'trust_desc') return (applicantAgents[b.agentId]?.trustScore ?? 0) - (applicantAgents[a.agentId]?.trustScore ?? 0);
+    return getTimeMs(b.createdAt) - getTimeMs(a.createdAt);
+  });
 
   return (
     <div className="container mx-auto p-6 space-y-6">
@@ -142,6 +425,18 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             </Button>
           </div>
         )}
+
+        {canDeliver && (
+          <Button onClick={() => setDeliveryDialogOpen(true)} className="bg-amber-600 hover:bg-amber-700 text-white">
+            <PackageCheck className="h-4 w-4 mr-2" />Submit Delivery
+          </Button>
+        )}
+
+        {canApply && (
+          <Button onClick={() => setApplyDialogOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white" disabled={orgAgents.length === 0}>
+            <Briefcase className="h-4 w-4 mr-2" />Apply with a Quote
+          </Button>
+        )}
       </div>
 
       <div className="grid lg:grid-cols-3 gap-6">
@@ -152,6 +447,109 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               <p className="text-sm text-muted-foreground whitespace-pre-wrap">{job.description || "No description provided"}</p>
             </CardContent>
           </Card>
+
+          {job.hiringMode === 'applications' && (
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0">
+                <CardTitle className="flex items-center gap-2">
+                  <Briefcase className="h-5 w-5" />Applications ({applications.length})
+                </CardTitle>
+                {applications.length > 1 && (
+                  <Select value={applySort} onValueChange={(v) => setApplySort(v as typeof applySort)}>
+                    <SelectTrigger className="h-8 w-[150px] text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="newest">Newest</SelectItem>
+                      <SelectItem value="quote_asc">Quote: Low-High</SelectItem>
+                      <SelectItem value="quote_desc">Quote: High-Low</SelectItem>
+                      <SelectItem value="trust_desc">Trust score</SelectItem>
+                    </SelectContent>
+                  </Select>
+                )}
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {hireError && (
+                  <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                    {hireError}
+                  </div>
+                )}
+                {applications.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No applications yet.</p>
+                ) : (
+                  sortedApplications.map((app) => {
+                    const applicant = applicantAgents[app.agentId];
+                    const isExpanded = expandedPortfolio === app.agentId;
+                    const portfolio = portfolios[app.agentId];
+                    return (
+                      <div key={app.id} className={cn("border rounded-lg p-3 space-y-2", app.status === 'accepted' && "border-emerald-500/40 bg-emerald-500/5", app.status === 'rejected' && "opacity-60")}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-sm">🤖 {app.agentName}</span>
+                              {app.status === 'accepted' && <Badge className="text-[10px] bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">Hired</Badge>}
+                              {app.status === 'rejected' && <Badge variant="outline" className="text-[10px]">Not selected</Badge>}
+                            </div>
+                            <div className="flex items-center gap-2 mt-1">
+                              {applicant?.trustScore != null && (
+                                <span className="text-[11px] text-muted-foreground flex items-center gap-0.5"><Star className="h-3 w-3" />{applicant.trustScore} trust</span>
+                              )}
+                              {applicant?.tasksCompleted != null && (
+                                <span className="text-[11px] text-muted-foreground">{applicant.tasksCompleted} jobs completed</span>
+                              )}
+                            </div>
+                          </div>
+                          {app.quote && (
+                            <Badge variant="outline" className="text-sm font-bold text-amber-600 border-amber-300">${app.quote}</Badge>
+                          )}
+                        </div>
+                        {app.message && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{app.message}</p>}
+                        <div className="flex items-center gap-2 pt-1">
+                          <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => togglePortfolio(app.agentId)}>
+                            {isExpanded ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
+                            Portfolio
+                          </Button>
+                          {job.status === 'open' && app.status === 'pending' && (
+                            <Button
+                              size="sm"
+                              className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 ml-auto"
+                              onClick={() => handleHire(app)}
+                              disabled={hiringApplicationId !== null}
+                            >
+                              {hiringApplicationId === app.id ? "Hiring..." : "Hire"}
+                            </Button>
+                          )}
+                        </div>
+                        {isExpanded && (
+                          <div className="border-t pt-2 mt-2">
+                            {portfolioLoading === app.agentId ? (
+                              <p className="text-xs text-muted-foreground">Loading portfolio...</p>
+                            ) : !portfolio || portfolio.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">No completed jobs yet.</p>
+                            ) : (
+                              <ul className="space-y-2">
+                                {portfolio.map((pj) => (
+                                  <li key={pj.id} className="text-xs bg-muted/40 rounded p-2">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-medium">{pj.title}</span>
+                                      {pj.reward && <span className="text-amber-600 font-medium">${pj.reward}</span>}
+                                    </div>
+                                    {pj.reviewStatus && (
+                                      <Badge variant="outline" className={cn("text-[10px] mt-1", pj.reviewStatus === 'approved' ? "text-emerald-600 border-emerald-300" : "text-destructive border-destructive/40")}>
+                                        {pj.reviewStatus}
+                                      </Badge>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           {job.deliveryNotes && (
             <Card className="border-2 border-emerald-500/20 bg-emerald-500/5">
@@ -181,7 +579,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                 )}
                 {job.completedAt ? (
                   <div className="text-xs text-muted-foreground">
-                    Submitted {new Date(job.completedAt as any).toLocaleString()}
+                    Submitted {fmtDateTime(job.completedAt)}
                   </div>
                 ) : null}
               </CardContent>
@@ -206,7 +604,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                 {job.reviewedBy ? (
                   <div className="text-xs text-muted-foreground">
                     Reviewed by {job.reviewedBy}
-                    {job.reviewedAt ? ` on ${new Date(job.reviewedAt as any).toLocaleString()}` : ''}
+                    {job.reviewedAt ? ` on ${fmtDateTime(job.reviewedAt)}` : ''}
                   </div>
                 ) : null}
               </CardContent>
@@ -238,7 +636,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               </div>
               <div>
                 <div className="font-medium mb-1">Created</div>
-                <div className="text-muted-foreground">{new Date(job.createdAt as any).toLocaleDateString()}</div>
+                <div className="text-muted-foreground">{fmtDate(job.createdAt)}</div>
               </div>
             </CardContent>
           </Card>
@@ -256,8 +654,149 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               </CardContent>
             </Card>
           )}
+
+          <Card>
+            <CardHeader><CardTitle className="text-lg flex items-center gap-2"><Clock className="h-4 w-4" />Activity</CardTitle></CardHeader>
+            <CardContent>
+              <ul className="space-y-3 text-sm">
+                <li className="flex gap-2">
+                  <span className="text-muted-foreground shrink-0">📢</span>
+                  <div>
+                    <div>Job posted</div>
+                    <div className="text-xs text-muted-foreground">{fmtDateTime(job.createdAt)}</div>
+                  </div>
+                </li>
+                {Boolean(job.claimedAt || job.takenByAgentId) && (
+                  <li className="flex gap-2">
+                    <span className="text-muted-foreground shrink-0">🤖</span>
+                    <div>
+                      <div>Claimed by {job.claimedByAgentName || job.takenByAgentId}</div>
+                      {Boolean(job.claimedAt) && <div className="text-xs text-muted-foreground">{fmtDateTime(job.claimedAt)}</div>}
+                    </div>
+                  </li>
+                )}
+                {Boolean(job.completedAt) && (
+                  <li className="flex gap-2">
+                    <span className="text-muted-foreground shrink-0">📦</span>
+                    <div>
+                      <div>Delivered by {job.completedByAgentName}</div>
+                      <div className="text-xs text-muted-foreground">{fmtDateTime(job.completedAt)}</div>
+                    </div>
+                  </li>
+                )}
+                {Boolean(job.reviewedAt) && (
+                  <li className="flex gap-2">
+                    <span className="text-muted-foreground shrink-0">{job.reviewStatus === 'approved' ? '✅' : '↩️'}</span>
+                    <div>
+                      <div>{job.reviewStatus === 'approved' ? 'Approved' : 'Sent back for revisions'} by {job.reviewedBy}</div>
+                      <div className="text-xs text-muted-foreground">{fmtDateTime(job.reviewedAt)}</div>
+                    </div>
+                  </li>
+                )}
+              </ul>
+            </CardContent>
+          </Card>
         </div>
       </div>
+
+      <Card>
+        <CardHeader><CardTitle className="text-lg flex items-center gap-2"><MessageSquare className="h-4 w-4" />Comments</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex gap-2">
+            <Textarea
+              placeholder="Add a comment..."
+              value={commentBody}
+              onChange={(e) => setCommentBody(e.target.value)}
+              rows={2}
+              className="flex-1"
+            />
+            <Button onClick={handlePostComment} disabled={postingComment || !commentBody.trim()} size="icon" className="shrink-0">
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
+          {comments.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No comments yet.</p>
+          ) : (
+            <ul className="space-y-3">
+              {comments.map((c) => (
+                <li key={c.id} className="text-sm border rounded-md p-3 bg-muted/30">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-medium text-xs">{c.authorName || c.authorAddress}</span>
+                    <span className="text-[11px] text-muted-foreground">{fmtDateTime(c.createdAt)}</span>
+                  </div>
+                  <p className="whitespace-pre-wrap">{c.body}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={deliveryDialogOpen} onOpenChange={setDeliveryDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Submit Delivery</DialogTitle>
+            <DialogDescription>Submit the completed work for review.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium mb-2 block">Completed by</label>
+              <Input placeholder="Agent name" value={deliveryAgentName} onChange={(e) => setDeliveryAgentName(e.target.value)} />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Delivery notes <span className="text-destructive">*</span></label>
+              <Textarea placeholder="Describe what was done, deliverables, and any notes for the reviewer..." value={deliveryNotesInput} onChange={(e) => setDeliveryNotesInput(e.target.value)} rows={5} />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">File links (one per line, optional)</label>
+              <Textarea placeholder="https://..." value={deliveryFilesInput} onChange={(e) => setDeliveryFilesInput(e.target.value)} rows={2} />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setDeliveryDialogOpen(false)} disabled={submittingDelivery}>Cancel</Button>
+              <Button onClick={handleSubmitDelivery} disabled={submittingDelivery || !deliveryNotesInput.trim()} className="bg-amber-600 hover:bg-amber-700 text-white">
+                {submittingDelivery ? "Submitting..." : "Submit Delivery"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={applyDialogOpen} onOpenChange={setApplyDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Apply with a Quote</DialogTitle>
+            <DialogDescription>Pitch one of your agents for this job with a price quote.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <label className="text-sm font-medium mb-2 block">Agent <span className="text-destructive">*</span></label>
+              <Select value={applyAgentId} onValueChange={setApplyAgentId}>
+                <SelectTrigger><SelectValue placeholder="Choose an agent" /></SelectTrigger>
+                <SelectContent>
+                  {orgAgents.map((a) => <SelectItem key={a.id} value={a.id}>🤖 {a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Quote (optional)</label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                <Input placeholder="e.g. 250" value={applyQuote} onChange={(e) => setApplyQuote(e.target.value)} className="pl-7" />
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Pitch (optional)</label>
+              <Textarea placeholder="Why this agent is a good fit, approach, timeline..." value={applyMessage} onChange={(e) => setApplyMessage(e.target.value)} rows={4} />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setApplyDialogOpen(false)} disabled={submittingApplication}>Cancel</Button>
+              <Button onClick={handleApply} disabled={submittingApplication || !applyAgentId} className="bg-blue-600 hover:bg-blue-700 text-white">
+                {submittingApplication ? "Submitting..." : "Submit Application"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={reviewDialogOpen} onOpenChange={setReviewDialogOpen}>
         <DialogContent>

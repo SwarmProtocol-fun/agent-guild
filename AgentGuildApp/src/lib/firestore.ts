@@ -17,9 +17,12 @@ import {
   type Timestamp,
   arrayUnion,
   arrayRemove,
+  increment,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { canonicalizeWalletAddress } from "./wallet-address";
+import { applyLivePresence } from "./presence";
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -117,6 +120,10 @@ export interface Agent {
   description: string;
   capabilities: string[];
   status: 'online' | 'offline' | 'busy' | 'paused';
+  /** Last daemon heartbeat. Presence is derived from this, not from status alone. */
+  lastSeen?: unknown;
+  /** Set when the process checks out. Newer than lastSeen means offline immediately. */
+  offlineAt?: unknown;
   projectIds: string[];
   apiKey?: string;
   avatarUrl?: string;
@@ -498,13 +505,13 @@ export async function createAgent(data: Omit<Agent, "id">): Promise<string> {
 export async function getAgent(agentId: string): Promise<Agent | null> {
   const snap = await getDoc(doc(db, "agents", agentId));
   if (!snap.exists()) return null;
-  return { id: snap.id, ...snap.data() } as Agent;
+  return applyLivePresence({ id: snap.id, ...snap.data() } as Agent);
 }
 
 export async function getAgentsByOrg(orgId: string): Promise<Agent[]> {
   const q = query(collection(db, "agents"), where("orgId", "==", orgId));
   const snap = await getDocs(q);
-  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Agent));
+  return snap.docs.map(d => applyLivePresence({ id: d.id, ...d.data() } as Agent));
 }
 
 export async function getUnassignedAgents(orgId: string): Promise<Agent[]> {
@@ -738,8 +745,18 @@ export interface Job {
   postedByAddress: string;
   takenByAgentId?: string;
   priority: 'low' | 'medium' | 'high';
+  claimedAt?: unknown;
+  claimedByAgentName?: string;
   completedAt?: unknown;
   completedByAgentName?: string;
+  /** How agents get assigned to this job. Undefined = 'instant' (legacy default). */
+  hiringMode?: 'instant' | 'applications';
+  /** instant mode only: minimum agent.tasksCompleted required to claim */
+  minCompletedJobs?: number;
+  /** instant mode only: minimum agent.trustScore (0-100) required to claim */
+  minTrustScore?: number;
+  /** applications mode only: denormalized count, incremented on each application */
+  applicationCount?: number;
   // Delivery & Review
   deliveryNotes?: string;
   deliveryFiles?: string[]; // URLs to uploaded files
@@ -795,7 +812,7 @@ export async function getOpenJobs(orgId: string): Promise<Job[]> {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
 }
 
-export async function claimJob(jobId: string, agentId: string, orgId: string, projectId: string): Promise<string> {
+export async function claimJob(jobId: string, agentId: string, orgId: string, projectId: string, agentName?: string): Promise<string> {
   // ── Credit Policy Enforcement ──────────────────────────────
   const { resolveAgentPolicy } = await import("@/lib/agent-policy");
   const { canClaimJob } = await import("@/lib/credit-policy");
@@ -872,6 +889,7 @@ export async function claimJob(jobId: string, agentId: string, orgId: string, pr
     status: "in_progress",
     takenByAgentId: agentId,
     updatedAt: serverTimestamp(),
+    ...(agentName ? { claimedAt: serverTimestamp(), claimedByAgentName: agentName } : {}),
   });
   // Auto-create a task for the claiming agent
   const job = await getDoc(doc(db, "jobs", jobId));
@@ -900,8 +918,103 @@ export async function updateJob(jobId: string, data: Partial<Job>): Promise<void
   await updateDoc(doc(db, "jobs", jobId), { ...data, updatedAt: serverTimestamp() });
 }
 
+export async function submitJobDelivery(jobId: string, data: {
+  deliveryNotes: string;
+  deliveryFiles?: string[];
+  completedByAgentName: string;
+}): Promise<void> {
+  await updateDoc(doc(db, "jobs", jobId), {
+    status: "completed",
+    deliveryNotes: data.deliveryNotes,
+    deliveryFiles: data.deliveryFiles ?? [],
+    completedByAgentName: data.completedByAgentName,
+    completedAt: serverTimestamp(),
+    reviewStatus: "pending",
+    updatedAt: serverTimestamp(),
+  });
+}
+
 export async function deleteJob(jobId: string): Promise<void> {
   await deleteDoc(doc(db, "jobs", jobId));
+}
+
+// ─── Job Comments ────────────────────────────────────────
+
+export interface JobComment {
+  id: string;
+  jobId: string;
+  orgId: string;
+  authorAddress: string;
+  authorName?: string;
+  body: string;
+  createdAt: unknown;
+}
+
+export async function getJobComments(jobId: string): Promise<JobComment[]> {
+  const q = query(collection(db, "jobComments"), where("jobId", "==", jobId), orderBy("createdAt", "asc"));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as JobComment));
+}
+
+export async function addJobComment(data: Omit<JobComment, "id" | "createdAt">): Promise<string> {
+  const ref = await addDoc(collection(db, "jobComments"), {
+    ...data,
+    createdAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+// ─── Job Applications (quotes) ──────────────────────────
+
+export interface JobApplication {
+  id: string;
+  jobId: string;
+  orgId: string;
+  agentId: string;
+  agentName: string;
+  /** Proposed price, free text like Job.reward (e.g. "250") */
+  quote?: string;
+  message?: string;
+  status: 'pending' | 'accepted' | 'rejected';
+  createdAt: unknown;
+}
+
+export async function getJobApplications(jobId: string): Promise<JobApplication[]> {
+  const q = query(collection(db, "jobApplications"), where("jobId", "==", jobId));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as JobApplication));
+}
+
+export async function applyToJob(data: Omit<JobApplication, "id" | "status" | "createdAt">): Promise<string> {
+  const ref = await addDoc(collection(db, "jobApplications"), {
+    ...data,
+    status: "pending",
+    createdAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, "jobs", data.jobId), { applicationCount: increment(1) });
+  return ref.id;
+}
+
+/** Accept one application, reject the rest, and assign the job to the hired agent. */
+export async function hireApplicant(jobId: string, application: JobApplication, orgId: string, projectId: string): Promise<void> {
+  // Routes through claimJob so hiring respects credit-policy enforcement and
+  // auto-creates the agent's task, same as every other job-assignment path.
+  await claimJob(jobId, application.agentId, orgId, projectId, application.agentName);
+
+  const others = (await getJobApplications(jobId)).filter(a => a.id !== application.id && a.status === "pending");
+  const batch = writeBatch(db);
+  batch.update(doc(db, "jobApplications", application.id), { status: "accepted" });
+  for (const other of others) {
+    batch.update(doc(db, "jobApplications", other.id), { status: "rejected" });
+  }
+  await batch.commit();
+}
+
+/** An agent's completed & approved job history — used to render their portfolio. */
+export async function getCompletedJobsByAgent(agentId: string): Promise<Job[]> {
+  const q = query(collection(db, "jobs"), where("takenByAgentId", "==", agentId), where("status", "==", "completed"));
+  const snap = await getDocs(q);
+  return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
 }
 
 // ─── Agent Communications ───────────────────────────────

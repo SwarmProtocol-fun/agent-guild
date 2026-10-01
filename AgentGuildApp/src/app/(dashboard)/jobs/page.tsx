@@ -17,12 +17,13 @@ import {
   getProjectsByOrg,
   getAgentsByOrg,
   createJob,
-  updateJob,
+  claimJob,
   getChannelsByProject,
   type Job,
   type Project,
   type Agent,
 } from "@/lib/firestore";
+import { QuickPostJobDialog } from "@/components/jobs/quick-post-job-dialog";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,15 @@ const parseRewardValue = (reward?: string): number => {
 };
 
 const fmtCost = (v: number) => v > 0 ? `$${v.toLocaleString()}` : "$0";
+
+const getTimeMs = (timestamp: unknown): number => {
+  if (!timestamp) return 0;
+  if (typeof timestamp === "object" && "seconds" in (timestamp as any)) {
+    return (timestamp as any).seconds * 1000;
+  }
+  const t = new Date(timestamp as any).getTime();
+  return isNaN(t) ? 0 : t;
+};
 
 const priorityColors = {
   low: "bg-muted text-muted-foreground",
@@ -72,8 +82,18 @@ export default function JobBoardPage() {
   const [jobSkills, setJobSkills] = useState<string[]>([]);
   const [jobProject, setJobProject] = useState("__none__");
   const [jobPriority, setJobPriority] = useState<Job["priority"]>("medium");
+  const [jobHiringMode, setJobHiringMode] = useState<"instant" | "applications">("instant");
+  const [jobMinCompletedJobs, setJobMinCompletedJobs] = useState("");
+  const [jobMinTrustScore, setJobMinTrustScore] = useState("");
   const [creating, setCreating] = useState(false);
   const [updating, setUpdating] = useState(false);
+
+  // Filters & sort
+  const [searchQuery, setSearchQuery] = useState("");
+  const [skillFilter, setSkillFilter] = useState("__all__");
+  const [priorityFilter, setPriorityFilter] = useState("__all__");
+  const [projectFilter, setProjectFilter] = useState("__all__");
+  const [sortBy, setSortBy] = useState<"newest" | "oldest" | "reward_desc" | "reward_asc">("newest");
 
   // ── Firestore loaders ──
 
@@ -110,8 +130,38 @@ export default function JobBoardPage() {
     return agents.find((a) => a.id === agentId)?.name || "Unknown";
   };
 
+  const getEligibleAgents = (job: Job) =>
+    agents.filter((a) =>
+      (job.minCompletedJobs == null || (a.tasksCompleted ?? 0) >= job.minCompletedJobs) &&
+      (job.minTrustScore == null || (a.trustScore ?? 0) >= job.minTrustScore)
+    );
+
+  const visibleJobs = jobs
+    .filter((job) => {
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        if (!job.title.toLowerCase().includes(q) && !(job.description || "").toLowerCase().includes(q)) return false;
+      }
+      if (skillFilter !== "__all__" && !(job.requiredSkills ?? []).includes(skillFilter)) return false;
+      if (priorityFilter !== "__all__" && job.priority !== priorityFilter) return false;
+      if (projectFilter !== "__all__" && job.projectId !== projectFilter) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortBy === "reward_desc") return parseRewardValue(b.reward) - parseRewardValue(a.reward);
+      if (sortBy === "reward_asc") return parseRewardValue(a.reward) - parseRewardValue(b.reward);
+      const diff = getTimeMs(b.createdAt) - getTimeMs(a.createdAt);
+      return sortBy === "oldest" ? -diff : diff;
+    });
+
+  const filtersActive = searchQuery.trim() !== "" || skillFilter !== "__all__" || priorityFilter !== "__all__" || projectFilter !== "__all__";
+
+  const clearFilters = () => {
+    setSearchQuery(""); setSkillFilter("__all__"); setPriorityFilter("__all__"); setProjectFilter("__all__");
+  };
+
   const getJobsByStatus = (status: Job["status"]) =>
-    jobs.filter((job) => job.status === status);
+    visibleJobs.filter((job) => job.status === status);
 
   const toggleSkill = (skill: string) => {
     setJobSkills((prev) =>
@@ -134,10 +184,15 @@ export default function JobBoardPage() {
         postedByAddress: account?.address || "",
         projectId: jobProject === "__none__" ? "" : jobProject,
         priority: jobPriority,
+        hiringMode: jobHiringMode,
+        minCompletedJobs: jobHiringMode === "instant" && jobMinCompletedJobs.trim() ? Number(jobMinCompletedJobs) : undefined,
+        minTrustScore: jobHiringMode === "instant" && jobMinTrustScore.trim() ? Number(jobMinTrustScore) : undefined,
+        applicationCount: 0,
         createdAt: new Date(),
       });
       setJobTitle(""); setJobDescription(""); setJobReward("");
       setJobSkills([]); setJobProject("__none__"); setJobPriority("medium");
+      setJobHiringMode("instant"); setJobMinCompletedJobs(""); setJobMinTrustScore("");
       setCreateOpen(false);
       await loadData();
     } catch (err) {
@@ -149,10 +204,12 @@ export default function JobBoardPage() {
   };
 
   const handleTakeJob = async (job: Job, agentId: string) => {
+    if (!currentOrg) return;
     try {
       setUpdating(true);
+      setError(null);
       const agentName = getAgentName(agentId);
-      await updateJob(job.id, { status: "in_progress", takenByAgentId: agentId });
+      await claimJob(job.id, agentId, currentOrg.id, job.projectId || "", agentName);
 
       // Send notification to the project's channel
       if (job.projectId && currentOrg) {
@@ -215,6 +272,7 @@ export default function JobBoardPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-end gap-2">
+        <QuickPostJobDialog onJobCreated={loadData} />
         <Button
           size="sm"
           onClick={() => setCreateOpen(true)}
@@ -248,6 +306,51 @@ export default function JobBoardPage() {
         </div>
       ) : (
         <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="Search jobs..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-8 w-48 text-xs"
+            />
+            <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+              <SelectTrigger className="h-8 w-[110px] text-xs"><SelectValue placeholder="Priority" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All priorities</SelectItem>
+                <SelectItem value="low">Low</SelectItem>
+                <SelectItem value="medium">Medium</SelectItem>
+                <SelectItem value="high">High</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={skillFilter} onValueChange={setSkillFilter}>
+              <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue placeholder="Skill" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All skills</SelectItem>
+                {SKILL_OPTIONS.map((skill) => <SelectItem key={skill} value={skill}>{skill}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {projects.length > 0 && (
+              <Select value={projectFilter} onValueChange={setProjectFilter}>
+                <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="Project" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All projects</SelectItem>
+                  {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            )}
+            <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+              <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue placeholder="Sort" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="newest">Newest</SelectItem>
+                <SelectItem value="oldest">Oldest</SelectItem>
+                <SelectItem value="reward_desc">Reward: High-Low</SelectItem>
+                <SelectItem value="reward_asc">Reward: Low-High</SelectItem>
+              </SelectContent>
+            </Select>
+            {filtersActive && (
+              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={clearFilters}>Clear filters</Button>
+            )}
+          </div>
           {(() => {
             const totalBudget = jobs.reduce((s, j) => s + (parseFloat(j.reward || "0") || 0), 0);
             const spentBudget = jobs.filter(j => j.status === "completed").reduce((s, j) => s + (parseFloat(j.reward || "0") || 0), 0);
@@ -341,18 +444,39 @@ export default function JobBoardPage() {
                               )}
                             </div>
                           )}
-                          {job.status === "open" && agents.length > 0 && (
-                            <div className="pt-1" onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}>
-                              <Select onValueChange={(agentId) => handleTakeJob(job, agentId)}>
-                                <SelectTrigger className="h-7 text-xs bg-amber-500/10 border-amber-500/30 hover:bg-amber-500/20">
-                                  <SelectValue placeholder="▶️ Start — pick agent..." />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {agents.map((a) => <SelectItem key={a.id} value={a.id}>🤖 {a.name}</SelectItem>)}
-                                </SelectContent>
-                              </Select>
+                          {job.status === "open" && job.hiringMode === "applications" && (
+                            <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-blue-500/10 border border-blue-500/20 w-fit text-[11px] text-blue-700 dark:text-blue-400 font-medium">
+                              📝 {job.applicationCount || 0} application{job.applicationCount === 1 ? "" : "s"} — view &amp; apply
                             </div>
                           )}
+                          {job.status === "open" && job.hiringMode !== "applications" && (job.minCompletedJobs != null || job.minTrustScore != null) && (
+                            <div className="text-[10px] text-muted-foreground">
+                              Requires {job.minCompletedJobs != null && `${job.minCompletedJobs}+ jobs completed`}
+                              {job.minCompletedJobs != null && job.minTrustScore != null && " · "}
+                              {job.minTrustScore != null && `${job.minTrustScore}+ trust score`}
+                            </div>
+                          )}
+                          {job.status === "open" && job.hiringMode !== "applications" && (() => {
+                            const eligible = getEligibleAgents(job);
+                            if (agents.length === 0) return null;
+                            if (eligible.length === 0) {
+                              return (
+                                <div className="text-[11px] text-muted-foreground italic pt-0.5">No agents meet the requirements yet</div>
+                              );
+                            }
+                            return (
+                              <div className="pt-1" onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}>
+                                <Select onValueChange={(agentId) => handleTakeJob(job, agentId)}>
+                                  <SelectTrigger className="h-7 text-xs bg-amber-500/10 border-amber-500/30 hover:bg-amber-500/20">
+                                    <SelectValue placeholder="▶️ Start — pick agent..." />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {eligible.map((a) => <SelectItem key={a.id} value={a.id}>🤖 {a.name}</SelectItem>)}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            );
+                          })()}
                           <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
                             <div className="flex items-center gap-1.5 min-w-0 truncate">
                               {job.projectId && <span className="truncate">📁 {getProjectName(job.projectId)}</span>}
@@ -452,6 +576,45 @@ export default function JobBoardPage() {
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+            <div>
+              <label className="text-xs font-medium mb-1.5 block">How should agents get this job?</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setJobHiringMode("instant")}
+                  className={cn(
+                    "text-left text-xs rounded-md border p-2.5 transition-colors",
+                    jobHiringMode === "instant" ? "border-amber-400 bg-amber-500/10" : "hover:bg-muted"
+                  )}
+                >
+                  <div className="font-medium mb-0.5">⚡ First come, first served</div>
+                  <div className="text-muted-foreground">Any (qualified) agent can claim it instantly</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setJobHiringMode("applications")}
+                  className={cn(
+                    "text-left text-xs rounded-md border p-2.5 transition-colors",
+                    jobHiringMode === "applications" ? "border-amber-400 bg-amber-500/10" : "hover:bg-muted"
+                  )}
+                >
+                  <div className="font-medium mb-0.5">📝 Open for applications</div>
+                  <div className="text-muted-foreground">Agents apply with a quote; you pick one</div>
+                </button>
+              </div>
+            </div>
+            {jobHiringMode === "instant" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Min. jobs completed (optional)</label>
+                  <Input type="number" min="0" placeholder="e.g. 5" value={jobMinCompletedJobs} onChange={(e) => setJobMinCompletedJobs(e.target.value)} />
+                </div>
+                <div>
+                  <label className="text-xs font-medium mb-1 block">Min. trust score (optional)</label>
+                  <Input type="number" min="0" max="100" placeholder="e.g. 70" value={jobMinTrustScore} onChange={(e) => setJobMinTrustScore(e.target.value)} />
+                </div>
               </div>
             )}
             <div className="flex gap-2 justify-end pt-2">
