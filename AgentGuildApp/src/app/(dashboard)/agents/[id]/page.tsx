@@ -18,6 +18,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { useWallet as useSolanaWalletAdapter } from "@solana/wallet-adapter-react";
+import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { useOrg } from "@/contexts/OrgContext";
 import { useAgentGuildData } from "@/hooks/useAgentGuildData";
 import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
@@ -159,6 +161,8 @@ function AgentDetailPage() {
   const { address: sessionAddress } = useSession();
   const agentGuild = useAgentGuildData();
   const agentGuildWrite = useAgentGuildWrite();
+  const { connected: solanaConnected, publicKey: solanaWalletPublicKey } = useSolanaWalletAdapter();
+  const { setVisible: setWalletModalVisible } = useWalletModal();
 
 
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -187,6 +191,7 @@ function AgentDetailPage() {
 
   // Solana / Metaplex state
   const [solanaLoading, setSolanaLoading] = useState(false);
+  const [solanaError, setSolanaError] = useState<string | null>(null);
 
   // Custodial agent wallets (platform-generated, separate from the identity wallet above)
   const [wallets, setWallets] = useState<AgentWallet[]>([]);
@@ -407,6 +412,10 @@ function AgentDetailPage() {
 
   const handleRegisterSubmit = async () => {
     if (!registerName.trim()) return;
+    if (!solanaConnected || !solanaWalletPublicKey) {
+      setWalletModalVisible(true);
+      return;
+    }
     const feeRate = parseInt(registerFeeRate, 10);
     if (isNaN(feeRate) || feeRate < 0) return;
     const txHash = await agentGuildWrite.registerAgent(registerName.trim(), registerSkills.trim(), agent?.asn || "", feeRate);
@@ -512,6 +521,7 @@ function AgentDetailPage() {
   const handleGenerateSolanaWallet = async () => {
     if (!agent || !currentOrg) return;
     setSolanaLoading(true);
+    setSolanaError(null);
     try {
       const res = await fetch("/api/v1/solana/wallet/generate", {
         method: "POST",
@@ -521,9 +531,11 @@ function AgentDetailPage() {
       const data = await res.json();
       if (res.ok) {
         setAgent({ ...agent, solanaAddress: data.solanaAddress });
+      } else {
+        setSolanaError(data.error || "Failed to generate Solana wallet");
       }
     } catch (err) {
-      console.error("Wallet generation failed:", err);
+      setSolanaError(err instanceof Error ? err.message : "Failed to generate Solana wallet");
     } finally {
       setSolanaLoading(false);
     }
@@ -532,6 +544,7 @@ function AgentDetailPage() {
   const handleMintSolanaNft = async () => {
     if (!agent || !currentOrg) return;
     setSolanaLoading(true);
+    setSolanaError(null);
     try {
       const recipientAddress = agent.solanaAddress || sessionAddress || "";
       const res = await fetch("/api/v1/metaplex/mint", {
@@ -546,9 +559,11 @@ function AgentDetailPage() {
       const data = await res.json();
       if (res.ok) {
         setAgent({ ...agent, nftMintAddress: data.mintAddress, nftMintedAt: new Date() });
+      } else {
+        setSolanaError(data.error || "Failed to mint identity NFT");
       }
     } catch (err) {
-      console.error("NFT mint failed:", err);
+      setSolanaError(err instanceof Error ? err.message : "Failed to mint identity NFT");
     } finally {
       setSolanaLoading(false);
     }
@@ -557,15 +572,19 @@ function AgentDetailPage() {
   const handleUpdateSolanaMetadata = async () => {
     if (!agent || !currentOrg || !agent.nftMintAddress) return;
     setSolanaLoading(true);
+    setSolanaError(null);
     try {
       const res = await fetch("/api/v1/metaplex/update", {
         method: "POST",
         headers: solanaAuthHeaders,
         body: JSON.stringify({ agentId: agent.id, orgId: currentOrg.id }),
       });
-      await res.json();
+      const data = await res.json();
+      if (!res.ok) {
+        setSolanaError(data.error || "Failed to update metadata");
+      }
     } catch (err) {
-      console.error("Metadata update failed:", err);
+      setSolanaError(err instanceof Error ? err.message : "Failed to update metadata");
     } finally {
       setSolanaLoading(false);
     }
@@ -1483,6 +1502,14 @@ function AgentDetailPage() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
+            {solanaError && (
+              <div className="flex items-center justify-between gap-3 p-2.5 rounded-md bg-red-50 border border-red-200 text-xs text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
+                <span>{solanaError}</span>
+                <button onClick={() => setSolanaError(null)} className="shrink-0 hover:text-red-800 dark:hover:text-red-300">
+                  <X className="w-3.5 h-3.5" aria-hidden="true" />
+                </button>
+              </div>
+            )}
             {/* Agent Registry (Solana AgentGuild program) */}
             <div>
               <div className="flex items-center gap-2 mb-2">
@@ -1890,6 +1917,11 @@ function AgentDetailPage() {
             <p className="text-sm text-muted-foreground">
               Register <strong>{agent?.name}</strong> on the Solana Agent Registry program.
             </p>
+            {!solanaConnected && (
+              <div className="p-3 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-700 dark:bg-amber-950/20 dark:border-amber-800 dark:text-amber-400">
+                Connect a Solana wallet to sign this registration — you&apos;ll be prompted when you click Register.
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium mb-1 block">Agent Name *</label>
               <Input value={registerName} onChange={e => setRegisterName(e.target.value)} disabled={agentGuildWrite.state.isLoading} />
@@ -1940,7 +1972,11 @@ function AgentDetailPage() {
                   disabled={agentGuildWrite.state.isLoading || !registerName.trim()}
                   className="bg-amber-600 hover:bg-amber-700 text-white"
                 >
-                  {agentGuildWrite.state.isLoading ? 'Registering...' : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
+                  {agentGuildWrite.state.isLoading
+                    ? 'Registering...'
+                    : !solanaConnected
+                      ? <><Wallet className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Connect Wallet</>
+                      : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
                 </Button>
               )}
             </div>

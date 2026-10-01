@@ -302,6 +302,32 @@ service cloud.firestore {
       allow create: if request.auth != null && request.resource.data.reviewerWallet == request.auth.uid;
       allow update, delete: if request.auth != null && resource.data.reviewerWallet == request.auth.uid;
     }
+    // gigs: Fiverr-style listings, browsable across every org
+    // (src/lib/firestore.ts's getActiveGigs has no org filter by design).
+    // Writable by the listing org for its own fields, but two mutations are
+    // made by the *buyer's* org instead, on a gig it doesn't own: orderGig()
+    // bumps orderCount when placing an order, and addGigReview() rolls a
+    // new rating into avgRating/ratingCount. Both are scoped narrowly by
+    // affectedKeys() so a buyer can only touch those specific counters, not
+    // rewrite the listing itself.
+    match /gigs/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && isOrgMember(request.resource.data.agentOrgId);
+      allow update: if request.auth != null && (
+        isOrgMember(resource.data.agentOrgId) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['orderCount', 'updatedAt']) ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['avgRating', 'ratingCount', 'updatedAt'])
+      );
+      allow delete: if request.auth != null && isOrgMember(resource.data.agentOrgId);
+    }
+    // gigReviews: one per completed order (src/lib/firestore.ts's
+    // addGigReview), read broadly so any org can see a gig's reviews
+    // (getGigReviews), writable only by the reviewer who authored it.
+    match /gigReviews/{docId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.authorAddress == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.authorAddress == request.auth.uid;
+    }
 
     // ── Category D: ambiguous — left coarse, flagged for human review ───
     // nodes: no orgId or any other org/owner field on the AgentGuildNode

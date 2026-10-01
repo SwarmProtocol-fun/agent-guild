@@ -8,10 +8,27 @@ import { ConnectWalletButton, useWalletAccount } from "@/lib/wallet";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, Suspense, lazy, useRef } from "react";
 import Image from "next/image";
-import { ArrowRight, Sun, Moon, Loader2 } from "lucide-react";
+import { ArrowRight, Sun, Moon, Loader2, Star, Clock } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useSession } from "@/contexts/SessionContext";
 import { debug } from "@/lib/debug";
+
+interface PreviewGig {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  agentName: string;
+  price: string;
+  deliveryDays: number;
+  avgRating: number;
+  ratingCount: number;
+}
+
+const fmtGigPrice = (price?: string) => {
+  const n = parseFloat((price || "").replace(/[^0-9.]/g, ""));
+  return isNaN(n) || n <= 0 ? "Custom" : `$${n.toLocaleString()}`;
+};
 
 // [agent-guild-core] Spline 3D extracted to mod — placeholder
 const Spline = lazy(() => Promise.resolve({ default: (_props: Record<string, unknown>) => null }));
@@ -34,7 +51,18 @@ function LandingPageContent() {
   // Staggered loading: center first, then flanks after delay
   const [robotsReady, setRobotsReady] = useState<boolean[]>([false, false, false]);
 
+  // Public gig preview — fetched unauthenticated so visitors see real listings
+  // before connecting a wallet, instead of a bare "Connect Wallet" landing page.
+  const [previewGigs, setPreviewGigs] = useState<PreviewGig[]>([]);
+
   useEffect(() => setMounted(true), []);
+
+  useEffect(() => {
+    fetch("/api/v1/gigs?limit=3")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => data?.gigs && setPreviewGigs(data.gigs))
+      .catch(() => {});
+  }, []);
 
   const redirectParam = searchParams.get('redirect');
 
@@ -221,6 +249,48 @@ function LandingPageContent() {
           </div>
         </section>
 
+        {/* Gig Preview — real listings, visible before connecting a wallet */}
+        {previewGigs.length > 0 && (
+          <section className="py-20 border-t border-white/5">
+            <div className="max-w-6xl mx-auto px-6">
+              <h2 className="text-2xl font-bold text-white mb-2 text-center">Gigs available right now</h2>
+              <p className="text-sm text-muted-foreground text-center mb-10">A live sample of what agents are offering today</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {previewGigs.map((gig) => (
+                  <div key={gig.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-sm font-medium leading-snug text-white">{gig.title}</h3>
+                      <span className="text-[10px] shrink-0 px-2 py-0.5 rounded-full border border-amber-500/30 text-amber-400">{gig.category}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground line-clamp-2">{gig.description}</p>
+                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <span>🤖 {gig.agentName}</span>
+                      {gig.ratingCount > 0 && (
+                        <span className="flex items-center gap-0.5"><Star className="h-3 w-3 fill-amber-400 text-amber-400" />{gig.avgRating.toFixed(1)}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                      <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Clock className="h-3 w-3" />{gig.deliveryDays}d delivery</span>
+                      <span className="text-sm font-bold text-amber-400">{fmtGigPrice(gig.price)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-center mt-8">
+                {authenticated && !loading ? (
+                  <Link href="/gigs">
+                    <Button variant="outline" size="lg" className="h-11 px-6 rounded-full border-white/10 hover:bg-white/5">
+                      See all gigs <ArrowRight className="ml-2 w-4 h-4" />
+                    </Button>
+                  </Link>
+                ) : (
+                  <ConnectWalletButton label="Connect to order" />
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+
         {/* Final CTA */}
         <section className="py-24 border-t border-white/5">
           <div className="max-w-4xl mx-auto px-6 text-center">
@@ -247,7 +317,7 @@ function LandingPageContent() {
           <span className="text-sm font-bold text-white">Agent Guild Protocol</span>
         </div>
         <p className="text-xs text-muted-foreground uppercase tracking-widest">
-          Enterprise AI Fleet Orchestration &copy; 2026
+          The Marketplace for Autonomous Agents &copy; 2026
         </p>
       </footer>
     </div>

@@ -360,7 +360,14 @@ function PoolActionDialog({
 
     useEffect(() => {
         if (mode === "deposit") {
-            fetch("/api/v1/lending/treasury").then((r) => r.ok && r.json()).then((d) => d && setTreasury(d.treasuryAddress));
+            fetch("/api/v1/lending/treasury")
+                .then(async (r) => {
+                    const body = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(body.error || "Lending treasury not configured");
+                    return body;
+                })
+                .then((d) => setTreasury(d.treasuryAddress))
+                .catch((err) => setError(err instanceof Error ? err.message : "Failed to load treasury address"));
         }
     }, [mode]);
 

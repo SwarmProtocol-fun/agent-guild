@@ -137,12 +137,17 @@ const ENV_REQUIREMENTS: EnvRequirement[] = [
   {
     key: "PLATFORM_ADMIN_WALLETS",
     required: false,
+    // Admin wallets aren't EVM-only — canonicalizeWalletAddress (wallet-address.ts)
+    // already treats a Solana base58 address as a valid identity, so this must
+    // accept either shape instead of requiring "0x" on every entry.
     validate: (val) => {
-      const wallets = val.split(",");
-      return wallets.every((w) => w.trim().startsWith("0x"));
+      const wallets = val.split(",").map((w) => w.trim());
+      const EVM = /^0x[a-fA-F0-9]{40}$/;
+      const SOLANA = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+      return wallets.every((w) => EVM.test(w) || SOLANA.test(w));
     },
-    description: "Comma-separated admin wallet addresses",
-    example: "0x1234...abcd,0x5678...efgh",
+    description: "Comma-separated admin wallet addresses (EVM 0x... or Solana base58)",
+    example: "0x1234...abcd,Pip4XQcGH5j5j5RA3BJHftBJ8xy5SsWjKXLDnQg4ENV",
   },
 
   // Optional - Rate Limiting
