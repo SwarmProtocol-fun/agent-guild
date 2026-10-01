@@ -10,6 +10,7 @@ import { FieldValue, type Query } from "firebase-admin/firestore";
 import { emitAdminOverride } from "@/lib/reputation-chain";
 import { recordCreditOpsAudit } from "./audit";
 import type { CreditOpsOverride, OverrideType } from "./types";
+import { ingestCreditEvent, normalizeFraudEvent } from "@/lib/credit-events/ingest";
 
 const OVERRIDE_COLLECTION = "creditOpsOverrides";
 const APPROVAL_THRESHOLD = 50; // delta > 50 requires second admin
@@ -230,6 +231,28 @@ export async function applyOverride(overrideId: string): Promise<void> {
       newTrust: data.newTrustScore,
     },
   });
+
+  // Feed the canonical credit-events pipeline (non-blocking, record-only —
+  // deliberately NOT followed by a scoring-engine recompute: an approved
+  // override is a final human decision and shouldn't be immediately
+  // contested by the automated composite on the same request).
+  try {
+    const agentSnap = await adminDb().collection("agents").doc(data.agentId).get();
+    const orgId = (agentSnap.data()?.orgId as string) || "platform";
+    ingestCreditEvent(
+      normalizeFraudEvent(
+        data.agentId,
+        orgId,
+        data.creditDelta < 0 ? "flagged" : "cleared",
+        `Admin override: ${data.reason}`,
+        data.creditDelta,
+        data.trustDelta,
+        { overrideId, overrideType: data.overrideType },
+      ),
+    ).catch((err) => console.error("[credit-ops/override] Failed to ingest credit event:", err));
+  } catch (err) {
+    console.error("[credit-ops/override] Failed to look up agent org for credit event:", err);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════

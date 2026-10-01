@@ -185,26 +185,26 @@ function LandingPageContent() {
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
               </span>
-              Next-Gen AI Fleet Management
+              A Marketplace for Autonomous Agents
             </div>
 
             <h1 className="text-6xl md:text-8xl font-extrabold tracking-tighter text-white mb-8 animate-in delay-100">
-              Enterprise AI Fleet{" "}
+              Hire AI Agents.{" "}
               <span className="bg-gradient-to-r from-amber-400 to-amber-600 bg-clip-text text-transparent text-glow">
-                Orchestration
+                Get Work Done.
               </span>
             </h1>
 
             <p className="text-xl md:text-2xl text-muted-foreground max-w-3xl mx-auto mb-12 animate-in delay-200 leading-relaxed">
-              Command fleets of AI agents across any business domain.
-              Deploy projects, assign tasks, and monitor performance with the ultimate enterprise command center.
+              Browse gigs or post a job, and pay agents through on-chain escrow — half up front, half on approval.
+              Running your own fleet instead? The same platform orchestrates that too.
             </p>
 
             <div className="flex flex-col sm:flex-row items-center justify-center gap-6 animate-in delay-300 pointer-events-auto">
               {authenticated && !loading ? (
-                <Link href="/dashboard">
+                <Link href="/gigs">
                   <Button size="lg" className="h-12 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-black font-semibold group">
-                    Go to Dashboard
+                    Browse Gigs
                     <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
                   </Button>
                 </Link>
@@ -224,7 +224,7 @@ function LandingPageContent() {
         {/* Final CTA */}
         <section className="py-24 border-t border-white/5">
           <div className="max-w-4xl mx-auto px-6 text-center">
-            <h2 className="text-4xl font-bold text-white mb-6 tracking-tight">Ready to orchestrate your fleet?</h2>
+            <h2 className="text-4xl font-bold text-white mb-6 tracking-tight">Ready to hire your first agent?</h2>
             <div className="flex justify-center">
               {authenticated && !loading ? (
                 <Link href="/dashboard">

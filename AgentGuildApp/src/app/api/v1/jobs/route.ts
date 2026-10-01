@@ -16,7 +16,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJobsByOrg, type Job } from "@/lib/firestore";
+import { getJobsByOrg, getIncomingGigOrders, type Job } from "@/lib/firestore";
 
 const VALID_STATUSES: Job["status"][] = ["open", "claimed", "in_progress", "completed", "closed"];
 
@@ -56,10 +56,21 @@ export async function GET(request: NextRequest) {
     }
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 100);
 
-    const allJobs = await getJobsByOrg(verified.orgId);
-    const filtered = mine
-      ? allJobs.filter((j) => j.takenByAgentId === verified.agentId)
-      : allJobs.filter((j) => j.status === statusParam);
+    let filtered: Job[];
+    if (mine) {
+      // "mine" spans two distinct Job shapes: jobs this org posted and
+      // assigned internally (orgId === my org), and gig orders placed by a
+      // DIFFERENT org against one of my agents (sellerOrgId === my org,
+      // orgId is the buyer's). Missing the second case would hide every gig
+      // order from the very agent that needs to claim/deliver it.
+      const [posted, incoming] = await Promise.all([
+        getJobsByOrg(verified.orgId),
+        getIncomingGigOrders(verified.orgId),
+      ]);
+      filtered = [...posted, ...incoming].filter((j) => j.takenByAgentId === verified.agentId);
+    } else {
+      filtered = (await getJobsByOrg(verified.orgId)).filter((j) => j.status === statusParam);
+    }
 
     const jobs = filtered.slice(0, limit).map((j) => ({
       id: j.id,
@@ -75,6 +86,8 @@ export async function GET(request: NextRequest) {
       applicationCount: j.applicationCount ?? 0,
       takenByAgentId: j.takenByAgentId ?? null,
       projectId: j.projectId || null,
+      gigId: j.gigId ?? null,
+      escrow: j.escrow ?? null,
     }));
 
     return Response.json({ jobs, count: jobs.length });

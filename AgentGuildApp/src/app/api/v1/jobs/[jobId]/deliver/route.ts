@@ -14,7 +14,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, submitJobDelivery } from "@/lib/firestore";
+import { getJob, submitJobDelivery, recordEscrowDelivered } from "@/lib/firestore";
 
 export async function POST(
   request: NextRequest,
@@ -53,7 +53,10 @@ export async function POST(
     if (!job) {
       return Response.json({ error: "Job not found" }, { status: 404 });
     }
-    if (job.orgId !== verified.orgId) {
+    // A gig order's delivering agent belongs to job.sellerOrgId, not job.orgId
+    // (the buyer's org) — only non-gig jobs are scoped to a single org.
+    const callerOrgMatches = job.gigId ? job.sellerOrgId === verified.orgId : job.orgId === verified.orgId;
+    if (!callerOrgMatches) {
       return Response.json({ error: "Job not found in your organization" }, { status: 403 });
     }
     if (job.takenByAgentId !== verified.agentId) {
@@ -71,12 +74,20 @@ export async function POST(
     const deliveryFiles = Array.isArray(body.deliveryFiles)
       ? body.deliveryFiles.filter((f: unknown): f is string => typeof f === "string")
       : undefined;
+    // Set only when this order has on-chain escrow and the caller already
+    // signed submitDelivery() itself (only the agent's own key can) before
+    // calling this endpoint — we just record the resulting signature.
+    const onChainDeliveryTxSig = typeof body.onChainDeliveryTxSig === "string" ? body.onChainDeliveryTxSig : undefined;
 
     await submitJobDelivery(jobId, {
       deliveryNotes,
       deliveryFiles,
       completedByAgentName: verified.agentName,
     });
+
+    if (onChainDeliveryTxSig && job.escrow) {
+      await recordEscrowDelivered(jobId, onChainDeliveryTxSig);
+    }
 
     return Response.json({ jobId, status: "completed", reviewStatus: "pending", completedAt: Date.now() });
   } catch (err: any) {

@@ -10,7 +10,7 @@
 
 import { useState, useCallback } from "react";
 import { useWallet as useSolanaWalletAdapter } from "@solana/wallet-adapter-react";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 
 import * as agentGuild from "@/lib/solana/client";
 import type { SolanaWallet } from "@/lib/solana/client";
@@ -23,6 +23,12 @@ interface WriteState {
   txHash: string | null;
 }
 
+export interface PostTaskResult {
+  taskPda: string;
+  taskId: number;
+  txSig: string;
+}
+
 interface AgentGuildWrite {
   claimTask: (taskId: number) => Promise<string | null>;
   submitDelivery: (taskId: number, deliveryHashHex: string) => Promise<string | null>;
@@ -32,6 +38,14 @@ interface AgentGuildWrite {
     requiredSkills: string,
     deadlineUnix: number,
     budgetSol: string,
+  ) => Promise<PostTaskResult | null>;
+  approveDelivery: (taskId: number, claimantWallet: string) => Promise<string | null>;
+  disputeDelivery: (taskId: number) => Promise<string | null>;
+  resolveDispute: (
+    taskId: number,
+    posterWallet: string,
+    claimantWallet: string,
+    agentBps: number,
   ) => Promise<string | null>;
   registerAgent: (name: string, skills: string, asn: string, feeRate: number) => Promise<string | null>;
   state: WriteState;
@@ -102,7 +116,7 @@ export function useAgentGuildWrite(): AgentGuildWrite {
     requiredSkills: string,
     deadlineUnix: number,
     budgetSol: string,
-  ): Promise<string | null> => {
+  ): Promise<PostTaskResult | null> => {
     setState({ isLoading: true, error: null, txHash: null });
     try {
       if (parseFloat(budgetSol) < MIN_TASK_BUDGET_SOL) {
@@ -110,17 +124,68 @@ export function useAgentGuildWrite(): AgentGuildWrite {
       }
       const wallet = getWallet();
       const budgetLamports = Math.round(parseFloat(budgetSol) * LAMPORTS_PER_SOL);
-      const task = await agentGuild.postTask(wallet, {
+      const { task, taskId, txSig } = await agentGuild.postTask(wallet, {
         title,
         description,
         requiredSkills,
         deadline: deadlineUnix,
         budgetLamports,
       });
-      setState({ isLoading: false, error: null, txHash: task.toBase58() });
-      return task.toBase58();
+      setState({ isLoading: false, error: null, txHash: txSig });
+      return { taskPda: task.toBase58(), taskId: taskId.toNumber(), txSig };
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to post task";
+      setState({ isLoading: false, error: msg, txHash: null });
+      return null;
+    }
+  }, [getWallet]);
+
+  const approveDelivery = useCallback(async (taskId: number, claimantWallet: string): Promise<string | null> => {
+    setState({ isLoading: true, error: null, txHash: null });
+    try {
+      const wallet = getWallet();
+      const [task] = agentGuild.taskPda(taskId);
+      const sig = await agentGuild.approveDelivery(wallet, task, new PublicKey(claimantWallet));
+      setState({ isLoading: false, error: null, txHash: sig });
+      return sig;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to approve delivery";
+      setState({ isLoading: false, error: msg, txHash: null });
+      return null;
+    }
+  }, [getWallet]);
+
+  const disputeDelivery = useCallback(async (taskId: number): Promise<string | null> => {
+    setState({ isLoading: true, error: null, txHash: null });
+    try {
+      const wallet = getWallet();
+      const [task] = agentGuild.taskPda(taskId);
+      const sig = await agentGuild.disputeDelivery(wallet, task);
+      setState({ isLoading: false, error: null, txHash: sig });
+      return sig;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to dispute delivery";
+      setState({ isLoading: false, error: msg, txHash: null });
+      return null;
+    }
+  }, [getWallet]);
+
+  /** Authority-only (platform admin wallet) — the transaction itself fails on-chain for anyone else. */
+  const resolveDispute = useCallback(async (
+    taskId: number,
+    posterWallet: string,
+    claimantWallet: string,
+    agentBps: number,
+  ): Promise<string | null> => {
+    setState({ isLoading: true, error: null, txHash: null });
+    try {
+      const wallet = getWallet();
+      const [task] = agentGuild.taskPda(taskId);
+      const sig = await agentGuild.resolveDispute(wallet, task, new PublicKey(posterWallet), new PublicKey(claimantWallet), agentBps);
+      setState({ isLoading: false, error: null, txHash: sig });
+      return sig;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to resolve dispute";
       setState({ isLoading: false, error: msg, txHash: null });
       return null;
     }
@@ -145,5 +210,5 @@ export function useAgentGuildWrite(): AgentGuildWrite {
     }
   }, [getWallet]);
 
-  return { claimTask, submitDelivery, postTask, registerAgent, state, reset };
+  return { claimTask, submitDelivery, postTask, approveDelivery, disputeDelivery, resolveDispute, registerAgent, state, reset };
 }

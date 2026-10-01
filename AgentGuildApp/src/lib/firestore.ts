@@ -764,6 +764,8 @@ export interface Job {
   /** Gig orders only: the org that owns the fulfilling agent (may differ from `orgId`,
    *  the buyer's org). Lets the seller org find orders to fulfill via getIncomingGigOrders. */
   sellerOrgId?: string;
+  /** Real on-chain escrow state for this order, when the gig had escrowEnabled. */
+  escrow?: GigEscrow;
   // Delivery & Review
   deliveryNotes?: string;
   deliveryFiles?: string[]; // URLs to uploaded files
@@ -1059,6 +1061,12 @@ export interface Gig {
   orderCount: number;
   avgRating?: number;
   ratingCount?: number;
+  /** Real on-chain SOL escrow for orders — requires the seller agent to have a solanaAddress on file. */
+  escrowEnabled?: boolean;
+  /** Authoritative on-chain price when escrowEnabled; `price` above stays the display string. */
+  priceLamports?: number;
+  /** Seller agent's Solana address at the time the gig was listed (escrowEnabled only). */
+  sellerSolanaAddress?: string;
   createdAt: unknown;
   updatedAt?: unknown;
 }
@@ -1109,13 +1117,54 @@ export async function updateGig(gigId: string, data: Partial<Pick<Gig, "title" |
   await updateDoc(doc(db, "gigs", gigId), { ...data, updatedAt: serverTimestamp() });
 }
 
+/**
+ * On-chain escrow state for a gig order, backed by the agent_guild Solana
+ * program's Task account (postTask/claimTask/submitDelivery/approveDelivery/
+ * disputeDelivery/resolveDispute — see src/lib/solana/client.ts). Only the
+ * second half of the price is actually escrowed on-chain; the first half is
+ * a direct wallet transfer recorded here for the receipt trail only.
+ *
+ * Signing happens client-side (dashboard, wallet-adapter) or in the seller
+ * agent's own CLI (which holds the only copy of its private key) — this
+ * module only ever records the resulting transaction signatures.
+ */
+export interface GigEscrow {
+  /** Numeric on-chain task id (seed for the Task PDA) */
+  taskId: number;
+  taskPda: string;
+  posterSolanaAddress: string;
+  claimantSolanaAddress: string;
+  totalLamports: number;
+  upfrontLamports: number;
+  escrowLamports: number;
+  /** Direct wallet-to-wallet transfer for the upfront half — not on-chain escrow. */
+  upfrontTransferTxSig: string;
+  /** postTask() — funds `escrowLamports` into the Task PDA. */
+  fundTxSig: string;
+  /** claimTask() — signed by the agent's own key, recorded after the fact. */
+  claimTxSig?: string;
+  /** submitDelivery() — signed by the agent's own key. */
+  deliveryTxSig?: string;
+  /** approveDelivery() — signed by the buyer, releases escrowLamports to the agent. */
+  releaseTxSig?: string;
+  /** disputeDelivery() — signed by the buyer (poster). */
+  disputeTxSig?: string;
+  /** resolveDispute() — signed by the program's authority (platform admin). */
+  resolveTxSig?: string;
+  resolvedAgentBps?: number;
+  status: 'funded' | 'claimed' | 'delivered' | 'released' | 'disputed' | 'resolved';
+}
+
 /** Place an order on a gig: creates the Job already in_progress & assigned to
  *  the seller agent (no open/claim/application step — the buyer chose this
- *  seller directly, same as hireApplicant() skips straight to assignment). */
+ *  seller directly, same as hireApplicant() skips straight to assignment).
+ *  `escrow` is populated only for escrowEnabled gigs, after the buyer has
+ *  already signed the upfront transfer + postTask() transactions client-side. */
 export async function orderGig(
   gigId: string,
   buyer: { orgId: string; address: string },
-  requirements?: string
+  requirements?: string,
+  escrow?: Omit<GigEscrow, "status">
 ): Promise<string> {
   const gig = await getGig(gigId);
   if (!gig) throw new Error("Gig not found");
@@ -1137,6 +1186,7 @@ export async function orderGig(
     hiringMode: "instant",
     gigId: gig.id,
     sellerOrgId: gig.agentOrgId,
+    ...(escrow ? { escrow: { ...escrow, status: "funded" as const } } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -1144,6 +1194,41 @@ export async function orderGig(
   await updateDoc(doc(db, "gigs", gigId), { orderCount: increment(1) });
 
   return jobRef.id;
+}
+
+/** Merges a partial GigEscrow update into a job's existing escrow record. */
+async function updateJobEscrow(jobId: string, patch: Partial<GigEscrow>): Promise<void> {
+  const job = await getJob(jobId);
+  if (!job?.escrow) throw new Error("Job has no escrow record");
+  await updateDoc(doc(db, "jobs", jobId), {
+    escrow: { ...job.escrow, ...patch },
+    updatedAt: serverTimestamp(),
+  });
+}
+
+/** Records a successful on-chain claimTask() — called by the seller agent's own CLI after it signs. */
+export async function recordEscrowClaimed(jobId: string, claimTxSig: string): Promise<void> {
+  await updateJobEscrow(jobId, { claimTxSig, status: "claimed" });
+}
+
+/** Records a successful on-chain submitDelivery() — called alongside submitJobDelivery(). */
+export async function recordEscrowDelivered(jobId: string, deliveryTxSig: string): Promise<void> {
+  await updateJobEscrow(jobId, { deliveryTxSig, status: "delivered" });
+}
+
+/** Records a successful on-chain approveDelivery() — called alongside the buyer's approval. */
+export async function recordEscrowReleased(jobId: string, releaseTxSig: string): Promise<void> {
+  await updateJobEscrow(jobId, { releaseTxSig, status: "released" });
+}
+
+/** Records a successful on-chain disputeDelivery() — called alongside filing the record-only dispute. */
+export async function recordEscrowDisputed(jobId: string, disputeTxSig: string): Promise<void> {
+  await updateJobEscrow(jobId, { disputeTxSig, status: "disputed" });
+}
+
+/** Records a successful on-chain resolveDispute() — called by a platform admin. */
+export async function recordEscrowResolved(jobId: string, resolveTxSig: string, resolvedAgentBps: number): Promise<void> {
+  await updateJobEscrow(jobId, { resolveTxSig, resolvedAgentBps, status: "resolved" });
 }
 
 // ─── Gig Reviews ─────────────────────────────────────────

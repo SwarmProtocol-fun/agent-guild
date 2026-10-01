@@ -39,6 +39,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { solanaKeypairFromPrivateKeyPem, claimTaskOnChain, submitDeliveryOnChain, sha256Bytes32 } from "./solana-escrow.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -2499,6 +2500,124 @@ async function cmdSettle() {
   console.log(`  Receipt:   ${receipt.receiptHash}`);
 }
 
+/** Signed GET against /v1/jobs, returning the parsed job list. */
+async function fetchMyJobs(config, privateKey) {
+  const ts = Date.now().toString();
+  const message = `GET:/v1/jobs:${config.agentId}:${ts}`;
+  const sig = sign(message, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/jobs?mine=true&agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(`Failed to list jobs (${resp.status}): ${err.error || "Unknown error"}`);
+  }
+  const { jobs } = await resp.json();
+  return jobs;
+}
+
+async function cmdClaimGigOrder() {
+  const jobId = process.argv[3];
+  if (!jobId) {
+    console.error("Usage: agent-guild claim-gig-order <jobId>");
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey, publicKey } = ensureKeypair();
+
+  const jobs = await fetchMyJobs(config, privateKey);
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) {
+    console.error(`Job ${jobId} not found among your assigned orders.`);
+    process.exit(1);
+  }
+  if (!job.escrow) {
+    console.error(`Job ${jobId} has no on-chain escrow — nothing to claim on-chain.`);
+    process.exit(1);
+  }
+  if (job.escrow.status !== "funded") {
+    console.error(`Escrow is not awaiting claim (status: ${job.escrow.status}).`);
+    process.exit(1);
+  }
+
+  console.log(`Claiming on-chain task ${job.escrow.taskId} for order "${job.title}"...`);
+  const solanaKeypair = solanaKeypairFromPrivateKeyPem(privateKey);
+  // .rpc() sends and confirms before resolving — no separate wait needed.
+  const claimTxSig = await claimTaskOnChain(solanaKeypair, job.escrow.taskId);
+  console.log(`  Tx: ${claimTxSig}`);
+
+  const ts = Date.now().toString();
+  const message = `POST:/v1/jobs/${jobId}/escrow-claim:${ts}`;
+  const sig = sign(message, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/jobs/${jobId}/escrow-claim?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ claimTxSig }) },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    console.error(`Claim recorded on-chain but failed to sync to the hub (${resp.status}): ${err.error || "Unknown error"}`);
+    console.error(`Your on-chain claim (tx ${claimTxSig}) still succeeded — rerun this command to retry the sync.`);
+    process.exit(1);
+  }
+  console.log(`Claimed. Deliver with: agent-guild deliver-gig-order ${jobId} --notes "..."`);
+}
+
+async function cmdDeliverGigOrder() {
+  const jobId = process.argv[3];
+  const notes = arg("--notes");
+  const filesArg = arg("--files");
+  if (!jobId || !notes) {
+    console.error('Usage: agent-guild deliver-gig-order <jobId> --notes "..." [--files "url1,url2"]');
+    process.exit(1);
+  }
+  const deliveryFiles = filesArg ? filesArg.split(",").map((f) => f.trim()).filter(Boolean) : undefined;
+
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  const jobs = await fetchMyJobs(config, privateKey);
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) {
+    console.error(`Job ${jobId} not found among your assigned orders.`);
+    process.exit(1);
+  }
+
+  let onChainDeliveryTxSig;
+  if (job.escrow) {
+    if (job.escrow.status !== "claimed") {
+      console.error(`Escrow is not claimed yet (status: ${job.escrow.status}) — run claim-gig-order first.`);
+      process.exit(1);
+    }
+    console.log(`Submitting delivery on-chain for task ${job.escrow.taskId}...`);
+    const solanaKeypair = solanaKeypairFromPrivateKeyPem(privateKey);
+    const deliveryHashHex = Buffer.from(sha256Bytes32(notes)).toString("hex");
+    onChainDeliveryTxSig = await submitDeliveryOnChain(solanaKeypair, job.escrow.taskId, deliveryHashHex);
+    console.log(`  Tx: ${onChainDeliveryTxSig}`);
+  }
+
+  const ts = Date.now().toString();
+  const message = `POST:/v1/jobs/${jobId}/deliver:${ts}`;
+  const sig = sign(message, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/jobs/${jobId}/deliver?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryNotes: notes, deliveryFiles, ...(onChainDeliveryTxSig ? { onChainDeliveryTxSig } : {}) }),
+    },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    console.error(`Delivery failed (${resp.status}): ${err.error || "Unknown error"}`);
+    if (onChainDeliveryTxSig) {
+      console.error(`Your on-chain delivery (tx ${onChainDeliveryTxSig}) still succeeded — rerun this command to retry the sync.`);
+    }
+    process.exit(1);
+  }
+  console.log(`Delivered. Awaiting buyer review.`);
+}
+
 async function cmdWorkMode() {
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
@@ -3107,6 +3226,8 @@ try {
   else if (cmd === "complete") await cmdComplete();
   else if (cmd === "assignments") await cmdAssignments();
   else if (cmd === "settle") await cmdSettle();
+  else if (cmd === "claim-gig-order") await cmdClaimGigOrder();
+  else if (cmd === "deliver-gig-order") await cmdDeliverGigOrder();
   else if (cmd === "work-mode") await cmdWorkMode();
   else if (cmd === "send-a2a") await cmdSendA2A();
   else if (cmd === "send-coord") await cmdSendCoord();
@@ -3140,6 +3261,10 @@ Task Assignment Commands:
   assignments [--status pending] [--limit 20]            — list your assignments
   settle      <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "..."]  — settle a finished job on Solana devnet (USDC + on-chain receipt)
   work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept]  — manage work mode
+
+Gig Order Commands (job-board / marketplace orders assigned to you — see /jobs, /gigs):
+  claim-gig-order    <jobId>                              — sign claimTask() on-chain for a gig order with escrow (required before deliver-gig-order)
+  deliver-gig-order  <jobId> --notes "..." [--files "url1,url2"]  — submit delivery; also signs submitDelivery() on-chain if the order has escrow
 
 Structured Messaging Commands:
   send-a2a       <agentId> "<payload>"                   — send agent-to-agent message (JSON payload)

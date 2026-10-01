@@ -20,6 +20,9 @@ import { calculateRequiredEscrow } from "@/lib/credit-policy";
 import { CREDIT_SCORE_MIN, CREDIT_SCORE_MAX, TRUST_SCORE_MIN, TRUST_SCORE_MAX } from "@/lib/credit-tiers";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
 import { invalidateCache } from "@/lib/credit-cache";
+import { ingestCreditEvent } from "@/lib/credit-events/ingest";
+import type { CreditEventType } from "@/lib/credit-events/types";
+import { recomputeAndSync } from "@/lib/scoring-engine";
 import { verifyAndClaimUsdcTransfer, treasuryAddress } from "@/lib/solana/lending-verify";
 import {
     MIN_LOAN_USD,
@@ -608,6 +611,32 @@ async function applyLoanCreditEvent(
     }).catch((err) => console.error("[lending-service] Failed to record credit audit:", err));
 
     invalidateCache(`credit:${agentId}`);
+
+    // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
+    // Scoring Engine's settlement sub-score reads loan outcomes from here.
+    const asn = (data.asn as string) || "";
+    const canonicalType: CreditEventType = eventType === "loan_defaulted" ? "payment.failed" : "payment.settled";
+    ingestCreditEvent({
+        eventType: canonicalType,
+        agentId,
+        asn,
+        agentAddress: (data.walletAddress as string) || undefined,
+        orgId: (data.orgId as string) || "platform",
+        creditDelta,
+        trustDelta,
+        provenance: "system",
+        severity: creditDelta < 0 ? (Math.abs(creditDelta) > 30 ? "high" : "medium") : "info",
+        source: {
+            system: "lending-service",
+            sourceEventId: `${eventType}-${agentId}-${Date.now()}`,
+            sourceEventType: eventType,
+        },
+        timestamp: Math.floor(Date.now() / 1000),
+        description: reason,
+        metadata,
+    }).then(() => {
+        if (asn) return recomputeAndSync(agentId, asn);
+    }).catch((err) => console.error("[lending-service] Failed to ingest credit event:", err));
 }
 
 async function settleLoanWithPool(poolId: string | undefined, principalReturned: number, interestReturned: number, lossUsd: number): Promise<void> {

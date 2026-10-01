@@ -914,6 +914,108 @@ function AgentDetailPage() {
         </TabsList>
 
       <TabsContent value="overview" className="space-y-6">
+      {/* Agent Wallets — custodial, platform-generated */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2"><Wallet className="w-4 h-4" aria-hidden="true" /> Agent Wallets</CardTitle>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="text-xs">{wallets.length}/{walletsMax}</Badge>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleOpenGenerateWallet}
+                disabled={generatingWallet || walletsLoading || wallets.length >= walletsMax}
+                className="h-7 text-xs gap-1 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
+              >
+                <Plus className="w-3 h-3" aria-hidden="true" /> Generate Wallet
+              </Button>
+            </div>
+          </div>
+          <CardDescription>Platform-held Solana or EVM/Hyperliquid wallets generated for this agent — separate from its own identity key below</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {walletsLoading && wallets.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Loading wallets...</p>
+          ) : wallets.length > 0 ? (
+            <div className="space-y-2">
+              {wallets.map((w) => (
+                <div
+                  key={w.id}
+                  className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-border bg-muted/30"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant="outline" className="text-xs uppercase">{w.chain}</Badge>
+                      <code className="font-mono text-xs truncate">{shortAddress(w.publicKey)}</code>
+                      <button
+                        onClick={() => copyWalletAddress(w.id, w.publicKey)}
+                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        title="Copy address"
+                      >
+                        {copiedWalletId === w.id ? (
+                          <Check className="w-3 h-3 text-emerald-500" aria-hidden="true" />
+                        ) : (
+                          <Copy className="w-3 h-3" aria-hidden="true" />
+                        )}
+                      </button>
+                      <a
+                        href={w.chain === "solana"
+                          ? `https://solscan.io/account/${w.publicKey}?cluster=devnet`
+                          : `https://app.hyperliquid${w.hyperliquidNetwork === "mainnet" ? "" : "-testnet"}.xyz/trade`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                        title={w.chain === "solana" ? "View on Solscan" : "Open on Hyperliquid"}
+                      >
+                        <ExternalLink className="w-3 h-3" aria-hidden="true" />
+                      </a>
+                      {w.chain === "evm" && (
+                        <Badge className={`text-xs ${w.hyperliquidRegistered
+                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                          : "bg-muted text-muted-foreground"}`}
+                        >
+                          {w.hyperliquidRegistered ? `Hyperliquid (${w.hyperliquidNetwork})` : "Not registered for trading"}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                      {w.chain === "solana" ? (
+                        <>
+                          <span>{(w.balance.sol ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</span>
+                          {w.balance.usdc != null && <span>{w.balance.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</span>}
+                        </>
+                      ) : (
+                        <span>
+                          {w.balance.hyperliquidEquity != null
+                            ? `$${w.balance.hyperliquidEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })} account equity`
+                            : "No Hyperliquid account yet"}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {w.chain === "evm" && (
+                    <button
+                      onClick={() => handleOpenResetPassphrase(w)}
+                      className="p-1.5 rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors shrink-0"
+                      title={w.hyperliquidRegistered ? "Reset trading passphrase" : "Set trading passphrase"}
+                    >
+                      <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-muted-foreground">
+              <Wallet className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
+              <p className="text-sm">No wallets generated yet</p>
+              <p className="text-xs mt-1">Click &quot;Generate Wallet&quot; to create one</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Task completion progress */}
       {agentTasks.length > 0 && (
         <Card>
@@ -1356,108 +1458,6 @@ function AgentDetailPage() {
           </CardContent>
         </Card>
       )}
-
-      {/* Agent Wallets — custodial, platform-generated */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base flex items-center gap-2"><Wallet className="w-4 h-4" aria-hidden="true" /> Agent Wallets</CardTitle>
-            <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="text-xs">{wallets.length}/{walletsMax}</Badge>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleOpenGenerateWallet}
-                disabled={generatingWallet || walletsLoading || wallets.length >= walletsMax}
-                className="h-7 text-xs gap-1 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
-              >
-                <Plus className="w-3 h-3" aria-hidden="true" /> Generate Wallet
-              </Button>
-            </div>
-          </div>
-          <CardDescription>Platform-held Solana or EVM/Hyperliquid wallets generated for this agent — separate from its own identity key below</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {walletsLoading && wallets.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Loading wallets...</p>
-          ) : wallets.length > 0 ? (
-            <div className="space-y-2">
-              {wallets.map((w) => (
-                <div
-                  key={w.id}
-                  className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-border bg-muted/30"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <Badge variant="outline" className="text-xs uppercase">{w.chain}</Badge>
-                      <code className="font-mono text-xs truncate">{shortAddress(w.publicKey)}</code>
-                      <button
-                        onClick={() => copyWalletAddress(w.id, w.publicKey)}
-                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                        title="Copy address"
-                      >
-                        {copiedWalletId === w.id ? (
-                          <Check className="w-3 h-3 text-emerald-500" aria-hidden="true" />
-                        ) : (
-                          <Copy className="w-3 h-3" aria-hidden="true" />
-                        )}
-                      </button>
-                      <a
-                        href={w.chain === "solana"
-                          ? `https://solscan.io/account/${w.publicKey}?cluster=devnet`
-                          : `https://app.hyperliquid${w.hyperliquidNetwork === "mainnet" ? "" : "-testnet"}.xyz/trade`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                        title={w.chain === "solana" ? "View on Solscan" : "Open on Hyperliquid"}
-                      >
-                        <ExternalLink className="w-3 h-3" aria-hidden="true" />
-                      </a>
-                      {w.chain === "evm" && (
-                        <Badge className={`text-xs ${w.hyperliquidRegistered
-                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
-                          : "bg-muted text-muted-foreground"}`}
-                        >
-                          {w.hyperliquidRegistered ? `Hyperliquid (${w.hyperliquidNetwork})` : "Not registered for trading"}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
-                      {w.chain === "solana" ? (
-                        <>
-                          <span>{(w.balance.sol ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</span>
-                          {w.balance.usdc != null && <span>{w.balance.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</span>}
-                        </>
-                      ) : (
-                        <span>
-                          {w.balance.hyperliquidEquity != null
-                            ? `$${w.balance.hyperliquidEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })} account equity`
-                            : "No Hyperliquid account yet"}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {w.chain === "evm" && (
-                    <button
-                      onClick={() => handleOpenResetPassphrase(w)}
-                      className="p-1.5 rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors shrink-0"
-                      title={w.hyperliquidRegistered ? "Reset trading passphrase" : "Set trading passphrase"}
-                    >
-                      <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-6 text-muted-foreground">
-              <Wallet className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
-              <p className="text-sm">No wallets generated yet</p>
-              <p className="text-xs mt-1">Click &quot;Generate Wallet&quot; to create one</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
       {/* On-Chain Registration — Solana */}
       <Card>

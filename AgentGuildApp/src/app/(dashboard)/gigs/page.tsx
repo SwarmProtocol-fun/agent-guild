@@ -25,6 +25,10 @@ import {
 } from "@/lib/firestore";
 import { Star, Zap, Clock, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { GigEscrowOrderForm } from "@/components/gigs/gig-escrow-order-form";
+
+const SOLANA_ESCROW_AVAILABLE = process.env.NEXT_PUBLIC_WALLET_PROVIDER === "solana";
+const LAMPORTS_PER_SOL = 1_000_000_000;
 
 const CATEGORIES = ["Research", "Trading", "Operations", "Support", "Analytics", "Scout", "Content", "Dev"];
 
@@ -61,6 +65,8 @@ export default function GigsPage() {
   const [gigCategory, setGigCategory] = useState(CATEGORIES[0]);
   const [gigPrice, setGigPrice] = useState("");
   const [gigDeliveryDays, setGigDeliveryDays] = useState("3");
+  const [gigEscrowEnabled, setGigEscrowEnabled] = useState(false);
+  const [gigPriceSol, setGigPriceSol] = useState("");
   const [creatingGig, setCreatingGig] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -116,10 +122,24 @@ export default function GigsPage() {
     }
   };
 
+  const handleEscrowOrdered = (jobId: string) => {
+    setOrderGigTarget(null);
+    setRequirements("");
+    router.push(`/jobs/${jobId}`);
+  };
+
   const handleCreateGig = async () => {
     if (!currentOrg || !gigAgentId || !gigTitle.trim() || !gigPrice.trim()) return;
     const agent = myAgents.find((a) => a.id === gigAgentId);
     if (!agent) return;
+    if (gigEscrowEnabled && !agent.solanaAddress) {
+      setError(`${agent.name} has no Solana address on file — generate one for this agent before enabling escrow.`);
+      return;
+    }
+    if (gigEscrowEnabled && (!gigPriceSol.trim() || parseFloat(gigPriceSol) <= 0)) {
+      setError("Enter a SOL price for on-chain escrow.");
+      return;
+    }
     setCreatingGig(true);
     setError(null);
     try {
@@ -131,11 +151,17 @@ export default function GigsPage() {
         description: gigDescription.trim(),
         category: gigCategory,
         tags: agent.capabilities?.slice(0, 5) ?? [],
-        price: gigPrice.trim(),
+        price: gigEscrowEnabled ? `${gigPriceSol.trim()} SOL` : gigPrice.trim(),
         deliveryDays: Math.max(1, parseInt(gigDeliveryDays, 10) || 1),
         status: "active",
+        ...(gigEscrowEnabled ? {
+          escrowEnabled: true,
+          priceLamports: Math.round(parseFloat(gigPriceSol) * LAMPORTS_PER_SOL),
+          sellerSolanaAddress: agent.solanaAddress,
+        } : {}),
       });
       setGigAgentId(""); setGigTitle(""); setGigDescription(""); setGigPrice(""); setGigDeliveryDays("3");
+      setGigEscrowEnabled(false); setGigPriceSol("");
       setCreateOpen(false);
       await loadData();
     } catch (err) {
@@ -287,7 +313,9 @@ export default function GigsPage() {
           <DialogHeader>
             <DialogTitle>Order: {orderGigTarget?.title}</DialogTitle>
             <DialogDescription>
-              This creates an order assigned directly to {orderGigTarget?.agentName} for {fmtPrice(orderGigTarget?.price)}. You'll track delivery on the Job Board.
+              {orderGigTarget?.escrowEnabled
+                ? `Half pays ${orderGigTarget?.agentName} immediately, half is held in on-chain escrow until you approve delivery.`
+                : `This creates an order assigned directly to ${orderGigTarget?.agentName} for ${fmtPrice(orderGigTarget?.price)}. You'll track delivery on the Job Board.`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -295,12 +323,26 @@ export default function GigsPage() {
               <label className="text-sm font-medium mb-2 block">Requirements (optional)</label>
               <Textarea placeholder="Anything specific this order needs, beyond the gig description..." value={requirements} onChange={(e) => setRequirements(e.target.value)} rows={4} />
             </div>
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setOrderGigTarget(null)} disabled={ordering}>Cancel</Button>
-              <Button onClick={handleOrder} disabled={ordering} className="bg-amber-600 hover:bg-amber-700 text-white">
-                {ordering ? "Placing order..." : "Place Order"}
-              </Button>
-            </div>
+            {orderGigTarget?.escrowEnabled ? (
+              SOLANA_ESCROW_AVAILABLE ? (
+                <GigEscrowOrderForm
+                  gig={orderGigTarget}
+                  buyerOrgId={currentOrg.id}
+                  requirements={requirements}
+                  onOrdered={handleEscrowOrdered}
+                  onError={(msg) => setError(msg)}
+                />
+              ) : (
+                <p className="text-xs text-destructive">This deployment isn't configured for Solana wallets (NEXT_PUBLIC_WALLET_PROVIDER), so escrow orders aren't available here.</p>
+              )
+            ) : (
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" onClick={() => setOrderGigTarget(null)} disabled={ordering}>Cancel</Button>
+                <Button onClick={handleOrder} disabled={ordering} className="bg-amber-600 hover:bg-amber-700 text-white">
+                  {ordering ? "Placing order..." : "Place Order"}
+                </Button>
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -341,16 +383,35 @@ export default function GigsPage() {
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Price <span className="text-red-500">*</span></label>
-                <Input placeholder="e.g. 150" value={gigPrice} onChange={(e) => setGigPrice(e.target.value)} />
+                <Input placeholder="e.g. 150" value={gigPrice} onChange={(e) => setGigPrice(e.target.value)} disabled={gigEscrowEnabled} />
               </div>
               <div>
                 <label className="text-xs font-medium mb-1 block">Delivery (days)</label>
                 <Input type="number" min="1" value={gigDeliveryDays} onChange={(e) => setGigDeliveryDays(e.target.value)} />
               </div>
             </div>
+            {SOLANA_ESCROW_AVAILABLE && (
+              <div className="rounded-md border p-3 space-y-2">
+                <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                  <input type="checkbox" checked={gigEscrowEnabled} onChange={(e) => setGigEscrowEnabled(e.target.checked)} className="h-3.5 w-3.5" />
+                  Real on-chain escrow — half paid upfront, half held until delivery is approved
+                </label>
+                {gigEscrowEnabled && (
+                  <div>
+                    <label className="text-xs font-medium mb-1 block">Price in SOL <span className="text-red-500">*</span></label>
+                    <Input type="number" min="0" step="0.01" placeholder="e.g. 0.5" value={gigPriceSol} onChange={(e) => setGigPriceSol(e.target.value)} />
+                    <p className="text-[11px] text-muted-foreground mt-1">Requires the selected agent to have a Solana address on file.</p>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex gap-2 justify-end pt-2">
               <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creatingGig}>Cancel</Button>
-              <Button onClick={handleCreateGig} disabled={creatingGig || !gigAgentId || !gigTitle.trim() || !gigPrice.trim()} className="bg-amber-600 hover:bg-amber-700 text-white">
+              <Button
+                onClick={handleCreateGig}
+                disabled={creatingGig || !gigAgentId || !gigTitle.trim() || (gigEscrowEnabled ? !gigPriceSol.trim() : !gigPrice.trim())}
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+              >
                 {creatingGig ? "Listing..." : "List Gig"}
               </Button>
             </div>

@@ -283,6 +283,7 @@ export type DisputeType =
   | "unfair_penalty"
   | "governance_decision"
   | "tier_dispute"
+  | "job_delivery"
   | "other";
 
 export type DisputeStatus =

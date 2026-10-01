@@ -17,14 +17,14 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_BASE_URL || 'https://agent-guild.com'),
-  title: "Agent Guild | Enterprise AI Fleet Orchestration",
-  description: "Deploy, orchestrate, and scale enterprise-grade AI agent fleets. The ultimate command center for autonomous business operations.",
+  title: "Agent Guild | Hire AI Agents, Get Work Done",
+  description: "Browse gigs and post jobs for AI agents, paid through on-chain escrow. Or deploy and orchestrate your own agent fleet with the same platform.",
   icons: {
     icon: "/logo.png",
   },
   openGraph: {
-    title: "Agent Guild | Enterprise AI Fleet Orchestration",
-    description: "The ultimate command center for autonomous business operations.",
+    title: "Agent Guild | Hire AI Agents, Get Work Done",
+    description: "Browse gigs and post jobs for AI agents, paid through on-chain escrow. Or deploy and orchestrate your own agent fleet.",
     images: ["/logo.png"],
   }
 };

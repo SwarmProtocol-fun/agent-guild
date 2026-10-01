@@ -7,6 +7,10 @@ import { ShieldAlert, Loader2, ArrowLeft, Clock, Search, Scale, Gavel, XCircle }
 import { Button } from "@/components/ui/button";
 import { useSession } from "@/contexts/SessionContext";
 import { isPlatformAdmin } from "@/lib/platform-admins";
+import { getJob, type Job } from "@/lib/firestore";
+import { AdminResolveEscrowDispute } from "@/components/jobs/admin-resolve-escrow-dispute";
+
+const SOLANA_ESCROW_AVAILABLE = process.env.NEXT_PUBLIC_WALLET_PROVIDER === "solana";
 
 interface DisputeDetail {
   id: string;
@@ -27,6 +31,7 @@ export default function DisputeDetailPage() {
   const isAdmin = isPlatformAdmin(sessionAddress);
 
   const [item, setItem] = useState<DisputeDetail | null>(null);
+  const [relatedJob, setRelatedJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [comment, setComment] = useState("");
@@ -37,7 +42,13 @@ export default function DisputeDetailPage() {
     setLoading(true);
     try {
       const res = await fetch(`/api/admin/credit-ops/disputes/${id}`);
-      if (res.ok) { const d = await res.json(); setItem(d.item); }
+      if (res.ok) {
+        const d = await res.json();
+        setItem(d.item);
+        if (d.item?.disputeType === "job_delivery" && d.item.relatedEventIds?.[0]) {
+          setRelatedJob(await getJob(d.item.relatedEventIds[0]));
+        }
+      }
     } catch { /* silent */ } finally { setLoading(false); }
   }, [id]);
 
@@ -98,6 +109,27 @@ export default function DisputeDetailPage() {
             <h3 className="text-sm font-medium mb-2">Description</h3>
             <p className="text-sm whitespace-pre-wrap">{item.description}</p>
           </div>
+
+          {relatedJob && (
+            <div className="rounded-xl border border-border bg-card/50 p-4 space-y-2">
+              <h3 className="text-sm font-medium">Order</h3>
+              <Link href={`/jobs/${relatedJob.id}`} className="text-sm text-primary hover:underline">{relatedJob.title}</Link>
+              {relatedJob.deliveryNotes && (
+                <p className="text-xs text-muted-foreground whitespace-pre-wrap">{relatedJob.deliveryNotes}</p>
+              )}
+              {relatedJob.escrow && (
+                SOLANA_ESCROW_AVAILABLE ? (
+                  <AdminResolveEscrowDispute
+                    jobId={relatedJob.id}
+                    escrow={relatedJob.escrow}
+                    onResolved={() => fetchDetail()}
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground">This deployment isn't configured for Solana wallets — can't execute the on-chain split here.</p>
+                )
+              )}
+            </div>
+          )}
 
           {/* Adjudication result */}
           {item.adjudication && (

@@ -36,12 +36,18 @@ import {
   getCompletedJobsByAgent,
   getGigReviewByJob,
   addGigReview,
+  recordEscrowReleased,
   type Job,
   type JobComment,
   type Agent,
   type JobApplication,
   type GigReview,
 } from "@/lib/firestore";
+import { GigEscrowStatusCard } from "@/components/jobs/gig-escrow-status-card";
+import { GigEscrowApproveButton } from "@/components/jobs/gig-escrow-approve-button";
+import { GigEscrowDisputeSignButton } from "@/components/jobs/gig-escrow-dispute-sign-button";
+
+const SOLANA_ESCROW_AVAILABLE = process.env.NEXT_PUBLIC_WALLET_PROVIDER === "solana";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import {
@@ -128,6 +134,17 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [reviewText, setReviewText] = useState("");
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewSubmitError, setReviewSubmitError] = useState<string | null>(null);
+
+  // Gig order escrow (on-chain approve)
+  const [escrowApproveError, setEscrowApproveError] = useState<string | null>(null);
+
+  // Dispute filing (gig orders only)
+  const [disputeDialogOpen, setDisputeDialogOpen] = useState(false);
+  const [disputeDescription, setDisputeDescription] = useState("");
+  const [disputeOnChainTxSig, setDisputeOnChainTxSig] = useState<string | null>(null);
+  const [submittingDispute, setSubmittingDispute] = useState(false);
+  const [disputeSubmitError, setDisputeSubmitError] = useState<string | null>(null);
+  const [disputeFiled, setDisputeFiled] = useState(false);
 
   const loadComments = async () => {
     try {
@@ -240,6 +257,49 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       console.error("Failed to review job:", error);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** Fires after the buyer signs approveDelivery() on-chain — records the
+   *  release tx, then runs the normal (off-chain) approval on top of it. */
+  const handleEscrowApproved = async (releaseTxSig: string) => {
+    if (!job) return;
+    setEscrowApproveError(null);
+    try {
+      await recordEscrowReleased(job.id, releaseTxSig);
+    } catch (error) {
+      console.error("Failed to record escrow release:", error);
+      // Non-fatal — the on-chain release already succeeded; continue with
+      // the off-chain approval so the job isn't stuck even if this write failed.
+    }
+    await handleReview();
+  };
+
+  const handleFileDispute = async () => {
+    if (!job || !disputeDescription.trim()) return;
+    setSubmittingDispute(true);
+    setDisputeSubmitError(null);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/dispute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          description: disputeDescription.trim(),
+          ...(disputeOnChainTxSig ? { onChainDisputeTxSig: disputeOnChainTxSig } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to file dispute");
+      setDisputeFiled(true);
+      if (disputeOnChainTxSig) {
+        const updated = await getJob(job.id);
+        setJob(updated);
+      }
+    } catch (error) {
+      console.error("Failed to file dispute:", error);
+      setDisputeSubmitError(error instanceof Error ? error.message : "Failed to file dispute");
+    } finally {
+      setSubmittingDispute(false);
     }
   };
 
@@ -469,6 +529,12 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         {canApply && (
           <Button onClick={() => setApplyDialogOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white" disabled={orgAgents.length === 0}>
             <Briefcase className="h-4 w-4 mr-2" />Apply with a Quote
+          </Button>
+        )}
+
+        {job.gigId && job.deliveryNotes && !disputeFiled && (
+          <Button onClick={() => setDisputeDialogOpen(true)} variant="outline" className="text-destructive">
+            <AlertCircle className="h-4 w-4 mr-2" />Dispute
           </Button>
         )}
       </div>
@@ -713,6 +779,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             </CardContent>
           </Card>
 
+          {job.escrow && <GigEscrowStatusCard escrow={job.escrow} />}
+
           {canReview && (
             <Card className="border-2 border-amber-500/50 bg-amber-500/5">
               <CardContent className="pt-6">
@@ -881,13 +949,73 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               <label className="text-sm font-medium mb-2 block">Feedback {reviewAction === 'reject' && <span className="text-destructive">*</span>}</label>
               <Textarea placeholder={reviewAction === 'approve' ? "Great work! (optional)" : "Please explain what needs to be changed..."} value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} rows={4} />
             </div>
+            {escrowApproveError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {escrowApproveError}
+              </div>
+            )}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setReviewDialogOpen(false)} disabled={submitting}>Cancel</Button>
-              <Button onClick={handleReview} disabled={submitting || (reviewAction === 'reject' && !reviewNotes.trim())} className={reviewAction === 'approve' ? "bg-emerald-600 hover:bg-emerald-700" : "bg-destructive hover:bg-destructive/90"}>
-                {submitting ? "Submitting..." : reviewAction === 'approve' ? 'Approve' : 'Reject'}
-              </Button>
+              {reviewAction === 'approve' && job.escrow ? (
+                SOLANA_ESCROW_AVAILABLE ? (
+                  <GigEscrowApproveButton
+                    escrow={job.escrow}
+                    onApproved={handleEscrowApproved}
+                    onError={setEscrowApproveError}
+                  />
+                ) : (
+                  <p className="text-xs text-destructive">This deployment isn't configured for Solana wallets — can't release on-chain escrow here.</p>
+                )
+              ) : (
+                <Button onClick={handleReview} disabled={submitting || (reviewAction === 'reject' && !reviewNotes.trim())} className={reviewAction === 'approve' ? "bg-emerald-600 hover:bg-emerald-700" : "bg-destructive hover:bg-destructive/90"}>
+                  {submitting ? "Submitting..." : reviewAction === 'approve' ? 'Approve' : 'Reject'}
+                </Button>
+              )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={disputeDialogOpen} onOpenChange={(open) => { setDisputeDialogOpen(open); if (!open) { setDisputeSubmitError(null); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Dispute This Order</DialogTitle>
+            <DialogDescription>
+              Files a record for a platform admin to review. This doesn't change the order's status or move money by itself — the admin reads your description and the seller's response, then rules on it.
+            </DialogDescription>
+          </DialogHeader>
+          {disputeFiled ? (
+            <p className="text-sm text-emerald-600">Dispute filed. A platform admin will review it.</p>
+          ) : (
+            <div className="space-y-4">
+              {disputeSubmitError && (
+                <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                  {disputeSubmitError}
+                </div>
+              )}
+              <div>
+                <label className="text-sm font-medium mb-2 block">What's wrong? <span className="text-destructive">*</span></label>
+                <Textarea placeholder="Describe the disagreement — what was expected vs. what was delivered..." value={disputeDescription} onChange={(e) => setDisputeDescription(e.target.value)} rows={4} />
+              </div>
+              {job.escrow && address === job.postedByAddress && (
+                SOLANA_ESCROW_AVAILABLE ? (
+                  <GigEscrowDisputeSignButton
+                    escrow={job.escrow}
+                    onSigned={setDisputeOnChainTxSig}
+                    onError={setDisputeSubmitError}
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground">This deployment isn't configured for Solana wallets — the dispute will be filed as a record only, escrow stays as-is.</p>
+                )
+              )}
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" onClick={() => setDisputeDialogOpen(false)} disabled={submittingDispute}>Cancel</Button>
+                <Button onClick={handleFileDispute} disabled={submittingDispute || !disputeDescription.trim()} className="bg-destructive hover:bg-destructive/90">
+                  {submittingDispute ? "Filing..." : "File Dispute"}
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -225,12 +225,13 @@ export async function postTask(
         deadline: number;
         budgetLamports: number | BN;
     },
-) {
+): Promise<{ task: PublicKey; taskId: BN; txSig: string }> {
     const program = getProgram(wallet);
     const [config] = guildConfigPda();
     const configAccount = await program.account.guildConfig.fetch(config);
-    const [task] = taskPda(configAccount.taskCounter);
-    await program.methods
+    const taskId: BN = configAccount.taskCounter;
+    const [task] = taskPda(taskId);
+    const txSig = await program.methods
         .postTask(
             args.title,
             args.description,
@@ -240,7 +241,7 @@ export async function postTask(
         )
         .accounts({ poster: wallet.publicKey })
         .rpc();
-    return task;
+    return { task, taskId, txSig };
 }
 
 export async function approveDelivery(wallet: SolanaWallet, task: PublicKey, claimant: PublicKey) {
@@ -248,6 +249,34 @@ export async function approveDelivery(wallet: SolanaWallet, task: PublicKey, cla
     return program.methods
         .approveDelivery()
         .accounts({ poster: wallet.publicKey, taskAccount: task, claimant })
+        .rpc();
+}
+
+/** Poster-only: flags a submitted delivery as disputed, freezing the escrow until resolveDispute(). */
+export async function disputeDelivery(wallet: SolanaWallet, task: PublicKey) {
+    const program = getProgram(wallet);
+    return program.methods
+        .disputeDelivery()
+        .accounts({ poster: wallet.publicKey, taskAccount: task })
+        .rpc();
+}
+
+/**
+ * Authority-only (the program's configured admin wallet): splits the escrowed
+ * budget between agent and poster. `agentBps` is the agent's share in basis
+ * points (10000 = 100% to agent, 0 = 100% refunded to poster, 5000 = even split).
+ */
+export async function resolveDispute(
+    wallet: SolanaWallet,
+    task: PublicKey,
+    poster: PublicKey,
+    claimant: PublicKey,
+    agentBps: number,
+) {
+    const program = getProgram(wallet);
+    return program.methods
+        .resolveDispute(agentBps)
+        .accounts({ authority: wallet.publicKey, taskAccount: task, poster, claimant })
         .rpc();
 }
 
