@@ -6,6 +6,7 @@
 
 import { adminDb } from "./firebase-admin";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { PRESENCE_STALE_MS, liveStatus } from "./presence";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -36,6 +37,78 @@ export const STATUS_CONFIG: Record<AgentStatus, { label: string; color: string; 
 
 const HEARTBEAT_COLLECTION = "agentHeartbeats";
 
+/**
+ * Daemon heartbeat. Keeps paused/busy. Anything else with a fresh ping is
+ * online, and a previous checkout is cleared.
+ */
+export async function noteAgentHeartbeat(
+    agentId: string,
+    orgId?: string | null,
+    extra?: { agentName?: string; latencyMs?: number; version?: string; uptime?: number },
+): Promise<void> {
+    const agentRef = adminDb().collection("agents").doc(agentId);
+    const snap = await agentRef.get();
+    const stored = snap.exists ? snap.data()?.status : undefined;
+    const status = stored === "paused" || stored === "busy" ? stored : "online";
+    await agentRef.set({
+        status,
+        lastSeen: FieldValue.serverTimestamp(),
+        offlineAt: FieldValue.delete(),
+    }, { merge: true });
+    if (orgId) {
+        await recordHeartbeat(orgId, agentId, extra);
+        await sweepStaleAgents(orgId);
+    }
+}
+
+/** Process checked out. Does not refresh lastSeen. */
+export async function noteAgentOffline(agentId: string): Promise<void> {
+    await adminDb().collection("agents").doc(agentId).set({
+        status: "offline",
+        offlineAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+}
+
+/**
+ * Flip stored status to match the heartbeat clock.
+ * With an orgId, every agent in that org is checked (so a fresh heartbeat
+ * can also correct siblings). Without one, only stored online/busy rows are
+ * scanned — that's the global tick, and it is what marks a dead daemon
+ * offline after the process itself is gone.
+ */
+export async function sweepStaleAgents(orgId?: string): Promise<number> {
+    const base = adminDb().collection("agents");
+    const snap = orgId
+        ? await base.where("orgId", "==", orgId).get()
+        : await base.where("status", "in", ["online", "busy"]).get();
+    const now = Date.now();
+    let flipped = 0;
+    for (const doc of snap.docs) {
+        const data = doc.data();
+        const live = liveStatus({
+            status: data.status,
+            lastSeen: data.lastSeen,
+            offlineAt: data.offlineAt,
+        }, now);
+        if (live === data.status) continue;
+        if (live === "offline") {
+            await doc.ref.set({
+                status: "offline",
+                offlineAt: FieldValue.serverTimestamp(),
+            }, { merge: true });
+        } else {
+            await doc.ref.set({
+                status: live,
+                offlineAt: FieldValue.delete(),
+            }, { merge: true });
+        }
+        flipped++;
+    }
+    return flipped;
+}
+
+export { PRESENCE_STALE_MS };
+
 /** Record/update an agent's heartbeat */
 export async function recordHeartbeat(
     orgId: string,
@@ -59,7 +132,7 @@ export async function recordHeartbeat(
 export async function getHeartbeats(orgId: string): Promise<AgentHeartbeat[]> {
     const snap = await adminDb().collection(HEARTBEAT_COLLECTION).where("orgId", "==", orgId).get();
     const now = Date.now();
-    const STALE_MS = 5 * 60 * 1000; // 5 minutes
+    const STALE_MS = PRESENCE_STALE_MS;
 
     return snap.docs.map((d) => {
         const data = d.data();
@@ -123,17 +196,23 @@ export async function resumeAgent(
 ): Promise<void> {
     // Update agent status in agents collection
     const agentRef = adminDb().collection("agents").doc(agentId);
+    const snap = await agentRef.get();
+    const data = snap.data() || {};
+    // Resume clears pause. It does not invent a heartbeat — a dead daemon
+    // stays offline until the process pings again.
+    const live = liveStatus({ status: "online", lastSeen: data.lastSeen, offlineAt: null });
     await agentRef.set({
-        status: "online",
+        status: live,
         pausedAt: null,
         pausedBy: null,
         pauseReason: null,
+        ...(live === "offline"
+            ? { offlineAt: FieldValue.serverTimestamp() }
+            : { offlineAt: FieldValue.delete() }),
     }, { merge: true });
 
-    // Update heartbeat status
     const heartbeatRef = adminDb().collection(HEARTBEAT_COLLECTION).doc(`${orgId}_${agentId}`);
     await heartbeatRef.set({
-        status: "online" as AgentStatus,
-        lastSeen: FieldValue.serverTimestamp(),
+        status: live,
     }, { merge: true });
 }

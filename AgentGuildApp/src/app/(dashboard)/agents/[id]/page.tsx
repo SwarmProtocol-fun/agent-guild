@@ -22,6 +22,7 @@ import { useAgentGuildData } from "@/hooks/useAgentGuildData";
 import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { getScoreBand } from "@/lib/credit-scoring";
 import { getTier, type PolicyTierName } from "@/lib/credit-policy";
+import { heartbeatAgeLabel } from "@/lib/presence";
 import {
   getAgent,
   getProjectsByOrg,
@@ -29,7 +30,6 @@ import {
   getJobsByOrg,
   updateAgent,
   deleteAgent,
-  agentCheckIn,
   agentCheckOut,
   type Agent,
   type Project,
@@ -158,7 +158,7 @@ function AgentDetailPage() {
   const [skillBusy, setSkillBusy] = useState<string | null>(null);
   const [showSkillPicker, setShowSkillPicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [updating, setUpdating] = useState(false);
+
 
   // Edit state
   const [showEdit, setShowEdit] = useState(false);
@@ -263,28 +263,26 @@ function AgentDetailPage() {
     loadAgentData();
   }, [agentId, currentOrg]);
 
-  const handleStatusToggle = async () => {
-    if (!agent || !currentOrg) return;
-    const newStatus: Agent['status'] = agent.status === 'online' ? 'offline' : 'online';
-    try {
-      setUpdating(true);
-      await updateAgent(agentId, { status: newStatus });
-      const updatedAgent = { ...agent, status: newStatus };
-      setAgent(updatedAgent);
-
-      // Auto check-in/check-out to agent group chat
-      if (newStatus === 'online') {
-        await agentCheckIn(updatedAgent, currentOrg.id);
-      } else {
-        await agentCheckOut(updatedAgent, currentOrg.id);
+  // Presence follows the daemon heartbeat. Re-read it so a dead process
+  // flips offline and a live one flips online without a manual toggle.
+  useEffect(() => {
+    if (!agentId) return;
+    const timer = setInterval(async () => {
+      try {
+        const fresh = await getAgent(agentId);
+        if (!fresh) return;
+        setAgent((prev) => prev ? {
+          ...prev,
+          status: fresh.status,
+          lastSeen: fresh.lastSeen,
+          offlineAt: fresh.offlineAt,
+        } : fresh);
+      } catch {
+        // keep the last rendered presence
       }
-    } catch (err) {
-      console.error('Failed to update agent status:', err);
-      setError(err instanceof Error ? err.message : 'Failed to update agent status');
-    } finally {
-      setUpdating(false);
-    }
-  };
+    }, 20000);
+    return () => clearInterval(timer);
+  }, [agentId]);
 
   const handleEditOpen = () => {
     if (!agent) return;
@@ -639,12 +637,17 @@ function AgentDetailPage() {
               <h1 className="text-3xl font-bold tracking-tight">{agent.name}</h1>
               <Badge className={getTypeColor(agent.type)}>{getTypeLabel(agent.type)}</Badge>
               <span className={`text-sm flex items-center gap-1.5 ${agent.status === "online" ? "text-emerald-600 dark:text-emerald-400" :
-                  agent.status === "busy" ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400"
+                  agent.status === "busy" ? "text-amber-600 dark:text-amber-400" :
+                  agent.status === "paused" ? "text-gray-500" : "text-red-600 dark:text-red-400"
                 }`}>
                 <span className={`w-2.5 h-2.5 rounded-full ${agent.status === "online" ? "bg-emerald-500" :
-                    agent.status === "busy" ? "bg-amber-500" : "bg-red-500"
+                    agent.status === "busy" ? "bg-amber-500" :
+                    agent.status === "paused" ? "bg-gray-400" : "bg-red-500"
                   }`} />
                 {agent.status}
+                {heartbeatAgeLabel(agent.lastSeen) ? (
+                  <span className="text-xs text-muted-foreground">· {heartbeatAgeLabel(agent.lastSeen)}</span>
+                ) : null}
               </span>
               {onchainMatch && (
                 <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800">
@@ -658,14 +661,6 @@ function AgentDetailPage() {
             </p>
           </div>
           <div className="flex gap-2 flex-shrink-0">
-            <Button
-              onClick={handleStatusToggle}
-              disabled={updating || agent.status === 'paused'}
-              variant={agent.status === 'online' ? 'outline' : 'default'}
-              className={agent.status === 'online' ? 'hover:bg-red-50 hover:border-red-300 hover:text-red-600' : 'bg-emerald-600 hover:bg-green-700'}
-            >
-              {updating ? 'Updating...' : agent.status === 'online' ? 'Set Offline' : 'Set Online'}
-            </Button>
             {agent.status === 'paused' ? (
               <Button
                 variant="outline"

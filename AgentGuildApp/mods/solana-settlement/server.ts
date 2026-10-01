@@ -1,6 +1,8 @@
 import { defineServerMod } from "@agent-guild/sdk";
 import { settleOnChains, hashJobResult, getBalance, verifyReceipt } from "@/lib/settlement/registry";
 import { enforceCapability } from "@/lib/skills";
+import { agentAlreadyRegistered, getAgentSlashingHistoryOnChain, mintIdentityToken } from "@/lib/solana/platform";
+import { getScoreEventHistoryForAsn } from "@/lib/solana/client";
 
 interface SettlementRecord {
   agentId: string;
@@ -9,6 +11,7 @@ interface SettlementRecord {
   explorerUrl: string;
   amountUsdc: number;
   resultHash: string;
+  reputationUpdated: boolean;
   at: string;
 }
 
@@ -48,7 +51,10 @@ export default defineServerMod({
       }
 
       try {
-        await enforceCapability(agentId, orgId, "solana-settle");
+        // Capability key is the skill id ("solana-settlement"), not "solana-settle" —
+        // installMod() grants enabledCapabilities from mod.capabilities, which is
+        // [skill.id]. The two must match or enforceCapability() 403s unconditionally.
+        await enforceCapability(agentId, orgId, "solana-settlement");
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 403 });
       }
@@ -72,7 +78,8 @@ export default defineServerMod({
       const receipt = receipts[0];
       history.unshift({
         agentId, taskId, txSig: receipt.txSig, explorerUrl: receipt.explorerUrl,
-        amountUsdc, resultHash: receipt.receiptHash, at: new Date().toISOString(),
+        amountUsdc, resultHash: receipt.receiptHash, reputationUpdated: receipt.reputationUpdated,
+        at: new Date().toISOString(),
       });
       if (history.length > 50) history.length = 50;
 
@@ -112,6 +119,57 @@ export default defineServerMod({
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 502 });
       }
+    },
+
+    /**
+     * GET /registered/:wallet — whether this wallet has an on-chain
+     * AgentAccount PDA yet. `/settle`'s reputation update silently no-ops
+     * for an unregistered wallet, so this is what the panel checks to
+     * explain a settlement that shows `reputationUpdated: false`.
+     */
+    "GET /registered/:wallet": async (_req, { params }) => {
+      return Response.json({ registered: await agentAlreadyRegistered(params.wallet) });
+    },
+
+    /** GET /slashing/:asn — approved penalty proposals against this ASN (the on-chain slashing history). */
+    "GET /slashing/:asn": async (_req, { params }) => {
+      return Response.json({ history: await getAgentSlashingHistoryOnChain(params.asn) });
+    },
+
+    /**
+     * GET /events/:asn — the ASN's on-chain score-event memo timeline
+     * (oldest first), the same feed the core credit explainer reads.
+     */
+    "GET /events/:asn": async (_req, { params }) => {
+      try {
+        const events = await getScoreEventHistoryForAsn(params.asn);
+        return Response.json({ events });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /**
+     * POST /identity/mint — mints a soulbound (frozen SPL) identity token
+     * for an agent wallet. Platform-admin only: this is an irreversible,
+     * fee-paying on-chain action, not something any signed-in operator
+     * should be able to trigger for an arbitrary wallet.
+     *
+     * Body: { agentAddress }
+     */
+    "POST /identity/mint": async (req, ctx) => {
+      if (ctx.session?.role !== "platform_admin") {
+        return Response.json({ error: "platform_admin session required" }, { status: 403 });
+      }
+      const { agentAddress } = await req.json();
+      if (!agentAddress) {
+        return Response.json({ error: "agentAddress is required" }, { status: 400 });
+      }
+      const { mint } = await mintIdentityToken(agentAddress);
+      if (!mint) {
+        return Response.json({ error: "Mint failed — check SOLANA_PLATFORM_KEYPAIR is configured" }, { status: 502 });
+      }
+      return Response.json({ mint });
     },
   },
 });

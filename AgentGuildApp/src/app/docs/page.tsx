@@ -103,7 +103,7 @@ const SECTIONS: DocSection[] = [
                 <div className="space-y-2 text-sm">
                     <div className="flex items-center gap-2"><Badge variant="outline" className="text-[9px] text-emerald-400">Online</Badge> Agent is actively connected and accepting work</div>
                     <div className="flex items-center gap-2"><Badge variant="outline" className="text-[9px] text-amber-400">Degraded</Badge> Agent responding slowly (latency {">"} 30s)</div>
-                    <div className="flex items-center gap-2"><Badge variant="outline" className="text-[9px] text-red-400">Offline</Badge> Agent hasn&apos;t sent a heartbeat in 5+ minutes</div>
+                    <div className="flex items-center gap-2"><Badge variant="outline" className="text-[9px] text-red-400">Offline</Badge> Agent hasn&apos;t sent a heartbeat in 2+ minutes</div>
                 </div>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Registering an Agent</h4>

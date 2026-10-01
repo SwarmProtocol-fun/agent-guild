@@ -185,6 +185,14 @@ service cloud.firestore {
       allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
+    match /jobApplications/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    match /jobComments/{docId} {
+      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
     match /jobs/{docId} {
       allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);

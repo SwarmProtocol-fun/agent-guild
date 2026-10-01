@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "jobComments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "jobId",     "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "messages",
       "queryScope": "COLLECTION",
       "fields": [

@@ -29,6 +29,9 @@ def main():
     parser.add_argument("--order-type", default="market", choices=["market", "limit"])
     parser.add_argument("--limit-price", type=float)
     parser.add_argument("--reduce-only", action="store_true")
+    parser.add_argument("--leverage", type=int)
+    parser.add_argument("--stop-loss-pct", type=float)
+    parser.add_argument("--take-profit-pct", type=float)
     args = parser.parse_args()
 
     private_key = os.environ.get("HYPERLIQUID_PRIVATE_KEY")
@@ -42,6 +45,9 @@ def main():
     wallet = Account.from_key(private_key)
     info = Info(base_url, skip_ws=True)
     exchange = Exchange(wallet, base_url)
+
+    if args.leverage:
+        exchange.update_leverage(args.leverage, args.coin, is_cross=True)
 
     is_buy = args.side == "buy"
     mids = info.all_mids()
@@ -72,6 +78,29 @@ def main():
     statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
     fill = statuses[0].get("filled") or statuses[0].get("resting") or statuses[0]
 
+    # SL/TP attach as separate reduce-only trigger orders on the opposite
+    # side of the position, priced a fixed percent through the fill/mid —
+    # only makes sense for an order that opens/adds to a position.
+    triggers = {}
+    if not args.reduce_only and (args.stop_loss_pct or args.take_profit_pct):
+        entry_px = float(fill.get("avgPx", limit_px)) if isinstance(fill, dict) else limit_px
+        if args.stop_loss_pct:
+            trigger_px = entry_px * (1 - args.stop_loss_pct / 100) if is_buy else entry_px * (1 + args.stop_loss_pct / 100)
+            sl_result = exchange.order(
+                args.coin, not is_buy, size, trigger_px,
+                {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
+                reduce_only=True,
+            )
+            triggers["stopLoss"] = {"triggerPx": trigger_px, "raw": sl_result}
+        if args.take_profit_pct:
+            trigger_px = entry_px * (1 + args.take_profit_pct / 100) if is_buy else entry_px * (1 - args.take_profit_pct / 100)
+            tp_result = exchange.order(
+                args.coin, not is_buy, size, trigger_px,
+                {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
+                reduce_only=True,
+            )
+            triggers["takeProfit"] = {"triggerPx": trigger_px, "raw": tp_result}
+
     print(json.dumps({
         "coin": args.coin,
         "isBuy": is_buy,
@@ -80,7 +109,9 @@ def main():
         "midPriceAtOrder": mid_price,
         "limitPx": limit_px,
         "reduceOnly": args.reduce_only,
+        "leverage": args.leverage,
         "raw": fill,
+        "triggers": triggers or None,
     }))
 
 

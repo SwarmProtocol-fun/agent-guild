@@ -1,8 +1,8 @@
 {
   "id": "hyperliquid-trading",
   "name": "Hyperliquid Trading",
-  "version": "1.0.0",
-  "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt.",
+  "version": "1.1.0",
+  "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt. Adds leverage/SL-TP risk controls, limit orders with live pricing, trade history + PnL stats, and DCA/grid/signal strategies.",
   "author": "Agent Guild",
   "agentGuildApi": 1,
   "permissions": ["events:subscribe"],

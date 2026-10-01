@@ -29,6 +29,8 @@ import { ConfidenceIndicator } from "@/components/credit/confidence-indicator";
 import { TierBadgeTooltip } from "@/components/credit/tier-badge-tooltip";
 import { CreditAuditTable } from "@/components/credit/credit-audit-table";
 import { isPlatformAdmin } from "@/lib/platform-admins";
+import { LoanEligibilityCard } from "@/components/lending/loan-eligibility-card";
+import { ActiveLoansPanel } from "@/components/lending/active-loans-panel";
 
 export default function AgentCreditPage({ params }: { params: Promise<{ id: string }> }) {
     const resolvedParams = use(params);
@@ -43,6 +45,7 @@ export default function AgentCreditPage({ params }: { params: Promise<{ id: stri
     const [auditEntries, setAuditEntries] = useState<CreditAuditEntry[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [loanRefreshKey, setLoanRefreshKey] = useState(0);
 
     const isAdmin = isPlatformAdmin(sessionAddress);
 
@@ -302,6 +305,14 @@ export default function AgentCreditPage({ params }: { params: Promise<{ id: stri
                     </CardContent>
                 </Card>
             )}
+
+            {/* Lending */}
+            <LoanEligibilityCard
+                agentId={agentId}
+                orgId={currentOrg?.id || agent.orgId}
+                onLoanRequested={() => setLoanRefreshKey((k) => k + 1)}
+            />
+            <ActiveLoansPanel agentId={agentId} refreshKey={loanRefreshKey} />
 
             {/* Admin: Audit Trail */}
             {isAdmin && (

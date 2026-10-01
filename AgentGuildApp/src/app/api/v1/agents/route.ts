@@ -21,6 +21,7 @@ import { rateLimit } from "../rate-limit";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
 import { Timestamp } from "firebase-admin/firestore";
+import { liveStatus } from "@/lib/presence";
 
 interface AgentResult {
     id: string;
@@ -75,12 +76,9 @@ export async function GET(req: NextRequest) {
     const statusFilter = url.searchParams.get("status");
 
     try {
-        // Push the exact-match status filter into Firestore so busy orgs with many
-        // agents don't pull the full roster just to return a handful of "online" ones.
-        // (type/skill stay client-side — they're matched case-insensitively/by substring.)
-        let query = adminDb().collection("agents").where("orgId", "==", orgId);
-        if (statusFilter) query = query.where("status", "==", statusFilter);
-        const snap = await query.get();
+        // Status is derived from the heartbeat clock, so it cannot be pushed
+        // into the Firestore query — a stored "online" row may already be dead.
+        const snap = await adminDb().collection("agents").where("orgId", "==", orgId).get();
 
         let agents: AgentResult[] = snap.docs.map(d => {
             const data = d.data();
@@ -94,7 +92,11 @@ export async function GET(req: NextRequest) {
                 id: d.id,
                 name: data.name || "Unknown",
                 type: data.type || "agent",
-                status: data.status || "offline",
+                status: liveStatus({
+                    status: data.status,
+                    lastSeen: data.lastSeen,
+                    offlineAt: data.offlineAt,
+                }),
                 bio: data.bio || undefined,
                 skills: Array.isArray(data.reportedSkills) ? data.reportedSkills : [],
                 lastSeen,
@@ -102,7 +104,11 @@ export async function GET(req: NextRequest) {
             };
         });
 
-        // Apply remaining filters (status is already applied at the Firestore level above)
+        if (statusFilter) {
+            agents = agents.filter(a => a.status === statusFilter);
+        }
+
+        // Apply remaining filters
         if (typeFilter) {
             agents = agents.filter(a => a.type.toLowerCase() === typeFilter.toLowerCase());
         }

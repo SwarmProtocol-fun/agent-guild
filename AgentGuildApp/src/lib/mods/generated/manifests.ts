@@ -5,8 +5,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "hyperliquid-trading",
     "name": "Hyperliquid Trading",
-    "version": "1.0.0",
-    "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt.",
+    "version": "1.1.0",
+    "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt. Adds leverage/SL-TP risk controls, limit orders with live pricing, trade history + PnL stats, and DCA/grid/signal strategies.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [
@@ -69,8 +69,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "tempo-settlement",
     "name": "Tempo Settlement",
-    "version": "1.0.0",
-    "description": "Settles completed agent jobs on Tempo — stablecoin-native micropayment plus an on-chain receipt hash, no custom contract required.",
+    "version": "1.3.0",
+    "description": "Settles completed agent jobs on Tempo using Tempo's native protocol (viem/tempo) — receipt hash carried in a real TIP-20 transfer memo, gas payable in any stablecoin, optional fee sponsorship, and atomic multi-job batch settlement in one transaction. Also exposes a Machine Payments Protocol (HTTP 402) paid endpoint, plus micropayment metering, void/dispute, stats, CSV export, and fee estimates.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [

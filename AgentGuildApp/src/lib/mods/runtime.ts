@@ -8,6 +8,8 @@
 import type {
   EventName, ModContext, ModManifest, ModSession, RouteContext, ServerMod, AgentGuildEventMap,
 } from "@agent-guild/sdk";
+import type { NextRequest } from "next/server";
+import { requireAgentAuth } from "@/lib/auth-guard";
 import { MOD_MANIFESTS } from "./generated/manifests";
 import { serverMods } from "./generated/server";
 import { matchRoute } from "./router";
@@ -110,11 +112,30 @@ export async function handleModRequest(
   const match = matchRoute(loaded.mod.routes ?? {}, req.method, path);
   if (!match) return Response.json({ error: "Not found" }, { status: 404 });
 
+  // An agent (not a human operator) can authenticate itself the same
+  // Ed25519 way it already does against /api/v1/* — agent/sig/ts query
+  // params, message "METHOD:/mods/<modId>/<path>:<ts>" — instead of a
+  // signed-in session. Only attempted when those params are actually
+  // present, so a plain session-based call never pays for the extra
+  // Firestore round trip. A bad/missing signature just leaves ctx.agent
+  // null (falls through to the session check below) rather than failing
+  // the request outright — a session and a signature are alternatives, not
+  // both required.
+  let agent: RouteContext["agent"] = null;
+  const url = new URL(req.url);
+  if (url.searchParams.get("agent") && url.searchParams.get("sig") && url.searchParams.get("ts")) {
+    const prefix = `${req.method}:/mods/${modId}/${path.join("/")}`;
+    const authResult = await requireAgentAuth(req as NextRequest, prefix);
+    if (authResult.ok && authResult.agent) {
+      agent = { agentId: authResult.agent.agentId, orgId: authResult.agent.orgId };
+    }
+  }
+
   const isPublic = typeof match.def !== "function" && match.def.public === true;
-  if (!isPublic && !session) return Response.json({ error: "Authentication required" }, { status: 401 });
+  if (!isPublic && !session && !agent) return Response.json({ error: "Authentication required" }, { status: 401 });
 
   const handler = typeof match.def === "function" ? match.def : match.def.handler;
-  const ctx: RouteContext = { ...loaded.ctx, params: match.params, session };
+  const ctx: RouteContext = { ...loaded.ctx, params: match.params, session, agent };
   try {
     const result = await handler(req, ctx);
     return result instanceof Response ? result : Response.json(result ?? null);

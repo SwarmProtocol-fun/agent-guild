@@ -1,0 +1,109 @@
+/**
+ * GET  /api/v1/lending/loans?agentId=X             — an agent's loan history
+ * GET  /api/v1/lending/loans?open=solo             — open solo loan requests (marketplace browse)
+ * GET  /api/v1/lending/loans?open=pending_disbursement — platform admin: pool loans awaiting real payout
+ * GET  /api/v1/lending/loans?lenderWallet=X        — loans funded by a given wallet
+ * POST /api/v1/lending/loans                       — request a new loan for an agent
+ *   Body: { agentId, orgId, kind: "trust"|"unsecured", source: "pool"|"solo",
+ *           amountUsd, termDays?, poolId?, purpose? }
+ */
+import { NextRequest, NextResponse } from "next/server";
+import { adminDb } from "@/lib/firebase-admin";
+import { requireOrgMember, requirePlatformAdmin, getWalletAddress, unauthorized, forbidden } from "@/lib/auth-guard";
+import {
+    listLoansForAgent,
+    listOpenSoloRequests,
+    listLoansFundedByWallet,
+    listPendingDisbursements,
+    requestLoan,
+} from "@/lib/lending/lending-service";
+import type { LoanKind, LoanSource } from "@/lib/lending/types";
+
+export async function GET(req: NextRequest) {
+    try {
+        const agentId = req.nextUrl.searchParams.get("agentId");
+        const open = req.nextUrl.searchParams.get("open");
+        const lenderWallet = req.nextUrl.searchParams.get("lenderWallet");
+
+        if (agentId) {
+            const loans = await listLoansForAgent(agentId);
+            return NextResponse.json({ loans });
+        }
+        if (open === "solo") {
+            const loans = await listOpenSoloRequests();
+            return NextResponse.json({ loans });
+        }
+        if (open === "pending_disbursement") {
+            const admin = requirePlatformAdmin(req);
+            if (!admin.ok) return forbidden(admin.error || "Platform admin required");
+            const loans = await listPendingDisbursements();
+            return NextResponse.json({ loans });
+        }
+        if (lenderWallet) {
+            const loans = await listLoansFundedByWallet(lenderWallet);
+            return NextResponse.json({ loans });
+        }
+        return NextResponse.json({ error: "Provide agentId, open=solo, open=pending_disbursement, or lenderWallet" }, { status: 400 });
+    } catch (error) {
+        console.error("[lending/loans] GET error:", error);
+        return NextResponse.json({ error: "Failed to load loans" }, { status: 500 });
+    }
+}
+
+export async function POST(req: NextRequest) {
+    let body: {
+        agentId?: string;
+        orgId?: string;
+        kind?: LoanKind;
+        source?: LoanSource;
+        amountUsd?: number;
+        termDays?: number;
+        poolId?: string;
+        purpose?: string;
+    };
+    try {
+        body = await req.json();
+    } catch {
+        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const { agentId, orgId, kind, source, amountUsd } = body;
+    if (!agentId || !orgId || !kind || !source || !Number.isFinite(amountUsd)) {
+        return NextResponse.json({ error: "agentId, orgId, kind, source, and amountUsd are required" }, { status: 400 });
+    }
+    if (kind !== "trust" && kind !== "unsecured") {
+        return NextResponse.json({ error: 'kind must be "trust" or "unsecured"' }, { status: 400 });
+    }
+    if (source !== "pool" && source !== "solo") {
+        return NextResponse.json({ error: 'source must be "pool" or "solo"' }, { status: 400 });
+    }
+
+    const orgAuth = await requireOrgMember(req, orgId);
+    if (!orgAuth.ok) return orgAuth.status === 401 ? unauthorized(orgAuth.error) : forbidden(orgAuth.error);
+
+    const agentSnap = await adminDb().collection("agents").doc(agentId).get();
+    if (!agentSnap.exists) {
+        return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+    if (agentSnap.data()?.orgId !== orgId) {
+        return forbidden("Agent does not belong to this organization");
+    }
+
+    try {
+        const loan = await requestLoan({
+            agentId,
+            orgId,
+            kind,
+            source,
+            amountUsd: amountUsd as number,
+            termDays: body.termDays,
+            poolId: body.poolId,
+            purpose: body.purpose,
+            requestedByWallet: getWalletAddress(req) || undefined,
+        });
+        return NextResponse.json({ loan }, { status: 201 });
+    } catch (error) {
+        console.error("[lending/loans] POST error:", error);
+        return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to request loan" }, { status: 400 });
+    }
+}

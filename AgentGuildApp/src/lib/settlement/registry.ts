@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { EvmSettlementAdapter } from "./evm-adapter";
 import { SolanaSettlementAdapter } from "./solana-adapter";
+import { TempoSettlementAdapter } from "./tempo-adapter";
 import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResult } from "./types";
 
 export type { SettleJobParams, SettlementReceipt, VerifyResult };
@@ -9,9 +10,11 @@ const adapters: Record<string, SettlementAdapter> = {
   base: new EvmSettlementAdapter("base"),
   baseSepolia: new EvmSettlementAdapter("baseSepolia"),
   sepolia: new EvmSettlementAdapter("sepolia"),
-  tempo: new EvmSettlementAdapter("tempo"),
+  tempo: new TempoSettlementAdapter(),
   solana: new SolanaSettlementAdapter(),
 };
+
+export const tempoAdapter = adapters.tempo as TempoSettlementAdapter;
 
 export function supportedChains(): string[] {
   return Object.keys(adapters);

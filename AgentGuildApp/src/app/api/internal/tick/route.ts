@@ -16,6 +16,8 @@ import { getGlobalActiveRuns } from "@/lib/workflow/store";
 import { advanceRun } from "@/lib/workflow/executor";
 import { evaluateCronTriggers, evaluateRegularCronJobs } from "@/lib/workflow/cron-evaluator";
 import { getRedis } from "@/lib/redis";
+import { runHyperliquidStrategyTick } from "../../../../../mods/hyperliquid-trading/server";
+import { sweepStaleAgents } from "@/lib/heartbeat";
 
 /** Max runs to advance per tick (fits within 10s Netlify timeout) */
 const BATCH_LIMIT = 20;
@@ -97,6 +99,29 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── Phase 4: Evaluate autonomous Hyperliquid strategies (DCA / grid) ────
+  let hyperliquidResult = { evaluated: 0, fired: 0, errors: 0 };
+
+  if (Date.now() - startTime < TIME_BUDGET_MS) {
+    try {
+      hyperliquidResult = await runHyperliquidStrategyTick();
+    } catch (err) {
+      console.error("[tick] Hyperliquid strategy evaluation failed:", err);
+      hyperliquidResult.errors = 1;
+    }
+  }
+
+  // ── Phase 5: Presence. A dead daemon stops heartbeating; this is what
+  // flips its stored status to offline so the dashboard matches reality.
+  let presenceFlipped = 0;
+  if (Date.now() - startTime < TIME_BUDGET_MS) {
+    try {
+      presenceFlipped = await sweepStaleAgents();
+    } catch (err) {
+      console.error("[tick] Presence sweep failed:", err);
+    }
+  }
+
   // ── Release lock ────────────────────────────────────────────────────────
   if (redis) {
     try {
@@ -112,5 +137,7 @@ export async function POST(req: NextRequest) {
     workflows: { advanced, completed, failed, errors: workflowErrors },
     cron: cronResult,
     cronJobs: cronJobsResult,
+    hyperliquidStrategies: hyperliquidResult,
+    presenceFlipped,
   });
 }

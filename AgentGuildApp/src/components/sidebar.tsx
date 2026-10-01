@@ -17,7 +17,7 @@ import {
   Link as LinkIcon, Zap, Palette, Megaphone, Wrench, Plug, Puzzle, Sparkles,
   Monitor, Globe, Code as CodeIcon, Bot, ShieldAlert, Flag, Package, History,
   TrendingUp, DollarSign, Settings2, Database,
-  Star, Search, X, Hexagon, Upload, Layers, Diamond,
+  Star, Search, X, Hexagon, Upload, Layers, Diamond, Landmark,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MaturityBadge } from "@/components/ui/maturity-badge";
@@ -118,6 +118,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     items: [
       { id: "dashboard", href: "/dashboard", label: "Dashboard", icon: BarChart3, maturity: "production" },
       { id: "credit", href: "/analytics/credit", label: "Credit", icon: TrendingUp, maturity: "production" },
+      { id: "lending", href: "/lending", label: "Lending", icon: Landmark, maturity: "beta" },
       { id: "activity", href: "/activity", label: "Activity", icon: Activity, maturity: "production" },
       { id: "doctor", href: "/doctor", label: "Health", icon: Stethoscope, maturity: "production" },
       { id: "agent-map", href: "/agent-map", label: "Agent Map", icon: Map, maturity: "production" },

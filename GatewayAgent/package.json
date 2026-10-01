@@ -23,5 +23,12 @@
     "execution",
     "ed25519"
   ],
-  "dependencies": {}
+  "scripts": {
+    "test": "node --test scripts/executors/__tests__/*.test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "mppx": "^0.12.0",
+    "viem": "^2.57.1"
+  }
 }

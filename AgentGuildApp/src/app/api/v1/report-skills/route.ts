@@ -13,7 +13,7 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequestDetailed, isTimestampFresh, unauthorized, unauthorizedFor, configUnavailable, isAdminConfigError } from "../verify";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../webhooks/auth";
 import { adminDb } from "@/lib/firebase-admin";
-import { FieldValue } from "firebase-admin/firestore";
+import { noteAgentHeartbeat, noteAgentOffline } from "@/lib/heartbeat";
 
 interface ReportedSkillPayload {
     id: string;
@@ -83,11 +83,26 @@ export async function POST(req: NextRequest) {
 
     try {
         const agentRef = adminDb().collection("agents").doc(agentId!);
-        await agentRef.update({
-            reportedSkills: skills,
-            ...(bio ? { bio } : {}),
-            lastSeen: FieldValue.serverTimestamp(),
-        });
+        const existing = await agentRef.get();
+        const orgId = existing.data()?.orgId as string | undefined;
+        const checkingOut = body.presence === "offline";
+
+        if (checkingOut) {
+            await agentRef.set({
+                reportedSkills: skills,
+                ...(bio ? { bio } : {}),
+            }, { merge: true });
+            await noteAgentOffline(agentId!);
+        } else {
+            // Skills + heartbeat in one place. noteAgentHeartbeat owns
+            // status/lastSeen so a stale "online" flag cannot survive a
+            // dead process, and a live ping clears an earlier checkout.
+            await agentRef.set({
+                reportedSkills: skills,
+                ...(bio ? { bio } : {}),
+            }, { merge: true });
+            await noteAgentHeartbeat(agentId!, orgId);
+        }
 
         // The heartbeat is the one signed call the CLI's daemon and `status`
         // make on every tick — piggyback the agent's current on-chain state
@@ -100,6 +115,8 @@ export async function POST(req: NextRequest) {
         return Response.json({
             ok: true,
             agentId,
+            status: checkingOut ? "offline" : (agentData?.status || "online"),
+            presenceProtocol: 1,
             reportedSkills: skills.length,
             asn: agentData?.asn ?? null,
             onChainRegistered: agentData?.onChainRegistered === true,

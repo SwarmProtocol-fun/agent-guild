@@ -18,7 +18,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh, unauthorized } from "../../../verify";
 import { authenticateAgent, unauthorized as webhookUnauthorized } from "../../../../webhooks/auth";
-import { recordHeartbeat } from "@/lib/heartbeat";
+import { noteAgentHeartbeat } from "@/lib/heartbeat";
 
 export async function POST(
     req: NextRequest,
@@ -73,7 +73,7 @@ export async function POST(
     const uptime = typeof body.uptime === "number" ? body.uptime : undefined;
 
     try {
-        await recordHeartbeat(resolvedOrgId, resolvedAgentId, { agentName, latencyMs, version, uptime });
+        await noteAgentHeartbeat(resolvedAgentId, resolvedOrgId, { agentName, latencyMs, version, uptime });
         return Response.json({
             ok: true,
             status: "online",

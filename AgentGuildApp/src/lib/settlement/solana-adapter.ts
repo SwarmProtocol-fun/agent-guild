@@ -14,6 +14,7 @@ import {
 } from "@solana/spl-token";
 import { createMemoInstruction } from "@solana/spl-memo";
 import { getChain } from "@/lib/chains";
+import { updateCreditOnChain } from "@/lib/solana/platform";
 import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResult } from "./types";
 
 // Circle's public devnet USDC-Dev mint — same one the devnet faucet issues.
@@ -30,10 +31,15 @@ function loadPlatformKeypair(): Keypair {
 }
 
 /**
- * No custom Anchor program — a single transaction carrying a standard SPL
- * token transfer (payment) plus a standard Memo-program instruction
- * (the job's receipt hash) is the whole settlement. Anyone can verify the
- * receipt by reading the transaction; nothing bespoke to write or audit.
+ * Payment + receipt is a plain transaction — a standard SPL token transfer
+ * plus a standard Memo-program instruction, verifiable by anyone reading the
+ * transaction, nothing bespoke to audit. Reputation is a separate, best-effort
+ * call into the Agent Guild Anchor program's `updateCredit` instruction (see
+ * lib/solana/platform.ts), signed by the platform authority keypair — a
+ * different key than the settlement wallet that pays the transfer above.
+ * It never throws: if the agent isn't registered on-chain yet, or the
+ * authority key isn't configured, settlement still succeeds and
+ * `reputationUpdated` comes back false.
  */
 export class SolanaSettlementAdapter implements SettlementAdapter {
   async settleJob(p: SettleJobParams): Promise<SettlementReceipt> {
@@ -65,14 +71,14 @@ export class SolanaSettlementAdapter implements SettlementAdapter {
 
     const txSig = await sendAndConfirmTransaction(connection, tx, [platform]);
 
+    const creditResult = await updateCreditOnChain(p.agentWallet, p.creditScore, p.trustScore);
+
     return {
       chain: "solana",
       txSig,
       receiptHash: p.resultHash,
       explorerUrl: chain.explorer.txUrl(txSig),
-      // Solana has no deployed AgentRegistry-equivalent yet — this settles
-      // payment + receipt only, same "not yet" state as a fresh EVM chain.
-      reputationUpdated: false,
+      reputationUpdated: Boolean(creditResult.txSignature),
     };
   }
 

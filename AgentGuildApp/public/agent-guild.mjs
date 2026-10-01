@@ -21,6 +21,7 @@
  *   agent-guild reject      <assignmentId> "<reason>"
  *   agent-guild complete    <assignmentId> [--notes "..."]
  *   agent-guild assignments [--status pending] [--limit 20]
+ *   agent-guild settle      <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "..."] — settle a finished job on Solana devnet
  *   agent-guild work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept] [--no-auto-accept]
  *   agent-guild send-a2a    <agentId> "<payload>"
  *   agent-guild send-coord  --coordinator <id> --action <action> "<payload>"
@@ -553,6 +554,41 @@ function sign(message, privateKeyPem) {
   });
   const sig = crypto.sign(null, Buffer.from(message, "utf-8"), privateKey);
   return sig.toString("base64");
+}
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/** Standard base58 (Bitcoin/Solana alphabet) encoding of a byte buffer. */
+function base58Encode(buffer) {
+  if (buffer.length === 0) return "";
+  let zeros = 0;
+  while (zeros < buffer.length && buffer[zeros] === 0) zeros++;
+  let num = 0n;
+  for (const byte of buffer) num = (num << 8n) | BigInt(byte);
+  let out = "";
+  while (num > 0n) {
+    const rem = num % 58n;
+    num /= 58n;
+    out = BASE58_ALPHABET[Number(rem)] + out;
+  }
+  return BASE58_ALPHABET[0].repeat(zeros) + out;
+}
+
+/**
+ * A Solana pubkey IS a raw Ed25519 public key — this agent's existing CLI
+ * identity key doubles as its real, self-custodied Solana address, no
+ * separate wallet to generate or collect. Mirrors
+ * AgentGuildApp/src/lib/solana/client.ts's solanaAddressFromEd25519Pem() —
+ * strip the PEM's SPKI header, base58-encode the last 32 raw key bytes.
+ */
+function solanaAddressFromEd25519Pem(publicKeyPem) {
+  const pemContent = publicKeyPem
+    .replace(/-----BEGIN PUBLIC KEY-----/, "")
+    .replace(/-----END PUBLIC KEY-----/, "")
+    .replace(/\s/g, "");
+  const derBytes = Buffer.from(pemContent, "base64");
+  const rawKey = derBytes.subarray(derBytes.length - 32);
+  return base58Encode(rawKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1361,11 @@ async function cmdStatus() {
   console.log(`  Hub:       ${config.hubUrl}`);
   console.log(`  Last Poll: ${state.lastPoll ? new Date(state.lastPoll).toISOString() : "never"}`);
   console.log(`  Daemon:    ${daemonIsRunning() ? `running (pid ${readFileSync(daemonPidPath(), "utf8").trim()})` : "not running"}`);
+  if (state.replyPollHealth?.failures > 0) {
+    console.log(`  Reply-poll: DOWN — ${state.replyPollHealth.failures} consecutive failure(s) (${state.replyPollHealth.lastError}) since ${state.replyPollHealth.lastErrorAt}`);
+  } else {
+    console.log(`  Reply-poll: ok`);
+  }
 
   if (config.skills && config.skills.length > 0) {
     console.log(`  Skills:    ${config.skills.map(s => s.name).join(", ")}`);
@@ -1508,6 +1549,7 @@ async function cmdDaemon() {
   console.log(`  Agent:    ${config.agentName} (${config.agentId})`);
   console.log(`  Heartbeat: ${intervalSec}s`);
   console.log(`  Reply poll: ${REPLY_POLL_INTERVAL_MS / 1000}s${config.replyCommand ? "" : " (no replyCommand configured — messages will be logged, not answered)"}`);
+  console.log(`  DM belt:  ${DM_REPLY_TIMEOUT_MS / 1000}s, tools + vault in private DMs`);
   console.log(`  Hub:      ${config.hubUrl}`);
   console.log(`  Mode:     ${config.offline ? "OFFLINE (pending registration)" : "online"}`);
   if (webhookUrl) {
@@ -1588,7 +1630,10 @@ async function daemonTick(config, privateKey, daemonState) {
       daemonState.wasDisconnected = false;
     }
 
-    console.log(`[${now}] heartbeat ok`);
+    const pollNote = daemonState.replyPollFailures
+      ? ` (reply-poll DOWN: ${daemonState.replyPollFailures}x, ${daemonState.replyPollLastError})`
+      : "";
+    console.log(`[${now}] heartbeat ok${pollNote}`);
     return true;
   } catch (err) {
     console.error(`[${now}] heartbeat failed: ${err.message}`);
@@ -1608,16 +1653,31 @@ async function daemonTick(config, privateKey, daemonState) {
 
 const REPLY_POLL_INTERVAL_MS = 2000;
 const REPLY_TIMEOUT_MS = 60000;
+// Private DMs run the builder belt (tools + vault). A real build does not
+// fit in the hub's one-minute chat budget.
+const DM_REPLY_TIMEOUT_MS = 8 * 60 * 1000;
 
 /**
  * Message ids currently being answered. Guards against a second poll tick
- * starting a duplicate reply while runReplyCommand (up to 60s) is still in
- * flight for that id (FR-7).
+ * starting a duplicate reply while runReplyCommand is still in flight for
+ * that id (FR-7). Hub replies are capped at REPLY_TIMEOUT_MS. DM belt
+ * replies are capped at DM_REPLY_TIMEOUT_MS.
  */
 const inFlightReplyIds = new Set();
-// One grok reply at a time. A poll can return several eligible messages, and
-// parallel `grok --single` processes contend on the same leader socket.
-let replyQueue = Promise.resolve();
+// One grok reply at a time *per channel kind*. A poll can return several
+// eligible messages, and parallel `grok --single` processes for the same
+// session/leader-socket would contend — but the DM and Hub now run under
+// separate sessions (see grok-reply.mjs), so they get separate queues too;
+// a slow DM job no longer makes a Hub reply wait, or vice versa.
+let dmReplyQueue = Promise.resolve();
+let hubReplyQueue = Promise.resolve();
+
+// Rolling per-channel message buffer so a reply can see "what was said
+// before" instead of answering each message in isolation. Capped in
+// state.json to keep the file small; CHANNEL_HISTORY_CONTEXT is how many of
+// those get sent as context with any one reply.
+const CHANNEL_HISTORY_LIMIT = 20;
+const CHANNEL_HISTORY_CONTEXT = 5;
 
 /**
  * Split a config-authored command string into argv. `command` comes from
@@ -1719,19 +1779,36 @@ async function sendChannelReply(config, privateKey, channelId, text, replyTo) {
  * FR-5: a first failure stays out of repliedIds so the next poll can retry
  * once. A second failure for the same id poisons it into repliedIds as
  * "error" so a message that can never be answered (e.g. reply text always
- * empty) can't loop forever.
+ * empty) can't loop forever. Returns true on that second (poisoning) failure
+ * so the caller knows to tell the channel, instead of the message just
+ * vanishing with nothing but a line in daemon.log.
  */
 function recordReplyFailure(messageId) {
   const state = loadState();
   state.repliedIds = state.repliedIds || {};
   state.replyFailures = state.replyFailures || {};
+  let poisoned = false;
   if (state.replyFailures[messageId]) {
     delete state.replyFailures[messageId];
     state.repliedIds[messageId] = "error";
+    poisoned = true;
   } else {
     state.replyFailures[messageId] = true;
   }
   saveState(state);
+  return poisoned;
+}
+
+/**
+ * Best-effort "I couldn't answer that" line for a message that just got
+ * poisoned (its second straight failure). Never itself retried — if this
+ * send also fails, the human still has silence, but at worst it costs one
+ * extra failed API call, not another vanished reply.
+ */
+async function notifyReplyFailure(config, privateKey, msg) {
+  try {
+    await sendChannelReply(config, privateKey, msg.channelId, "Sorry — I couldn't put together a reply to that.", msg.id);
+  } catch { /* best-effort */ }
 }
 
 function recordReplySuccess(messageId) {
@@ -1742,17 +1819,27 @@ function recordReplySuccess(messageId) {
   saveState(state);
 }
 
+/** Record a failure and, on the second straight one for this id, tell the channel. */
+async function handleReplyFailure(config, privateKey, msg, now, detail) {
+  console.error(`[${now}] reply failed (${msg.id}): ${detail}`);
+  const poisoned = recordReplyFailure(msg.id);
+  if (poisoned) await notifyReplyFailure(config, privateKey, msg);
+}
+
 /**
  * Generate and send one reply. Runs detached from the poll loop (fire and
  * forget from replyPollTick's perspective) so a slow LLM call never blocks
  * the next 2s tick; inFlightReplyIds is what stops that from double-replying.
+ *
+ * `ctx.isDm`/`ctx.isHub` tell the reply command which session/sandbox to run
+ * under (see grok-reply.mjs); `ctx.history` is the last few prior messages
+ * in this channel, so "do that" has something to point at.
  */
-async function processReply(config, privateKey, msg) {
+async function processReply(config, privateKey, msg, ctx = {}) {
   const now = new Date().toISOString().replace("T", " ").slice(0, 19);
   const replyCommand = config.replyCommand;
   if (!replyCommand) {
-    console.error(`[${now}] reply failed (${msg.id}): no replyCommand configured`);
-    recordReplyFailure(msg.id);
+    await handleReplyFailure(config, privateKey, msg, now, "no replyCommand configured");
     return;
   }
 
@@ -1766,28 +1853,57 @@ async function processReply(config, privateKey, msg) {
     fromType: msg.fromType,
     text: msg.text,
     timestamp: msg.timestamp,
+    history: ctx.history || [],
   };
 
   const result = await runReplyCommand(replyCommand, payload, {
     AGENT_GUILD_AGENT_NAME: config.agentName || "",
     AGENT_GUILD_AGENT_TYPE: config.agentType || "",
     AGENT_GUILD_AGENT_BIO: config.bio || "",
-  });
+    AGENT_GUILD_AGENT_ID: config.agentId || "",
+    AGENT_GUILD_CHANNEL_KIND: ctx.isDm ? "dm" : "hub",
+  }, ctx.isDm ? DM_REPLY_TIMEOUT_MS : REPLY_TIMEOUT_MS);
   if (!result.ok) {
-    console.error(`[${now}] reply failed (${msg.id}): ${result.error}`);
-    recordReplyFailure(msg.id);
+    await handleReplyFailure(config, privateKey, msg, now, result.error);
     return;
   }
 
   const sent = await sendChannelReply(config, privateKey, msg.channelId, result.text, msg.id);
   if (!sent.ok) {
-    console.error(`[${now}] reply failed (${msg.id}): send ${sent.status} ${sent.data?.error || sent.rawBody}`);
-    recordReplyFailure(msg.id);
+    await handleReplyFailure(config, privateKey, msg, now, `send ${sent.status} ${sent.data?.error || sent.rawBody}`);
     return;
   }
 
   recordReplySuccess(msg.id);
   console.log(`[${now}] replied: channel=${msg.channelId} humanMsg=${msg.id} sentMsg=${sent.data?.messageId}`);
+}
+
+/**
+ * Track reply-poll health across ticks, and surface it loudly once it's not
+ * just a one-off blip. The 30s heartbeat (daemonTick) is a fully separate
+ * timer hitting a different endpoint — it can keep reporting "ok" while this
+ * poll is wedged (e.g. the hub keeps 401ing a signature), so without this a
+ * dead reply-poll looks identical to a healthy, quiet channel. Mirrored into
+ * state.json (not just daemonState) so a separate `agent-guild status`
+ * invocation can see it too.
+ */
+function recordReplyPollFailure(daemonState, now, reason) {
+  daemonState.replyPollFailures = (daemonState.replyPollFailures || 0) + 1;
+  daemonState.replyPollLastError = reason;
+  daemonState.replyPollLastErrorAt = now;
+  if (daemonState.replyPollFailures === 3 || daemonState.replyPollFailures % 15 === 0) {
+    console.error(`[${now}] ALERT: reply-poll has failed ${daemonState.replyPollFailures}x in a row (${reason}) — messages are not being answered even though the heartbeat is fine.`);
+  }
+  saveState({ ...loadState(), replyPollHealth: { failures: daemonState.replyPollFailures, lastError: reason, lastErrorAt: now } });
+}
+
+function recordReplyPollSuccess(daemonState, now) {
+  if (daemonState.replyPollFailures) {
+    console.log(`[${now}] reply-poll recovered after ${daemonState.replyPollFailures} failed attempt(s)`);
+  }
+  daemonState.replyPollFailures = 0;
+  daemonState.replyPollLastError = null;
+  saveState({ ...loadState(), replyPollHealth: { failures: 0, lastError: null, lastErrorAt: null } });
 }
 
 /**
@@ -1799,7 +1915,10 @@ async function processReply(config, privateKey, msg) {
  *
  * Eligible = fromType !== "agent", and the channel is Agent Hub or this
  * agent's own DM (FR-3). A project channel this agent happens to poll for
- * other reasons is left alone — auto-reply never touches it.
+ * other reasons is left alone — auto-reply never touches it. Within that,
+ * the DM always gets a reply (it's a 1:1 chat), but Agent Hub only replies
+ * when the message actually names this agent — otherwise every human line
+ * in a shared channel got an answer, which gets loud fast.
  *
  * `overrideSince` is used once, by cmdDaemon's FR-8 catch-up poll, to read
  * from config.registeredAt instead of the live state.lastPoll cursor.
@@ -1814,12 +1933,15 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     ({ resp, rawBody } = await fetchMessages(config, privateKey, since));
   } catch (err) {
     console.error(`[${now}] reply-poll error: ${err.message}`);
+    recordReplyPollFailure(daemonState, now, err.message);
     return;
   }
   if (!resp.ok) {
     console.error(`[${now}] reply-poll ${resp.status}: ${rawBody.slice(0, 200)}`);
+    recordReplyPollFailure(daemonState, now, `HTTP ${resp.status}`);
     return;
   }
+  recordReplyPollSuccess(daemonState, now);
 
   const data = JSON.parse(rawBody);
   const messages = data.messages || [];
@@ -1827,8 +1949,21 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
   const channelById = Object.fromEntries(channels.map((c) => [c.id, c]));
 
   // advanceLastPoll never moves the cursor backward, so a catch-up call with
-  // an old overrideSince can't rewind it (FR-8).
-  saveState({ ...loadState(), lastPoll: advanceLastPoll(state.lastPoll, since, messages) });
+  // an old overrideSince can't rewind it (FR-8). Also roll each message into
+  // its channel's rolling history buffer here, capturing (per message) the
+  // prior context that existed *before* it — that's what "do that" gets to
+  // point at when this message is the one being replied to.
+  const freshState = loadState();
+  freshState.lastPoll = advanceLastPoll(state.lastPoll, since, messages);
+  freshState.channelHistory = freshState.channelHistory || {};
+  const historyForMsg = new Map();
+  for (const msg of messages) {
+    const arr = freshState.channelHistory[msg.channelId] = freshState.channelHistory[msg.channelId] || [];
+    historyForMsg.set(msg.id, arr.slice(-CHANNEL_HISTORY_CONTEXT));
+    arr.push({ from: msg.from, fromType: msg.fromType, text: msg.text, timestamp: msg.timestamp });
+    if (arr.length > CHANNEL_HISTORY_LIMIT) arr.splice(0, arr.length - CHANNEL_HISTORY_LIMIT);
+  }
+  saveState(freshState);
 
   if (!daemonState.hubChannelId) {
     const hub = channels.find((c) => c.name === "Agent Hub" || c.projectId === "org");
@@ -1850,6 +1985,7 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
   }
 
   const repliedIds = loadState().repliedIds || {};
+  const agentNameLower = (config.agentName || "").trim().toLowerCase();
 
   for (const msg of messages) {
     if (msg.fromType === "agent") continue; // never reply to another agent (FR-3, non-goals §5)
@@ -1859,14 +1995,23 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     const isDm = chan?.projectId === "dm";
     if (!isHub && !isDm) continue; // FR-3 scope — leave other channels alone
 
+    // Agent Hub is shared — only answer when actually named, so a human
+    // talking to someone else in the channel doesn't get an unwanted reply.
+    if (isHub && (!agentNameLower || !msg.text.toLowerCase().includes(agentNameLower))) continue;
+
     if (repliedIds[msg.id]) continue; // already answered, or poisoned as "error"
     if (inFlightReplyIds.has(msg.id)) continue; // a reply for this id is already generating
 
     inFlightReplyIds.add(msg.id);
-    replyQueue = replyQueue
-      .then(() => processReply(config, privateKey, msg))
+    const ctx = { isDm, isHub, history: historyForMsg.get(msg.id) || [] };
+    const run = () => processReply(config, privateKey, msg, ctx)
       .catch((err) => { console.error(`reply queue (${msg.id}): ${err.message}`); })
       .finally(() => inFlightReplyIds.delete(msg.id));
+
+    // Separate queues so the DM's own grok session never waits behind a Hub
+    // reply (or vice versa) — see grok-reply.mjs for the session split.
+    if (isDm) dmReplyQueue = dmReplyQueue.then(run);
+    else hubReplyQueue = hubReplyQueue.then(run);
   }
 }
 
@@ -2212,6 +2357,78 @@ async function cmdAssignments() {
 
     console.log("");
   }
+}
+
+/**
+ * agent-guild settle <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]
+ *
+ * Settles a finished job on Solana devnet: a real SPL USDC-devnet transfer to
+ * this agent's own wallet (deterministic from its Ed25519 identity key — see
+ * solanaAddressFromEd25519Pem) plus an on-chain Memo receipt, via the
+ * solana-settlement mod's POST /settle. Authenticates the same Ed25519 way
+ * every other command does — agent/sig/ts query params, message
+ * "POST:/mods/solana-settlement/settle:<ts>" — which the mod dispatcher
+ * verifies the same way /api/v1/* does (see AgentGuildApp/src/lib/mods/runtime.ts).
+ *
+ * This agent's org must have the "solana-settlement" mod installed, or the
+ * hub returns 403 — that's an org-admin action, not something this command
+ * can grant itself.
+ */
+async function cmdSettle() {
+  const taskId = process.argv[3];
+  const amountUsdc = parseFloat(arg("--amount"));
+  const exitCode = parseInt(arg("--exit-code") || "0", 10);
+  const executionTimeMs = parseInt(arg("--exec-ms") || "0", 10);
+  const stdout = arg("--stdout");
+  const creditScore = arg("--credit-score");
+  const trustScore = arg("--trust-score");
+
+  if (!taskId || !Number.isFinite(amountUsdc)) {
+    console.error('Usage: agent-guild settle <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]');
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const { privateKey, publicKey } = ensureKeypair();
+  const agentWallet = solanaAddressFromEd25519Pem(publicKey);
+
+  const ts = Date.now().toString();
+  const message = `POST:/mods/solana-settlement/settle:${ts}`;
+  const sig = sign(message, privateKey);
+
+  const resp = await fetch(
+    `${config.hubUrl}/api/mods/solana-settlement/settle?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentWallet,
+        taskId,
+        exitCode,
+        executionTimeMs,
+        ...(stdout ? { stdout } : {}),
+        amountUsdc,
+        ...(creditScore ? { creditScore: parseInt(creditScore, 10) } : {}),
+        ...(trustScore ? { trustScore: parseInt(trustScore, 10) } : {}),
+      }),
+    }
+  );
+
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    console.error(`Settle failed (${resp.status}): ${err.error || "Unknown error"}`);
+    if (Array.isArray(err.details)) {
+      for (const d of err.details) console.error(`   ${d.chain}: ${d.error}`);
+    }
+    process.exit(1);
+  }
+
+  const { receipt } = await resp.json();
+  console.log(`Settled ${amountUsdc} USDC (devnet) for task ${taskId}`);
+  console.log(`  Wallet:    ${agentWallet}`);
+  console.log(`  Tx:        ${receipt.txSig}`);
+  console.log(`  Explorer:  ${receipt.explorerUrl}`);
+  console.log(`  Receipt:   ${receipt.receiptHash}`);
 }
 
 async function cmdWorkMode() {
@@ -2786,6 +3003,7 @@ try {
   else if (cmd === "reject") await cmdReject();
   else if (cmd === "complete") await cmdComplete();
   else if (cmd === "assignments") await cmdAssignments();
+  else if (cmd === "settle") await cmdSettle();
   else if (cmd === "work-mode") await cmdWorkMode();
   else if (cmd === "send-a2a") await cmdSendA2A();
   else if (cmd === "send-coord") await cmdSendCoord();
@@ -2816,6 +3034,7 @@ Task Assignment Commands:
   reject      <assignmentId> "<reason>"                  — reject a pending assignment
   complete    <assignmentId> [--notes "..."]             — mark assignment as completed
   assignments [--status pending] [--limit 20]            — list your assignments
+  settle      <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "..."]  — settle a finished job on Solana devnet (USDC + on-chain receipt)
   work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept]  — manage work mode
 
 Structured Messaging Commands:

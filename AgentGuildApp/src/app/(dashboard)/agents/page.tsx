@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { createAgent, updateAgent, deleteAgent, getTasksByOrg, getJobsByOrg, type Agent, type Task, type Job } from "@/lib/firestore";
+import { applyLivePresence } from "@/lib/presence";
 
 /** Hash an API key with SHA-256 for secure storage (Web Crypto API for client-side). */
 async function hashApiKeyClient(apiKey: string): Promise<string> {
@@ -262,10 +263,10 @@ export default function AgentsPage() {
     );
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const agentsData = snapshot.docs.map(doc => ({
+      const agentsData = snapshot.docs.map(doc => applyLivePresence({
         id: doc.id,
         ...doc.data(),
-      })) as Agent[];
+      } as Agent));
       setAgents(agentsData);
       setLoading(false);
     }, (err) => {
@@ -274,7 +275,16 @@ export default function AgentsPage() {
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    // Heartbeats age out without a new snapshot. Recompute so a dead daemon
+    // flips to offline while this page is open.
+    const timer = setInterval(() => {
+      setAgents((prev) => prev.map((agent) => applyLivePresence(agent)));
+    }, 15000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(timer);
+    };
   }, [currentOrg, retryNonce]);
 
   const handleRetryLoad = useCallback(() => setRetryNonce(n => n + 1), []);

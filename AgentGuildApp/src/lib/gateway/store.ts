@@ -116,6 +116,8 @@ export async function getTask(id: string): Promise<QueuedTask | null> {
   return { id: snap.id, ...snap.data() } as QueuedTask;
 }
 
+const TERMINAL_STATUSES: QueuedTaskStatus[] = ["completed", "failed", "timeout", "cancelled"];
+
 export async function updateTask(
   id: string,
   data: Partial<
@@ -125,6 +127,11 @@ export async function updateTask(
   await db().collection(QUEUE).doc(id).update({
     ...data,
     updatedAt: FieldValue.serverTimestamp(),
+    // A handful of task types (e.g. "hyperliquid") carry a one-time secret
+    // in their payload for the worker to use — once the task reaches a
+    // terminal state it's done needing it, so scrub it rather than leaving
+    // it sitting in Firestore. Harmless no-op for every other task type.
+    ...(data.status && TERMINAL_STATUSES.includes(data.status) ? { "payload.privateKey": FieldValue.delete() } : {}),
   });
 }
 
