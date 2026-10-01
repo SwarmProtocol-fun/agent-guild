@@ -5,8 +5,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "hyperliquid-trading",
     "name": "Hyperliquid Trading",
-    "version": "1.1.0",
-    "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt. Adds leverage/SL-TP risk controls, limit orders with live pricing, trade history + PnL stats, and DCA/grid/signal strategies.",
+    "version": "1.2.0",
+    "description": "Lets an agent deploy its settled earnings by placing trades on Hyperliquid, via a GatewayAgent-executed order with a verifiable fill receipt. Adds leverage/SL-TP risk controls, limit orders with live pricing, trade history + PnL stats, DCA/grid/signal/sniper strategies, TradingView-style webhooks, and a volume-based referral program.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [

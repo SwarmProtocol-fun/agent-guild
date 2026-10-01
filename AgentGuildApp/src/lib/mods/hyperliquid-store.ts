@@ -2,10 +2,12 @@
  * Hyperliquid Mod — Firestore persistence.
  *
  * Collections:
- *   hyperliquidRiskConfig — per-agent leverage/position/loss limits
- *   hyperliquidTrades     — trade log used for history + PnL stats
- *   hyperliquidStrategies — DCA/grid/signal strategy definitions
- *   hyperliquidWallets    — per-agent encrypted Hyperliquid private key
+ *   hyperliquidRiskConfig  — per-agent leverage/position/loss limits
+ *   hyperliquidTrades      — trade log used for history + PnL stats
+ *   hyperliquidStrategies  — DCA/grid/signal/sniper strategy definitions
+ *   hyperliquidWallets     — per-agent encrypted Hyperliquid private key
+ *   hyperliquidSniperState — per-network "known coins" baseline for new-listing sniping
+ *   hyperliquidReferrals   — per-agent referral attribution + accrued reward
  *
  * Server-only (Firebase Admin SDK) — mirrors the pattern in
  * `@/lib/gateway/store.ts`. Only import from the mod's server.ts / API routes.
@@ -18,6 +20,8 @@ const RISK_CONFIG = "hyperliquidRiskConfig";
 const TRADES = "hyperliquidTrades";
 const STRATEGIES = "hyperliquidStrategies";
 const WALLETS = "hyperliquidWallets";
+const SNIPER_STATE = "hyperliquidSniperState";
+const REFERRALS = "hyperliquidReferrals";
 
 function db() {
   return adminDb();
@@ -196,11 +200,20 @@ export async function getDailyRealizedPnl(agentId: string): Promise<number> {
 
 // ── Strategies ───────────────────────────────────────────────────────────────
 
-export type StrategyType = "dca" | "grid" | "signal";
+export type StrategyType = "dca" | "grid" | "signal" | "sniper";
 
 export interface DcaParams { intervalMs: number }
 export interface GridParams { lowerPrice: number; upperPrice: number; levels: number; visitedLevels?: number[] }
 export interface SignalParams { direction?: "buy" | "sell" }
+/**
+ * "new-listing" watches for any coin that wasn't in Hyperliquid's tradeable
+ * universe on the previous tick (coin="ANY") or a specific coin landing
+ * (coin=<symbol>, firing only if that exact symbol is the new one).
+ * "price-above"/"price-below" watches `coin`'s mid price against targetPrice.
+ * Every mode auto-disarms (enabled:false) after firing once — a sniper is a
+ * one-shot "wait for it, then buy" trigger, not a recurring strategy.
+ */
+export interface SniperParams { mode: "new-listing" | "price-above" | "price-below"; targetPrice?: number }
 
 export interface Strategy {
   id: string;
@@ -211,18 +224,28 @@ export interface Strategy {
   coin: string;
   sizeUsd: number;
   enabled: boolean;
-  params: DcaParams | GridParams | SignalParams | Record<string, unknown>;
+  params: DcaParams | GridParams | SignalParams | SniperParams | Record<string, unknown>;
   lastRunAt: Date | null;
   createdAt: Date | null;
-  /** Set by the tick evaluator when a dca/grid trigger condition is met — the
-   *  agent still has to call POST /strategy/:id/execute-pending with its own
-   *  passphrase to actually place the trade (see the wallet note above). */
+  /** Set by the tick evaluator when a dca/grid/sniper trigger condition is
+   *  met — the agent still has to call POST /strategy/:id/execute-pending
+   *  with its own passphrase to actually place the trade (see the wallet
+   *  note above). */
   pendingSignal: boolean;
   pendingSince: Date | null;
   /** Snapshot of whatever the tick evaluator needs at execute time (e.g. the
-   *  grid level reached), captured when pendingSignal was set so execution
-   *  doesn't re-derive it from a price that's since moved. */
+   *  grid level reached, or the coin a new-listing sniper actually caught),
+   *  captured when pendingSignal was set so execution doesn't re-derive it
+   *  from a price/universe that's since moved. */
   pendingContext: Record<string, unknown> | null;
+  /**
+   * Random token gating the public POST /webhook/:id route (e.g. a
+   * TradingView alert) — only ever set on "signal" strategies. Unlike the
+   * agent's wallet passphrase, this isn't secret-grade (it doesn't decrypt
+   * anything) — it just scopes who can push this one strategy to "pending",
+   * same trust level as a Stripe/GitHub webhook signing secret.
+   */
+  webhookToken: string | null;
 }
 
 function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
@@ -242,11 +265,12 @@ function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
     pendingSignal: data.pendingSignal ?? false,
     pendingSince: data.pendingSince?.toDate() ?? null,
     pendingContext: data.pendingContext ?? null,
+    webhookToken: data.webhookToken ?? null,
   };
 }
 
 export async function createStrategy(
-  data: Omit<Strategy, "id" | "lastRunAt" | "createdAt" | "pendingSignal" | "pendingSince" | "pendingContext">,
+  data: Omit<Strategy, "id" | "lastRunAt" | "createdAt" | "pendingSignal" | "pendingSince" | "pendingContext" | "webhookToken">,
 ): Promise<string> {
   const ref = await db().collection(STRATEGIES).add({
     ...data,
@@ -255,8 +279,21 @@ export async function createStrategy(
     pendingSignal: false,
     pendingSince: null,
     pendingContext: null,
+    webhookToken: null,
   });
   return ref.id;
+}
+
+/** Issue (or rotate) the webhook token gating POST /webhook/:id for a "signal" strategy. */
+export async function setStrategyWebhookToken(id: string, token: string | null): Promise<void> {
+  await db().collection(STRATEGIES).doc(id).update({ webhookToken: token });
+}
+
+/** Looks up a strategy by its webhook token — used by the public POST /webhook/:id route. */
+export async function getStrategyByWebhookToken(id: string, token: string): Promise<Strategy | null> {
+  const strategy = await getStrategy(id);
+  if (!strategy || !strategy.webhookToken || strategy.webhookToken !== token) return null;
+  return strategy;
 }
 
 export async function toggleStrategy(id: string, enabled: boolean): Promise<void> {
@@ -314,4 +351,123 @@ export async function getStrategies(agentId: string): Promise<Strategy[]> {
 export async function getEnabledStrategies(): Promise<Strategy[]> {
   const snap = await db().collection(STRATEGIES).where("enabled", "==", true).get();
   return snap.docs.map(docToStrategy);
+}
+
+// ── Sniper state ─────────────────────────────────────────────────────────────
+//
+// One doc per network holding the last-seen set of tradeable coins, so the
+// tick evaluator can tell a genuinely new listing apart from the entire
+// existing universe (which would otherwise look "new" the first time any
+// new-listing sniper ever runs).
+
+export async function getKnownCoins(network: string): Promise<string[] | null> {
+  const snap = await db().collection(SNIPER_STATE).doc(network).get();
+  if (!snap.exists) return null;
+  return (snap.data()!.coins as string[] | undefined) ?? [];
+}
+
+export async function setKnownCoins(network: string, coins: string[]): Promise<void> {
+  await db().collection(SNIPER_STATE).doc(network).set({ coins, updatedAt: FieldValue.serverTimestamp() });
+}
+
+// ── Referrals ────────────────────────────────────────────────────────────────
+//
+// An agent's referral "code" is just its own agentId — no separate vanity
+// code generation. Doc id == agentId. referredBy is set at most once per
+// agent (first code applied wins); accrueReferralReward credits whoever
+// referred `agentId` with a cut of `agentId`'s trading volume.
+
+/** Reward credited to a referrer, in basis points of the referred agent's trade size. */
+export const REFERRAL_REWARD_BPS = 5;
+
+export interface Referral {
+  agentId: string;
+  orgId: string;
+  referredBy: string | null;
+  referredCount: number;
+  totalVolumeUsd: number;
+  rewardUsd: number;
+  createdAt: Date | null;
+  updatedAt: Date | null;
+}
+
+function docToReferral(agentId: string, data: FirebaseFirestore.DocumentData): Referral {
+  return {
+    agentId,
+    orgId: data.orgId ?? "",
+    referredBy: data.referredBy ?? null,
+    referredCount: data.referredCount ?? 0,
+    totalVolumeUsd: data.totalVolumeUsd ?? 0,
+    rewardUsd: data.rewardUsd ?? 0,
+    createdAt: data.createdAt?.toDate() ?? null,
+    updatedAt: data.updatedAt?.toDate() ?? null,
+  };
+}
+
+export async function getReferral(agentId: string): Promise<Referral | null> {
+  const snap = await db().collection(REFERRALS).doc(agentId).get();
+  if (!snap.exists) return null;
+  return docToReferral(agentId, snap.data()!);
+}
+
+/** Creates an agent's referral doc if it doesn't exist yet — safe to call repeatedly. */
+export async function ensureReferral(agentId: string, orgId: string): Promise<Referral> {
+  const ref = db().collection(REFERRALS).doc(agentId);
+  const snap = await ref.get();
+  if (!snap.exists) {
+    await ref.set({
+      orgId, referredBy: null, referredCount: 0, totalVolumeUsd: 0, rewardUsd: 0,
+      createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    });
+    return (await ref.get()).data() as unknown as Referral;
+  }
+  return docToReferral(agentId, snap.data()!);
+}
+
+/**
+ * Attributes `agentId` to `referralCode` (the referrer's agentId), one time
+ * only. The referrer doesn't need a pre-existing referral doc — applying a
+ * code lazily creates one for them via `set(..., {merge:true})`. The
+ * check-then-write runs inside a transaction so two concurrent calls can't
+ * both pass the "not already applied" check before either writes.
+ */
+export async function applyReferralCode(
+  agentId: string, orgId: string, referralCode: string,
+): Promise<{ ok: true } | { error: string }> {
+  const referrerAgentId = referralCode.trim();
+  if (!referrerAgentId) return { error: "referralCode is required" };
+  if (referrerAgentId === agentId) return { error: "Cannot refer yourself" };
+
+  await ensureReferral(agentId, orgId);
+  const refDoc = db().collection(REFERRALS).doc(agentId);
+  const referrerDoc = db().collection(REFERRALS).doc(referrerAgentId);
+
+  return db().runTransaction(async (tx) => {
+    const existing = (await tx.get(refDoc)).data();
+    if (existing?.referredBy) return { error: "This agent has already applied a referral code" };
+
+    tx.update(refDoc, { referredBy: referrerAgentId, updatedAt: FieldValue.serverTimestamp() });
+    tx.set(
+      referrerDoc,
+      { referredCount: FieldValue.increment(1), totalVolumeUsd: FieldValue.increment(0), rewardUsd: FieldValue.increment(0), updatedAt: FieldValue.serverTimestamp() },
+      { merge: true },
+    );
+    return { ok: true };
+  });
+}
+
+/** Called from POST /settle-trade when a new position is opened — credits the referrer, if any. */
+export async function accrueReferralReward(agentId: string, sizeUsd: number): Promise<void> {
+  const snap = await db().collection(REFERRALS).doc(agentId).get();
+  const referredBy = snap.exists ? (snap.data()!.referredBy as string | null) : null;
+  if (!referredBy) return;
+
+  await db().collection(REFERRALS).doc(referredBy).set(
+    {
+      totalVolumeUsd: FieldValue.increment(sizeUsd),
+      rewardUsd: FieldValue.increment(sizeUsd * (REFERRAL_REWARD_BPS / 10000)),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
 }

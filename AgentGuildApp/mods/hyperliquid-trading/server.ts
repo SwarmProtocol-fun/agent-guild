@@ -1,8 +1,10 @@
-import { defineServerMod } from "@agent-guild/sdk";
+import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { enqueueTask, getTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
 import { enforceCapability } from "@/lib/skills";
 import { encryptValue, decryptValue } from "@/lib/secrets";
+import { getAgent } from "@/lib/firestore-admin";
+import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import {
   getRiskConfig,
   setRiskConfig,
@@ -21,9 +23,20 @@ import {
   getAgentWallet,
   setAgentWallet,
   deleteAgentWallet,
+  setStrategyWebhookToken,
+  getStrategyByWebhookToken,
+  getKnownCoins,
+  setKnownCoins,
+  getReferral,
+  ensureReferral,
+  applyReferralCode,
+  accrueReferralReward,
   type DcaParams,
   type GridParams,
+  type SniperParams,
+  type Strategy,
 } from "@/lib/mods/hyperliquid-store";
+import crypto from "crypto";
 
 type HlNetwork = "testnet" | "mainnet";
 
@@ -53,6 +66,12 @@ async function getMidPrice(coin: string, network: HlNetwork): Promise<number> {
   const px = Number(mids[coin]);
   if (!px) throw new Error(`No mid price for ${coin}`);
   return px;
+}
+
+/** The full set of perp coins currently tradeable on Hyperliquid — used by the "new-listing" sniper mode. */
+async function getUniverseCoins(network: HlNetwork): Promise<string[]> {
+  const meta = await hlInfo<{ universe: { name: string }[] }>({ type: "meta" }, network);
+  return meta.universe.map((a) => a.name);
 }
 
 /**
@@ -143,11 +162,91 @@ async function enforceRiskAndEnqueue(params: {
   return { taskId };
 }
 
+type AccessDenied = { error: string; status: number };
+
+/**
+ * Authorizes a request against a specific orgId. Every route below used to
+ * trust `body.orgId` outright whenever there was no verified agent signature
+ * (`ctx.agent` isn't wired up by the runtime yet — see RouteContext in
+ * sdk.ts) — any signed-in operator could act on an org they have no
+ * relationship to (set/delete another org's trading wallet, place trades,
+ * loosen risk limits, plant strategies, hijack referral rewards). This
+ * mirrors `solana-settlement`'s `ctx.session.role` check and
+ * `/api/v1/lending`'s `requireOrgMember`, adapted for mod routes (a
+ * `ModSession` only carries a wallet address, not a `NextRequest` to re-read
+ * the `x-wallet-address` header from).
+ */
+async function requireOrgAccess(ctx: RouteContext, orgId: string): Promise<AccessDenied | null> {
+  if (ctx.agent) {
+    return ctx.agent.orgId === orgId ? null : { error: "Agent signature does not match orgId", status: 403 };
+  }
+  if (!ctx.session) return { error: "Authentication required", status: 401 };
+  const result = await requireOrgMembershipByAddress(ctx.session.address, orgId);
+  return result.ok ? null : { error: result.error ?? "Forbidden", status: result.status ?? 403 };
+}
+
+/**
+ * Same check as `requireOrgAccess`, but for routes keyed only by `:agentId`
+ * with no orgId in the request — resolves the agent's real org from its own
+ * record (never trusting a client-supplied orgId) and checks access against
+ * that. Returns the resolved orgId so callers don't need a second lookup.
+ */
+async function requireAgentOrgAccess(ctx: RouteContext, agentId: string): Promise<{ orgId: string } | AccessDenied> {
+  if (ctx.agent) {
+    if (ctx.agent.agentId !== agentId) return { error: "Agent signature does not match agentId", status: 403 };
+    return { orgId: ctx.agent.orgId };
+  }
+  const agent = await getAgent(agentId);
+  if (!agent) return { error: "Agent not found", status: 404 };
+  const denied = await requireOrgAccess(ctx, agent.orgId);
+  if (denied) return denied;
+  return { orgId: agent.orgId };
+}
+
+type RouteError = { status: number; body: { error: string } };
+
+/**
+ * Shared by POST /strategy/:id/signal (authenticated) and the public POST
+ * /webhook/:id (token-gated) — both just need to validate the strategy is a
+ * "signal" type, decrypt the wallet with the caller-supplied masterSecret,
+ * and enqueue the trade. Keeping this in one place means the webhook route
+ * can never drift from the same risk/wallet checks the in-app route gets.
+ */
+async function fireSignalStrategy(
+  strategy: Strategy,
+  body: { masterSecret?: string; isBuy?: boolean },
+): Promise<{ taskId: string } | RouteError> {
+  if (strategy.type !== "signal") {
+    return { status: 400, body: { error: "Only signal strategies can be fired this way" } };
+  }
+  if (!body.masterSecret) {
+    return { status: 400, body: { error: "masterSecret is required" } };
+  }
+
+  let privateKey: string, network: HlNetwork;
+  try {
+    ({ privateKey, network } = await resolveAgentWallet(strategy.agentId, body.masterSecret));
+  } catch (err) {
+    return { status: 400, body: { error: (err as Error).message } };
+  }
+
+  const signalParams = strategy.params as { direction?: "buy" | "sell" };
+  const isBuy = body.isBuy ?? (signalParams.direction ? signalParams.direction === "buy" : true);
+
+  const result = await enforceRiskAndEnqueue({
+    orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, isBuy, sizeUsd: strategy.sizeUsd, privateKey, network,
+  });
+  if ("error" in result) return { status: 400, body: result };
+  await touchStrategyRun(strategy.id);
+  return result;
+}
+
 /**
  * Evaluated once per Hub tick (see the mod's added phase in
  * `/api/internal/tick/route.ts`). DCA fires on a fixed interval; grid fires
- * when the mid price crosses a level it hasn't visited yet. Neither can
- * place the trade itself — there's no passphrase available inside a
+ * when the mid price crosses a level it hasn't visited yet; sniper fires
+ * on a new Hyperliquid listing or a price break, then auto-disarms. None of
+ * them can place the trade itself — there's no passphrase available inside a
  * scheduled tick to decrypt the agent's wallet with (see the wallet note in
  * hyperliquid-store.ts) — so this only flips the strategy to `pendingSignal`.
  * The agent's own process is expected to poll GET /strategy/:agentId/pending
@@ -183,8 +282,37 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
 
         await markStrategyPending(strategy.id, { level });
         markedPending++;
+      } else if (strategy.type === "sniper") {
+        const params = strategy.params as SniperParams;
+        const wallet = await getAgentWallet(strategy.agentId);
+        if (!wallet) continue; // nothing to trade with yet — agent hasn't set a wallet
+
+        if (params.mode === "new-listing") {
+          const known = await getKnownCoins(wallet.network);
+          const current = await getUniverseCoins(wallet.network);
+          if (known === null) {
+            // First run for this network — seed the baseline instead of
+            // treating Hyperliquid's entire existing universe as "new".
+            await setKnownCoins(wallet.network, current);
+            continue;
+          }
+          const newCoins = current.filter((c) => !known.includes(c));
+          if (newCoins.length === 0) continue;
+          await setKnownCoins(wallet.network, current);
+
+          const target = strategy.coin === "ANY" ? newCoins[0] : (newCoins.includes(strategy.coin) ? strategy.coin : null);
+          if (!target) continue;
+          await markStrategyPending(strategy.id, { detectedCoin: target });
+        } else {
+          if (params.targetPrice == null) continue;
+          const price = await getMidPrice(strategy.coin, wallet.network);
+          const triggered = params.mode === "price-above" ? price >= params.targetPrice : price <= params.targetPrice;
+          if (!triggered) continue;
+          await markStrategyPending(strategy.id, { triggerPrice: price });
+        }
+        markedPending++;
       }
-      // "signal" strategies never fire from the tick — only via POST /strategy/:id/signal.
+      // "signal" strategies never fire from the tick — only via POST /strategy/:id/signal or the public webhook.
     } catch (err) {
       console.error(`[hyperliquid-strategy] ${strategy.id} failed:`, err);
       errors++;
@@ -218,11 +346,12 @@ export default defineServerMod({
      *
      * orgId/agentId fall back to the body only for browser-session calls —
      * a verified agent signature (ctx.agent) always takes precedence, same
-     * as every other route here. NOTE: ctx.agent isn't wired up by the
-     * runtime yet (see RouteContext in sdk.ts) — until it is, this route
-     * relies on org-level dashboard access control, same as /risk-config and
-     * /strategy, not a cryptographic guarantee that only the agent itself
-     * (vs. another caller in the same org) can set its wallet.
+     * as every other route here. ctx.agent isn't wired up by the runtime yet
+     * (see RouteContext in sdk.ts), so a browser-session call is authorized
+     * by requireOrgAccess instead: the caller must be a member of orgId, not
+     * merely signed in to the platform — this is any caller in the same org
+     * setting the agent's wallet, not a cryptographic guarantee that only
+     * the agent itself does.
      * Body: { orgId, agentId, privateKey, masterSecret, network? }
      */
     "POST /wallet": async (req, ctx) => {
@@ -238,20 +367,27 @@ export default defineServerMod({
         return Response.json({ error: "network must be testnet or mainnet" }, { status: 400 });
       }
 
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
       const { encryptedValue, iv } = encryptValue(privateKey, agentId, masterSecret);
       await setAgentWallet(agentId, { orgId, encryptedValue, iv, network });
       return Response.json({ ok: true });
     },
 
     /** GET /wallet/:agentId — whether a wallet is configured, and which network. Never returns key material. */
-    "GET /wallet/:agentId": async (_req, { params }) => {
-      const wallet = await getAgentWallet(params.agentId);
+    "GET /wallet/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const wallet = await getAgentWallet(ctx.params.agentId);
       return Response.json({ hasWallet: !!wallet, network: wallet?.network ?? null });
     },
 
-    /** DELETE /wallet/:agentId — same access-control caveat as POST /wallet above. */
+    /** DELETE /wallet/:agentId — same org-membership check as POST /wallet above. */
     "DELETE /wallet/:agentId": async (_req, ctx) => {
       const agentId = ctx.agent?.agentId ?? ctx.params.agentId;
+      const access = await requireAgentOrgAccess(ctx, agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
       await deleteAgentWallet(agentId);
       return Response.json({ ok: true });
     },
@@ -279,6 +415,9 @@ export default defineServerMod({
         return Response.json({ error: "limitPrice is required for limit orders" }, { status: 400 });
       }
 
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
       try {
         await enforceCapability(agentId, orgId, "hyperliquid-trade");
       } catch (err) {
@@ -300,9 +439,11 @@ export default defineServerMod({
     },
 
     /** GET /status/:taskId — poll a trade's execution state. */
-    "GET /status/:taskId": async (_req, { params }) => {
-      const task = await getTask(params.taskId);
+    "GET /status/:taskId": async (_req, ctx) => {
+      const task = await getTask(ctx.params.taskId);
       if (!task) return Response.json({ error: "Task not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, task.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
       return Response.json({ status: task.status, result: task.result, error: task.error });
     },
 
@@ -369,6 +510,9 @@ export default defineServerMod({
         return Response.json({ error: "orgId, agentId, wallet, coin, masterSecret are required" }, { status: 400 });
       }
 
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
       try {
         await enforceCapability(agentId, orgId, "hyperliquid-close");
       } catch (err) {
@@ -403,16 +547,29 @@ export default defineServerMod({
      * fill as an on-chain receipt (same mechanism the compute-settlement
      * mods use), so a trade's proof-of-execution lives next to a job's,
      * and record it in the trade history used by GET /history/:agentId.
-     * Body: { agentId, agentWallet, taskId, chains, creditScore?, trustScore? }
+     * agentId/orgId are read from the task record itself, never the request
+     * body — the body previously supplied its own agentId, letting any
+     * caller who knew a completed taskId attribute someone else's real fill
+     * (and its referral reward) to an agentId/org they don't control.
+     * Body: { agentWallet, taskId, chains, creditScore?, trustScore? }
      */
-    "POST /settle-trade": async (req) => {
+    "POST /settle-trade": async (req, ctx) => {
       const body = await req.json();
-      const { agentId, agentWallet, taskId, chains = ["solana"], creditScore, trustScore } = body;
+      const { agentWallet, taskId, chains = ["solana"], creditScore, trustScore } = body;
 
       const task = await getTask(taskId);
       if (!task || task.status !== "completed") {
         return Response.json({ error: "Task not completed yet" }, { status: 409 });
       }
+
+      const agentId = (task.payload as { agentId?: string }).agentId;
+      const orgId = task.orgId;
+      if (!agentId) {
+        return Response.json({ error: "Task has no agentId in its payload" }, { status: 500 });
+      }
+
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
 
       const result = task.result as {
         exitCode?: number;
@@ -447,6 +604,7 @@ export default defineServerMod({
 
       const data = result?.data;
       if (data?.coin && data.isBuy != null && data.sizeUsd != null) {
+        const status = (task.payload as { reduceOnly?: boolean })?.reduceOnly ? "closed" : "opened";
         await recordTrade({
           orgId: task.orgId,
           agentId,
@@ -457,16 +615,23 @@ export default defineServerMod({
           orderType: (task.payload as { orderType?: string })?.orderType ?? "market",
           fillPrice: data.fill?.raw?.avgPx ? Number(data.fill.raw.avgPx) : undefined,
           realizedPnl: data.fill?.realizedPnl ? Number(data.fill.realizedPnl) : undefined,
-          status: (task.payload as { reduceOnly?: boolean })?.reduceOnly ? "closed" : "opened",
+          status,
         });
+        // Referral reward accrues on volume opened, not on the closing leg of
+        // the same position — otherwise a single trade would count twice.
+        if (status === "opened") {
+          await accrueReferralReward(agentId, data.sizeUsd);
+        }
       }
 
       return Response.json({ receipts, errors });
     },
 
     /** GET /history/:agentId — trade log + aggregate PnL/win-rate stats. */
-    "GET /history/:agentId": async (_req, { params }) => {
-      const history = await getTradeHistory(params.agentId);
+    "GET /history/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const history = await getTradeHistory(ctx.params.agentId);
       return Response.json(history);
     },
 
@@ -487,6 +652,9 @@ export default defineServerMod({
         return Response.json({ error: "orgId, agentId, leverage, maxPositionUsd, maxDailyLossUsd are required" }, { status: 400 });
       }
 
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
       try {
         await enforceCapability(agentId, orgId, "hyperliquid-configure-risk");
       } catch (err) {
@@ -498,23 +666,29 @@ export default defineServerMod({
     },
 
     /** GET /risk-config/:agentId */
-    "GET /risk-config/:agentId": async (_req, { params }) => {
-      const config = await getRiskConfig(params.agentId);
+    "GET /risk-config/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const config = await getRiskConfig(ctx.params.agentId);
       return Response.json({ config });
     },
 
     /** GET /strategy/:agentId — list an agent's strategies. */
-    "GET /strategy/:agentId": async (_req, { params }) => {
-      const strategies = await getStrategies(params.agentId);
+    "GET /strategy/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const strategies = await getStrategies(ctx.params.agentId);
       return Response.json({ strategies });
     },
 
     /**
-     * POST /strategy — create a DCA, grid, or signal strategy. Requires the
-     * "hyperliquid-run-strategy" capability. DCA/grid are evaluated by the
-     * tick phase in /api/internal/tick; signal only fires via
-     * POST /strategy/:id/signal.
+     * POST /strategy — create a DCA, grid, signal, or sniper strategy.
+     * Requires the "hyperliquid-run-strategy" capability. DCA/grid/sniper are
+     * evaluated by the tick phase in /api/internal/tick; signal only fires via
+     * POST /strategy/:id/signal or the public POST /webhook/:id.
      * Body: { orgId, agentId, wallet, type, coin, sizeUsd, params }
+     * For a sniper strategy, coin may be "ANY" (new-listing mode only, to
+     * catch whichever coin lists next rather than a specific one).
      */
     "POST /strategy": async (req, ctx) => {
       const body = await req.json();
@@ -525,8 +699,8 @@ export default defineServerMod({
       if (!orgId || !agentId || !wallet || !type || !coin || !sizeUsd) {
         return Response.json({ error: "orgId, agentId, wallet, type, coin, sizeUsd are required" }, { status: 400 });
       }
-      if (!["dca", "grid", "signal"].includes(type)) {
-        return Response.json({ error: "type must be dca, grid, or signal" }, { status: 400 });
+      if (!["dca", "grid", "signal", "sniper"].includes(type)) {
+        return Response.json({ error: "type must be dca, grid, signal, or sniper" }, { status: 400 });
       }
       if (type === "dca" && !params?.intervalMs) {
         return Response.json({ error: "params.intervalMs is required for a dca strategy" }, { status: 400 });
@@ -534,6 +708,20 @@ export default defineServerMod({
       if (type === "grid" && !(params?.lowerPrice && params?.upperPrice && params?.levels)) {
         return Response.json({ error: "params.lowerPrice, upperPrice, levels are required for a grid strategy" }, { status: 400 });
       }
+      if (type === "sniper") {
+        if (!["new-listing", "price-above", "price-below"].includes(params?.mode)) {
+          return Response.json({ error: "params.mode must be new-listing, price-above, or price-below for a sniper strategy" }, { status: 400 });
+        }
+        if (params.mode !== "new-listing" && params?.targetPrice == null) {
+          return Response.json({ error: "params.targetPrice is required for price-above/price-below sniper modes" }, { status: 400 });
+        }
+        if (params.mode !== "new-listing" && coin === "ANY") {
+          return Response.json({ error: "coin \"ANY\" is only valid for new-listing sniper mode" }, { status: 400 });
+        }
+      }
+
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
 
       try {
         await enforceCapability(agentId, orgId, "hyperliquid-run-strategy");
@@ -546,52 +734,111 @@ export default defineServerMod({
     },
 
     /** POST /strategy/:id/toggle — enable/disable a strategy. Body: { enabled } */
-    "POST /strategy/:id/toggle": async (req, { params }) => {
+    "POST /strategy/:id/toggle": async (req, ctx) => {
       const body = await req.json();
-      await toggleStrategy(params.id, Boolean(body.enabled));
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      await toggleStrategy(strategy.id, Boolean(body.enabled));
       return Response.json({ ok: true });
     },
 
     /**
-     * POST /strategy/:id/signal — fire a "signal" strategy immediately
-     * (an agent or webhook calling in from outside the tick evaluator).
+     * POST /strategy/:id/signal — fire a "signal" strategy immediately (an
+     * agent calling in from outside the tick evaluator, from inside the
+     * platform). For a third-party TradingView-style alert, use the public
+     * POST /webhook/:id route instead — this one is session/agent-gated.
      * Body: { masterSecret, isBuy? } — isBuy defaults to the strategy's
      * configured direction. Needs the strategy's agent to already have a
      * wallet set via POST /wallet.
      */
-    "POST /strategy/:id/signal": async (req, { params }) => {
+    "POST /strategy/:id/signal": async (req, ctx) => {
       const body = await req.json().catch(() => ({}));
-      const { masterSecret, isBuy: isBuyOverride } = body;
-      const strategy = await getStrategy(params.id);
+      const strategy = await getStrategy(ctx.params.id);
       if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
-      if (strategy.type !== "signal") {
-        return Response.json({ error: "Only signal strategies can be fired via this route" }, { status: 400 });
-      }
-      if (!masterSecret) {
-        return Response.json({ error: "masterSecret is required" }, { status: 400 });
-      }
-
-      let privateKey: string, network: HlNetwork;
-      try {
-        ({ privateKey, network } = await resolveAgentWallet(strategy.agentId, masterSecret));
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 400 });
-      }
-
-      const signalParams = strategy.params as { direction?: "buy" | "sell" };
-      const isBuy = isBuyOverride ?? (signalParams.direction ? signalParams.direction === "buy" : true);
-
-      const result = await enforceRiskAndEnqueue({
-        orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, isBuy, sizeUsd: strategy.sizeUsd, privateKey, network,
-      });
-      if ("error" in result) return Response.json(result, { status: 400 });
-      await touchStrategyRun(strategy.id);
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      const result = await fireSignalStrategy(strategy, body);
+      if ("status" in result) return Response.json(result.body, { status: result.status });
       return Response.json(result);
     },
 
+    /**
+     * POST /webhook/:id?token=… — public counterpart to /strategy/:id/signal,
+     * built for third-party alert sources (TradingView, a custom script) that
+     * can't carry a platform session. `public: true` because that caller has
+     * no session — the webhook token (scoped to this one strategy, issued via
+     * POST /strategy/:id/webhook-token) is the auth instead. It does not
+     * replace the masterSecret requirement: the token only proves "this
+     * caller may try to fire strategy :id", the agent's own passphrase is
+     * still required to actually decrypt its wallet and sign (see
+     * resolveAgentWallet) — same zero-knowledge-wallet guarantee as every
+     * other trade-initiating route in this mod.
+     * Body: { masterSecret, isBuy? } — same contract as /strategy/:id/signal.
+     */
+    "POST /webhook/:id": {
+      public: true,
+      handler: async (req, { params }) => {
+        const token = new URL(req.url).searchParams.get("token");
+        if (!token) return Response.json({ error: "token query param is required" }, { status: 401 });
+
+        const strategy = await getStrategyByWebhookToken(params.id, token);
+        if (!strategy) return Response.json({ error: "Not found" }, { status: 404 });
+
+        const body = await req.json().catch(() => ({}));
+        const result = await fireSignalStrategy(strategy, body);
+        if ("status" in result) return Response.json(result.body, { status: result.status });
+        return Response.json(result);
+      },
+    },
+
+    /**
+     * POST /strategy/:id/webhook-token — issue (or rotate) the token gating
+     * POST /webhook/:id for a "signal" strategy. Requires the
+     * "hyperliquid-webhook" capability. Returns the full URL to paste into an
+     * external alert source — note it still expects `masterSecret` in every
+     * call's body, same as any other trade-initiating route. agentId/orgId
+     * are always the strategy's own (never a body override) — otherwise any
+     * signed-in caller could rotate or revoke another org's webhook token by
+     * knowing/guessing a strategy id.
+     */
+    "POST /strategy/:id/webhook-token": async (_req, ctx) => {
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      if (strategy.type !== "signal") {
+        return Response.json({ error: "Only signal strategies can have a webhook" }, { status: 400 });
+      }
+
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
+      try {
+        await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-webhook");
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 403 });
+      }
+
+      const token = crypto.randomBytes(24).toString("hex");
+      await setStrategyWebhookToken(strategy.id, token);
+      return Response.json({ token, path: `/api/mods/hyperliquid-trading/webhook/${strategy.id}?token=${token}` });
+    },
+
+    /** DELETE /strategy/:id/webhook-token — revoke a strategy's webhook. */
+    "DELETE /strategy/:id/webhook-token": async (_req, ctx) => {
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      await setStrategyWebhookToken(strategy.id, null);
+      return Response.json({ ok: true });
+    },
+
     /** GET /strategy/:agentId/pending — dca/grid strategies waiting for this agent to execute. */
-    "GET /strategy/:agentId/pending": async (_req, { params }) => {
-      const strategies = await getPendingStrategies(params.agentId);
+    "GET /strategy/:agentId/pending": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const strategies = await getPendingStrategies(ctx.params.agentId);
       return Response.json({ strategies });
     },
 
@@ -603,11 +850,13 @@ export default defineServerMod({
      * a fresh read, since price may have moved since the tick ran.
      * Body: { masterSecret }
      */
-    "POST /strategy/:id/execute-pending": async (req, { params }) => {
+    "POST /strategy/:id/execute-pending": async (req, ctx) => {
       const body = await req.json().catch(() => ({}));
       const { masterSecret } = body;
-      const strategy = await getStrategy(params.id);
+      const strategy = await getStrategy(ctx.params.id);
       if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
       if (!strategy.pendingSignal) {
         return Response.json({ error: "Strategy has no pending signal" }, { status: 400 });
       }
@@ -622,8 +871,14 @@ export default defineServerMod({
         return Response.json({ error: (err as Error).message }, { status: 400 });
       }
 
+      // A "new-listing ANY" sniper doesn't know its target coin until the
+      // tick evaluator catches one — that's what pendingContext.detectedCoin
+      // is for. Every other strategy type just trades its own `coin`.
+      const detectedCoin = (strategy.pendingContext as { detectedCoin?: string } | null)?.detectedCoin;
+      const coin = strategy.type === "sniper" && detectedCoin ? detectedCoin : strategy.coin;
+
       const result = await enforceRiskAndEnqueue({
-        orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, isBuy: true, sizeUsd: strategy.sizeUsd, privateKey, network,
+        orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy: true, sizeUsd: strategy.sizeUsd, privateKey, network,
       });
       if ("error" in result) return Response.json(result, { status: 400 });
 
@@ -632,10 +887,65 @@ export default defineServerMod({
         const level = (strategy.pendingContext as { level?: number } | null)?.level;
         const visited = params_.visitedLevels ?? [];
         await clearStrategyPending(strategy.id, level != null ? { ...params_, visitedLevels: [...visited, level] } : undefined);
+      } else if (strategy.type === "sniper") {
+        // One-shot: a sniper disarms after firing rather than re-arming for
+        // the next listing/price break, same UX as UniDexBot's sniper.
+        await clearStrategyPending(strategy.id);
+        await toggleStrategy(strategy.id, false);
       } else {
         await clearStrategyPending(strategy.id);
       }
 
+      return Response.json(result);
+    },
+
+    // ── Referrals ──────────────────────────────────────────────────────────
+
+    /**
+     * GET /referral/:agentId — an agent's referral code (its own agentId),
+     * who referred it (if anyone), and accrued stats. Lazily creates the
+     * referral doc on first read, using the agent's own org (resolved
+     * server-side, never a client-supplied `orgId` query param).
+     */
+    "GET /referral/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      await ensureReferral(ctx.params.agentId, access.orgId);
+      const referral = await getReferral(ctx.params.agentId);
+      return Response.json({
+        code: ctx.params.agentId,
+        referredBy: referral?.referredBy ?? null,
+        referredCount: referral?.referredCount ?? 0,
+        totalVolumeUsd: referral?.totalVolumeUsd ?? 0,
+        rewardUsd: referral?.rewardUsd ?? 0,
+      });
+    },
+
+    /**
+     * POST /referral/apply — attribute this agent to another agent's
+     * referral code (its agentId), one time only. It moves no funds on its
+     * own; it only sets who future trade-volume rewards
+     * (accrueReferralReward) credit — but since that attribution is
+     * permanent (first code wins), requireOrgAccess still gates it: without
+     * it, any signed-in caller could hijack a victim agent's referral
+     * attribution before its real referrer applies (agentIds aren't secret —
+     * they're shown in the UI and used as the referral code itself).
+     * Body: { orgId, agentId, referralCode }
+     */
+    "POST /referral/apply": async (req, ctx) => {
+      const body = await req.json();
+      const agentId = ctx.agent?.agentId ?? body.agentId;
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      const { referralCode } = body;
+      if (!orgId || !agentId || !referralCode) {
+        return Response.json({ error: "orgId, agentId, referralCode are required" }, { status: 400 });
+      }
+
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
+      const result = await applyReferralCode(agentId, orgId, referralCode);
+      if ("error" in result) return Response.json(result, { status: 400 });
       return Response.json(result);
     },
   },

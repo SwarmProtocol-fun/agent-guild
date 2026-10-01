@@ -175,6 +175,56 @@
         { "fieldPath": "allowPublicScores", "order": "ASCENDING" },
         { "fieldPath": "tasksCompleted",    "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "loanOffers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",    "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "loanOffers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "lenderWalletAddress", "order": "ASCENDING" },
+        { "fieldPath": "createdAt",           "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kanbanBoards",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",     "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "kanbanTasks",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",    "order": "ASCENDING" },
+        { "fieldPath": "boardId",  "order": "ASCENDING" },
+        { "fieldPath": "position", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "hyperliquidTrades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "agentId",   "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "hyperliquidTrades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "agentId",   "order": "ASCENDING" },
+        { "fieldPath": "status",    "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

@@ -43,6 +43,7 @@ import type {
     PoolWithdrawalRequest,
     PoolDepositRecord,
     EligibilitySummary,
+    LoanOffer,
 } from "./types";
 
 const POOLS = "lendingPools";
@@ -51,6 +52,11 @@ const DEPOSITS = "lendingPoolDeposits";
 const WITHDRAWALS = "lendingPoolWithdrawals";
 const LOANS = "loans";
 const REPAYMENTS = "loanRepayments";
+const OFFERS = "loanOffers";
+
+/** Loose sanity bounds on a lender-proposed rate — actual eligibility banding happens per-borrower at acceptance time. */
+const OFFER_MIN_RATE_BPS = 100;
+const OFFER_MAX_RATE_BPS = 10_000;
 const ACTIVE_LOAN_STATUSES: string[] = ["pending", "pending_disbursement", "active"];
 
 const DEFAULT_POOL_NAME = "Community Lending Pool";
@@ -496,6 +502,9 @@ export async function fundLoanSolo(loanId: string, lenderWallet: string, txSig: 
     if (loan.source !== "solo") throw new Error("Only solo loan requests can be funded directly");
     if (loan.status !== "pending") throw new Error("This loan is no longer open for funding");
     if (!loan.borrowerWalletAddress) throw new Error("Borrower has no wallet address on file");
+    if (loan.reservedLenderWallet && loan.reservedLenderWallet !== lenderWallet) {
+        throw new Error("This loan was accepted from a specific lender's offer and can only be funded by that wallet");
+    }
 
     await verifyAndClaimUsdcTransfer({
         txSig,
@@ -524,6 +533,135 @@ export async function fundLoanSolo(loanId: string, lenderWallet: string, txSig: 
         txn.update(loanRef, update);
         return { ...current, ...update };
     });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Loan offers — lender posts terms first, a borrower accepts
+// ═══════════════════════════════════════════════════════════════
+
+function toOffer(id: string, data: FirebaseFirestore.DocumentData): LoanOffer {
+    return { id, ...data } as LoanOffer;
+}
+
+export interface CreateLoanOfferInput {
+    lenderWalletAddress: string;
+    kind: LoanKind;
+    amountUsd: number;
+    rateBps: number;
+    termDays?: number;
+    note?: string;
+}
+
+export async function createLoanOffer(input: CreateLoanOfferInput): Promise<LoanOffer> {
+    const amountUsd = Math.round(input.amountUsd * 100) / 100;
+    if (!(amountUsd >= MIN_LOAN_USD)) {
+        throw new Error(`Offer amount must be at least $${MIN_LOAN_USD}`);
+    }
+    const rateBps = Math.round(input.rateBps);
+    if (!Number.isFinite(rateBps) || rateBps < OFFER_MIN_RATE_BPS || rateBps > OFFER_MAX_RATE_BPS) {
+        throw new Error(`Rate must be between ${(OFFER_MIN_RATE_BPS / 100).toFixed(1)}% and ${(OFFER_MAX_RATE_BPS / 100).toFixed(1)}% APR`);
+    }
+
+    const offer: Omit<LoanOffer, "id"> = {
+        lenderWalletAddress: input.lenderWalletAddress,
+        kind: input.kind,
+        amountUsd,
+        rateBps,
+        termDays: clampTermDays(input.termDays ?? 30),
+        note: input.note,
+        status: "open",
+        createdAt: nowSec(),
+    };
+    const ref = await adminDb().collection(OFFERS).add(offer);
+    return { id: ref.id, ...offer };
+}
+
+export async function getLoanOffer(offerId: string): Promise<LoanOffer | null> {
+    const snap = await adminDb().collection(OFFERS).doc(offerId).get();
+    return snap.exists ? toOffer(snap.id, snap.data()!) : null;
+}
+
+export async function listOpenLoanOffers(): Promise<LoanOffer[]> {
+    const snap = await adminDb().collection(OFFERS).where("status", "==", "open").orderBy("createdAt", "desc").limit(50).get();
+    return snap.docs.map((d) => toOffer(d.id, d.data()));
+}
+
+export async function listLoanOffersForWallet(wallet: string): Promise<LoanOffer[]> {
+    const snap = await adminDb().collection(OFFERS).where("lenderWalletAddress", "==", wallet).orderBy("createdAt", "desc").get();
+    return snap.docs.map((d) => toOffer(d.id, d.data()));
+}
+
+export async function withdrawLoanOffer(offerId: string, walletAddress: string): Promise<LoanOffer> {
+    const ref = adminDb().collection(OFFERS).doc(offerId);
+    return adminDb().runTransaction(async (txn) => {
+        const snap = await txn.get(ref);
+        if (!snap.exists) throw new Error("Offer not found");
+        const offer = toOffer(snap.id, snap.data()!);
+        if (offer.lenderWalletAddress !== walletAddress) throw new Error("Only the lender who posted this offer can withdraw it");
+        if (offer.status !== "open") throw new Error(`Offer is not open (status: ${offer.status})`);
+        const update = { status: "withdrawn" as const, withdrawnAt: nowSec() };
+        txn.update(ref, update);
+        return { ...offer, ...update };
+    });
+}
+
+export interface AcceptLoanOfferInput {
+    offerId: string;
+    agentId: string;
+    orgId: string;
+    /** Defaults to the offer's full amount; must not exceed it. */
+    amountUsd?: number;
+    requestedByWallet?: string;
+}
+
+/**
+ * Borrower accepts a lender's standing offer: creates a "pending" solo loan
+ * on the offer's terms, reserved so only the offering lender can fund it (see
+ * reservedLenderWallet / fundLoanSolo). Still runs through the normal
+ * eligibility gate — an offer's rate/amount must land within the accepting
+ * agent's own tier band, same as a self-posted solo request.
+ */
+export async function acceptLoanOffer(input: AcceptLoanOfferInput): Promise<Loan> {
+    const offerRef = adminDb().collection(OFFERS).doc(input.offerId);
+
+    const offer = await adminDb().runTransaction(async (txn) => {
+        const snap = await txn.get(offerRef);
+        if (!snap.exists) throw new Error("Offer not found");
+        const current = toOffer(snap.id, snap.data()!);
+        if (current.status !== "open") throw new Error(`Offer is not open (status: ${current.status})`);
+        txn.update(offerRef, { status: "fulfilled" as const });
+        return current;
+    });
+
+    const amountUsd = input.amountUsd !== undefined ? Math.round(input.amountUsd * 100) / 100 : offer.amountUsd;
+    if (amountUsd > offer.amountUsd) {
+        await offerRef.update({ status: "open" });
+        throw new Error(`Amount exceeds the offer's maximum of $${offer.amountUsd.toLocaleString()}`);
+    }
+
+    try {
+        const loan = await requestLoan({
+            agentId: input.agentId,
+            orgId: input.orgId,
+            kind: offer.kind,
+            source: "solo",
+            amountUsd,
+            termDays: offer.termDays,
+            requestedByWallet: input.requestedByWallet,
+            requestedRateBps: offer.rateBps,
+        });
+
+        const loanRef = adminDb().collection(LOANS).doc(loan.id);
+        const update = { offerId: offer.id, reservedLenderWallet: offer.lenderWalletAddress };
+        await loanRef.update(update);
+
+        await offerRef.update({ acceptedLoanId: loan.id, acceptedAt: nowSec() });
+
+        return { ...loan, ...update };
+    } catch (error) {
+        await offerRef.update({ status: "open" });
+        throw error;
+    }
 }
 
 /**

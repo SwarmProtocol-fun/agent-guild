@@ -1,7 +1,7 @@
 /** Agent Guild — Diablo-style agent inventory for the Agent Guild Protocol. */
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,14 +11,13 @@ import { useOrg } from "@/contexts/OrgContext";
 import { getAgentsByOrg, getOrganization, updateOrganization, ensureAgentGroupChat, sendMessage, type Agent } from "@/lib/firestore";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { cn } from "@/lib/utils";
-// [agent-guild-core] ReactBits + Slots extracted to mods
+// [agent-guild-core] ReactBits extracted to mods; slot automations (policy builder,
+// execution history) were a paid mod removed in the open-core split and have no
+// backing API anymore — don't reintroduce UI for them without the mod's /api/v1/slots routes.
 const SpotlightCard = ({ children, className, ...props }: { children: React.ReactNode; className?: string; spotlightColor?: string; [k: string]: unknown }) => <div className={className} {...props}>{children}</div>;
-const SlotPolicyBuilder = () => null;
-const SlotExecutionHistory = () => null;
-interface SlotPolicy { slotId: string; agentId: string; priority: number; conditions?: Record<string, unknown>; }
 import {
   FileText, Shield, GitBranch, BarChart3, MessageSquare, Wrench,
-  Zap, X, Search, Plus, History, Power, Trash2,
+  Zap, X, Search,
 } from "lucide-react";
 
 // ═══════════════════════════════════════════════════════════════
@@ -74,33 +73,7 @@ export default function AgentGuildPage() {
   const [saving, setSaving] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-
-  // Automation state
-  const [policies, setPolicies] = useState<Record<string, SlotPolicy[]>>({});
-  const [builderOpen, setBuilderOpen] = useState(false);
-  const [builderSlotId, setBuilderSlotId] = useState("");
-  const [builderSlotName, setBuilderSlotName] = useState("");
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [historyPolicyId, setHistoryPolicyId] = useState("");
-  const [historyPolicyName, setHistoryPolicyName] = useState("");
-
-  // Fetch policies for all slots
-  const fetchPolicies = useCallback(async () => {
-    if (!currentOrg) return;
-    try {
-      const res = await fetch(`/api/v1/slots?orgId=${currentOrg.id}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const bySlot: Record<string, SlotPolicy[]> = {};
-      for (const p of data.policies || []) {
-        if (!bySlot[p.slotId]) bySlot[p.slotId] = [];
-        bySlot[p.slotId].push(p);
-      }
-      setPolicies(bySlot);
-    } catch {
-      // Silently fail — policies are optional enhancement
-    }
-  }, [currentOrg]);
+  const [assignError, setAssignError] = useState<string | null>(null);
 
   // Load agents and slot assignments
   useEffect(() => {
@@ -113,16 +86,10 @@ export default function AgentGuildPage() {
       setAgents(agentList);
       setAssignments(freshOrg?.agentSlots || freshOrg?.swarmSlots || {});
     }).finally(() => setLoading(false));
-
-    fetchPolicies();
-  }, [currentOrg, fetchPolicies]);
+  }, [currentOrg]);
 
   const filledCount = PROTOCOL_SLOTS.filter(s => assignments[s.id]?.agentId).length;
   const allEquipped = filledCount === PROTOCOL_SLOTS.length;
-
-  const assignedAgentIds = new Set(
-    Object.values(assignments).filter(Boolean).map(a => a!.agentId)
-  );
 
   const filteredAgents = agents.filter(a => {
     if (searchQuery) {
@@ -135,6 +102,7 @@ export default function AgentGuildPage() {
   async function assignAgent(slotId: string, agentId: string) {
     if (!currentOrg) return;
     setSaving(true);
+    setAssignError(null);
     const updated = { ...assignments, [slotId]: { agentId, assignedAt: new Date() } };
     try {
       await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
@@ -156,16 +124,18 @@ export default function AgentGuildPage() {
           });
         }).catch(() => {});
       }
+      setSelectedSlot(null);
     } catch (err) {
       console.error("Failed to assign agent:", err);
+      setAssignError(err instanceof Error ? err.message : "Failed to assign agent");
     }
     setSaving(false);
-    setSelectedSlot(null);
   }
 
   async function assignAgentToAll(agentId: string) {
     if (!currentOrg) return;
     setSaving(true);
+    setAssignError(null);
     const updated: Record<string, { agentId: string; assignedAt: unknown } | null> = {};
     for (const slot of PROTOCOL_SLOTS) {
       updated[slot.id] = { agentId, assignedAt: new Date() };
@@ -188,22 +158,25 @@ export default function AgentGuildPage() {
           });
         }).catch(() => {});
       }
+      setSelectedSlot(null);
     } catch (err) {
       console.error("Failed to assign agent to all slots:", err);
+      setAssignError(err instanceof Error ? err.message : "Failed to assign agent to all slots");
     }
     setSaving(false);
-    setSelectedSlot(null);
   }
 
   async function unassignAgent(slotId: string) {
     if (!currentOrg) return;
     setSaving(true);
+    setAssignError(null);
     const updated = { ...assignments, [slotId]: null };
     try {
       await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
     } catch (err) {
       console.error("Failed to unassign agent:", err);
+      setAssignError(err instanceof Error ? err.message : "Failed to unassign agent");
     }
     setSaving(false);
   }
@@ -215,6 +188,11 @@ export default function AgentGuildPage() {
   }
 
   const selectedSlotInfo = PROTOCOL_SLOTS.find(s => s.id === selectedSlot);
+
+  function openSlot(slotId: string) {
+    setAssignError(null);
+    setSelectedSlot(slotId);
+  }
 
   if (loading) {
     return (
@@ -315,7 +293,7 @@ export default function AgentGuildPage() {
                       "p-4 rounded-xl border relative overflow-hidden min-h-[160px] flex flex-col",
                       styles.border, styles.bg
                     )}
-                    onClick={() => setSelectedSlot(slot.id)}
+                    onClick={() => openSlot(slot.id)}
                   >
                     {/* Glow gradient */}
                     <div className={cn("absolute inset-0 bg-gradient-to-br to-transparent opacity-60", styles.glow)} />
@@ -355,16 +333,6 @@ export default function AgentGuildPage() {
                         </div>
                       </div>
 
-                      {/* Automation badges */}
-                      {(policies[slot.id]?.length ?? 0) > 0 && (
-                        <div className="flex items-center gap-1 mt-2">
-                          <Badge variant="outline" className="text-[9px] border-purple-500/30 text-purple-400">
-                            <Zap className="w-2.5 h-2.5 mr-0.5" />
-                            {policies[slot.id].length} automation{policies[slot.id].length !== 1 ? "s" : ""}
-                          </Badge>
-                        </div>
-                      )}
-
                       <p className="text-[10px] text-muted-foreground/40 text-center mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
                         Click to swap agent
                       </p>
@@ -383,7 +351,7 @@ export default function AgentGuildPage() {
               >
                 <button
                   className="w-full p-4 border-2 border-dashed border-muted-foreground/15 rounded-xl hover:border-muted-foreground/30 transition-all min-h-[160px] flex flex-col items-center justify-center gap-2 text-center"
-                  onClick={() => setSelectedSlot(slot.id)}
+                  onClick={() => openSlot(slot.id)}
                 >
                   <slot.icon className={cn("h-7 w-7", `text-muted-foreground/25`)} />
                   <span className="text-xs font-semibold text-muted-foreground/40">{slot.name}</span>
@@ -420,10 +388,10 @@ export default function AgentGuildPage() {
                     // Find first empty slot, or first slot not assigned to this agent
                     const emptySlot = PROTOCOL_SLOTS.find(s => !assignments[s.id]?.agentId);
                     if (emptySlot) {
-                      setSelectedSlot(emptySlot.id);
+                      openSlot(emptySlot.id);
                     } else {
                       // All filled — let user pick which to swap
-                      setSelectedSlot(PROTOCOL_SLOTS[0].id);
+                      openSlot(PROTOCOL_SLOTS[0].id);
                     }
                   }}
                   className="w-full flex items-center gap-2.5 p-2.5 rounded-lg border border-border hover:border-muted-foreground/30 hover:bg-muted/30 cursor-pointer transition-all text-left"
@@ -451,7 +419,7 @@ export default function AgentGuildPage() {
       </div>
 
       {/* Assignment Dialog */}
-      <Dialog open={!!selectedSlot} onOpenChange={() => setSelectedSlot(null)}>
+      <Dialog open={!!selectedSlot} onOpenChange={() => { setSelectedSlot(null); setAssignError(null); }}>
         <DialogHeader>
           <DialogTitle>
             {selectedSlotInfo ? `Assign Agent to ${selectedSlotInfo.name}` : "Assign Agent"}
@@ -461,106 +429,10 @@ export default function AgentGuildPage() {
           {selectedSlotInfo && (
             <p className="text-xs text-muted-foreground mb-3">{selectedSlotInfo.description}</p>
           )}
-
-          {/* Automation section */}
-          {selectedSlotInfo && (
-            <div className="mb-4 pb-4 border-b border-border">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  Automations
-                </h4>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-[10px] text-purple-400 border-purple-500/30 hover:bg-purple-500/10"
-                  onClick={() => {
-                    setBuilderSlotId(selectedSlotInfo.id);
-                    setBuilderSlotName(selectedSlotInfo.name);
-                    setBuilderOpen(true);
-                  }}
-                >
-                  <Plus className="w-3 h-3 mr-1" /> Add Automation
-                </Button>
-              </div>
-              {(policies[selectedSlotInfo.id]?.length ?? 0) === 0 ? (
-                <p className="text-[10px] text-muted-foreground/50 py-2">
-                  No automations configured. Add one to trigger actions automatically.
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {policies[selectedSlotInfo.id].map((policy) => (
-                    <div
-                      key={policy.id}
-                      className="flex items-center gap-2 p-2 rounded-lg border border-border bg-card/50"
-                    >
-                      <Zap className={cn("w-3.5 h-3.5 shrink-0", policy.enabled ? "text-purple-400" : "text-zinc-600")} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium truncate">{policy.name}</p>
-                        <p className="text-[10px] text-muted-foreground">
-                          {policy.trigger.type.replace(/_/g, " ")} → {policy.action.type.replace(/_/g, " ")}
-                        </p>
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className={cn(
-                          "text-[9px]",
-                          policy.enabled
-                            ? "border-emerald-500/30 text-emerald-400"
-                            : "border-zinc-600 text-zinc-500"
-                        )}
-                      >
-                        {policy.enabled ? "Active" : "Off"}
-                      </Badge>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0 text-zinc-500 hover:text-zinc-300"
-                        onClick={() => {
-                          setHistoryPolicyId(policy.id);
-                          setHistoryPolicyName(policy.name);
-                          setHistoryOpen(true);
-                        }}
-                        title="View execution history"
-                      >
-                        <History className="w-3 h-3" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0 text-zinc-500 hover:text-amber-400"
-                        onClick={async () => {
-                          try {
-                            await fetch(`/api/v1/slots/${policy.id}`, {
-                              method: "PATCH",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ enabled: !policy.enabled }),
-                            });
-                            fetchPolicies();
-                          } catch {}
-                        }}
-                        title={policy.enabled ? "Disable" : "Enable"}
-                      >
-                        <Power className="w-3 h-3" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 p-0 text-zinc-500 hover:text-red-400"
-                        onClick={async () => {
-                          try {
-                            await fetch(`/api/v1/slots/${policy.id}`, { method: "DELETE" });
-                            fetchPolicies();
-                          } catch {}
-                        }}
-                        title="Delete automation"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+          {assignError && (
+            <p className="text-xs text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">
+              {assignError}
+            </p>
           )}
 
           <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
@@ -619,24 +491,6 @@ export default function AgentGuildPage() {
           </div>
         </DialogContent>
       </Dialog>
-
-      {/* Slot Policy Builder Dialog */}
-      <SlotPolicyBuilder
-        open={builderOpen}
-        onOpenChange={setBuilderOpen}
-        slotId={builderSlotId}
-        slotName={builderSlotName}
-        orgId={currentOrg?.id || ""}
-        onSave={fetchPolicies}
-      />
-
-      {/* Execution History Dialog */}
-      <SlotExecutionHistory
-        open={historyOpen}
-        onOpenChange={setHistoryOpen}
-        policyId={historyPolicyId}
-        policyName={historyPolicyName}
-      />
     </div>
   );
 }

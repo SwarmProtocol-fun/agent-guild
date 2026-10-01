@@ -78,6 +78,25 @@ def main():
     statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
     fill = statuses[0].get("filled") or statuses[0].get("resting") or statuses[0]
 
+    # Hyperliquid's order response never carries realized PnL — that only
+    # shows up per-fill in the user's fill history (closedPnl), keyed by
+    # this order's oid. The mod's /settle-trade route (and the daily-loss
+    # risk guard, which sums realizedPnl across today's closed trades) both
+    # depend on this being populated for a reduce-only (closing) order, so
+    # look it up here rather than silently leaving it null. Best-effort: a
+    # lookup failure shouldn't fail a trade that already executed.
+    realized_pnl = None
+    if args.reduce_only:
+        try:
+            oid = fill.get("oid") if isinstance(fill, dict) else None
+            if oid is not None:
+                user_fills = info.user_fills(wallet.address)
+                matches = [f for f in user_fills if f.get("oid") == oid]
+                if matches:
+                    realized_pnl = sum(float(f.get("closedPnl", 0)) for f in matches)
+        except Exception:
+            pass
+
     # SL/TP attach as separate reduce-only trigger orders on the opposite
     # side of the position, priced a fixed percent through the fill/mid —
     # only makes sense for an order that opens/adds to a position.
@@ -112,6 +131,7 @@ def main():
         "leverage": args.leverage,
         "raw": fill,
         "triggers": triggers or None,
+        "realizedPnl": realized_pnl,
     }))
 
 

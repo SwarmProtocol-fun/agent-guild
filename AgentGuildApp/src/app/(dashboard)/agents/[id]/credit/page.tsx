@@ -31,6 +31,7 @@ import { CreditAuditTable } from "@/components/credit/credit-audit-table";
 import { isPlatformAdmin } from "@/lib/platform-admins";
 import { LoanEligibilityCard } from "@/components/lending/loan-eligibility-card";
 import { ActiveLoansPanel } from "@/components/lending/active-loans-panel";
+import { LoanOffersPanel } from "@/components/lending/loan-offers-panel";
 
 export default function AgentCreditPage({ params }: { params: Promise<{ id: string }> }) {
     const resolvedParams = use(params);
@@ -311,6 +312,12 @@ export default function AgentCreditPage({ params }: { params: Promise<{ id: stri
                 agentId={agentId}
                 orgId={currentOrg?.id || agent.orgId}
                 onLoanRequested={() => setLoanRefreshKey((k) => k + 1)}
+            />
+            <LoanOffersPanel
+                agentId={agentId}
+                orgId={currentOrg?.id || agent.orgId}
+                walletAddress={sessionAddress}
+                onAccepted={() => setLoanRefreshKey((k) => k + 1)}
             />
             <ActiveLoansPanel agentId={agentId} refreshKey={loanRefreshKey} />
 

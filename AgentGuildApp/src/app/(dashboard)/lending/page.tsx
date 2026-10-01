@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
     Landmark, Users, User, Loader2, AlertCircle, CheckCircle2,
-    ShieldCheck, ArrowDownToLine, ArrowUpFromLine, Wallet,
+    ShieldCheck, ArrowDownToLine, ArrowUpFromLine, Wallet, Plus, X,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -21,10 +21,11 @@ import { useSession } from "@/contexts/SessionContext";
 import { getDoc, doc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
+import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-dialog";
 import type { Agent } from "@/lib/firestore";
-import type { LendingPool, Loan, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
+import type { LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
 
-type Tab = "pools" | "fund" | "positions";
+type Tab = "pools" | "fund" | "offers" | "positions";
 
 function fmt(n: number): string {
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -41,6 +42,8 @@ export default function LendingMarketplacePage() {
     const [activeTab, setActiveTab] = useState<Tab>("pools");
     const [pools, setPools] = useState<LendingPool[]>([]);
     const [openLoans, setOpenLoans] = useState<Loan[]>([]);
+    const [openOffers, setOpenOffers] = useState<LoanOffer[]>([]);
+    const [myOffers, setMyOffers] = useState<LoanOffer[]>([]);
     const [positions, setPositions] = useState<Record<string, PoolPosition>>({});
     const [fundedLoans, setFundedLoans] = useState<Loan[]>([]);
     const [pendingWithdrawals, setPendingWithdrawals] = useState<PoolWithdrawalRequest[]>([]);
@@ -51,19 +54,23 @@ export default function LendingMarketplacePage() {
 
     const [poolDialog, setPoolDialog] = useState<{ pool: LendingPool; mode: "deposit" | "withdraw" } | null>(null);
     const [fundingLoan, setFundingLoan] = useState<Loan | null>(null);
+    const [creatingOffer, setCreatingOffer] = useState(false);
 
     const load = useCallback(async () => {
         setLoading(true);
         setError(null);
         try {
-            const [poolsRes, loansRes] = await Promise.all([
+            const [poolsRes, loansRes, offersRes] = await Promise.all([
                 fetch("/api/v1/lending/pools"),
                 fetch("/api/v1/lending/loans?open=solo"),
+                fetch("/api/v1/lending/offers?open=1"),
             ]);
             const poolsData = poolsRes.ok ? (await poolsRes.json()).pools as LendingPool[] : [];
             const loansData = loansRes.ok ? (await loansRes.json()).loans as Loan[] : [];
+            const offersData = offersRes.ok ? (await offersRes.json()).offers as LoanOffer[] : [];
             setPools(poolsData);
             setOpenLoans(loansData);
+            setOpenOffers(offersData);
 
             if (sessionAddress) {
                 const posEntries = await Promise.all(
@@ -85,10 +92,14 @@ export default function LendingMarketplacePage() {
                     headers: { "x-wallet-address": sessionAddress },
                 });
                 setPendingWithdrawals(withdrawalsRes.ok ? (await withdrawalsRes.json()).requests : []);
+
+                const myOffersRes = await fetch(`/api/v1/lending/offers?lenderWallet=${sessionAddress}`);
+                setMyOffers(myOffersRes.ok ? (await myOffersRes.json()).offers : []);
             } else {
                 setPositions({});
                 setFundedLoans([]);
                 setPendingWithdrawals([]);
+                setMyOffers([]);
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : "Failed to load lending data");
@@ -139,6 +150,7 @@ export default function LendingMarketplacePage() {
                 {([
                     { key: "pools", label: "Pools" },
                     { key: "fund", label: `Fund a Loan (${openLoans.length})` },
+                    { key: "offers", label: `Loan Offers (${openOffers.length})` },
                     { key: "positions", label: "My Positions" },
                 ] as { key: Tab; label: string }[]).map(({ key, label }) => (
                     <button
@@ -219,10 +231,12 @@ export default function LendingMarketplacePage() {
 
                     {activeTab === "fund" && (
                         <div className="space-y-2">
-                            {openLoans.length === 0 ? (
-                                <p className="text-sm text-muted-foreground py-8 text-center">No open solo loan requests right now.</p>
-                            ) : (
-                                openLoans.map((loan) => (
+                            {(() => {
+                                const fundable = openLoans.filter((l) => !l.reservedLenderWallet || l.reservedLenderWallet === sessionAddress);
+                                if (fundable.length === 0) {
+                                    return <p className="text-sm text-muted-foreground py-8 text-center">No open solo loan requests right now.</p>;
+                                }
+                                return fundable.map((loan) => (
                                     <div key={loan.id} className="flex items-center justify-between p-3 rounded-lg border border-border">
                                         <div className="flex items-center gap-3">
                                             {loan.kind === "trust" ? (
@@ -239,6 +253,7 @@ export default function LendingMarketplacePage() {
                                                     {(loan.interestRateBps / 100).toFixed(1)}% APR &middot; {loan.termDays}d term
                                                     {loan.kind === "trust" && ` · $${loan.collateralUsd.toFixed(0)} escrow`}
                                                     {loan.purpose && ` · ${loan.purpose}`}
+                                                    {loan.reservedLenderWallet && " · from your offer"}
                                                 </div>
                                             </div>
                                         </div>
@@ -246,8 +261,49 @@ export default function LendingMarketplacePage() {
                                             Fund
                                         </Button>
                                     </div>
-                                ))
+                                ));
+                            })()}
+                        </div>
+                    )}
+
+                    {activeTab === "offers" && (
+                        <div className="space-y-3">
+                            <div className="flex justify-end">
+                                <Button size="sm" className="h-7 text-xs gap-1" onClick={() => setCreatingOffer(true)}>
+                                    <Plus className="h-3 w-3" /> Create Offer
+                                </Button>
+                            </div>
+                            {openOffers.length === 0 ? (
+                                <p className="text-sm text-muted-foreground py-8 text-center">No open loan offers right now.</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {openOffers.map((offer) => (
+                                        <div key={offer.id} className="flex items-center justify-between p-3 rounded-lg border border-border">
+                                            <div className="flex items-center gap-3">
+                                                {offer.kind === "trust" ? (
+                                                    <ShieldCheck className="h-4 w-4 text-amber-500 shrink-0" />
+                                                ) : (
+                                                    <Landmark className="h-4 w-4 text-emerald-500 shrink-0" />
+                                                )}
+                                                <div>
+                                                    <div className="text-sm font-medium">
+                                                        Up to ${offer.amountUsd.toLocaleString()}
+                                                        <span className="text-muted-foreground font-normal"> &middot; {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d</span>
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground">
+                                                        {offer.kind === "trust" ? "Trust (escrowed)" : "Unsecured"}
+                                                        {offer.note && ` · ${offer.note}`}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <Badge variant="outline" className="text-[10px]">open</Badge>
+                                        </div>
+                                    ))}
+                                </div>
                             )}
+                            <p className="text-[11px] text-muted-foreground pt-1">
+                                Accept an offer from an agent&apos;s credit page — eligibility (amount, rate band) is checked against that agent&apos;s own tier.
+                            </p>
                         </div>
                     )}
 
@@ -286,6 +342,42 @@ export default function LendingMarketplacePage() {
                                         </div>
                                     </div>
                                 )}
+                                <div>
+                                    <h3 className="text-sm font-semibold mb-2">My Loan Offers</h3>
+                                    {myOffers.length === 0 ? (
+                                        <p className="text-xs text-muted-foreground">No loan offers posted yet.</p>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {myOffers.map((offer) => (
+                                                <div key={offer.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
+                                                    <span>
+                                                        ${offer.amountUsd.toLocaleString()} at {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d
+                                                    </span>
+                                                    <div className="flex items-center gap-2">
+                                                        <Badge variant="outline" className="text-[10px]">{offer.status}</Badge>
+                                                        {offer.status === "open" && (
+                                                            <Button
+                                                                size="sm"
+                                                                variant="ghost"
+                                                                className="h-6 w-6 p-0"
+                                                                onClick={async () => {
+                                                                    if (!sessionAddress) return;
+                                                                    await fetch(`/api/v1/lending/offers/${offer.id}/withdraw`, {
+                                                                        method: "POST",
+                                                                        headers: { "x-wallet-address": sessionAddress },
+                                                                    });
+                                                                    setRefreshKey((k) => k + 1);
+                                                                }}
+                                                            >
+                                                                <X className="h-3 w-3" />
+                                                            </Button>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
                                 <div>
                                     <h3 className="text-sm font-semibold mb-2">Solo Loans Funded</h3>
                                     {fundedLoans.length === 0 ? (
@@ -333,6 +425,16 @@ export default function LendingMarketplacePage() {
                     }}
                 />
             )}
+
+            <CreateLoanOfferDialog
+                open={creatingOffer}
+                onOpenChange={setCreatingOffer}
+                walletAddress={sessionAddress}
+                onCreated={() => {
+                    setCreatingOffer(false);
+                    setRefreshKey((k) => k + 1);
+                }}
+            />
         </div>
     );
 }

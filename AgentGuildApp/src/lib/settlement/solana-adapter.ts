@@ -14,7 +14,7 @@ import {
 } from "@solana/spl-token";
 import { createMemoInstruction } from "@solana/spl-memo";
 import { getChain } from "@/lib/chains";
-import { updateCreditOnChain } from "@/lib/solana/platform";
+import { getPlatformKeypair, updateCreditOnChain } from "@/lib/solana/platform";
 import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResult } from "./types";
 
 // Circle's public devnet USDC-Dev mint — same one the devnet faucet issues.
@@ -24,10 +24,14 @@ const USDC_DECIMALS = 6;
 const MEMO_PREFIX = "agent-guild:receipt:";
 const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
+// Same SOLANA_PLATFORM_KEYPAIR (base58) that lib/solana/platform.ts, the
+// gas-sponsor route, and metaplex/mint already use — this used to read its
+// own SOLANA_SETTLEMENT_SECRET_KEY (JSON-array format), a var that was never
+// set anywhere in .env.example/.env.local/CI, so settlement always threw.
 function loadPlatformKeypair(): Keypair {
-  const raw = process.env.SOLANA_SETTLEMENT_SECRET_KEY;
-  if (!raw) throw new Error("SOLANA_SETTLEMENT_SECRET_KEY not configured");
-  return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(raw)));
+  const keypair = getPlatformKeypair();
+  if (!keypair) throw new Error("SOLANA_PLATFORM_KEYPAIR not configured");
+  return keypair;
 }
 
 /**

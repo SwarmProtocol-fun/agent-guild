@@ -25,11 +25,12 @@ interface TradeRecord {
 
 interface Strategy {
   id: string;
-  type: "dca" | "grid" | "signal";
+  type: "dca" | "grid" | "signal" | "sniper";
   coin: string;
   sizeUsd: number;
   enabled: boolean;
   pendingSignal: boolean;
+  webhookToken: string | null;
 }
 
 interface RiskConfig {
@@ -38,7 +39,15 @@ interface RiskConfig {
   maxDailyLossUsd: number;
 }
 
-type Tab = "trade" | "positions" | "strategies" | "history" | "risk";
+interface ReferralStats {
+  code: string;
+  referredBy: string | null;
+  referredCount: number;
+  totalVolumeUsd: number;
+  rewardUsd: number;
+}
+
+type Tab = "trade" | "positions" | "strategies" | "history" | "risk" | "referral";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "trade", label: "Trade" },
@@ -46,6 +55,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "strategies", label: "Strategies" },
   { id: "history", label: "History" },
   { id: "risk", label: "Risk limits" },
+  { id: "referral", label: "Referral" },
 ];
 
 const inputClass =
@@ -336,6 +346,39 @@ function TradingPanel({ api }: PanelProps) {
     if (!data.error) loadRiskConfig();
   }
 
+  // ── Referral ───────────────────────────────────────────────────────────────
+  const [referral, setReferral] = useState<ReferralStats | "loading" | "error" | null>(null);
+  const [referralCodeInput, setReferralCodeInput] = useState("");
+  const [referralStatus, setReferralStatus] = useState<string | null>(null);
+
+  async function loadReferral() {
+    if (!agentId) return;
+    setReferral("loading");
+    try {
+      const resp = await api(`referral/${agentId}?orgId=${encodeURIComponent(orgId)}`);
+      const data = await resp.json();
+      setReferral(data);
+    } catch {
+      setReferral("error");
+    }
+  }
+
+  async function applyReferral(e: FormEvent) {
+    e.preventDefault();
+    setReferralStatus("applying…");
+    const resp = await api("referral/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orgId, agentId, referralCode: referralCodeInput }),
+    });
+    const data = await resp.json();
+    setReferralStatus(data.error ? `error: ${data.error}` : "applied");
+    if (!data.error) {
+      setReferralCodeInput("");
+      loadReferral();
+    }
+  }
+
   // ── History ─────────────────────────────────────────────────────────────
   const [history, setHistory] = useState<{ trades: TradeRecord[]; stats: { totalPnl: number; winRate: number; count: number } } | "loading" | "error" | null>(null);
 
@@ -357,15 +400,19 @@ function TradingPanel({ api }: PanelProps) {
 
   // ── Strategies ─────────────────────────────────────────────────────────────
   const [strategies, setStrategies] = useState<Strategy[] | "loading" | "error" | null>(null);
-  const [strategyType, setStrategyType] = useState<"dca" | "grid" | "signal">("dca");
+  const [strategyType, setStrategyType] = useState<"dca" | "grid" | "signal" | "sniper">("dca");
   const [strategyCoin, setStrategyCoin] = useState("ETH");
   const [strategySizeUsd, setStrategySizeUsd] = useState("10");
   const [dcaIntervalMin, setDcaIntervalMin] = useState("60");
   const [gridLower, setGridLower] = useState("");
   const [gridUpper, setGridUpper] = useState("");
   const [gridLevels, setGridLevels] = useState("5");
+  const [sniperMode, setSniperMode] = useState<"new-listing" | "price-above" | "price-below">("new-listing");
+  const [sniperTargetPrice, setSniperTargetPrice] = useState("");
   const [strategyStatus, setStrategyStatus] = useState<string | null>(null);
   const [executingId, setExecutingId] = useState<string | null>(null);
+  const [webhookUrls, setWebhookUrls] = useState<Record<string, string>>({});
+  const [webhookBusyId, setWebhookBusyId] = useState<string | null>(null);
 
   async function loadStrategies() {
     if (!agentId) return;
@@ -389,11 +436,13 @@ function TradingPanel({ api }: PanelProps) {
     const params =
       strategyType === "dca" ? { intervalMs: Number(dcaIntervalMin) * 60_000 } :
       strategyType === "grid" ? { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels) } :
+      strategyType === "sniper" ? { mode: sniperMode, ...(sniperMode !== "new-listing" ? { targetPrice: Number(sniperTargetPrice) } : {}) } :
       {};
+    const coin = strategyType === "sniper" && sniperMode === "new-listing" ? strategyCoin || "ANY" : strategyCoin;
     const resp = await api("strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orgId, agentId, wallet, type: strategyType, coin: strategyCoin, sizeUsd: Number(strategySizeUsd), params }),
+      body: JSON.stringify({ orgId, agentId, wallet, type: strategyType, coin, sizeUsd: Number(strategySizeUsd), params }),
     });
     const data = await resp.json();
     setStrategyStatus(data.error ? `error: ${data.error}` : "created");
@@ -420,6 +469,40 @@ function TradingPanel({ api }: PanelProps) {
     setStrategyStatus(data.error ? `error: ${data.error}` : `fired — task ${data.taskId}`);
   }
 
+  async function issueWebhook(id: string) {
+    setWebhookBusyId(id);
+    try {
+      const resp = await api(`strategy/${id}/webhook-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgId, agentId }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setStrategyStatus(`error: ${data.error}`);
+        return;
+      }
+      const origin = typeof window !== "undefined" ? window.location.origin : "";
+      setWebhookUrls((prev) => ({ ...prev, [id]: `${origin}${data.path}` }));
+    } finally {
+      setWebhookBusyId(null);
+    }
+  }
+
+  async function revokeWebhook(id: string) {
+    setWebhookBusyId(id);
+    try {
+      await api(`strategy/${id}/webhook-token`, { method: "DELETE" });
+      setWebhookUrls((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    } finally {
+      setWebhookBusyId(null);
+    }
+  }
+
   async function executePending(id: string) {
     setExecutingId(id);
     setStrategyStatus(null);
@@ -442,6 +525,7 @@ function TradingPanel({ api }: PanelProps) {
     loadRiskConfig();
     loadHistory();
     loadStrategies();
+    loadReferral();
   }
 
   const pendingStrategies = Array.isArray(strategies) ? strategies.filter((s) => s.pendingSignal) : [];
@@ -698,7 +782,7 @@ function TradingPanel({ api }: PanelProps) {
       )}
 
       {activeTab === "strategies" && (
-        <Section title="Strategies" description="DCA and grid conditions are detected automatically but still need your passphrase to execute (see Pending signals above).">
+        <Section title="Strategies" description="DCA, grid, and sniper conditions are detected automatically but still need your passphrase to execute (see Pending signals above).">
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted-foreground">{Array.isArray(strategies) ? `${strategies.length} strategies` : ""}</span>
             <button type="button" className={secondaryButtonClass()} onClick={loadStrategies}>Refresh</button>
@@ -708,22 +792,51 @@ function TradingPanel({ api }: PanelProps) {
           {strategies === "error" && <ErrorNote message="Couldn't load strategies." onRetry={loadStrategies} />}
           {Array.isArray(strategies) && strategies.length === 0 && <p className="text-sm text-muted-foreground">No strategies yet — create one below.</p>}
           {Array.isArray(strategies) && strategies.map((s) => (
-            <div key={s.id} className="flex items-center justify-between rounded-md border border-border p-2 text-sm">
-              <span className="flex items-center gap-2">
-                {s.type} · {s.coin} · ${s.sizeUsd}
-                {!s.enabled && <Badge tone="neutral">disabled</Badge>}
-                {s.pendingSignal && <Badge tone="warning">pending</Badge>}
-              </span>
-              <div className="flex gap-2">
-                {s.type === "signal" && (
-                  <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!masterSecret}>
-                    Fire
+            <div key={s.id} className="rounded-md border border-border p-2 text-sm space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  {s.type} · {s.coin} · ${s.sizeUsd}
+                  {!s.enabled && <Badge tone="neutral">disabled</Badge>}
+                  {s.pendingSignal && <Badge tone="warning">pending</Badge>}
+                </span>
+                <div className="flex gap-2">
+                  {s.type === "signal" && (
+                    <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!masterSecret}>
+                      Fire
+                    </button>
+                  )}
+                  <button type="button" className={secondaryButtonClass()} onClick={() => toggleStrategy(s.id, !s.enabled)}>
+                    {s.enabled ? "Disable" : "Enable"}
                   </button>
-                )}
-                <button type="button" className={secondaryButtonClass()} onClick={() => toggleStrategy(s.id, !s.enabled)}>
-                  {s.enabled ? "Disable" : "Enable"}
-                </button>
+                </div>
               </div>
+
+              {s.type === "signal" && (
+                <div className="border-t border-border pt-2 flex items-center justify-between gap-2">
+                  {webhookUrls[s.id] || s.webhookToken ? (
+                    <>
+                      <code className="text-xs text-muted-foreground truncate">
+                        {webhookUrls[s.id] ?? "webhook configured — generate again to view the URL"}
+                      </code>
+                      <button
+                        type="button"
+                        className={secondaryButtonClass("text-destructive hover:bg-destructive/10 shrink-0")}
+                        onClick={() => revokeWebhook(s.id)}
+                        disabled={webhookBusyId === s.id}
+                      >
+                        Revoke webhook
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs text-muted-foreground">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
+                      <button type="button" className={secondaryButtonClass("shrink-0")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
+                        {webhookBusyId === s.id ? "Generating…" : "Generate webhook"}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           ))}
 
@@ -735,11 +848,17 @@ function TradingPanel({ api }: PanelProps) {
                   <option value="dca">DCA</option>
                   <option value="grid">Grid</option>
                   <option value="signal">Signal</option>
+                  <option value="sniper">Sniper</option>
                 </select>
               </div>
               <div>
                 <label htmlFor="strategyCoin" className={labelClass}>Coin</label>
-                <input id="strategyCoin" name="strategyCoin" className={inputClass} value={strategyCoin} onChange={(e) => setStrategyCoin(e.target.value)} required />
+                <input
+                  id="strategyCoin" name="strategyCoin" className={inputClass} value={strategyCoin}
+                  onChange={(e) => setStrategyCoin(e.target.value)}
+                  placeholder={strategyType === "sniper" && sniperMode === "new-listing" ? "ANY (or a specific coin)" : undefined}
+                  required={!(strategyType === "sniper" && sniperMode === "new-listing")}
+                />
               </div>
               <div>
                 <label htmlFor="strategySizeUsd" className={labelClass}>Size (USD)</label>
@@ -766,6 +885,29 @@ function TradingPanel({ api }: PanelProps) {
                   <label htmlFor="gridLevels" className={labelClass}>Levels</label>
                   <input id="gridLevels" name="gridLevels" type="number" min="1" className={inputClass} value={gridLevels} onChange={(e) => setGridLevels(e.target.value)} required />
                 </div>
+              </div>
+            )}
+            {strategyType === "sniper" && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label htmlFor="sniperMode" className={labelClass}>Trigger</label>
+                  <select id="sniperMode" name="sniperMode" className={inputClass} value={sniperMode} onChange={(e) => setSniperMode(e.target.value as typeof sniperMode)}>
+                    <option value="new-listing">New listing</option>
+                    <option value="price-above">Price rises above</option>
+                    <option value="price-below">Price falls below</option>
+                  </select>
+                </div>
+                {sniperMode !== "new-listing" && (
+                  <div>
+                    <label htmlFor="sniperTargetPrice" className={labelClass}>Target price</label>
+                    <input id="sniperTargetPrice" name="sniperTargetPrice" type="number" min="0" className={inputClass} value={sniperTargetPrice} onChange={(e) => setSniperTargetPrice(e.target.value)} required />
+                  </div>
+                )}
+                {sniperMode === "new-listing" && (
+                  <p className="text-xs text-muted-foreground self-end pb-2 col-span-1">
+                    Fires once, the moment a new Hyperliquid perp lists. Auto-disarms after firing.
+                  </p>
+                )}
               </div>
             )}
             <button type="submit" className={primaryButtonClass()} disabled={!agentId || !wallet}>Create strategy</button>
@@ -835,6 +977,52 @@ function TradingPanel({ api }: PanelProps) {
             )}
             {riskStatus && <p className="text-sm text-muted-foreground">{riskStatus}</p>}
           </form>
+        </Section>
+      )}
+
+      {activeTab === "referral" && (
+        <Section title="Referral" description="Refer another agent and earn a cut of the trading volume it generates.">
+          {referral === "loading" && <Spinner label="Loading referral stats…" />}
+          {referral === "error" && <ErrorNote message="Couldn't load referral stats." onRetry={loadReferral} />}
+          {referral && referral !== "loading" && referral !== "error" && (
+            <>
+              <div>
+                <p className={labelClass}>Your referral code</p>
+                <code className="text-sm">{referral.code}</code>
+                <p className="text-xs text-muted-foreground mt-1">Share this agent ID — anyone who applies it below counts toward your referral stats.</p>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-sm">
+                <div className="rounded-md border border-border p-2">
+                  <div className="text-muted-foreground text-xs">Referred agents</div>
+                  <div className="font-medium">{referral.referredCount}</div>
+                </div>
+                <div className="rounded-md border border-border p-2">
+                  <div className="text-muted-foreground text-xs">Volume generated</div>
+                  <div className="font-medium">${referral.totalVolumeUsd.toFixed(2)}</div>
+                </div>
+                <div className="rounded-md border border-border p-2">
+                  <div className="text-muted-foreground text-xs">Reward earned</div>
+                  <div className="font-medium text-green-600 dark:text-green-400">${referral.rewardUsd.toFixed(2)}</div>
+                </div>
+              </div>
+              {referral.referredBy ? (
+                <p className="text-sm text-muted-foreground">Referred by <code>{referral.referredBy}</code>.</p>
+              ) : (
+                <form className="flex gap-2 items-end border-t border-border pt-3" onSubmit={applyReferral}>
+                  <div className="flex-1">
+                    <label htmlFor="referralCodeInput" className={labelClass}>Have a referral code?</label>
+                    <input
+                      id="referralCodeInput" name="referralCodeInput" className={inputClass}
+                      value={referralCodeInput} onChange={(e) => setReferralCodeInput(e.target.value)}
+                      placeholder="Referring agent's ID"
+                    />
+                  </div>
+                  <button type="submit" className={primaryButtonClass()} disabled={!agentId || !referralCodeInput}>Apply</button>
+                </form>
+              )}
+              {referralStatus && <p className="text-sm text-muted-foreground">{referralStatus}</p>}
+            </>
+          )}
         </Section>
       )}
     </div>

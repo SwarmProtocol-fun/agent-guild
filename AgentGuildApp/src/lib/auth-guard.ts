@@ -176,6 +176,34 @@ export async function requireOrgMember(
 }
 
 /**
+ * Verify a wallet address is a member (or owner) of the specified org.
+ * Same check as `requireOrgMember`, but for callers that already have a
+ * verified wallet address in hand instead of a `NextRequest` to read the
+ * `x-wallet-address` header from — e.g. mod routes, which get the caller's
+ * address from the session object `/api/mods/*` already built server-side
+ * (see `ModSession` in `@agent-guild/sdk`).
+ */
+export async function requireOrgMembershipByAddress(
+  walletAddress: string,
+  orgId: string,
+): Promise<OrgAuthResult> {
+  const wallet = canonicalizeWalletAddress(walletAddress);
+  const org = await getOrganization(orgId);
+  if (!org) {
+    return { ok: false, error: "Organization not found", status: 404 };
+  }
+
+  const isOwner = org.ownerAddress != null && canonicalizeWalletAddress(org.ownerAddress) === wallet;
+  const isMember = org.members?.some((m) => canonicalizeWalletAddress(m) === wallet);
+
+  if (!isOwner && !isMember) {
+    return { ok: false, error: "Not a member of this organization", status: 403 };
+  }
+
+  return { ok: true, org, walletAddress: wallet };
+}
+
+/**
  * Verify the caller is the owner (admin) of the specified org.
  * Requires `x-wallet-address` header.
  */

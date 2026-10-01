@@ -60,6 +60,10 @@ export interface Loan {
     purpose?: string;
     /** On-chain signature that funded this loan's principal (treasury or solo lender -> borrower). */
     disbursementTxSig?: string;
+    /** Set when this loan originated from accepting a LoanOffer. */
+    offerId?: string;
+    /** Set alongside offerId — only this wallet may fund the loan via fundLoanSolo(), since its lender pre-committed to these terms. */
+    reservedLenderWallet?: string;
 }
 
 export interface LoanRepayment {
@@ -129,6 +133,31 @@ export interface PoolDepositRecord {
     amountUsd: number;
     txSig: string;
     depositedAt: number;
+}
+
+export type LoanOfferStatus = "open" | "withdrawn" | "fulfilled";
+
+/**
+ * A lender-initiated standing offer to fund a solo loan on pre-agreed terms.
+ * The inverse of a borrower's solo loan request: here the lender posts terms
+ * first, and a borrower accepts one (subject to their own eligibility), which
+ * creates a "pending" solo Loan reserved for that lender to fund (see
+ * Loan.reservedLenderWallet).
+ */
+export interface LoanOffer {
+    id: string;
+    lenderWalletAddress: string;
+    kind: LoanKind;
+    /** Maximum principal the lender will fund at these terms. */
+    amountUsd: number;
+    rateBps: number;
+    termDays: number;
+    note?: string;
+    status: LoanOfferStatus;
+    createdAt: number;
+    acceptedLoanId?: string;
+    acceptedAt?: number;
+    withdrawnAt?: number;
 }
 
 export interface KindEligibility {
