@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
       .get();
 
     const candidateIds = snap.docs.map((d) => d.id);
-    const passports = await Promise.all(candidateIds.map((id) => buildAgentPassport(id)));
+    const passports = await Promise.all(candidateIds.map((id) => buildAgentPassport(id, { walletBalances: false })));
 
     let results: AgentPassport[] = passports.filter((p): p is AgentPassport => p !== null);
 

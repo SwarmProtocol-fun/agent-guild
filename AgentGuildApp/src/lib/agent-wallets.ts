@@ -50,6 +50,8 @@ export interface AgentWallet {
   /** True if this EVM wallet's key was also registered with mods/hyperliquid-trading at generation time. */
   hyperliquidRegistered?: boolean;
   hyperliquidNetwork?: HyperliquidNetwork;
+  /** Solana only. The custodial wallet paid-job payouts are labelled against — at most one per agent. */
+  payout?: boolean;
 }
 
 interface AgentWalletDoc extends Omit<AgentWallet, "id" | "createdAt"> {
@@ -120,6 +122,7 @@ function toPublicWallet(id: string, data: Record<string, unknown>): AgentWallet 
     createdAt: createdAt instanceof Timestamp ? createdAt.toDate() : null,
     hyperliquidRegistered: (data.hyperliquidRegistered as boolean) || undefined,
     hyperliquidNetwork: (data.hyperliquidNetwork as HyperliquidNetwork) || undefined,
+    payout: (data.payout as boolean) || undefined,
   };
 }
 
@@ -151,6 +154,9 @@ export async function generateAgentWallet(
   if (existing.size >= MAX_WALLETS_PER_AGENT) {
     throw new Error(`Agent already has the maximum of ${MAX_WALLETS_PER_AGENT} wallets`);
   }
+
+  // The first custodial Solana wallet becomes the payout wallet; later ones never take the flag on their own.
+  const isFirstSolana = chain === "solana" && !existing.docs.some((d) => (d.data().chain ?? "solana") === "solana");
 
   let publicKey: string;
   let secretMaterial: string;
@@ -191,6 +197,7 @@ export async function generateAgentWallet(
     createdBy,
     createdAt: FieldValue.serverTimestamp(),
     ...(hyperliquidRegistered ? { hyperliquidRegistered, hyperliquidNetwork } : {}),
+    ...(isFirstSolana ? { payout: true } : {}),
   };
 
   const ref = await adminDb().collection(AGENT_WALLETS_COLLECTION).add(doc);
@@ -207,6 +214,32 @@ export async function listAgentWallets(agentId: string): Promise<AgentWallet[]> 
   return snap.docs
     .map((d) => toPublicWallet(d.id, d.data()))
     .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0));
+}
+
+/**
+ * Moves the payout flag to one custodial Solana wallet of this agent and
+ * clears it on the agent's other custodial Solana wallets, in one batch.
+ * Throws a WalletInputError for anything that isn't a custodial Solana
+ * wallet belonging to this agent (EVM, the identity row, another agent's).
+ */
+export class WalletInputError extends Error {}
+
+export async function setPayoutWallet(agentId: string, orgId: string, walletId: string): Promise<void> {
+  if (walletId === IDENTITY_WALLET_ID) throw new WalletInputError("The identity wallet cannot be the payout wallet");
+  const snap = await adminDb()
+    .collection(AGENT_WALLETS_COLLECTION)
+    .where("agentId", "==", agentId)
+    .get();
+  const target = snap.docs.find((d) => d.id === walletId);
+  if (!target || target.data().orgId !== orgId) throw new WalletInputError("Wallet does not belong to this agent");
+  if ((target.data().chain ?? "solana") !== "solana") throw new WalletInputError("Only a Solana wallet can be the payout wallet");
+
+  const batch = adminDb().batch();
+  for (const d of snap.docs) {
+    if ((d.data().chain ?? "solana") !== "solana") continue;
+    batch.update(d.ref, { payout: d.id === walletId });
+  }
+  await batch.commit();
 }
 
 /**
@@ -370,12 +403,111 @@ async function getHyperliquidEquity(address: string, network: HyperliquidNetwork
   }
 }
 
-/** Read-only balance check, branching by chain. */
-export async function getAgentWalletBalance(wallet: Pick<AgentWallet, "publicKey" | "chain" | "hyperliquidNetwork">): Promise<WalletBalance> {
+/** Read-only balance check, branching by chain. Hyperliquid equity is only looked up for a wallet registered there. */
+export async function getAgentWalletBalance(
+  wallet: Pick<AgentWallet, "publicKey" | "chain" | "hyperliquidNetwork" | "hyperliquidRegistered">,
+): Promise<WalletBalance> {
   if (wallet.chain === "evm") {
-    const hyperliquidEquity = await getHyperliquidEquity(wallet.publicKey, wallet.hyperliquidNetwork ?? "testnet");
+    const hyperliquidEquity = wallet.hyperliquidRegistered
+      ? await getHyperliquidEquity(wallet.publicKey, wallet.hyperliquidNetwork ?? "testnet")
+      : null;
     return { sol: null, usdc: null, hyperliquidEquity };
   }
   const { sol, usdc } = await getSolanaBalance(wallet.publicKey);
   return { sol, usdc, hyperliquidEquity: null };
+}
+
+// ── Public wallet list ───────────────────────────────────────────────────
+//
+// The one wallet shape every reader uses: the passport, GET
+// /api/v1/agents/:id/wallets, the Connect CLI, and the agent page. The
+// identity row (the agent's own Ed25519-derived Solana address, which the
+// agent holds the key for) comes first; custodial rows follow, oldest
+// first. Built field by field from public data — never a secret.
+
+export const IDENTITY_WALLET_ID = "identity";
+
+const NULL_BALANCE: WalletBalance = { sol: null, usdc: null, hyperliquidEquity: null };
+
+export interface PublicAgentWallet {
+  /** "identity", or the agentWallets doc id. */
+  id: string;
+  chain: AgentWalletChain;
+  address: string;
+  custodial: boolean;
+  label: string | null;
+  payout: boolean;
+  hyperliquidRegistered: boolean;
+  hyperliquidNetwork: HyperliquidNetwork | null;
+  balance: WalletBalance;
+}
+
+export interface PublicAgentWalletList {
+  wallets: PublicAgentWallet[];
+  /** Custodial wallets only — what MAX_WALLETS_PER_AGENT counts. */
+  generated: number;
+  max: number;
+}
+
+/**
+ * Builds the public wallet list for an agent. Pass `agent` when the caller
+ * already has the agent doc, to skip a re-read. A failed balance lookup
+ * nulls that one wallet's balance and never fails the list. `balances:
+ * false` skips the RPC lookups entirely (every balance null) — for list
+ * views that build many of these at once.
+ */
+export async function listPublicAgentWallets(
+  agentId: string,
+  agent?: { solanaAddress?: string },
+  options: { balances?: boolean } = {},
+): Promise<PublicAgentWalletList> {
+  const solanaAddress =
+    agent !== undefined
+      ? agent.solanaAddress
+      : ((await adminDb().collection("agents").doc(agentId).get()).data()?.solanaAddress as string | undefined);
+  const custodial = await listAgentWallets(agentId);
+
+  // Older wallets predate the payout flag: the oldest custodial Solana wallet is payout until one is set explicitly.
+  const solanaCustodial = custodial.filter((w) => w.chain === "solana");
+  const payoutId = (solanaCustodial.find((w) => w.payout) ?? solanaCustodial[0])?.id;
+
+  const rows: Omit<PublicAgentWallet, "balance">[] = [];
+  if (solanaAddress) {
+    rows.push({
+      id: IDENTITY_WALLET_ID,
+      chain: "solana",
+      address: solanaAddress,
+      custodial: false,
+      label: null,
+      payout: false,
+      hyperliquidRegistered: false,
+      hyperliquidNetwork: null,
+    });
+  }
+  for (const w of custodial) {
+    rows.push({
+      id: w.id,
+      chain: w.chain,
+      address: w.publicKey,
+      custodial: true,
+      label: w.label ?? null,
+      payout: w.id === payoutId,
+      hyperliquidRegistered: w.hyperliquidRegistered === true,
+      hyperliquidNetwork: w.hyperliquidRegistered ? (w.hyperliquidNetwork ?? "testnet") : null,
+    });
+  }
+
+  const wallets = await Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      balance: options.balances === false ? NULL_BALANCE : await getAgentWalletBalance({
+        publicKey: row.address,
+        chain: row.chain,
+        hyperliquidRegistered: row.hyperliquidRegistered,
+        hyperliquidNetwork: row.hyperliquidNetwork ?? undefined,
+      }).catch(() => NULL_BALANCE),
+    })),
+  );
+
+  return { wallets, generated: custodial.length, max: MAX_WALLETS_PER_AGENT };
 }

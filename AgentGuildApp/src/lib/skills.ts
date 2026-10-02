@@ -862,6 +862,63 @@ for (const skill of SKILL_REGISTRY) {
     MOD_REGISTRY.push(mod);
 }
 
+// ── Derived capabilities ──
+//
+// Two capability sources that need no install doc: the agent-wallet
+// capability (held by any agent with an identity address or a custodial
+// wallet), and reported skills whose id names a free registry capability.
+// Both resolvers below (client and firestore-admin) call these so the
+// dashboard and the API cannot drift.
+
+export const AGENT_WALLET_CAPABILITY: Capability = {
+    id: "agent-wallet",
+    modId: "agent-wallet",
+    type: "skill",
+    key: "agent-wallet",
+    name: "Agent Wallet",
+    description: "Read the agent's identity and custodial wallets and their balances.",
+    permissionScopes: ["read"],
+};
+CAPABILITY_REGISTRY.push(AGENT_WALLET_CAPABILITY);
+
+/**
+ * Capability ids an agent holds without an install: agent-wallet when it
+ * has a wallet, plus each reported skill that matches a registry id. A
+ * reported skill never unlocks a paid mod's capability (that would skip
+ * the subscription check above) and never claims agent-wallet itself.
+ */
+export function derivedCapabilityIds(input: {
+    hasWallet: boolean;
+    reportedSkills?: { id: string }[];
+}): string[] {
+    const ids: string[] = [];
+    if (input.hasWallet) ids.push(AGENT_WALLET_CAPABILITY.id);
+    for (const skill of input.reportedSkills ?? []) {
+        if (skill.id === AGENT_WALLET_CAPABILITY.id) continue;
+        const cap = CAPABILITY_REGISTRY.find((c) => c.id === skill.id);
+        if (!cap) continue;
+        const mod = MOD_REGISTRY.find((m) => m.id === cap.modId);
+        const model = mod?.pricing?.model;
+        if (model && model !== "free") continue;
+        ids.push(cap.id);
+    }
+    return ids;
+}
+
+/** Shapes a registry capability for a resolver's output. */
+export function toResolvedCapability(cap: Capability): ResolvedCapability {
+    const mod = MOD_REGISTRY.find((m) => m.id === cap.modId);
+    return {
+        key: cap.key,
+        name: cap.name,
+        description: cap.description,
+        type: cap.type,
+        modId: cap.modId,
+        modName: mod?.name ?? (cap.id === AGENT_WALLET_CAPABILITY.id ? AGENT_WALLET_CAPABILITY.name : "Unknown"),
+        permissionScopes: cap.permissionScopes,
+    };
+}
+
 /** Get all capabilities for a specific mod */
 export function getModCapabilities(modId: string): Capability[] {
     return CAPABILITY_REGISTRY.filter((c) => c.modId === modId);
@@ -1398,10 +1455,13 @@ export async function getAgentCapabilities(
     agentId: string,
     orgId: string,
 ): Promise<ResolvedCapability[]> {
-    const [installations, agentAssignments, subscriptions] = await Promise.all([
+    const [installations, agentAssignments, subscriptions, agentDoc] = await Promise.all([
         getModInstallations(orgId),
         getAgentSkills(agentId),
         getOrgSubscriptions(orgId),
+        getDoc(doc(db, "agents", agentId))
+            .then((d) => d.data() as { solanaAddress?: string; reportedSkills?: { id: string }[] } | undefined)
+            .catch(() => undefined),
     ]);
 
     const enabledInstalls = installations.filter((i) => i.enabled);
@@ -1435,22 +1495,21 @@ export async function getAgentCapabilities(
         capabilityIds.add(skillId);
     }
 
+    // Wallet + reported skills. The client can't read agentWallets (key
+    // material — no client rule), so only the identity address counts here;
+    // firestore-admin's resolver also counts custodial wallets.
+    for (const capId of derivedCapabilityIds({
+        hasWallet: !!agentDoc?.solanaAddress,
+        reportedSkills: agentDoc?.reportedSkills,
+    })) {
+        capabilityIds.add(capId);
+    }
+
     // Resolve each ID against the capability registry
     const resolved: ResolvedCapability[] = [];
     for (const capId of capabilityIds) {
         const cap = CAPABILITY_REGISTRY.find((c) => c.id === capId);
-        if (!cap) continue;
-
-        const mod = MOD_REGISTRY.find((m) => m.id === cap.modId);
-        resolved.push({
-            key: cap.key,
-            name: cap.name,
-            description: cap.description,
-            type: cap.type,
-            modId: cap.modId,
-            modName: mod?.name ?? "Unknown",
-            permissionScopes: cap.permissionScopes,
-        });
+        if (cap) resolved.push(toResolvedCapability(cap));
     }
 
     return resolved;

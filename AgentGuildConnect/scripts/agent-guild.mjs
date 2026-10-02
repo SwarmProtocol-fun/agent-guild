@@ -3677,6 +3677,47 @@ async function cmdPassport() {
   console.log(JSON.stringify(data.passport, null, 2));
 }
 
+/**
+ * This agent's wallets — identity row first, then custodial — from the
+ * hub's signed GET /v1/agents/<id>/wallets. Public fields only: the hub
+ * never returns key material on this route, and nothing here prints any.
+ */
+async function cmdWallet() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const path = `/v1/agents/${config.agentId}/wallets`;
+  const resp = await fetch(`${config.hubUrl}/api${path}?${signedQuery(config, privateKey, path)}`);
+  const data = await expectOk(resp, "Failed to fetch wallets");
+  const wallets = Array.isArray(data.wallets) ? data.wallets : [];
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify({ wallets, generated: data.generated, max: data.max }, null, 2));
+    return;
+  }
+  if (wallets.length === 0) {
+    console.log("No wallets.");
+    return;
+  }
+  for (const w of wallets) {
+    const parts = [w.id, w.chain, w.address];
+    if (w.label) parts.push(`label: ${w.label}`);
+    if (w.payout) parts.push("payout");
+    const balance = walletBalanceText(w);
+    if (balance) parts.push(balance);
+    console.log(parts.join("  "));
+  }
+}
+
+/** One wallet's balance for `wallet` output; empty for an EVM wallet with nothing to look up. */
+function walletBalanceText(w) {
+  const b = w.balance || {};
+  if (w.chain === "evm") {
+    if (!w.hyperliquidRegistered) return "";
+    return b.hyperliquidEquity == null ? "balance unavailable" : `$${b.hyperliquidEquity} Hyperliquid equity`;
+  }
+  if (b.sol == null) return "balance unavailable";
+  return b.usdc ? `${b.sol} SOL  ${b.usdc} USDC` : `${b.sol} SOL`;
+}
+
 async function cmdDelegate() {
   const delegateAgentId = process.argv[3];
   if (!delegateAgentId) {
@@ -4273,6 +4314,7 @@ try {
   else if (cmd === "claim") await cmdClaim();
   else if (cmd === "discover-agents") await cmdDiscoverAgents();
   else if (cmd === "passport") await cmdPassport();
+  else if (cmd === "wallet") await cmdWallet();
   else if (cmd === "delegate") await cmdDelegate();
   else if (cmd === "delegations") await cmdDelegations();
   else if (cmd === "revoke-delegation") await cmdRevokeDelegation();
@@ -4319,6 +4361,7 @@ Job Board Protocol (bid/negotiate/claim on jobs posted with hiringMode "applicat
 Discovery & Passport (cross-org — any public agent on the guild, not just your own fleet):
   discover-agents  [--capabilities a,b,c] [--min-reputation N]  — find public agents by capability/reputation
   passport         <agentId>                                   — fetch an agent's identity/wallets/capabilities/reputation
+  wallet           [--json]                                    — list this agent's identity + custodial wallets with balances (no secrets)
 
 Delegation Protocol (scoped, time-limited, revocable authority — see lib/delegation.ts):
   delegate          <delegateAgentId> --permissions <p1,p2> --duration <30m|1h|2d> [--max-spend <usdc>]  — grant another agent scoped authority

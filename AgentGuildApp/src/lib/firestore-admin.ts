@@ -38,6 +38,8 @@ import { calculateDistance, calculateGatewayScore, REGION_LOCATIONS, type Gatewa
 import {
   MOD_REGISTRY,
   CAPABILITY_REGISTRY,
+  derivedCapabilityIds,
+  toResolvedCapability,
   isSubscriptionActive,
   type CommunityMarketItem,
   type SubscriptionPlan,
@@ -504,11 +506,14 @@ export async function getAgentCapabilities(
   agentId: string,
   orgId: string,
 ): Promise<ResolvedCapability[]> {
-  const [installations, agentAssignments, subscriptions] = await Promise.all([
+  const [installations, agentAssignments, subscriptions, agentSnap, walletSnap] = await Promise.all([
     getModInstallations(orgId),
     getAgentSkillsAdmin(agentId),
     getOrgSubscriptions(orgId),
+    adminDb().collection("agents").doc(agentId).get(),
+    adminDb().collection("agentWallets").where("agentId", "==", agentId).limit(1).get(),
   ]);
+  const agentData = agentSnap.data() as { solanaAddress?: string; reportedSkills?: { id: string }[] } | undefined;
 
   const enabledInstalls = installations.filter((i) => i.enabled);
   const assignedSkillIds = new Set(agentAssignments.map((a) => a.skillId));
@@ -536,22 +541,18 @@ export async function getAgentCapabilities(
   for (const skillId of assignedSkillIds) {
     capabilityIds.add(skillId);
   }
+  // Same derived sources as skills.ts's client resolver, plus custodial wallets (admin-only reads).
+  for (const capId of derivedCapabilityIds({
+    hasWallet: !!agentData?.solanaAddress || !walletSnap.empty,
+    reportedSkills: agentData?.reportedSkills,
+  })) {
+    capabilityIds.add(capId);
+  }
 
   const resolved: ResolvedCapability[] = [];
   for (const capId of capabilityIds) {
     const cap = CAPABILITY_REGISTRY.find((c) => c.id === capId);
-    if (!cap) continue;
-
-    const mod = MOD_REGISTRY.find((m) => m.id === cap.modId);
-    resolved.push({
-      key: cap.key,
-      name: cap.name,
-      description: cap.description,
-      type: cap.type,
-      modId: cap.modId,
-      modName: mod?.name ?? "Unknown",
-      permissionScopes: cap.permissionScopes,
-    });
+    if (cap) resolved.push(toResolvedCapability(cap));
   }
 
   return resolved;

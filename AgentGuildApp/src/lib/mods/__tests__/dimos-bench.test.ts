@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildLeaderboard, feedbackContext, lineageReport, parseSubmission, resolveLineage, MAX_CASES, type BenchRun,
+  buildLeaderboard, feedbackContext, lineageReport, parseReplay, parseSubmission, replayBrief, resolveLineage,
+  MAX_CASES, MAX_FRAMES, type BenchRun,
 } from "../../../../mods/dimos-bench/bench";
 
 const body = (results: unknown[], extra: Record<string, unknown> = {}) => ({
@@ -142,5 +143,42 @@ describe("feedbackContext", () => {
     expect(ctx.failures[1]).toMatchObject({ finalAnswer: "ans bad", steps: 3, toolCalls: 2, promptTokens: 100 });
     expect(ctx.passedCaseIds).toEqual(["ok"]);
     expect(ctx.improvementHistory.map((h) => [h.runId, h.improvement])).toEqual([["g0", "note 0"], ["g1", "note 1"], ["g2", "note 2"]]);
+  });
+});
+
+describe("parseReplay", () => {
+  const ids = { runId: "r1", caseId: "c1" };
+  const jpeg = "/9j/4AAQSkZJRg==";
+
+  it("keeps the path, frames and actions sorted by time, and ignores client-sent ids", () => {
+    const parsed = parseReplay(
+      {
+        runId: "someone-else", caseId: "other", environment: "MujocoSim", source: "go2",
+        path: [[2, 1, 0, 0], [0, 0, 0, 0]],
+        frames: [{ t: 1, w: 360, h: 270, jpeg }],
+        actions: [{ t: 0.5, name: "relative_move", args: '{"forward":1}' }, { name: "speak" }],
+        streams: [{ name: "odom", count: 11 }],
+      },
+      ids,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.replay.runId).toBe("r1");
+    expect(parsed.replay.caseId).toBe("c1");
+    expect(parsed.replay.path.map((p) => p[0])).toEqual([0, 2]);
+    expect(parsed.replay.actions[1]).toEqual({ t: null, name: "speak", args: "" });
+    expect(replayBrief(parsed.replay)).toEqual({
+      caseId: "c1", environment: "MujocoSim", source: "go2", poses: 2, frames: 1, actions: 2,
+    });
+  });
+
+  it("rejects empty replays, malformed poses, non-JPEG frames and too many frames", () => {
+    expect(parseReplay({ path: [], frames: [] }, ids).ok).toBe(false);
+    expect(parseReplay({ path: [[0, 1, 2]] }, ids).ok).toBe(false);
+    expect(parseReplay({ path: [[0, 1, 2, Number.NaN]] }, ids).ok).toBe(false);
+    expect(parseReplay({ frames: [{ t: 0, jpeg: "iVBORw0KGgo=" }] }, ids).ok).toBe(false); // a PNG
+    expect(parseReplay({ frames: [{ t: 0, jpeg: `${jpeg}<script>` }] }, ids).ok).toBe(false);
+    const many = Array.from({ length: MAX_FRAMES + 1 }, (_, t) => ({ t, jpeg }));
+    expect(parseReplay({ frames: many }, ids).ok).toBe(false);
   });
 });

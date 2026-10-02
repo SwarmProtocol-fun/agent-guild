@@ -2,8 +2,8 @@ import { defineServerMod } from "@agent-guild/sdk";
 import type { Timestamp } from "firebase-admin/firestore";
 import { cancelAssignment, getAssignment, AssignmentError, assignmentErrorStatus } from "@/lib/assignments";
 import { getAgent } from "@/lib/firestore-admin";
-import { buildLeaderboard, feedbackContext, lineageReport, parseSubmission, resolveLineage, type BenchRun } from "./bench";
-import { getAncestors, getRun, lineageExists, listRuns, newRunId, saveRun } from "./store";
+import { buildLeaderboard, feedbackContext, lineageReport, parseReplay, parseSubmission, resolveLineage, type BenchRun } from "./bench";
+import { getAncestors, getReplay, getRun, lineageExists, listReplays, listRuns, newRunId, saveReplay, saveRun } from "./store";
 
 const iso = (t: Timestamp | null | undefined) => (t ? t.toDate().toISOString() : null);
 
@@ -97,6 +97,41 @@ export default defineServerMod({
     "GET /runs/:runId": async (_req, { params }) => {
       const run = await getRun(params.runId);
       return run ? { run } : Response.json({ error: "Run not found" }, { status: 404 });
+    },
+
+    /**
+     * PUT /runs/:runId/media/:caseId — attach what the robot did in one case:
+     * its odometry path, a few camera keyframes, and the agent's tool calls.
+     * Agent-signed, and only by the agent that submitted the run, for a case
+     * the run has. Re-uploading replaces it.
+     */
+    "PUT /runs/:runId/media/:caseId": async (req, { params, agent }) => {
+      if (!agent) return Response.json({ error: "Agent signature required" }, { status: 403 });
+      const run = await getRun(params.runId);
+      if (!run) return Response.json({ error: "Run not found" }, { status: 404 });
+      if (run.agentId !== agent.agentId) return Response.json({ error: "Not your run" }, { status: 403 });
+      if (!run.results.some((c) => c.caseId === params.caseId)) {
+        return Response.json({ error: `Run has no case ${params.caseId}` }, { status: 404 });
+      }
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return Response.json({ error: "body must be JSON" }, { status: 400 });
+      }
+      const parsed = parseReplay(body, { runId: run.id, caseId: params.caseId });
+      if (!parsed.ok) return Response.json({ error: "Invalid replay", details: parsed.errors }, { status: 400 });
+      await saveReplay(parsed.replay);
+      return { runId: run.id, caseId: params.caseId, poses: parsed.replay.path.length, frames: parsed.replay.frames.length };
+    },
+
+    /** GET /runs/:runId/media — which cases have a robot replay (no images). */
+    "GET /runs/:runId/media": async (_req, { params }) => ({ replays: await listReplays(params.runId) }),
+
+    /** GET /runs/:runId/media/:caseId — one case's replay, keyframes included. */
+    "GET /runs/:runId/media/:caseId": async (_req, { params }) => {
+      const replay = await getReplay(params.runId, params.caseId);
+      return replay ? { replay } : Response.json({ error: "No replay for this case" }, { status: 404 });
     },
 
     /**

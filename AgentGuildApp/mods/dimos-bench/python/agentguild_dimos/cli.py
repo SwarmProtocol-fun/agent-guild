@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 import sys
 
-from agentguild_dimos import hub
+from agentguild_dimos import hub, media
 from agentguild_dimos import identity as identities
 from agentguild_dimos.lineage import lineage_fields
 from agentguild_dimos.report import build_submission
@@ -47,7 +47,24 @@ def _submit(run_dir: Path, args: argparse.Namespace) -> int:
         f"submitted run {run['id']} as {run['agentName']}: {run['suite']} gen {run['generation']} "
         f"(lineage {run['lineageId']}) | mean {s['meanScore']:.3f} | pass {s['passRate']:.0%} | {s['n']} cases"
     )
+    _upload_media(who, run["id"], run_dir, [r["case_id"] for r in body["results"]], args.hub)
     return 0
+
+
+def _upload_media(who: identities.Identity, run_id: str, run_dir: Path, case_ids: list[str], hub_url: str | None) -> None:
+    """Attach each case's robot replay, if ``run`` captured one. A failed upload keeps the run."""
+    sent = 0
+    for case_id in case_ids:
+        replay = media.load(run_dir, case_id)
+        if replay is None:
+            continue
+        try:
+            hub.upload_media(who, run_id, replay, hub_url=hub_url)
+            sent += 1
+        except hub.HubError as e:
+            print(f"agentguild-dimos: robot replay for {case_id} not uploaded: {e}", file=sys.stderr)
+    if sent:
+        print(f"uploaded {sent} robot replay{'s' if sent > 1 else ''}")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -62,8 +79,15 @@ def _run(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         identities.resolve(args.as_)  # fail before a long run, not after
+    class Runner(EvalRunner):
+        """dimOS's runner, plus a sample of each case's robot (path, camera, actions) for the panel."""
+
+        def run_case(self, case, agent):  # type: ignore[no-untyped-def]
+            with media.capture_case(case, self.run_dir / case.id):
+                return super().run_case(case, agent)
+
     kwargs = agent_kwargs(args.set)
-    runner = EvalRunner()
+    runner = Runner()
     results = runner.run(
         importlib.import_module(args.suite).SUITE,
         agent_class(args.agent)(**kwargs),

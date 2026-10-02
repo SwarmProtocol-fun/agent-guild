@@ -5,15 +5,19 @@
  *   dimosBenchRuns — one document per submitted dimos eval run, per-case
  *                    results inline (capped at MAX_CASES, text truncated,
  *                    so a document stays well under Firestore's 1 MiB).
+ *   dimosBenchReplays — one document per (run, case): the robot's path,
+ *                    camera keyframes and the agent's actions, uploaded
+ *                    after the run. Kept apart so run documents stay small.
  *
  * Queries use single-field filters and sort in memory, so no composite
  * index is needed. Server-only (Firebase Admin SDK).
  */
 import type { Query } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
-import type { BenchRun, RunSubmission } from "./bench";
+import { replayBrief, type BenchRun, type ReplayBrief, type RobotReplay, type RunSubmission } from "./bench";
 
 const RUNS = "dimosBenchRuns";
+const REPLAYS = "dimosBenchReplays";
 const SCAN_LIMIT = 500;
 
 function db() {
@@ -73,4 +77,25 @@ export async function getAncestors(run: BenchRun, max = 100): Promise<BenchRun[]
     parentId = parent.parentRunId;
   }
   return chain;
+}
+
+const replayDocId = (runId: string, caseId: string) => `${runId}__${encodeURIComponent(caseId)}`;
+
+export async function saveReplay(replay: RobotReplay): Promise<void> {
+  // The brief rides along so listing a run's replays never reads the keyframes.
+  await db().collection(REPLAYS).doc(replayDocId(replay.runId, replay.caseId)).set({ ...replay, brief: replayBrief(replay) });
+}
+
+export async function getReplay(runId: string, caseId: string): Promise<RobotReplay | null> {
+  const snap = await db().collection(REPLAYS).doc(replayDocId(runId, caseId)).get();
+  if (!snap.exists) return null;
+  const replay = snap.data() as RobotReplay & { brief?: ReplayBrief };
+  delete replay.brief;
+  return replay;
+}
+
+/** Which cases of a run have a replay, without the keyframes. */
+export async function listReplays(runId: string): Promise<ReplayBrief[]> {
+  const snap = await db().collection(REPLAYS).where("runId", "==", runId).select("brief").get();
+  return snap.docs.map((d) => d.get("brief") as ReplayBrief);
 }

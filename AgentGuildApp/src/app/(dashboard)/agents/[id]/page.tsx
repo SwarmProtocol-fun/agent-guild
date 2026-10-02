@@ -55,15 +55,16 @@ import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { useSession } from "@/contexts/SessionContext";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES } from "@/lib/agent-types";
 
-/** Custodial wallet the platform generated on this agent's behalf — see /api/v1/agents/[id]/wallets. */
+/** One row of GET /api/v1/agents/[id]/wallets — the identity wallet ("identity") or a custodial one. See listPublicAgentWallets. */
 interface AgentWallet {
   id: string;
-  publicKey: string;
   chain: "solana" | "evm";
-  label?: string;
-  createdAt: string | null;
-  hyperliquidRegistered?: boolean;
-  hyperliquidNetwork?: "testnet" | "mainnet";
+  address: string;
+  custodial: boolean;
+  label: string | null;
+  payout: boolean;
+  hyperliquidRegistered: boolean;
+  hyperliquidNetwork: "testnet" | "mainnet" | null;
   balance: { sol: number | null; usdc: number | null; hyperliquidEquity: number | null };
 }
 
@@ -190,10 +191,14 @@ function AgentDetailPage() {
   const [solanaLoading, setSolanaLoading] = useState(false);
   const [solanaError, setSolanaError] = useState<string | null>(null);
 
-  // Custodial agent wallets (platform-generated, separate from the identity wallet above)
+  // Agent wallets: the identity row plus custodial (platform-generated) ones; only custodial count toward the cap
   const [wallets, setWallets] = useState<AgentWallet[]>([]);
   const [walletsLoading, setWalletsLoading] = useState(false);
   const [walletsMax, setWalletsMax] = useState(10);
+  const [walletsGenerated, setWalletsGenerated] = useState(0);
+  const [settingPayoutId, setSettingPayoutId] = useState<string | null>(null);
+  // Resolved capabilities from GET /api/v1/agents/[id]/capabilities (installs, assignments, wallet, matching reported skills)
+  const [resolvedCaps, setResolvedCaps] = useState<{ key: string; name: string }[]>([]);
   const [generatingWallet, setGeneratingWallet] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
   const [copiedWalletId, setCopiedWalletId] = useState<string | null>(null);
@@ -618,6 +623,7 @@ function AgentDetailPage() {
       if (res.ok) {
         setWallets(data.wallets ?? []);
         setWalletsMax(data.max ?? 10);
+        setWalletsGenerated(data.generated ?? 0);
       }
     } catch (err) {
       console.error("Failed to load agent wallets:", err);
@@ -626,9 +632,48 @@ function AgentDetailPage() {
     }
   };
 
+  const loadCapabilities = async () => {
+    if (!agent || !currentOrg) return;
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/capabilities?org=${currentOrg.id}`, {
+        headers: solanaAuthHeaders,
+      });
+      const data = await res.json();
+      if (res.ok) setResolvedCaps(data.capabilities ?? []);
+    } catch (err) {
+      console.error("Failed to load agent capabilities:", err);
+    }
+  };
+
   useEffect(() => {
-    if (agent?.id && currentOrg?.id) loadWallets();
+    if (agent?.id && currentOrg?.id) {
+      loadWallets();
+      loadCapabilities();
+    }
   }, [agent?.id, currentOrg?.id]);
+
+  const handleSetPayout = async (walletId: string) => {
+    if (!agent || !currentOrg) return;
+    setWalletError(null);
+    setSettingPayoutId(walletId);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/wallets/${walletId}`, {
+        method: "PATCH",
+        headers: solanaAuthHeaders,
+        body: JSON.stringify({ orgId: currentOrg.id, payout: true }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setWallets((prev) => prev.map((w) => (w.custodial && w.chain === "solana" ? { ...w, payout: w.id === walletId } : w)));
+      } else {
+        setWalletError(data.error || "Failed to set payout wallet");
+      }
+    } catch (err) {
+      setWalletError(err instanceof Error ? err.message : "Failed to set payout wallet");
+    } finally {
+      setSettingPayoutId(null);
+    }
+  };
 
   const handleOpenGenerateWallet = () => {
     setGenerateChain("solana");
@@ -657,7 +702,8 @@ function AgentDetailPage() {
       });
       const data = await res.json();
       if (res.ok) {
-        setWallets((prev) => [...prev, data.wallet]);
+        // Reload rather than append: the list's shape, payout flag and generated count all come from the server.
+        await Promise.all([loadWallets(), loadCapabilities()]);
         setShowGenerateWallet(false);
         setHyperliquidPassphrase('');
       } else {
@@ -950,27 +996,30 @@ function AgentDetailPage() {
         </TabsList>
 
       <TabsContent value="overview" className="space-y-6">
-      {/* Agent Wallets — custodial, platform-generated */}
+      {/* Agent Wallets — identity row first, then custodial (platform-generated) */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle className="text-base flex items-center gap-2"><Wallet className="w-4 h-4" aria-hidden="true" /> Agent Wallets</CardTitle>
             <div className="flex items-center gap-2">
-              <Badge variant="secondary" className="text-xs">{wallets.length}/{walletsMax}</Badge>
+              <Badge variant="secondary" className="text-xs">{walletsGenerated}/{walletsMax} generated</Badge>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleOpenGenerateWallet}
-                disabled={generatingWallet || walletsLoading || wallets.length >= walletsMax}
+                disabled={generatingWallet || walletsLoading || walletsGenerated >= walletsMax}
                 className="h-7 text-xs gap-1 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
               >
                 <Plus className="w-3 h-3" aria-hidden="true" /> Generate Wallet
               </Button>
             </div>
           </div>
-          <CardDescription>Platform-held Solana or EVM/Hyperliquid wallets generated for this agent — separate from its own identity key below</CardDescription>
+          <CardDescription>The agent&apos;s own identity wallet, plus platform-held Solana or EVM/Hyperliquid wallets generated for it</CardDescription>
         </CardHeader>
         <CardContent>
+          {walletError && !showGenerateWallet && (
+            <p className="text-xs text-red-500 mb-2">{walletError}</p>
+          )}
           {walletsLoading && wallets.length === 0 ? (
             <p className="text-sm text-muted-foreground">Loading wallets...</p>
           ) : wallets.length > 0 ? (
@@ -981,11 +1030,27 @@ function AgentDetailPage() {
                   className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-border bg-muted/30"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <Badge variant="outline" className="text-xs uppercase">{w.chain}</Badge>
-                      <code className="font-mono text-xs truncate">{shortAddress(w.publicKey)}</code>
+                      <Badge variant="secondary" className="text-xs">{w.custodial ? "Custodial" : "Identity"}</Badge>
+                      {w.payout && (
+                        <Badge className="text-xs bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">Payout</Badge>
+                      )}
+                      {w.label && <span className="text-xs font-medium truncate">{w.label}</span>}
+                      {w.chain === "evm" && (
+                        <Badge className={`text-xs ${w.hyperliquidRegistered
+                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
+                          : "bg-muted text-muted-foreground"}`}
+                        >
+                          {w.hyperliquidRegistered ? `Hyperliquid (${w.hyperliquidNetwork})` : "Not registered for trading"}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-1 min-w-0">
+                      <code className="font-mono text-xs sm:hidden">{shortAddress(w.address)}</code>
+                      <code className="font-mono text-xs hidden sm:inline break-all">{w.address}</code>
                       <button
-                        onClick={() => copyWalletAddress(w.id, w.publicKey)}
+                        onClick={() => copyWalletAddress(w.id, w.address)}
                         className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
                         title="Copy address"
                       >
@@ -997,40 +1062,49 @@ function AgentDetailPage() {
                       </button>
                       <a
                         href={w.chain === "solana"
-                          ? `https://solscan.io/account/${w.publicKey}?cluster=devnet`
-                          : `https://app.hyperliquid${w.hyperliquidNetwork === "mainnet" ? "" : "-testnet"}.xyz/trade`}
+                          ? `https://solscan.io/account/${w.address}?cluster=devnet`
+                          : w.hyperliquidRegistered
+                            ? `https://app.hyperliquid${w.hyperliquidNetwork === "mainnet" ? "" : "-testnet"}.xyz/trade`
+                            : `https://sepolia.etherscan.io/address/${w.address}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="p-0.5 text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                        title={w.chain === "solana" ? "View on Solscan" : "Open on Hyperliquid"}
+                        title={w.chain === "solana" ? "View on Solscan" : w.hyperliquidRegistered ? "Open on Hyperliquid" : "View on Etherscan (Sepolia)"}
                       >
                         <ExternalLink className="w-3 h-3" aria-hidden="true" />
                       </a>
-                      {w.chain === "evm" && (
-                        <Badge className={`text-xs ${w.hyperliquidRegistered
-                          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400"
-                          : "bg-muted text-muted-foreground"}`}
-                        >
-                          {w.hyperliquidRegistered ? `Hyperliquid (${w.hyperliquidNetwork})` : "Not registered for trading"}
-                        </Badge>
-                      )}
                     </div>
-                    <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-3 mt-0.5 text-xs text-muted-foreground">
                       {w.chain === "solana" ? (
-                        <>
-                          <span>{(w.balance.sol ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</span>
-                          {w.balance.usdc != null && <span>{w.balance.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</span>}
-                        </>
-                      ) : (
+                        w.balance.sol == null ? (
+                          <span>Balance unavailable</span>
+                        ) : (
+                          <>
+                            <span>{w.balance.sol.toLocaleString(undefined, { maximumFractionDigits: 4 })} SOL</span>
+                            {w.balance.usdc != null && <span>{w.balance.usdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</span>}
+                          </>
+                        )
+                      ) : w.hyperliquidRegistered ? (
                         <span>
                           {w.balance.hyperliquidEquity != null
                             ? `$${w.balance.hyperliquidEquity.toLocaleString(undefined, { maximumFractionDigits: 2 })} account equity`
                             : "No Hyperliquid account yet"}
                         </span>
-                      )}
+                      ) : null}
                     </div>
                   </div>
-                  {w.chain === "evm" && (
+                  {w.custodial && w.chain === "solana" && !w.payout && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleSetPayout(w.id)}
+                      disabled={settingPayoutId !== null}
+                      className="h-7 text-xs shrink-0"
+                    >
+                      {settingPayoutId === w.id ? "Saving..." : "Set as payout"}
+                    </Button>
+                  )}
+                  {w.custodial && w.chain === "evm" && (
                     <button
                       onClick={() => handleOpenResetPassphrase(w)}
                       className="p-1.5 rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors shrink-0"
@@ -1045,7 +1119,7 @@ function AgentDetailPage() {
           ) : (
             <div className="text-center py-6 text-muted-foreground">
               <Wallet className="w-6 h-6 mx-auto mb-2" aria-hidden="true" />
-              <p className="text-sm">No wallets generated yet</p>
+              <p className="text-sm">No wallets yet</p>
               <p className="text-xs mt-1">Click &quot;Generate Wallet&quot; to create one</p>
             </div>
           )}
@@ -1084,16 +1158,36 @@ function AgentDetailPage() {
             <CardTitle className="text-base flex items-center gap-2"><Zap className="w-4 h-4" aria-hidden="true" /> Capabilities</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {(agent.capabilities ?? []).map((cap, index) => (
-                <Badge key={index} variant="secondary" className="text-xs">
-                  {cap}
-                </Badge>
-              ))}
-              {(agent.capabilities ?? []).length === 0 && (
-                <p className="text-sm text-muted-foreground">No capabilities defined</p>
-              )}
-            </div>
+            {(() => {
+              const resolvedKeys = new Set(resolvedCaps.map((c) => c.key));
+              const reportedOnly = (agent.reportedSkills ?? []).filter((rs) => !resolvedKeys.has(rs.id));
+              if (resolvedCaps.length === 0 && reportedOnly.length === 0) {
+                return <p className="text-sm text-muted-foreground">No capabilities defined</p>;
+              }
+              return (
+                <div className="space-y-3">
+                  {resolvedCaps.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {resolvedCaps.map((cap) => (
+                        <Badge key={cap.key} variant="secondary" className="text-xs">
+                          {cap.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                  {reportedOnly.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Reported</span>
+                      {reportedOnly.map((rs) => (
+                        <Badge key={rs.id} variant="outline" className="text-xs">
+                          {rs.id}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </CardContent>
         </Card>
 

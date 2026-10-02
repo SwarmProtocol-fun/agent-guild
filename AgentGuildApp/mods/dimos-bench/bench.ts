@@ -426,3 +426,113 @@ export function buildLeaderboard(runs: BenchRun[]): LeaderboardRow[] {
     })
     .sort((a, b) => b.meanScore - a.meanScore || b.passRate - a.passRate || a.agentName.localeCompare(b.agentName));
 }
+
+// ── Robot replay: what the robot did in one case ─────────────────────────
+
+export const MAX_POSES = 400;
+export const MAX_FRAMES = 8;
+export const MAX_ACTIONS = 60;
+/** Base64 bytes per keyframe (~75 KB JPEG); 8 of them keep a document well under 1 MiB. */
+export const MAX_FRAME_B64 = 100_000;
+
+/** [t, x, y, yaw]: seconds from the recording's start, metres, radians. */
+export type Pose = [number, number, number, number];
+
+export interface Keyframe {
+  t: number;
+  w: number;
+  h: number;
+  /** base64 JPEG */
+  jpeg: string;
+}
+
+export interface RobotAction {
+  /** Seconds from the recording's start; null when the recording's clock isn't the agent's (a frozen dataset). */
+  t: number | null;
+  name: string;
+  args: string;
+}
+
+export interface RobotReplay {
+  runId: string;
+  caseId: string;
+  /** dimOS environment class, e.g. MujocoSim, Habitat, DimSim, Dataset. */
+  environment: string;
+  /** Dataset name or recording id. */
+  source: string;
+  path: Pose[];
+  frames: Keyframe[];
+  actions: RobotAction[];
+  streams: { name: string; count: number }[];
+}
+
+export type ReplayBrief = Pick<RobotReplay, "caseId" | "environment" | "source"> & {
+  poses: number;
+  frames: number;
+  actions: number;
+};
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const JPEG_B64_RE = /^\/9j\/[A-Za-z0-9+/]+=*$/; // base64 of a JPEG starts with FF D8 FF
+
+/** Validate a PUT /runs/:runId/media/:caseId body (the python client's robot.json + actions). */
+export function parseReplay(
+  body: unknown,
+  ids: { runId: string; caseId: string },
+): { ok: true; replay: RobotReplay } | { ok: false; errors: string[] } {
+  if (!isObj(body)) return { ok: false, errors: ["body must be a JSON object"] };
+  const errors: string[] = [];
+  const path = Array.isArray(body.path) ? body.path : [];
+  const frames = Array.isArray(body.frames) ? body.frames : [];
+  const actions = Array.isArray(body.actions) ? body.actions : [];
+  if (path.length > MAX_POSES) errors.push(`at most ${MAX_POSES} poses`);
+  if (frames.length > MAX_FRAMES) errors.push(`at most ${MAX_FRAMES} frames`);
+  if (actions.length > MAX_ACTIONS) errors.push(`at most ${MAX_ACTIONS} actions`);
+  if (!path.length && !frames.length) errors.push("a replay needs a path or frames");
+
+  const poses: Pose[] = [];
+  path.forEach((p, i) => {
+    if (Array.isArray(p) && p.length === 4 && p.every(finite)) poses.push(p as Pose);
+    else errors.push(`path[${i}] must be [t, x, y, yaw]`);
+  });
+  const keyframes: Keyframe[] = [];
+  frames.forEach((f, i) => {
+    if (!isObj(f) || !finite(f.t) || typeof f.jpeg !== "string") return errors.push(`frames[${i}] needs t and jpeg`);
+    if (f.jpeg.length > MAX_FRAME_B64) return errors.push(`frames[${i}] is over ${MAX_FRAME_B64} base64 bytes`);
+    if (!JPEG_B64_RE.test(f.jpeg)) return errors.push(`frames[${i}].jpeg must be a base64 JPEG`);
+    keyframes.push({ t: f.t, w: count(f.w), h: count(f.h), jpeg: f.jpeg });
+  });
+  if (errors.length) return { ok: false, errors };
+
+  return {
+    ok: true,
+    replay: {
+      ...ids,
+      environment: text(body.environment, 64) || "unknown",
+      source: text(body.source, MAX_ID),
+      path: poses.sort((a, b) => a[0] - b[0]),
+      frames: keyframes.sort((a, b) => a.t - b.t),
+      actions: actions.filter(isObj).map((a) => ({
+        t: finite(a.t) ? a.t : null,
+        name: text(a.name, 80),
+        args: text(a.args, 200),
+      })),
+      streams: (Array.isArray(body.streams) ? body.streams : [])
+        .filter(isObj)
+        .slice(0, 50)
+        .map((s) => ({ name: text(s.name, 64), count: count(s.count) }))
+        .filter((s) => s.name),
+    },
+  };
+}
+
+export function replayBrief(r: RobotReplay): ReplayBrief {
+  return {
+    caseId: r.caseId,
+    environment: r.environment,
+    source: r.source,
+    poses: r.path.length,
+    frames: r.frames.length,
+    actions: r.actions.length,
+  };
+}

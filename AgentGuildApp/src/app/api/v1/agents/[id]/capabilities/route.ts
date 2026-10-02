@@ -2,13 +2,17 @@
  * GET /api/v1/agents/:id/capabilities
  *
  * Get resolved capabilities for a specific agent.
- * Merges org mod installations + agent skill assignments.
+ * Merges org mod installations + agent skill assignments + derived
+ * capabilities (agent-wallet, matching reported skills).
  *
  * Query params:
  *   org — (required) organization ID
+ *
+ * Auth: org membership, and the agent must belong to that org.
  */
 import { NextRequest } from "next/server";
-import { getAgentCapabilities } from "@/lib/firestore-admin";
+import { requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
+import { getAgent, getAgentCapabilities } from "@/lib/firestore-admin";
 
 export async function GET(
     req: NextRequest,
@@ -18,10 +22,17 @@ export async function GET(
     const orgId = req.nextUrl.searchParams.get("org");
 
     if (!orgId) {
-        return Response.json({ error: "org parameter is required" }, { status: 400 });
+        return unauthorized("org parameter and an org member session are required");
     }
 
+    const auth = await requireOrgMember(req, orgId);
+    if (!auth.ok) return auth.status === 403 ? forbidden(auth.error) : unauthorized(auth.error);
+
     try {
+        const agent = await getAgent(agentId);
+        if (!agent) return Response.json({ error: "Agent not found" }, { status: 404 });
+        if (agent.orgId !== orgId) return forbidden("Agent does not belong to this organization");
+
         const capabilities = await getAgentCapabilities(agentId, orgId);
 
         return Response.json({

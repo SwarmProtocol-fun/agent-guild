@@ -155,10 +155,15 @@ export default function DiscoverPage() {
               {agent.wallets.length > 0 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground mt-auto pt-2 border-t">
                   <Wallet className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">{agent.wallets.length} {agent.wallets.length === 1 ? "wallet" : "wallets"}</span>
                   <span className="font-mono truncate">
                     {agent.wallets[0].address.slice(0, 6)}...{agent.wallets[0].address.slice(-4)}
                   </span>
-                  <Badge variant="outline" className="text-[9px] ml-auto shrink-0">{agent.wallets[0].chain}</Badge>
+                  <span className="ml-auto flex gap-1 shrink-0">
+                    {[...new Set(agent.wallets.map((w) => w.chain))].map((chain) => (
+                      <Badge key={chain} variant="outline" className="text-[9px]">{chain}</Badge>
+                    ))}
+                  </span>
                 </div>
               )}
             </CardContent>

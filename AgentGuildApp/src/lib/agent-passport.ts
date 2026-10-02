@@ -16,17 +16,13 @@
 import { getAgent, getAgentCapabilities } from "./firestore-admin";
 import type { ResolvedCapability } from "./skills";
 import type { ReportedSkill } from "./firestore";
-import { listAgentWallets, type AgentWallet } from "./agent-wallets";
+import { listPublicAgentWallets, type PublicAgentWallet } from "./agent-wallets";
 import { getPrivacySettings } from "./privacy-settings";
 import { getTierForScore, CREDIT_SCORE_DEFAULT, TRUST_SCORE_DEFAULT, type TierDefinition } from "./credit-tiers";
 import { liveStatus } from "./presence";
 
-export interface PassportWallet {
-  chain: string;
-  address: string;
-  /** false for an identity-held wallet (solanaAddress/ethAddress/...), true for a platform-custodial one (agent-wallets.ts). */
-  custodial: boolean;
-}
+/** Same shape as GET /api/v1/agents/:id/wallets — see listPublicAgentWallets. */
+export type PassportWallet = PublicAgentWallet;
 
 export interface PassportReputation {
   creditScore: number;
@@ -72,6 +68,8 @@ export interface AgentPassport {
 export interface BuildPassportOptions {
   /** Org the requester belongs to. Full detail is returned when this matches the agent's own org. */
   viewerOrgId?: string;
+  /** Look up live wallet balances (default true). Discovery turns this off — it builds many passports per request. */
+  walletBalances?: boolean;
 }
 
 /**
@@ -97,15 +95,12 @@ export async function buildAgentPassport(
   if (!showProfile) return null;
   const showScores = isOwnOrg || privacy.allowPublicScores;
 
-  const [capabilities, custodialWallets] = await Promise.all([
+  const [capabilities, wallets] = await Promise.all([
     getAgentCapabilities(agentId, agent.orgId).catch(() => [] as ResolvedCapability[]),
-    listAgentWallets(agentId).catch(() => [] as AgentWallet[]),
+    listPublicAgentWallets(agentId, agent, { balances: options.walletBalances !== false })
+      .then((list) => list.wallets)
+      .catch(() => [] as PassportWallet[]),
   ]);
-
-  const wallets: PassportWallet[] = [
-    ...identityWallets(agent),
-    ...custodialWallets.map((w) => ({ chain: w.chain, address: w.publicKey, custodial: true })),
-  ];
 
   const creditScore = agent.creditScore ?? CREDIT_SCORE_DEFAULT;
   const trustScore = agent.trustScore ?? TRUST_SCORE_DEFAULT;
@@ -151,22 +146,4 @@ export async function buildAgentPassport(
   }
 
   return passport;
-}
-
-function identityWallets(agent: {
-  walletAddress?: string;
-  solanaAddress?: string;
-  ethAddress?: string;
-  flowAddress?: string;
-  flowEvmAddress?: string;
-}): PassportWallet[] {
-  const wallets: PassportWallet[] = [];
-  if (agent.solanaAddress) wallets.push({ chain: "solana", address: agent.solanaAddress, custodial: false });
-  if (agent.ethAddress) wallets.push({ chain: "evm", address: agent.ethAddress, custodial: false });
-  if (agent.flowAddress) wallets.push({ chain: "flow", address: agent.flowAddress, custodial: false });
-  if (agent.flowEvmAddress) wallets.push({ chain: "flow-evm", address: agent.flowEvmAddress, custodial: false });
-  if (agent.walletAddress && agent.walletAddress !== agent.solanaAddress && agent.walletAddress !== agent.ethAddress) {
-    wallets.push({ chain: "owner", address: agent.walletAddress, custodial: false });
-  }
-  return wallets;
 }

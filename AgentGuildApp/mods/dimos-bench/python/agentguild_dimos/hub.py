@@ -55,6 +55,13 @@ def submit(identity: Identity, body: dict[str, Any], *, hub_url: str | None = No
     return call(identity, "POST", mod_path("runs"), body, hub_url=hub_url)["run"]
 
 
+def upload_media(
+    identity: Identity, run_id: str, media: dict[str, Any], *, hub_url: str | None = None
+) -> dict[str, Any]:
+    """PUT one case's robot replay (path, keyframes, actions) onto a run this agent submitted."""
+    return call(identity, "PUT", mod_path("runs", run_id, "media", media["caseId"]), media, hub_url=hub_url, timeout_s=60)
+
+
 def feedback(identity: Identity, run_id: str, *, hub_url: str | None = None) -> dict[str, Any]:
     return call(identity, "GET", mod_path("runs", run_id, "feedback"), hub_url=hub_url)
 
