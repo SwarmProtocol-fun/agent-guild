@@ -23,7 +23,7 @@ import { useOrg } from "@/contexts/OrgContext";
 import { useSession } from "@/contexts/SessionContext";
 import {
   getJob,
-  updateJob,
+  reviewJobDelivery,
   submitJobDelivery,
   getChannelsByProject,
   getJobComments,
@@ -228,12 +228,10 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     if (!job) return;
     setSubmitting(true);
     try {
-      await updateJob(job.id, {
-        reviewStatus: reviewAction === 'approve' ? 'approved' : 'rejected',
-        reviewNotes: reviewNotes.trim() || undefined,
-        reviewedBy: address || "Unknown",
-        reviewedAt: new Date(),
-        status: reviewAction === 'approve' ? 'completed' : 'in_progress',
+      await reviewJobDelivery(job.id, {
+        approve: reviewAction === 'approve',
+        notes: reviewNotes,
+        by: address || "Unknown",
       });
 
       if (job.projectId && currentOrg) {

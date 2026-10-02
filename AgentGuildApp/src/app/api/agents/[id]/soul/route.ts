@@ -7,7 +7,7 @@
 
 import { NextRequest } from "next/server";
 import { getDefaultSOUL } from "@/lib/soul";
-import { getAgentSOUL, updateAgentSOUL } from "@/lib/firestore-admin";
+import { updateAgentSOUL } from "@/lib/firestore-admin";
 import { adminDb } from "@/lib/firebase-admin";
 import type { Agent } from "@/lib/firestore";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
@@ -29,35 +29,30 @@ export async function GET(
   }
 
   try {
-    const soulConfig = await getAgentSOUL(agentId);
+    const agentDoc = await adminDb().collection("agents").doc(agentId).get();
+    if (!agentDoc.exists) {
+      return Response.json({ error: "Agent not found" }, { status: 404 });
+    }
+    const agent = { id: agentDoc.id, ...agentDoc.data() } as Agent;
 
-    if (!soulConfig) {
-      // Generate default SOUL
-      const agentDoc = await adminDb().collection("agents").doc(agentId).get();
-      if (!agentDoc.exists) {
-        return Response.json({ error: "Agent not found" }, { status: 404 });
-      }
+    // Verify caller is a member of the agent's org — for a saved SOUL too,
+    // not only the generated default.
+    const auth = await requireOrgMember(request, agent.orgId);
+    if (!auth.ok) {
+      return auth.status === 403 ? forbidden(auth.error) : unauthorized(auth.error);
+    }
 
-      const agent = { id: agentDoc.id, ...agentDoc.data() } as Agent;
-
-      // Verify caller is a member of the agent's org
-      const auth = await requireOrgMember(request, agent.orgId);
-      if (!auth.ok) {
-        return auth.status === 403 ? forbidden(auth.error) : unauthorized(auth.error);
-      }
-
-      const defaultSOUL = getDefaultSOUL(agent.name, agent.type);
-
+    if (!agent.soulConfig) {
       return Response.json({
         ok: true,
-        soulConfig: defaultSOUL,
+        soulConfig: getDefaultSOUL(agent.name, agent.type),
         isDefault: true,
       });
     }
 
     return Response.json({
       ok: true,
-      soulConfig,
+      soulConfig: agent.soulConfig,
       isDefault: false,
     });
   } catch (err) {

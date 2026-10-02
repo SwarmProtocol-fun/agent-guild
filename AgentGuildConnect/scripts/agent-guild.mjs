@@ -36,7 +36,7 @@
 
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, readdirSync, constants as fsConstants } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, readdirSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { solanaKeypairFromPrivateKeyPem, claimTaskOnChain, submitDeliveryOnChain, sha256Bytes32 } from "./solana-escrow.mjs";
@@ -1958,9 +1958,11 @@ function recordHarnessTurn(generation, msg, kind, outcome) {
       text: String(msg.text || "").slice(0, 500),
       ...(outcome.ok ? { reply: String(outcome.text || "").slice(0, 800) } : { error: String(outcome.error || "").slice(0, 300) }),
     });
-    const lines = existsSync(path) ? readFileSync(path, "utf-8").split("\n").filter(Boolean) : [];
-    lines.push(line);
-    writeFileSync(path, `${lines.slice(-TRAJECTORY_KEEP).join("\n")}\n`);
+    // Append (atomic per line), so replies finishing together can't drop
+    // each other's turn; trim back to TRAJECTORY_KEEP only once it doubles.
+    appendFileSync(path, `${line}\n`);
+    const lines = readFileSync(path, "utf-8").split("\n").filter(Boolean);
+    if (lines.length > TRAJECTORY_KEEP * 2) writeFileSync(path, `${lines.slice(-TRAJECTORY_KEEP).join("\n")}\n`);
   } catch { /* the log is a convenience for evolve, never a reason to fail a reply */ }
 }
 
@@ -1974,7 +1976,10 @@ async function flushHarnessOutcomes(config, privateKey) {
       `${config.hubUrl}/api/v1/harness/outcomes?agent=${config.agentId}`,
       { outcomes: batch },
     );
-    await expectOk(resp, "Outcome report failed");
+    // A 4xx won't succeed on retry (bad batch, revoked key) — drop it
+    // rather than resend it on every heartbeat.
+    if (resp.status >= 500) await expectOk(resp, "Outcome report failed");
+    else if (!resp.ok) console.error(`harness outcomes rejected (${resp.status}) — dropped ${batch.length}`);
   } catch (err) {
     if (pendingOutcomes.length < 500) pendingOutcomes.unshift(...batch);
     console.error(`harness outcomes: ${err.message}`);

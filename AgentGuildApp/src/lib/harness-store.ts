@@ -11,7 +11,8 @@
  * lineage is scored, so the buyer's verdict is the only source for them.
  */
 import { adminDb } from "@/lib/firebase-admin";
-import type { HarnessGeneration, JobOutcome, ReplyOutcome } from "./harness";
+import type { DocumentData, DocumentSnapshot } from "firebase-admin/firestore";
+import { liveWindows, type HarnessGeneration, type JobOutcome, type ReplyOutcome } from "./harness";
 
 const HARNESS = "agentHarness";
 const MAX_GENERATIONS = 100;
@@ -26,6 +27,13 @@ function generationsRef(agentId: string) {
 }
 function outcomesRef(agentId: string) {
   return head(agentId).collection("outcomes");
+}
+
+/** Close the open live window of a generation document (for retiring it at `now`). */
+function closeWindow(snap: DocumentSnapshot, now: number) {
+  const g = snap.data() as HarnessGeneration;
+  const windows = liveWindows(g).map((w) => (w.to == null ? { ...w, to: now } : w));
+  return { status: "retired", retiredAt: now, windows };
 }
 
 export class HarnessError extends Error {
@@ -86,6 +94,7 @@ export async function proposeGeneration(
       proposedAt: now,
       activatedAt: null,
       retiredAt: null,
+      windows: [],
       decidedBy,
     };
     for (const p of pending.docs) tx.update(p.ref, { status: "rejected", decidedBy: "superseded", retiredAt: now });
@@ -114,9 +123,19 @@ export async function activateGeneration(agentId: string, generation: number, de
     if (status === "active") throw new HarnessError("Generation is already active", 409);
     if (status === "rejected") throw new HarnessError("A rejected generation can't be activated", 409);
     const current = h.data()?.activeGeneration as number | null | undefined;
+    const currentSnap = current != null ? await tx.get(generationsRef(agentId).doc(String(current))) : null;
     const now = Date.now();
-    if (current != null) tx.update(generationsRef(agentId).doc(String(current)), { status: "retired", retiredAt: now });
-    tx.update(target.ref, { status: "active", activatedAt: now, retiredAt: null, decidedBy });
+    if (currentSnap?.exists) tx.update(currentSnap.ref, closeWindow(currentSnap, now));
+    // A rollback keeps the generation's earlier live spans — and its first
+    // activatedAt — so outcomes from back then still count toward it.
+    const g = target.data() as HarnessGeneration;
+    tx.update(target.ref, {
+      status: "active",
+      activatedAt: g.activatedAt ?? now,
+      retiredAt: null,
+      windows: [...liveWindows(g), { from: now, to: null }],
+      decidedBy,
+    });
     tx.set(head(agentId), { activeGeneration: generation, updatedAt: now }, { merge: true });
   });
 }
@@ -139,8 +158,9 @@ export async function deactivate(agentId: string): Promise<void> {
     const h = await tx.get(head(agentId));
     const current = h.data()?.activeGeneration as number | null | undefined;
     if (current == null) return;
+    const currentSnap = await tx.get(generationsRef(agentId).doc(String(current)));
     const now = Date.now();
-    tx.update(generationsRef(agentId).doc(String(current)), { status: "retired", retiredAt: now });
+    if (currentSnap.exists) tx.update(currentSnap.ref, closeWindow(currentSnap, now));
     tx.set(head(agentId), { activeGeneration: null, updatedAt: now }, { merge: true });
   });
 }
@@ -167,35 +187,66 @@ export async function listReplyOutcomes(agentId: string): Promise<ReplyOutcome[]
   return snap.docs.map((d) => d.data() as ReplyOutcome);
 }
 
-/** Buyer verdicts on jobs this agent took, newest first. */
+interface ReviewEvent {
+  approved: boolean;
+  at: number;
+  notes: string;
+}
+
+/**
+ * A job's review decisions, oldest first: reviewHistory when it has one,
+ * else just the current reviewStatus (jobs reviewed before history was kept).
+ * A job that was sent back and then re-delivered sits at "pending" with its
+ * rejection only in the history, so it still counts.
+ */
+function reviewEvents(job: DocumentData): ReviewEvent[] {
+  if (Array.isArray(job.reviewHistory) && job.reviewHistory.length) {
+    return (job.reviewHistory as { status?: unknown; at?: unknown; notes?: unknown }[])
+      .filter((e) => e.status === "approved" || e.status === "rejected")
+      .map((e) => ({ approved: e.status === "approved", at: toMillis(e.at) ?? 0, notes: typeof e.notes === "string" ? e.notes : "" }))
+      .sort((a, b) => a.at - b.at);
+  }
+  if (job.reviewStatus !== "approved" && job.reviewStatus !== "rejected") return [];
+  return [{
+    approved: job.reviewStatus === "approved",
+    at: toMillis(job.reviewedAt) ?? toMillis(job.updatedAt) ?? 0,
+    notes: typeof job.reviewNotes === "string" ? job.reviewNotes : "",
+  }];
+}
+
+/**
+ * Buyer verdicts on jobs this agent took, newest first — one per review
+ * decision, so a revision request still counts after a later approval. A
+ * gig rating belongs to the order's final approval.
+ */
 export async function listJobOutcomes(agentId: string): Promise<JobOutcome[]> {
   const db = adminDb();
   const snap = await db.collection("jobs").where("takenByAgentId", "==", agentId).limit(MAX_JOBS).get();
-  const reviewed = snap.docs.filter((d) => {
-    const s = d.data().reviewStatus;
-    return s === "approved" || s === "rejected";
-  });
+  const reviewed = snap.docs.map((d) => ({ doc: d, events: reviewEvents(d.data()) })).filter((j) => j.events.length);
   const ratings = new Map<string, { rating: number; review: string }>();
-  const gigJobs = reviewed.filter((d) => d.data().gigId);
+  const gigJobs = reviewed.filter((j) => j.doc.data().gigId && j.events.at(-1)!.approved);
   if (gigJobs.length) {
-    const reviews = await db.getAll(...gigJobs.map((d) => db.collection("gigReviews").doc(d.id)));
+    const reviews = await db.getAll(...gigJobs.map((j) => db.collection("gigReviews").doc(j.doc.id)));
     for (const r of reviews) {
       const data = r.data();
       if (data && typeof data.rating === "number") ratings.set(r.id, { rating: data.rating, review: data.review ?? "" });
     }
   }
   return reviewed
-    .map((d) => {
-      const job = d.data();
-      const rated = ratings.get(d.id);
-      return {
-        jobId: d.id,
-        title: String(job.title ?? "").slice(0, 200),
-        at: toMillis(job.reviewedAt) ?? toMillis(job.updatedAt) ?? 0,
-        approved: job.reviewStatus === "approved",
-        rating: rated?.rating ?? null,
-        notes: [job.reviewNotes, rated?.review].filter(Boolean).join(" · ").slice(0, 1000),
-      };
+    .flatMap(({ doc, events }) => {
+      const title = String(doc.data().title ?? "").slice(0, 200);
+      const rated = ratings.get(doc.id);
+      return events.map((e, i) => {
+        const final = i === events.length - 1;
+        return {
+          jobId: doc.id,
+          title,
+          at: e.at,
+          approved: e.approved,
+          rating: final && e.approved ? rated?.rating ?? null : null,
+          notes: [e.notes, final ? rated?.review : ""].filter(Boolean).join(" · ").slice(0, 1000),
+        };
+      });
     })
     .sort((a, b) => b.at - a.at);
 }

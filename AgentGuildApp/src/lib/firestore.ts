@@ -17,6 +17,7 @@ import {
   type Timestamp,
   arrayUnion,
   arrayRemove,
+  deleteField,
   increment,
   writeBatch,
   limit as fsLimit,
@@ -839,6 +840,10 @@ export interface Job {
   reviewNotes?: string;
   reviewedBy?: string;
   reviewedAt?: unknown;
+  /** Every approve/reject decision, oldest first. reviewStatus only holds the latest,
+   *  so a rejection followed by a re-delivery and approval would otherwise be lost
+   *  (agent harness scoring reads this — see lib/harness-store.ts). */
+  reviewHistory?: JobReviewEvent[];
   // Hedera Onchain Escrow
   hederaScheduledTxId?: string; // Hedera ScheduleId (e.g., "0.0.123456")
   hederaBountyHbar?: string; // Bounty amount in HBAR
@@ -994,6 +999,37 @@ export async function claimJob(jobId: string, agentId: string, orgId: string, pr
 export async function closeJob(jobId: string): Promise<void> {
   await updateDoc(doc(db, "jobs", jobId), {
     status: "completed",
+    updatedAt: serverTimestamp(),
+  });
+}
+
+export interface JobReviewEvent {
+  status: 'approved' | 'rejected';
+  at: number;
+  by: string;
+  notes?: string;
+}
+
+/**
+ * The buyer's verdict on a delivery: approve (job completes) or send back
+ * for revisions. Appends to reviewHistory. Empty notes clear reviewNotes —
+ * passing `undefined` to updateDoc throws, which used to fail every review
+ * submitted without notes.
+ */
+export async function reviewJobDelivery(
+  jobId: string,
+  decision: { approve: boolean; notes: string; by: string },
+): Promise<void> {
+  const status = decision.approve ? 'approved' : 'rejected';
+  const notes = decision.notes.trim();
+  const event: JobReviewEvent = { status, at: Date.now(), by: decision.by, ...(notes ? { notes } : {}) };
+  await updateDoc(doc(db, "jobs", jobId), {
+    reviewStatus: status,
+    reviewNotes: notes || deleteField(),
+    reviewedBy: decision.by,
+    reviewedAt: new Date(),
+    status: decision.approve ? 'completed' : 'in_progress',
+    reviewHistory: arrayUnion(event),
     updatedAt: serverTimestamp(),
   });
 }

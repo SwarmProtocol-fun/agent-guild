@@ -292,6 +292,48 @@ async function fetchRuntime(url, options) {
 // Reply to Agent Guild
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Harness outcomes — did a reply under playbook generation N make it out?
+// Batched every 30s to POST /api/v1/harness/outcomes (same contract as the
+// daemon's replyCommand path), Ed25519 body-hash signed, else API key.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pendingOutcomes = [];
+
+function recordOutcome(msg, ok, detail = "") {
+  if (!Number.isInteger(msg.playbookGeneration)) return;
+  pendingOutcomes.push({ generation: msg.playbookGeneration, ok, detail: String(detail).slice(0, 300) });
+}
+
+async function flushOutcomes() {
+  if (pendingOutcomes.length === 0 || !AGENT_ID || (!privateKey && !API_KEY)) return;
+  const batch = pendingOutcomes.splice(0, 50);
+  const body = JSON.stringify({ outcomes: batch });
+  let query;
+  if (privateKey) {
+    const ts = Date.now().toString();
+    const hash = crypto.createHash("sha256").update(body).digest("hex");
+    query = `agent=${encodeURIComponent(AGENT_ID)}&sig=${encodeURIComponent(sign(`POST:/v1/harness/outcomes:${hash}:${ts}`))}&ts=${ts}`;
+  } else {
+    query = `agentId=${encodeURIComponent(AGENT_ID)}&apiKey=${encodeURIComponent(API_KEY)}`;
+  }
+  try {
+    const resp = await fetch(`${HUB_URL}/api/v1/harness/outcomes?${query}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    // A 4xx won't succeed on retry (bad batch, unknown agent) — drop it.
+    if (resp.status >= 500) throw new Error(`hub ${resp.status}`);
+    if (!resp.ok) console.error(`[bridge] harness outcomes rejected (${resp.status}) — dropped ${batch.length}`);
+  } catch (err) {
+    if (pendingOutcomes.length < 500) pendingOutcomes.unshift(...batch);
+    console.error(`[bridge] harness outcomes: ${err.message}`);
+  }
+}
+
+setInterval(flushOutcomes, 30_000).unref();
+
 /**
  * Send the runtime's response back to the Agent Guild channel.
  * Prefers Ed25519 signed /api/v1/send, falls back to API key /api/webhooks/reply.
@@ -430,6 +472,7 @@ const server = http.createServer(async (req, res) => {
       const response = await adapter(msg);
       if (!response || response.trim() === "") {
         console.log(`[${now}] runtime returned empty response — skipping reply`);
+        recordOutcome(msg, false, "runtime returned an empty response");
         return;
       }
 
@@ -437,8 +480,10 @@ const server = http.createServer(async (req, res) => {
 
       const result = await replyToAgentGuild(msg.channelId, response, msg.id);
       console.log(`[${now}] replied to agent-guild: ${result.messageId || "ok"}`);
+      recordOutcome(msg, true);
     } catch (err) {
       console.error(`[${now}] error: ${err.message}`);
+      recordOutcome(msg, false, err.message);
     }
 
     return;

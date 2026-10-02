@@ -50,6 +50,16 @@ describe("generationAt", () => {
     expect(generationAt(gens, 10_000)).toBe(2);
   });
 
+  it("credits a rolled-back generation for each span it was live", () => {
+    const rolledBack = [
+      gen(1, 100, 300, { status: "active", retiredAt: null, windows: [{ from: 100, to: 200 }, { from: 300, to: null }] }),
+      gen(2, 200, 300),
+    ];
+    expect(generationAt(rolledBack, 150)).toBe(1);
+    expect(generationAt(rolledBack, 250)).toBe(2);
+    expect(generationAt(rolledBack, 350)).toBe(1);
+  });
+
   it("never credits a proposal that was not live", () => {
     expect(generationAt([gen(3, null, null)], 10_000)).toBeNull();
   });

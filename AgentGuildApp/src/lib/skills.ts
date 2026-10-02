@@ -497,6 +497,30 @@ export const SKILL_REGISTRY: Skill[] = [
         pricing: { model: "free" },
         sidebarConfig: { sectionId: "modifications", label: "Tangem Wallet", href: "/mods/tagem-wallet/wallet", iconName: "DollarSign" },
     },
+    {
+        id: "dimos-bench",
+        name: "dimOS Benchmarks",
+        description: "Benchmarks agents on dimOS (dimensionalOS) robot eval suites — recordings, MuJoCo/Habitat sims, or a live robot. Agents submit signed eval runs; a per-suite leaderboard ranks them, and generation lineages track a harness improving run after run, with a feedback-context endpoint and a plateau signal for self-improvement loops.",
+        type: "mod",
+        source: "verified",
+        category: "Analytics",
+        icon: "🤖",
+        version: "0.2.0",
+        author: "Agent Guild",
+        tags: ["dimos", "robotics", "benchmarks", "evals", "leaderboard"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "dimOS Benchmarks", href: "/mods/dimos-bench/leaderboard", iconName: "Bot" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            agentSkills: [
+                { id: "dimos-submit-run", name: "Submit Eval Run", description: "File a dimOS eval run (optionally as the next generation of a lineage).", type: "skill", invocation: "POST /runs" },
+                { id: "dimos-run-feedback", name: "Get Run Feedback", description: "Failed/errored cases plus earlier improvement notes, for a feedback agent.", type: "skill", invocation: "GET /runs/:runId/feedback" },
+                { id: "dimos-lineage", name: "Check Lineage", description: "Score per generation and a plateau / continue-or-stop signal.", type: "skill", invocation: "GET /lineages/:lineageId" },
+            ],
+        },
+    },
 
     // ── Plugins ── (free, included in core)
     {

@@ -45,9 +45,27 @@ export interface HarnessGeneration {
   status: GenerationStatus;
   proposedBy: "agent" | "owner";
   proposedAt: number;
+  /** First time this generation went live (for display). */
   activatedAt: number | null;
   retiredAt: number | null;
+  /**
+   * Every span this generation was live. A rollback re-activates a retired
+   * generation, so one generation can own several spans; outcomes are
+   * credited by these, not by activatedAt/retiredAt. Absent on documents
+   * written before rollbacks kept history — liveWindows() falls back.
+   */
+  windows?: LiveWindow[];
   decidedBy: string | null;
+}
+
+export interface LiveWindow {
+  from: number;
+  to: number | null;
+}
+
+export function liveWindows(g: HarnessGeneration): LiveWindow[] {
+  if (g.windows?.length) return g.windows;
+  return g.activatedAt != null ? [{ from: g.activatedAt, to: g.retiredAt }] : [];
 }
 
 /** A buyer's verdict on a job the agent took (from jobs + gigReviews). */
@@ -94,11 +112,12 @@ export function jobValue(o: JobOutcome): number {
 
 /** The generation live at time `at`, or null (the runtime's default prompt). */
 export function generationAt(generations: HarnessGeneration[], at: number): number | null {
-  let live: HarnessGeneration | null = null;
+  let live: { generation: number; from: number } | null = null;
   for (const g of generations) {
-    if (g.activatedAt == null || g.activatedAt > at) continue;
-    if (g.retiredAt != null && g.retiredAt <= at) continue;
-    if (!live || g.activatedAt > live.activatedAt!) live = g;
+    for (const w of liveWindows(g)) {
+      if (w.from > at || (w.to != null && w.to <= at)) continue;
+      if (!live || w.from > live.from) live = { generation: g.generation, from: w.from };
+    }
   }
   return live ? live.generation : null;
 }
