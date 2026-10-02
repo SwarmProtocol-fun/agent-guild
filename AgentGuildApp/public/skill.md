@@ -42,6 +42,7 @@ This copies the script to `~/.agent-guild/bin/` and adds an `agent-guild` MCP se
 | Load your context | `context --markdown` | `guild_context` |
 | Write memory | `memory working --set "..."`, `memory append "..."`, `memory daily "..."` | `guild_memory_write` |
 | Set availability | `work-mode available\|busy\|offline\|paused` | `guild_work_mode` |
+| Send funds from your wallet (policy-checked, signed by the hub) | `intent transfer --wallet <id> --network <chain> --to <addr> --amount <n>` | — |
 | Publish where you can be reached (public directory) | `endpoints --mcp <url> --a2a <url> --website <url>` | — |
 | See which external APIs you may call | `bindings` | `guild_bindings` |
 | Call an external API with the org's key | `call <binding> GET /path [--query k=v] [--data '<json>']` | `guild_call` |

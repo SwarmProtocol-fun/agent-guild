@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook, Server, ShieldHalf } from "lucide-react";
+import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook, Server, ShieldHalf, Wallet as WalletIcon } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -103,6 +103,38 @@ interface ShroudEventRow {
   inputTokens: number;
   outputTokens: number;
 }
+
+interface WalletPolicy {
+  enabled: boolean;
+  networks: string[];
+  allowMainnet: boolean;
+  limits: { native?: { maxPerTx: string; maxPerDay: string }; usdc?: { maxPerTx: string; maxPerDay: string } };
+  recipientAllowlist: string[];
+  contractAllowlist: string[];
+}
+
+interface WalletRow {
+  id: string;
+  agentId: string;
+  chain: "solana" | "evm";
+  publicKey: string;
+  label: string | null;
+  policy: WalletPolicy;
+}
+
+interface IntentRow {
+  id: string;
+  agentId: string;
+  walletId: string;
+  request: Record<string, string>;
+  status: string;
+  error: string | null;
+  txHash: string | null;
+  explorerUrl: string | null;
+  createdAt: number | null;
+}
+
+interface NetworkRow { key: string; name: string; evm: boolean; testnet: boolean }
 
 interface AuditRow {
   seq: number;
@@ -240,6 +272,7 @@ export default function VaultPage() {
           <TabsTrigger value="secrets"><KeyRound className="h-4 w-4 mr-1.5" />Secrets ({secrets.length})</TabsTrigger>
           <TabsTrigger value="runtimes"><Server className="h-4 w-4 mr-1.5" />Runtimes ({runtimes.filter((r) => !r.revoked).length})</TabsTrigger>
           <TabsTrigger value="shroud"><ShieldHalf className="h-4 w-4 mr-1.5" />LLM proxy</TabsTrigger>
+          <TabsTrigger value="wallets"><WalletIcon className="h-4 w-4 mr-1.5" />Wallets</TabsTrigger>
           <TabsTrigger value="tokens"><Ticket className="h-4 w-4 mr-1.5" />Agent tokens</TabsTrigger>
           <TabsTrigger value="audit"><ScrollText className="h-4 w-4 mr-1.5" />Audit log</TabsTrigger>
         </TabsList>
@@ -435,6 +468,11 @@ export default function VaultPage() {
         {/* ── LLM proxy (Shroud) ───────────────────────────────── */}
         <TabsContent value="shroud" className="space-y-4">
           <ShroudPanel orgId={orgId} isOwner={isOwner} secrets={secrets} agentName={agentName} />
+        </TabsContent>
+
+        {/* ── Wallets / intents ─────────────────────────────────── */}
+        <TabsContent value="wallets" className="space-y-4">
+          <WalletsPanel orgId={orgId} isOwner={isOwner} agentName={agentName} />
         </TabsContent>
 
         {/* ── Agent tokens ─────────────────────────────────────── */}
@@ -639,6 +677,227 @@ function SecretDialog({ open, rotating, onClose, onSubmit }: {
             <Button onClick={submit} disabled={busy || !value || (!rotating && name.length < 2)}>
               {busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}{rotating ? "Rotate" : "Save secret"}
             </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function WalletsPanel({ orgId, isOwner, agentName }: { orgId: string; isOwner: boolean; agentName: (id: string) => string }) {
+  const [wallets, setWallets] = useState<WalletRow[]>([]);
+  const [intents, setIntents] = useState<IntentRow[]>([]);
+  const [networks, setNetworks] = useState<NetworkRow[]>([]);
+  const [mainnetAllowed, setMainnetAllowed] = useState(false);
+  const [editing, setEditing] = useState<WalletRow | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api<{ wallets: WalletRow[]; intents: IntentRow[]; networks: NetworkRow[]; mainnetAllowed: boolean }>(`/api/vault/intents?orgId=${orgId}`);
+      setWallets(d.wallets);
+      setIntents(d.intents);
+      setNetworks(d.networks);
+      setMainnetAllowed(d.mainnetAllowed);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoaded(true);
+    }
+  }, [orgId]);
+  useEffect(() => { load(); }, [load]);
+
+  if (!loaded) return <Loading />;
+  const summary = (r: Record<string, string>) => (r.type === "evm_call" ? `call ${shortAddr(r.to || "")}` : `${r.amount ?? "?"} ${r.asset === "usdc" ? "USDC" : "native"} → ${shortAddr(r.to || "")}`);
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground max-w-3xl">
+        Agents ask Agent Guild to send funds (<code className="text-xs">agent-guild intent transfer …</code>) instead of holding keys. Each request is
+        checked against the wallet&apos;s policy, simulated, and only then signed. Signing is off until you set a policy.
+        {!mainnetAllowed && " Mainnet signing is disabled on this server; only testnets can be enabled."}
+      </p>
+      {error && <p className="text-sm text-red-500">{error}</p>}
+
+      {wallets.length === 0 ? <Empty text="No custodial agent wallets yet. Create one from an agent's page." /> : (
+        <Card>
+          <CardContent className="p-0">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground border-b">
+                <tr>
+                  <th className="text-left font-medium p-3">Wallet</th>
+                  <th className="text-left font-medium p-3">Agent</th>
+                  <th className="text-left font-medium p-3">Signing</th>
+                  <th className="p-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {wallets.map((w) => (
+                  <tr key={w.id} className="border-b last:border-0">
+                    <td className="p-3">
+                      <div className="font-mono text-xs">{shortAddr(w.publicKey)}</div>
+                      <div className="text-[11px] text-muted-foreground">{w.chain}{w.label ? ` · ${w.label}` : ""} · id {w.id}</div>
+                    </td>
+                    <td className="p-3 text-xs">{agentName(w.agentId)}</td>
+                    <td className="p-3 text-xs">
+                      {w.policy.enabled ? (
+                        <div>
+                          <Badge variant="secondary">On</Badge> <span className="text-muted-foreground">{w.policy.networks.join(", ")}</span>
+                          <div className="text-muted-foreground mt-0.5">
+                            {Object.entries(w.policy.limits).map(([asset, l]) => `${asset}: ${l!.maxPerTx}/tx, ${l!.maxPerDay}/day`).join(" · ") || "no assets allowed"}
+                          </div>
+                        </div>
+                      ) : <span className="text-muted-foreground">Off</span>}
+                    </td>
+                    <td className="p-3 text-right">{isOwner && <Button size="sm" variant="outline" onClick={() => setEditing(w)}>Policy</Button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
+      {intents.length > 0 && (
+        <Card>
+          <CardContent className="p-0">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground border-b">
+                <tr>
+                  <th className="text-left font-medium p-3">When</th>
+                  <th className="text-left font-medium p-3">Agent</th>
+                  <th className="text-left font-medium p-3">Intent</th>
+                  <th className="text-left font-medium p-3">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {intents.map((i) => (
+                  <tr key={i.id} className="border-b last:border-0 align-top">
+                    <td className="p-3 text-xs whitespace-nowrap">{fmtTime(i.createdAt)}</td>
+                    <td className="p-3 text-xs">{agentName(i.agentId)}</td>
+                    <td className="p-3 text-xs"><span className="text-muted-foreground">{i.request.network}</span> {summary(i.request)}</td>
+                    <td className="p-3 text-xs">
+                      <Badge variant={["rejected", "failed", "simulation_failed", "reverted"].includes(i.status) ? "destructive" : "outline"}>{i.status}</Badge>
+                      {i.explorerUrl && <a href={i.explorerUrl} target="_blank" rel="noopener noreferrer" className="ml-2 underline">tx</a>}
+                      {i.error && <div className="text-muted-foreground mt-0.5 break-all">{i.error}</div>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
+      <PolicyDialog wallet={editing} networks={networks} mainnetAllowed={mainnetAllowed} onClose={() => setEditing(null)}
+        onSave={async (policy) => {
+          try {
+            await api(`/api/vault/intents/policy`, { method: "PUT", body: JSON.stringify({ orgId, walletId: editing!.id, ...policy }) });
+            await load();
+            return null;
+          } catch (e) {
+            return e instanceof Error ? e.message : String(e);
+          }
+        }} />
+    </div>
+  );
+}
+
+function PolicyDialog({ wallet, networks, mainnetAllowed, onClose, onSave }: {
+  wallet: WalletRow | null;
+  networks: NetworkRow[];
+  mainnetAllowed: boolean;
+  onClose: () => void;
+  onSave: (p: Record<string, unknown>) => Promise<string | null>;
+}) {
+  const [p, setP] = useState<WalletPolicy | null>(null);
+  const [recipients, setRecipients] = useState("");
+  const [contracts, setContracts] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!wallet) return;
+    setP(JSON.parse(JSON.stringify(wallet.policy)));
+    setRecipients(wallet.policy.recipientAllowlist.join("\n"));
+    setContracts(wallet.policy.contractAllowlist.join("\n"));
+    setError(null);
+  }, [wallet]);
+
+  if (!wallet || !p) return null;
+  const usable = networks.filter((n) => (wallet.chain === "evm" ? n.evm : !n.evm));
+  const limit = (asset: "native" | "usdc", field: "maxPerTx" | "maxPerDay", v: string) =>
+    setP({ ...p, limits: { ...p.limits, [asset]: { maxPerTx: p.limits[asset]?.maxPerTx ?? "0", maxPerDay: p.limits[asset]?.maxPerDay ?? "0", [field]: v } } });
+  const clearAsset = (asset: "native" | "usdc") => {
+    const next = { ...p.limits };
+    delete next[asset];
+    setP({ ...p, limits: next });
+  };
+
+  const save = async () => {
+    setBusy(true);
+    const err = await onSave({ ...p, recipientAllowlist: recipients, contractAllowlist: contracts });
+    setBusy(false);
+    setError(err);
+    if (!err) onClose();
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader><DialogTitle>Signing policy · {shortAddr(wallet.publicKey)}</DialogTitle></DialogHeader>
+        <div className="space-y-4 text-sm">
+          <label className="flex items-center gap-2 font-medium">
+            <input type="checkbox" checked={p.enabled} onChange={(e) => setP({ ...p, enabled: e.target.checked })} />Allow this agent to request signatures
+          </label>
+          <div className="space-y-1">
+            <Label>Networks</Label>
+            <div className="flex flex-wrap gap-2">
+              {usable.map((n) => (
+                <button key={n.key} type="button" disabled={!n.testnet && !(mainnetAllowed && p.allowMainnet)}
+                  onClick={() => setP({ ...p, networks: p.networks.includes(n.key) ? p.networks.filter((x) => x !== n.key) : [...p.networks, n.key] })}
+                  className={`px-2.5 py-1 rounded border text-xs disabled:opacity-40 ${p.networks.includes(n.key) ? "border-primary bg-primary/10" : "border-border text-muted-foreground"}`}>
+                  {n.name}{n.testnet ? "" : " (mainnet)"}
+                </button>
+              ))}
+            </div>
+            {mainnetAllowed && (
+              <label className="flex items-center gap-2 text-xs pt-1">
+                <input type="checkbox" checked={p.allowMainnet} onChange={(e) => setP({ ...p, allowMainnet: e.target.checked })} />Allow mainnet networks for this wallet (real funds)
+              </label>
+            )}
+          </div>
+          {(["native", "usdc"] as const).map((asset) => (
+            <div key={asset} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <Label>{asset === "native" ? "Native token (SOL / ETH)" : "USDC"}</Label>
+                {p.limits[asset]
+                  ? <button type="button" className="text-xs text-muted-foreground underline" onClick={() => clearAsset(asset)}>Don&apos;t allow</button>
+                  : <button type="button" className="text-xs underline" onClick={() => limit(asset, "maxPerTx", "0")}>Allow</button>}
+              </div>
+              {p.limits[asset] && (
+                <div className="grid grid-cols-2 gap-2">
+                  <Input aria-label={`${asset} max per transaction`} placeholder="Max per transaction" value={p.limits[asset]!.maxPerTx} onChange={(e) => limit(asset, "maxPerTx", e.target.value)} />
+                  <Input aria-label={`${asset} max per day`} placeholder="Max per day" value={p.limits[asset]!.maxPerDay} onChange={(e) => limit(asset, "maxPerDay", e.target.value)} />
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="space-y-1">
+            <Label htmlFor="pol-rcpt">Allowed recipients (one per line; empty = any)</Label>
+            <textarea id="pol-rcpt" className="w-full rounded-md border bg-transparent p-2 font-mono text-xs h-20" value={recipients} onChange={(e) => setRecipients(e.target.value)} />
+          </div>
+          {wallet.chain === "evm" && (
+            <div className="space-y-1">
+              <Label htmlFor="pol-ctr">Contracts it may call (one per line; empty = no contract calls)</Label>
+              <textarea id="pol-ctr" className="w-full rounded-md border bg-transparent p-2 font-mono text-xs h-16" value={contracts} onChange={(e) => setContracts(e.target.value)} />
+            </div>
+          )}
+          {error && <p className="text-red-500">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <Button onClick={save} disabled={busy}>{busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}Save policy</Button>
           </div>
         </div>
       </DialogContent>

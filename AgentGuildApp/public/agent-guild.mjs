@@ -32,6 +32,9 @@
  *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
  *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
  *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild wallet       [--json] — list this agent's custodial wallets
+ *   agent-guild intent       transfer|call --wallet <id> --network <chain> ... — ask the hub to sign under the wallet's policy
+ *   agent-guild intents      [--json] — recent intents
  *   agent-guild endpoints    [--mcp <url>] [--a2a <url>] [--website <url>] [--clear <kind>] — publish endpoints in the public directory
  *   agent-guild bindings     [--json] — list external APIs this agent may call via the vault
  *   agent-guild call         <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data <json>] — call one; the key is injected server-side
@@ -3111,6 +3114,81 @@ async function cmdToken() {
   console.log(data.token);
 }
 
+/** `agent-guild wallet` (alias `wallets`) — this agent's custodial wallets (ids are what `intent --wallet` takes). */
+async function cmdWallets() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const path = `/v1/agents/${config.agentId}/wallets`;
+  const resp = await fetch(`${config.hubUrl}/api${path}?${signedQuery(config, privateKey, path)}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Listing wallets failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  const wallets = data.wallets || [];
+  if (hasFlag("--json")) { console.log(JSON.stringify(wallets, null, 2)); return; }
+  if (!wallets.length) { console.log("No custodial wallets. An org owner can create one on the agent's page."); return; }
+  for (const w of wallets) console.log(`  ${w.id}  ${w.chain.padEnd(6)} ${w.publicKey}${w.label ? `  (${w.label})` : ""}`);
+}
+
+/**
+ * `agent-guild intent transfer --wallet <id> --network <chain> --to <addr> --amount <n> [--asset usdc] [--memo "..."]`
+ * `agent-guild intent call --wallet <id> --network <chain> --to <contract> --data 0x… [--value <n>]`
+ * The hub checks the wallet's policy, simulates, signs and broadcasts. Works keyless with AGENT_GUILD_TOKEN (intents:submit scope).
+ */
+async function cmdIntent() {
+  const kind = process.argv[3];
+  const walletId = arg("--wallet");
+  if (!["transfer", "call"].includes(kind) || !walletId) {
+    console.error('Usage: agent-guild intent transfer --wallet <id> --network <chain> --to <addr> --amount <n> [--asset native|usdc] [--memo "..."]\n       agent-guild intent call --wallet <id> --network <chain> --to <contract> --data 0x... [--value <n>]');
+    process.exit(2);
+  }
+  const payload = kind === "transfer"
+    ? { walletId, type: "transfer", network: arg("--network"), asset: arg("--asset") || "native", to: arg("--to"), amount: arg("--amount"), ...(arg("--memo") ? { memo: arg("--memo") } : {}) }
+    : { walletId, type: "evm_call", network: arg("--network"), to: arg("--to"), data: arg("--data"), ...(arg("--value") ? { value: arg("--value") } : {}), ...(arg("--memo") ? { memo: arg("--memo") } : {}) };
+
+  const tok = tokenAuth();
+  let resp;
+  if (tok) {
+    resp = await fetch(`${tok.hubUrl}/api/v1/intents`, { method: "POST", headers: { ...tok.headers, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  } else {
+    const config = loadConfig();
+    const { privateKey } = ensureKeypair();
+    resp = await signedBodyRequest(config, privateKey, "POST", "POST:/v1/intents", `${config.hubUrl}/api/v1/intents?agent=${config.agentId}`, payload);
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Intent refused (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  console.log(`${data.status}  ${data.txHash}`);
+  console.log(data.explorerUrl);
+}
+
+/** `agent-guild intents` — this agent's recent intents and their outcomes. */
+async function cmdIntents() {
+  const tok = tokenAuth();
+  let resp;
+  if (tok) {
+    resp = await fetch(`${tok.hubUrl}/api/v1/intents`, { headers: tok.headers });
+  } else {
+    const config = loadConfig();
+    const { privateKey } = ensureKeypair();
+    resp = await fetch(`${config.hubUrl}/api/v1/intents?${signedQuery(config, privateKey, "/v1/intents")}`);
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Listing intents failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) { console.log(JSON.stringify(data.intents, null, 2)); return; }
+  for (const i of data.intents || []) {
+    const r = i.request || {};
+    const what = r.type === "transfer" ? `${r.amount} ${r.asset} -> ${r.to}` : `call ${r.to}`;
+    console.log(`  ${new Date(i.createdAt).toISOString()}  ${String(i.status).padEnd(17)} ${r.network || ""}  ${what}${i.error ? `  (${i.error})` : ""}`);
+  }
+}
+
 async function cmdBindings() {
   const tok = tokenAuth();
   let resp;
@@ -3587,6 +3665,9 @@ try {
   else if (cmd === "agents") await cmdAgents();
   else if (cmd === "endpoints") await cmdEndpoints();
   else if (cmd === "bindings") await cmdBindings();
+  else if (cmd === "wallet" || cmd === "wallets") await cmdWallets();
+  else if (cmd === "intent") await cmdIntent();
+  else if (cmd === "intents") await cmdIntents();
   else if (cmd === "token") await cmdToken();
   else if (cmd === "call") await cmdCall();
   else if (cmd === "mcp") await cmdMcp();
@@ -3626,6 +3707,12 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Wallet Intents (the hub signs under your org's spending policy):
+  wallet      [--json]                                   — list this agent's custodial wallets
+  intent      transfer --wallet <id> --network <chain> --to <addr> --amount <n> [--asset native|usdc] [--memo "..."]
+  intent      call --wallet <id> --network <chain> --to <contract> --data 0x... [--value <n>]
+  intents     [--json]                                   — recent intents and their status
 
 Public Directory:
   endpoints   [--mcp <url>] [--a2a <url>] [--website <url>] [--clear mcp|a2a|website]  — show/set the endpoints listed in the public directory

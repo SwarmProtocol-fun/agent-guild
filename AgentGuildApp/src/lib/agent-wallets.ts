@@ -264,6 +264,21 @@ export async function getAgentWalletKeypair(walletId: string, orgId: string, age
   return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(secretKeyJson)));
 }
 
+/** EVM counterpart of getAgentWalletKeypair: the wallet's 0x private key, server-side only (lib/intents signs with it). */
+export async function getAgentWalletEvmPrivateKey(walletId: string, orgId: string, agentId: string): Promise<`0x${string}`> {
+  const doc = await adminDb().collection(AGENT_WALLETS_COLLECTION).doc(walletId).get();
+  if (!doc.exists) throw new Error("Wallet not found");
+  const data = doc.data()!;
+  if (data.agentId !== agentId || data.orgId !== orgId) {
+    throw new Error("Wallet does not belong to this agent/organization");
+  }
+  if (data.chain !== "evm") {
+    throw new Error(`getAgentWalletEvmPrivateKey only supports EVM wallets (this wallet is ${data.chain ?? "solana"})`);
+  }
+  const keyVersion = (data.keyVersion as number | undefined) ?? 1;
+  return decryptValue(data.encryptedSecretKey, data.iv, walletSalt(orgId, agentId), masterSecretForVersion(keyVersion)) as `0x${string}`;
+}
+
 /**
  * Resets the Hyperliquid trading passphrase for an EVM wallet generated
  * here, by decrypting OUR copy of its key (held under

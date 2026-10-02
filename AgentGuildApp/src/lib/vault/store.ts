@@ -254,7 +254,8 @@ export interface AuditEntry {
     | "tokens.revoked"
     | "secret.rotation_configured" | "secret.rotation_due" | "secret.rotation_failed"
     | "runtime.connected" | "runtime.revoked"
-    | "shroud.configured" | "shroud.blocked";
+    | "shroud.configured" | "shroud.blocked"
+    | "intent.policy_updated" | "intent.rejected" | "intent.failed" | "intent.executed";
   actorType: "user" | "agent";
   actorId: string;
   target: string;
