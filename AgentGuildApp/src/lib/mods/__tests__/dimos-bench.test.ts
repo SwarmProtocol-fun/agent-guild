@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildLeaderboard, parseSubmission, MAX_CASES, type BenchRun } from "../../../../mods/dimos-bench/bench";
+import {
+  buildLeaderboard, feedbackContext, lineageReport, parseSubmission, resolveLineage, MAX_CASES, type BenchRun,
+} from "../../../../mods/dimos-bench/bench";
 
 const body = (results: unknown[], extra: Record<string, unknown> = {}) => ({
   suite: "dimos.evals.suites.examples",
@@ -48,7 +50,7 @@ describe("buildLeaderboard", () => {
     id, agentId, agentName: agentId, orgId: "o", model, createdAt,
     suite: "s", agentModule: "dimos.evals.agents.pi", tags: [], dimosGitSha: null, dimosDirty: false,
     summary: { n: 2, meanScore, passRate, errors: 0, durationS: 1, costUsd: null },
-    results: [],
+    results: [], lineageId: id, parentRunId: null, generation: 0, harnessSha: null, improvement: "",
   });
 
   it("keeps each agent+model's best run and ranks by mean, then pass rate", () => {
@@ -64,5 +66,81 @@ describe("buildLeaderboard", () => {
       ["alpha", "m2", "r4", 1],
     ]);
     expect(rows[1].lastRunAt).toBe("2026-01-02");
+  });
+});
+
+const genRun = (id: string, generation: number, meanScore: number, extra: Partial<BenchRun> = {}): BenchRun => ({
+  id, agentId: "alpha", agentName: "Alpha", orgId: "o", model: "m", createdAt: `2026-01-0${generation + 1}T00:00:00Z`,
+  suite: "s", agentModule: "a", tags: [], dimosGitSha: null, dimosDirty: false,
+  summary: { n: 2, meanScore, passRate: meanScore, errors: 0, durationS: 1, costUsd: null },
+  results: [], lineageId: "lin", parentRunId: null, generation, harnessSha: null, improvement: `note ${generation}`,
+  ...extra,
+});
+
+describe("lineage submissions", () => {
+  it("reads lineage claims, ignores a claimed generation, validates formats", () => {
+    const parsed = parseSubmission(body([{ case_id: "a" }], { parentRunId: "p1", generation: 99, harnessSha: "abc1234", improvement: "  x  " }));
+    if (!parsed.ok) throw new Error(parsed.errors.join());
+    expect(parsed.lineage).toEqual({ lineageId: null, parentRunId: "p1" });
+    expect(parsed.run.harnessSha).toBe("abc1234");
+    expect(parsed.run.improvement).toBe("x");
+    expect(parseSubmission(body([{ case_id: "a" }], { harnessSha: "NOT-HEX" }))).toMatchObject({ ok: false });
+    expect(parseSubmission(body([{ case_id: "a" }], { lineageId: "bad id!" }))).toMatchObject({ ok: false });
+  });
+
+  const base = { runId: "new", agentId: "alpha", suite: "s", lineageTaken: false };
+
+  it("puts a child at parent generation + 1 in the parent's lineage", () => {
+    const parent = genRun("p1", 2, 0.5);
+    expect(resolveLineage({ ...base, claim: { lineageId: null, parentRunId: "p1" }, parent })).toEqual({
+      ok: true, lineageId: "lin", parentRunId: "p1", generation: 3,
+    });
+  });
+
+  it("refuses a parent from another agent, another suite, another lineage, or that doesn't exist", () => {
+    const claim = { lineageId: null, parentRunId: "p1" };
+    expect(resolveLineage({ ...base, claim, parent: null })).toMatchObject({ ok: false, status: 404 });
+    expect(resolveLineage({ ...base, claim, parent: genRun("p1", 0, 1, { agentId: "beta" }) })).toMatchObject({ ok: false, status: 403 });
+    expect(resolveLineage({ ...base, claim, parent: genRun("p1", 0, 1, { suite: "other" }) })).toMatchObject({ ok: false, status: 400 });
+    expect(resolveLineage({ ...base, claim: { lineageId: "x", parentRunId: "p1" }, parent: genRun("p1", 0, 1) })).toMatchObject({ ok: false });
+  });
+
+  it("roots a lineage at generation 0, under its own id or an unused name", () => {
+    expect(resolveLineage({ ...base, claim: { lineageId: null, parentRunId: null }, parent: null })).toMatchObject({ lineageId: "new", generation: 0 });
+    expect(resolveLineage({ ...base, claim: { lineageId: "mine", parentRunId: null }, parent: null })).toMatchObject({ lineageId: "mine" });
+    expect(resolveLineage({ ...base, claim: { lineageId: "mine", parentRunId: null }, parent: null, lineageTaken: true })).toMatchObject({ ok: false, status: 409 });
+  });
+});
+
+describe("lineageReport", () => {
+  it("reports best score per generation, deltas, and plateau after `patience` flat generations", () => {
+    const runs = [genRun("g0", 0, 0.4), genRun("g1", 1, 0.6), genRun("g1b", 1, 0.5), genRun("g2", 2, 0.55), genRun("g3", 3, 0.6)];
+    const r = lineageReport(runs, { patience: 2, minDelta: 0 })!;
+    expect(r.generations.map((g) => [g.generation, g.runId, g.runs])).toEqual([[0, "g0", 1], [1, "g1", 2], [2, "g2", 1], [3, "g3", 1]]);
+    expect(r.generations.map((g) => g.delta === null ? null : +g.delta.toFixed(2))).toEqual([null, 0.2, -0.05, 0.05]);
+    expect(r.generations[1].improvement).toBe("note 1");
+    expect([r.bestGeneration, r.generationsSinceImprovement, r.plateau, r.decision]).toEqual([1, 2, true, "stop"]); // a tie is not a gain
+    expect(lineageReport(runs, { patience: 3, minDelta: 0 })!.decision).toBe("continue");
+    expect(lineageReport([], { patience: 3, minDelta: 0 })).toBeNull();
+  });
+
+  it("only counts gains larger than minDelta", () => {
+    const r = lineageReport([genRun("g0", 0, 0.5), genRun("g1", 1, 0.505)], { patience: 1, minDelta: 0.01 })!;
+    expect([r.bestGeneration, r.plateau]).toEqual([0, true]);
+  });
+});
+
+describe("feedbackContext", () => {
+  it("lists errors then failures worst-first, and the improvement chain oldest-first", () => {
+    const c = (caseId: string, score: number, passed: boolean, error = "") => ({
+      caseId, score, passed, error, durationS: 1, finalAnswer: `ans ${caseId}`, steps: 3, toolCalls: 2,
+      promptTokens: 100, completionTokens: 10, costUsd: null, endedBy: "answer",
+    });
+    const run = genRun("g2", 2, 0.4, { parentRunId: "g1", results: [c("ok", 1, true), c("meh", 0.5, false), c("bad", 0, false), c("boom", 0, false, "timeout")] });
+    const ctx = feedbackContext(run, [genRun("g1", 1, 0.3), genRun("g0", 0, 0.2)]);
+    expect(ctx.failures.map((f) => [f.caseId, f.kind])).toEqual([["boom", "error"], ["bad", "failed"], ["meh", "failed"]]);
+    expect(ctx.failures[1]).toMatchObject({ finalAnswer: "ans bad", steps: 3, toolCalls: 2, promptTokens: 100 });
+    expect(ctx.passedCaseIds).toEqual(["ok"]);
+    expect(ctx.improvementHistory.map((h) => [h.runId, h.improvement])).toEqual([["g0", "note 0"], ["g1", "note 1"], ["g2", "note 2"]]);
   });
 });

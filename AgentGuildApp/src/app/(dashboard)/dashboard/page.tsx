@@ -1,23 +1,18 @@
-/** Dashboard — curated command center for org operations, analytics, and integrations. */
+/** Dashboard — operator overview: what needs attention, what's moving, and how it's trending. */
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { motion, useReducedMotion } from "motion/react";
-import { CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { StatCard } from "@/components/analytics/stat-card";
 import { useOrg } from "@/contexts/OrgContext";
-import SpotlightCard from "@/components/reactbits/SpotlightCard";
-import ShinyText from "@/components/reactbits/ShinyText";
-import DecryptedText from "@/components/reactbits/DecryptedText";
 import { VitalsWidget } from "@/components/vitals-widget";
 import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
-import { RotateCcw, X, FolderKanban, Target, Briefcase, Users, Loader2, Pencil, Wifi, TrendingUp } from "lucide-react";
+import { RotateCcw, X, Target, Briefcase, Wifi, DollarSign } from "lucide-react";
 import {
   getTasksByOrg,
   getProjectsByOrg,
@@ -29,17 +24,10 @@ import {
   type Task,
   type Agent,
   type Job,
-  ensureAgentGroupChat,
-  sendMessage,
 } from "@/lib/firestore";
-import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import {
-  getActivityFeed,
-  EVENT_TYPE_CONFIG,
-  type ActivityEvent,
-} from "@/lib/activity";
+import { getActivityFeed, type ActivityEvent } from "@/lib/activity";
 import type { DispatchPayload } from "@/components/agent-map/agent-map";
 import { TaskVelocityChart } from "@/components/charts/task-velocity-chart";
 import { CostTrendChart } from "@/components/charts/cost-trend-chart";
@@ -51,7 +39,7 @@ import {
   computeActivityByHour,
 } from "@/lib/dashboard-data";
 import type { DailyCost } from "@/lib/usage";
-import { getNamedCronJob, createCronJob, updateCronJob, SCHEDULE_PRESETS, parseCronToHuman, type CronJob } from "@/lib/cron";
+import { getNamedCronJob, type CronJob } from "@/lib/cron";
 import type { DailySummary } from "@/lib/daily-summary";
 import { UsageWidget } from "@/components/usage-widget";
 import { LiveFeedWidget } from "@/components/live-feed-widget";
@@ -61,6 +49,17 @@ import AgentSessionsWidget from "@/components/agent-sessions-widget";
 import CoordinatorDashboardWidget from "@/components/coordinator-dashboard-widget";
 import { PromptWidget } from "@/components/prompt-widget";
 import { ChannelsWidget } from "@/components/channels-widget";
+import {
+  DashboardCard,
+  NeedsAttentionCard,
+  RecentTasksCard,
+  RecentJobsCard,
+  ActivityFeedCard,
+  TopPerformersCard,
+  formatRelativeTime,
+  toMillis,
+} from "@/components/dashboard/dashboard-cards";
+import { DailyBriefingCard } from "@/components/dashboard/daily-briefing-card";
 
 const AgentMap = dynamic(
   () => import('@/components/agent-map/agent-map'),
@@ -79,8 +78,6 @@ const AgentMap = dynamic(
 /* ------------------------------------------------------------------ */
 
 interface OrgStats {
-  projectCount: number;
-  taskCount: number;
   completedTasks: number;
   activeTasks: number;
   todoTasks: number;
@@ -88,45 +85,9 @@ interface OrgStats {
   openJobs: number;
 }
 
-const statusColors: Record<string, string> = {
-  todo: "badge-neon-default",
-  in_progress: "badge-neon-amber",
-  done: "badge-neon-green",
-};
-
-const statusLabels: Record<string, string> = {
-  todo: "To Do",
-  in_progress: "In Progress",
-  done: "Done",
-};
-
-const jobStatusColors: Record<string, string> = {
-  open: "badge-neon-green",
-  claimed: "badge-neon-amber",
-  closed: "badge-neon-default",
-};
-
-const jobStatusLabels: Record<string, string> = {
-  open: "Open",
-  claimed: "Claimed",
-  closed: "Closed",
-};
-
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-function formatRelativeTime(date: Date | null): string {
-  if (!date) return "";
-  const diff = Date.now() - date.getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
 /** Section group label — establishes visual hierarchy between curated rows. */
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -156,6 +117,20 @@ function Reveal({ children, delay = 0, className }: { children: ReactNode; delay
   );
 }
 
+/** Placeholder for agent-scoped widgets when the viewer has no registered agent. */
+function RegisterAgentCard({ icon, title, what }: { icon: string; title: string; what: string }) {
+  return (
+    <DashboardCard icon={icon} title={title}>
+      <div className="text-center py-4 text-muted-foreground">
+        <p className="text-sm">Register as an agent to view {what}</p>
+        <Button asChild variant="outline" size="sm" className="mt-2">
+          <Link href="/agents">Register Agent</Link>
+        </Button>
+      </div>
+    </DashboardCard>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -172,28 +147,17 @@ export default function DashboardPage() {
   const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [activityFeed, setActivityFeed] = useState<ActivityEvent[]>([]);
   const [activityAll, setActivityAll] = useState<ActivityEvent[]>([]);
   const [dailyCosts, setDailyCosts] = useState<DailyCost[]>([]);
   const [agentSlots, setAgentSlots] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
+  const [briefingCronJob, setBriefingCronJob] = useState<CronJob | null>(null);
+  const [latestBriefing, setLatestBriefing] = useState<DailySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [dashTab, setDashTab] = useState("overview");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-
-  // Daily Briefing state
-  const [briefingCronJob, setBriefingCronJob] = useState<CronJob | null>(null);
-  const [latestBriefing, setLatestBriefing] = useState<DailySummary | null>(null);
-  const [briefingSetupMode, setBriefingSetupMode] = useState(false);
-  const [briefingSchedule, setBriefingSchedule] = useState("0 9 * * *");
-  const [briefingPrompt, setBriefingPrompt] = useState(
-    "Generate a daily activity summary for the organization. Include task completion stats, agent activity highlights, any errors or failures, and key metrics like token usage and cost."
-  );
-  const [briefingSaving, setBriefingSaving] = useState(false);
-  const [briefingError, setBriefingError] = useState<string | null>(null);
-  const [briefingAgentId, setBriefingAgentId] = useState<string>("");
 
   // Compute analytics data
   const taskVelocity = useMemo(() => computeTaskVelocity(allTasks), [allTasks]);
@@ -216,8 +180,6 @@ export default function DashboardPage() {
 
       // Derived here rather than via getOrgStats, which re-reads all four collections.
       setStats({
-        projectCount: projects.length,
-        taskCount: tasks.length,
         completedTasks: tasks.filter(t => t.status === 'done').length,
         activeTasks: tasks.filter(t => t.status === 'in_progress').length,
         todoTasks: tasks.filter(t => t.status === 'todo').length,
@@ -234,48 +196,31 @@ export default function DashboardPage() {
       const projectMap = new Map(projects.map(p => [p.id, p.name]));
       const agentMap = new Map(agentsData.map(a => [a.id, a.name]));
 
-      const enrichedTasks = tasks
-        .map(task => ({
-          ...task,
-          projectName: projectMap.get(task.projectId) || 'Unknown Project',
-          agentName: task.assigneeAgentId ? agentMap.get(task.assigneeAgentId) || 'Unknown Agent' : 'Unassigned'
-        }))
-        .sort((a, b) => {
-          const aTime = a.createdAt && typeof a.createdAt === 'object' && 'seconds' in a.createdAt
-            ? (a.createdAt as any).seconds * 1000
-            : new Date(a.createdAt as any).getTime();
-          const bTime = b.createdAt && typeof b.createdAt === 'object' && 'seconds' in b.createdAt
-            ? (b.createdAt as any).seconds * 1000
-            : new Date(b.createdAt as any).getTime();
-          return bTime - aTime;
-        })
-        .slice(0, 5);
+      setRecentTasks(
+        [...tasks]
+          .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt))
+          .slice(0, 5)
+          .map(task => ({
+            ...task,
+            projectName: projectMap.get(task.projectId) || 'Unknown Project',
+            agentName: task.assigneeAgentId ? agentMap.get(task.assigneeAgentId) || 'Unknown Agent' : 'Unassigned',
+          }))
+      );
 
-      setRecentTasks(enrichedTasks);
+      setRecentJobs(
+        [...jobs]
+          .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt))
+          .slice(0, 5)
+      );
 
-      const sortedJobs = [...jobs]
-        .sort((a, b) => {
-          const aTime = a.createdAt && typeof a.createdAt === 'object' && 'seconds' in a.createdAt
-            ? (a.createdAt as any).seconds * 1000
-            : new Date(a.createdAt as any).getTime();
-          const bTime = b.createdAt && typeof b.createdAt === 'object' && 'seconds' in b.createdAt
-            ? (b.createdAt as any).seconds * 1000
-            : new Date(b.createdAt as any).getTime();
-          return bTime - aTime;
-        })
-        .slice(0, 5);
-      setRecentJobs(sortedJobs);
-
-      // Load activity feed (200 for heatmap, slice 8 for feed widget)
+      // Activity feed — 200 events feed the heatmap, the first few feed the Activity card
       try {
-        const feed = await getActivityFeed(currentOrg.id, { max: 200 });
-        setActivityAll(feed);
-        setActivityFeed(feed.slice(0, 8));
+        setActivityAll(await getActivityFeed(currentOrg.id, { max: 200 }));
       } catch {
         // Activity feed is non-critical
       }
 
-      // Load cost data
+      // Cost data
       try {
         const { getUsageRecords, aggregateDaily } = await import("@/lib/usage");
         const records = await getUsageRecords(currentOrg.id, 14);
@@ -284,7 +229,7 @@ export default function DashboardPage() {
         // Cost data is non-critical
       }
 
-      // Load daily briefing cron job + latest summary
+      // Daily briefing cron job + latest summary
       try {
         // Use direct name lookup — avoids composite index requirement
         const briefingJob = await getNamedCronJob(currentOrg.id, "Daily Briefing");
@@ -332,91 +277,6 @@ export default function DashboardPage() {
       setRefreshing(false);
     }
   }, [loadDashboardData]);
-
-  // ── Daily Briefing setup/edit handler ──
-  const handleBriefingSetup = useCallback(async () => {
-    if (!currentOrg || (!account && !authenticated)) return;
-    setBriefingSaving(true);
-    setBriefingError(null);
-    try {
-      const briefingAgent = briefingAgentId ? agents.find(a => a.id === briefingAgentId) : null;
-      const scheduleLabel = parseCronToHuman(briefingSchedule);
-      const isEditing = !!briefingCronJob;
-
-      // Save the agent ID — preserve existing assignment if user didn't change it
-      const agentIdsToSave = briefingAgentId
-        ? [briefingAgentId]
-        : briefingCronJob?.agentIds?.length
-          ? briefingCronJob.agentIds
-          : undefined;
-
-      if (isEditing) {
-        await updateCronJob(briefingCronJob.id, {
-          message: briefingPrompt,
-          schedule: briefingSchedule,
-          scheduleLabel,
-          agentIds: agentIdsToSave,
-        });
-      } else {
-        await createCronJob({
-          orgId: currentOrg.id,
-          name: "Daily Briefing",
-          message: briefingPrompt,
-          schedule: briefingSchedule,
-          scheduleLabel,
-          agentIds: agentIdsToSave,
-          priority: "medium",
-          enabled: true,
-          createdBy: userAddress || "unknown",
-        });
-      }
-
-      // Notify assigned briefing agent through Agent Hub
-      if (briefingAgent) {
-        ensureAgentGroupChat(currentOrg.id).then(hub => {
-          const action = isEditing ? "updated" : "configured";
-          sendMessage({
-            channelId: hub.id,
-            senderId: "system",
-            senderName: "Agent Guild Protocol",
-            senderType: "agent",
-            content: [
-              `📋 **Daily Briefing ${action}** — assigned to **@${briefingAgent.name}**`,
-              ``,
-              `**Schedule:** ${scheduleLabel}`,
-              `**Prompt:** ${briefingPrompt}`,
-              ``,
-              `You are responsible for generating briefings on this schedule. Begin operations when ready.`,
-            ].join("\n"),
-            orgId: currentOrg.id,
-            createdAt: new Date(),
-          });
-        }).catch(() => {});
-      }
-
-      setBriefingSetupMode(false);
-      await loadDashboardData();
-    } catch (err) {
-      console.error("Failed to set up daily briefing:", err);
-      setBriefingError(err instanceof Error ? err.message : "Failed to save briefing");
-    } finally {
-      setBriefingSaving(false);
-    }
-  }, [currentOrg, account, authenticated, userAddress, briefingSchedule, briefingPrompt, briefingCronJob, briefingAgentId, agents, loadDashboardData]);
-
-  // ── Open briefing editor pre-filled with current config ──
-  const openBriefingEditor = useCallback(() => {
-    if (briefingCronJob) {
-      setBriefingSchedule(briefingCronJob.schedule);
-      setBriefingPrompt(briefingCronJob.message);
-      setBriefingAgentId(briefingCronJob.agentIds?.[0] || "");
-    } else {
-      // Default to agent-guild slot agent if one is assigned
-      const slot = agentSlots["daily-briefings"];
-      setBriefingAgentId(slot?.agentId || "");
-    }
-    setBriefingSetupMode(true);
-  }, [briefingCronJob, agentSlots]);
 
   // ── Dispatch handler — creates job, assigns agents, refreshes data ──
   const handleDispatch = useCallback(async (payload: DispatchPayload) => {
@@ -470,7 +330,7 @@ export default function DashboardPage() {
     } finally {
       setDispatching(false);
     }
-  }, [currentOrg, agents, account, currencySymbol, loadDashboardData, userAddress]);
+  }, [currentOrg, agents, currencySymbol, loadDashboardData, userAddress]);
 
   // ── Assign handler — assigns agents to open jobs via drag connections ──
   const handleAssign = useCallback(async (assignments: { jobId: string; agentId: string; jobTitle: string; agentName: string }[]) => {
@@ -490,10 +350,11 @@ export default function DashboardPage() {
     }
   }, [currentOrg, loadDashboardData]);
 
-  const onlineAgents = agents.filter(a => a.status === "online");
-  const busyAgents = agents.filter(a => a.status === "busy");
-  const offlineAgents = agents.filter(a => a.status === "offline");
+  const onlineCount = agents.filter(a => a.status === "online").length;
+  const busyCount = agents.filter(a => a.status === "busy").length;
   const userAgent = agents.find(a => a.walletAddress === userAddress);
+  const spend14d = dailyCosts.reduce((sum, d) => sum + d.costUsd, 0);
+  const tokens14d = dailyCosts.reduce((sum, d) => sum + d.tokens, 0);
 
   /* ── Greeting ── */
   const greeting = useMemo(() => {
@@ -527,19 +388,19 @@ export default function DashboardPage() {
           </div>
         </div>
         {/* Stat strip skeleton */}
-        <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
-          {Array.from({ length: 6 }, (_, i) => (
+        <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }, (_, i) => (
             <div key={`sk-stat-${i}`} className="h-20 rounded-xl skeleton-shimmer" style={{ animationDelay: `${i * 0.05}s` }} />
           ))}
         </div>
-        {/* Command center skeleton */}
+        {/* Command row skeleton */}
         <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
           <div className="lg:col-span-2 h-56 rounded-xl skeleton-shimmer" style={{ animationDelay: '0.2s' }} />
           <div className="h-56 rounded-xl skeleton-shimmer" style={{ animationDelay: '0.25s' }} />
         </div>
         <div className="grid gap-3 grid-cols-1 md:grid-cols-3">
           {Array.from({ length: 3 }, (_, i) => (
-            <div key={`sk-ops-${i}`} className="h-44 rounded-xl skeleton-shimmer" style={{ animationDelay: `${0.3 + i * 0.05}s` }} />
+            <div key={`sk-recent-${i}`} className="h-44 rounded-xl skeleton-shimmer" style={{ animationDelay: `${0.3 + i * 0.05}s` }} />
           ))}
         </div>
       </div>
@@ -574,22 +435,8 @@ export default function DashboardPage() {
     );
   }
 
-  /* ── Daily Briefing derived state ── */
-  const cronAgentId = briefingCronJob?.agentIds?.[0];
-  const briefingSlot = agentSlots["daily-briefings"];
-  const briefingAgent = cronAgentId
-    ? agents.find(a => a.id === cronAgentId)
-    : briefingSlot ? agents.find(a => a.id === briefingSlot.agentId) : null;
-
   const todo = stats?.todoTasks || 0;
-  const inProgress = stats?.activeTasks || 0;
   const done = stats?.completedTasks || 0;
-  const totalTaskCount = todo + inProgress + done;
-
-  const topPerformers = [...agents]
-    .filter(a => a.tasksCompleted && a.tasksCompleted > 0)
-    .sort((a, b) => (b.tasksCompleted || 0) - (a.tasksCompleted || 0))
-    .slice(0, 5);
 
   /* ── Render ── */
 
@@ -633,454 +480,70 @@ export default function DashboardPage() {
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="agent-guild">Agent Map</TabsTrigger>
+          <TabsTrigger value="system">System</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="mt-3 space-y-5">
 
           {/* ═══ At a glance ═══ */}
-          <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
             {[
-              { title: "Online", value: String(onlineAgents.length), icon: Wifi, changeLabel: "agents online" },
-              { title: "Active Tasks", value: String(stats?.activeTasks || 0), icon: Target, changeLabel: "in progress" },
-              { title: "Open Jobs", value: String(stats?.openJobs || 0), icon: Briefcase, changeLabel: `${stats?.jobCount || 0} total jobs` },
-              { title: "Done %", value: `${stats?.taskCount ? Math.round(((stats.completedTasks || 0) / stats.taskCount) * 100) : 0}%`, icon: TrendingUp, changeLabel: "completion rate" },
-              { title: "Projects", value: String(stats?.projectCount || 0), icon: FolderKanban, changeLabel: "active projects" },
-              { title: "Members", value: String(currentOrg?.members.length || 0), icon: Users, changeLabel: "org members" },
+              { title: "Agents Online", value: String(onlineCount), icon: Wifi, changeLabel: `of ${agents.length}${busyCount ? ` · ${busyCount} busy` : ""}` },
+              { title: "Active Tasks", value: String(stats?.activeTasks || 0), icon: Target, changeLabel: `${todo} to do · ${done} done` },
+              { title: "Open Jobs", value: String(stats?.openJobs || 0), icon: Briefcase, changeLabel: `${stats?.jobCount || 0} total` },
+              { title: "Spend (14d)", value: `$${spend14d.toFixed(2)}`, icon: DollarSign, changeLabel: `${(tokens14d / 1000).toFixed(1)}K tokens` },
             ].map((s, i) => (
               <Reveal key={s.title} delay={i * 0.04}>
-                <StatCard title={s.title} value={s.value} icon={s.icon} changeLabel={s.changeLabel} change={0} />
+                <StatCard title={s.title} value={s.value} icon={s.icon} changeLabel={s.changeLabel} />
               </Reveal>
             ))}
           </div>
 
-          {/* ═══ Command Center ═══ */}
+          {/* ═══ Command ═══ */}
           <div className="space-y-3">
-            <SectionLabel>Command Center</SectionLabel>
+            <SectionLabel>Command</SectionLabel>
             <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
               <Reveal delay={0.05} className="lg:col-span-2">
                 <PromptWidget onDispatch={handleDispatch} agents={agents} />
               </Reveal>
               <Reveal delay={0.08}>
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">
-                      🟢 <DecryptedText text="Agent Status" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2 px-4 pb-3">
-                    {agents.length === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p>No agents registered</p>
-                        <Link href="/agents" className="text-amber-600 dark:text-amber-400 hover:underline text-sm">
-                          Register your first agent →
-                        </Link>
-                      </div>
-                    ) : (
-                      [
-                        { label: "Online", count: onlineAgents.length, color: "bg-emerald-500", textColor: "text-emerald-500" },
-                        { label: "Busy", count: busyAgents.length, color: "bg-amber-500", textColor: "text-amber-500" },
-                        { label: "Offline", count: offlineAgents.length, color: "bg-muted-foreground/40", textColor: "text-muted-foreground" },
-                      ].map(s => (
-                        <div key={s.label} className="space-y-1.5">
-                          <div className="flex items-center justify-between text-sm">
-                            <div className="flex items-center gap-2">
-                              <span className={`w-2 h-2 rounded-full ${s.color}`} />
-                              <span className="font-medium">{s.label}</span>
-                            </div>
-                            <span className={`font-semibold tabular-nums ${s.textColor}`}>
-                              {s.count} <span className="text-xs text-muted-foreground font-normal">/ {agents.length}</span>
-                            </span>
-                          </div>
-                          <div className="h-2 bg-muted rounded-full overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all duration-500 ${s.color}`}
-                              style={{ width: `${agents.length > 0 ? (s.count / agents.length) * 100 : 0}%` }}
-                            />
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </CardContent>
-                </SpotlightCard>
+                <NeedsAttentionCard
+                  tasks={allTasks}
+                  jobs={allJobs}
+                  agents={agents}
+                  briefingErrorCount={latestBriefing?.summary?.errors?.length || 0}
+                />
               </Reveal>
             </div>
           </div>
 
-          {/* ═══ Operations ═══ */}
+          {/* ═══ Recent ═══ */}
           <div className="space-y-3">
-            <SectionLabel>Operations</SectionLabel>
+            <SectionLabel>Recent</SectionLabel>
             <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-              <Reveal delay={0.1}>
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="flex flex-row items-center gap-2 px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">
-                      📋 <DecryptedText text="Recent Tasks" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                    </CardTitle>
-                    <Link href="/missions" className="text-xs">
-                      <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
-                    </Link>
-                  </CardHeader>
-                  <CardContent className="space-y-0.5 px-4 pb-3">
-                    {recentTasks.length === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p>No tasks yet</p>
-                        <Link href="/missions" className="text-amber-600 dark:text-amber-400 hover:underline text-sm">
-                          Create your first task →
-                        </Link>
-                      </div>
-                    ) : (
-                      recentTasks.map((task) => (
-                        <div
-                          key={task.id}
-                          className="flex items-center justify-between py-2 border-b border-border last:border-0"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium truncate">{task.title}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              📁 {task.projectName} · 🤖 {task.agentName}
-                            </p>
-                          </div>
-                          <Badge variant="outline" className={`text-[10px] ${statusColors[task.status]}`}>
-                            {statusLabels[task.status]}
-                          </Badge>
-                        </div>
-                      ))
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              </Reveal>
-
-              <Reveal delay={0.13}>
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="flex flex-row items-center gap-2 px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">
-                      💼 <DecryptedText text="Recent Jobs" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                    </CardTitle>
-                    <Link href="/jobs" className="text-xs">
-                      <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
-                    </Link>
-                  </CardHeader>
-                  <CardContent className="space-y-0.5 px-4 pb-3">
-                    {recentJobs.length === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p>No jobs posted yet</p>
-                        <Link href="/jobs" className="text-amber-600 dark:text-amber-400 hover:underline text-sm">
-                          Post your first job →
-                        </Link>
-                      </div>
-                    ) : (
-                      recentJobs.map((job) => (
-                        <div
-                          key={job.id}
-                          className="flex items-center justify-between py-2 border-b border-border last:border-0"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium truncate">{job.title}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {job.reward && <span>💰 {job.reward} · </span>}
-                              {job.priority} priority
-                            </p>
-                          </div>
-                          <Badge variant="outline" className={`text-[10px] ${jobStatusColors[job.status]}`}>
-                            {jobStatusLabels[job.status]}
-                          </Badge>
-                        </div>
-                      ))
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              </Reveal>
-
-              <Reveal delay={0.16}>
-                <ChannelsWidget agents={agents} />
+              <Reveal delay={0.1}><RecentTasksCard tasks={recentTasks} /></Reveal>
+              <Reveal delay={0.13}><RecentJobsCard jobs={recentJobs} /></Reveal>
+              <Reveal delay={0.16} className="md:col-span-2 xl:col-span-1">
+                <ActivityFeedCard events={activityAll.slice(0, 5)} />
               </Reveal>
             </div>
+            <Reveal delay={0.18}>
+              <DailyBriefingCard
+                orgId={currentOrg.id}
+                agents={agents}
+                slotAgentId={agentSlots["daily-briefings"]?.agentId}
+                cronJob={briefingCronJob}
+                latestBriefing={latestBriefing}
+                createdBy={userAddress}
+                canEdit={!!account || authenticated}
+                onSaved={() => loadDashboardData()}
+              />
+            </Reveal>
           </div>
 
-          {/* ═══ Daily Briefing ═══ */}
-          <Reveal delay={0.18}>
-            {briefingSetupMode ? (
-              (() => {
-                const briefingPresets = SCHEDULE_PRESETS.filter(p =>
-                  ["daily", "weekly"].includes(p.type) || p.value === "0 */6 * * *"
-                );
-                const isEditing = !!briefingCronJob;
-                return (
-                  <SpotlightCard className="p-0 glass-card-enhanced overflow-hidden rounded-xl">
-                    <CardHeader className="px-4 pt-3 pb-1.5">
-                      <CardTitle className="text-sm">
-                        📋 <DecryptedText text={isEditing ? "Edit Briefing" : "Set Up Daily Briefing"} speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="px-4 pb-3 space-y-3">
-                      {/* Schedule picker */}
-                      <div>
-                        <label htmlFor="briefing-time" className="text-xs text-muted-foreground mb-1.5 block">Schedule</label>
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                          {briefingPresets.map((preset) => (
-                            <button
-                              key={preset.value + preset.label}
-                              type="button"
-                              onClick={() => setBriefingSchedule(preset.value)}
-                              className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${
-                                briefingSchedule === preset.value
-                                  ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
-                                  : "border-border hover:border-amber-500/30 text-muted-foreground hover:text-foreground"
-                              }`}
-                            >
-                              <span aria-hidden="true">{preset.icon}</span>
-                              <span className="truncate">{preset.label}</span>
-                            </button>
-                          ))}
-                        </div>
-                        {/* Custom time input */}
-                        <div className="mt-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground whitespace-nowrap">Custom time:</span>
-                            <input
-                              id="briefing-time"
-                              type="time"
-                              autoComplete="off"
-                              value={(() => {
-                                const parts = briefingSchedule.split(" ");
-                                if (parts.length === 5 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[0])) {
-                                  return `${parts[1].padStart(2, "0")}:${parts[0].padStart(2, "0")}`;
-                                }
-                                return "";
-                              })()}
-                              onChange={(e) => {
-                                const [h, m] = e.target.value.split(":");
-                                if (h !== undefined && m !== undefined) {
-                                  setBriefingSchedule(`${parseInt(m)} ${parseInt(h)} * * *`);
-                                }
-                              }}
-                              className="flex-1 rounded-lg border border-border bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Agent picker */}
-                      <div>
-                        <label htmlFor="briefing-agent" className="text-xs text-muted-foreground mb-1.5 block">Assigned Agent</label>
-                        <select
-                          id="briefing-agent"
-                          value={briefingAgentId}
-                          onChange={(e) => setBriefingAgentId(e.target.value)}
-                          className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&>option]:bg-background [&>option]:text-foreground"
-                        >
-                          <option value="">No agent assigned</option>
-                          {agents.map((a) => (
-                            <option key={a.id} value={a.id}>
-                              {a.name} ({a.type}{a.status === "online" ? " · online" : ""})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Prompt editor */}
-                      <div>
-                        <label htmlFor="briefing-prompt" className="text-xs text-muted-foreground mb-1.5 block">Briefing Prompt</label>
-                        <textarea
-                          id="briefing-prompt"
-                          value={briefingPrompt}
-                          onChange={(e) => setBriefingPrompt(e.target.value)}
-                          rows={3}
-                          className="w-full rounded-lg border border-border bg-background px-2.5 py-2 text-xs text-foreground placeholder:text-muted-foreground/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 resize-none"
-                          placeholder="Describe what the briefing should include..."
-                        />
-                      </div>
-
-                      {briefingError && (
-                        <p role="alert" className="text-xs text-red-400">{briefingError}</p>
-                      )}
-
-                      {/* Action buttons */}
-                      <div className="flex justify-end gap-2 pt-1">
-                        <Button variant="outline" size="sm" onClick={() => { setBriefingSetupMode(false); setBriefingError(null); }}>
-                          Cancel
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={handleBriefingSetup}
-                          disabled={briefingSaving || !briefingPrompt.trim()}
-                          className="bg-amber-500 hover:bg-amber-600 text-white"
-                        >
-                          {briefingSaving ? (
-                            <><Loader2 className="h-3 w-3 animate-spin mr-1" aria-hidden="true" /> Saving...</>
-                          ) : isEditing ? (
-                            "Save Changes"
-                          ) : (
-                            "Enable Briefings"
-                          )}
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </SpotlightCard>
-                );
-              })()
-            ) : !briefingCronJob ? (
-              <SpotlightCard className="p-0 glass-card-enhanced overflow-hidden rounded-xl">
-                <CardHeader className="px-4 pt-3 pb-1.5">
-                  <CardTitle className="text-sm">
-                    📋 <DecryptedText text="Daily Briefing" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="px-4 pb-3">
-                  <div className="text-center py-4 space-y-2">
-                    <div className="text-4xl opacity-30" aria-hidden="true">📋</div>
-                    <p className="text-sm text-muted-foreground">Daily briefings are not configured</p>
-                    <p className="text-xs text-muted-foreground/60">
-                      {briefingAgent
-                        ? "Set up a schedule to start receiving automated briefings."
-                        : "Assign an agent in the Agent Guild inventory, then set up a schedule."}
-                    </p>
-                    <div className="flex justify-center gap-2 mt-2">
-                      {!briefingAgent && (
-                        <Button asChild variant="outline" size="sm">
-                          <Link href="/agent-guild">Go to Agent Guild</Link>
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        onClick={() => { setBriefingAgentId(briefingSlot?.agentId || ""); setBriefingSetupMode(true); }}
-                        className="bg-amber-500 hover:bg-amber-600 text-white"
-                      >
-                        Set Up
-                      </Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </SpotlightCard>
-            ) : (() => {
-              const scheduleLabel = briefingCronJob.scheduleLabel || parseCronToHuman(briefingCronJob.schedule);
-              const summary = latestBriefing?.summary;
-              return (
-                <SpotlightCard className="p-0 glass-card-enhanced overflow-hidden rounded-xl">
-                  <CardHeader className="flex flex-row items-center gap-2 px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">
-                      📋 <DecryptedText text="Daily Briefing" speed={30} maxIterations={6} animateOn="view" sequential className="text-sm font-semibold" encryptedClassName="text-sm font-semibold text-amber-500/40" />
-                    </CardTitle>
-                    <Link href="/summaries" className="text-xs">
-                      <ShinyText text="View All →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
-                    </Link>
-                    <Badge variant="outline" className="text-[9px] px-1.5 py-0 bg-amber-500/10 border-amber-500/20 text-amber-400">
-                      {scheduleLabel}
-                    </Badge>
-                    <button
-                      onClick={openBriefingEditor}
-                      className="p-1 rounded hover:bg-muted/50 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      title="Edit briefing settings"
-                      aria-label="Edit briefing settings"
-                    >
-                      <Pencil className="h-3 w-3" aria-hidden="true" />
-                    </button>
-                  </CardHeader>
-                  <CardContent className="px-4 pb-3 grid gap-4 sm:grid-cols-[auto_1fr]">
-                    {/* Agent badge */}
-                    {briefingAgent ? (
-                      <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/10 sm:w-56">
-                        <img
-                          src={briefingAgent.avatarUrl || getAgentAvatarUrl(briefingAgent.name, briefingAgent.type)}
-                          alt=""
-                          className="w-8 h-8 rounded-full border-2 border-amber-500/30"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">{briefingAgent.name}</p>
-                          <p className="text-[10px] text-muted-foreground">
-                            Briefing Agent · {latestBriefing?.date || new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-                          </p>
-                        </div>
-                        <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${briefingAgent.status === "online" ? "bg-emerald-400" : briefingAgent.status === "busy" ? "bg-amber-400" : "bg-gray-400"}`} />
-                      </div>
-                    ) : cronAgentId ? (
-                      <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-500/5 border border-amber-500/10 sm:w-56">
-                        <div className="w-8 h-8 rounded-full border-2 border-amber-500/30 bg-amber-500/10 flex items-center justify-center">
-                          <span className="text-xs" aria-hidden="true">🤖</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium truncate">Agent {cronAgentId.slice(0, 8)}...</p>
-                          <p className="text-[10px] text-muted-foreground">Briefing Agent (loading...)</p>
-                        </div>
-                      </div>
-                    ) : <div />}
-
-                    {/* Summary data from Firestore */}
-                    {summary ? (
-                      <div className="grid gap-x-6 gap-y-2.5 sm:grid-cols-2">
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-base" aria-hidden="true">✅</span>
-                          <span className="text-muted-foreground">Tasks completed:</span>
-                          <span className="font-medium text-emerald-400">{summary.tasksCompleted}</span>
-                          {summary.tasksFailed > 0 && (
-                            <span className="text-red-400 text-xs">({summary.tasksFailed} failed)</span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-base" aria-hidden="true">🪙</span>
-                          <span className="text-muted-foreground">Tokens used:</span>
-                          <span className="font-medium">{(summary.tokensUsed / 1000).toFixed(1)}K</span>
-                        </div>
-                        <div className="flex items-center gap-2 text-sm">
-                          <span className="text-base" aria-hidden="true">💰</span>
-                          <span className="text-muted-foreground">Cost:</span>
-                          <span className="font-medium">${summary.costUsd.toFixed(4)}</span>
-                        </div>
-
-                        {summary.highlights.length > 0 && (
-                          <div className="sm:col-span-2 pt-2 border-t border-border space-y-1.5">
-                            <p className="text-xs font-semibold text-muted-foreground/60 uppercase tracking-wider">Highlights</p>
-                            {summary.highlights.map((h, i) => (
-                              <div key={i} className="flex items-center gap-2 text-xs">
-                                <span className="shrink-0" aria-hidden="true">✨</span>
-                                <span className="text-muted-foreground truncate">{h}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {summary.topActivities.length > 0 && (
-                          <div className="sm:col-span-2 pt-2 border-t border-border space-y-1.5">
-                            <p className="text-xs font-semibold text-muted-foreground/60 uppercase tracking-wider">Top Activities</p>
-                            {summary.topActivities.slice(0, 3).map((a, i) => (
-                              <div key={i} className="flex items-center gap-2 text-xs">
-                                <span className="shrink-0" aria-hidden="true">🎯</span>
-                                <span className="text-muted-foreground truncate flex-1">{a.details}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {summary.errors.length > 0 && (
-                          <div className="sm:col-span-2 pt-2 border-t border-border space-y-1.5">
-                            <p className="text-xs font-semibold text-muted-foreground/60 uppercase tracking-wider text-red-400">Errors</p>
-                            {summary.errors.slice(0, 2).map((e, i) => (
-                              <div key={i} className="flex items-center gap-2 text-xs text-red-400/80">
-                                <span className="shrink-0" aria-hidden="true">⚠️</span>
-                                <span className="truncate">{e.lastError}</span>
-                                <Badge variant="outline" className="text-[8px] px-1 border-red-500/20">{e.count}x</Badge>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="py-1 space-y-1">
-                        <p className="text-sm text-muted-foreground">No briefing generated yet</p>
-                        <p className="text-xs text-muted-foreground/60">
-                          Schedule: {scheduleLabel}. Summaries will appear here automatically.
-                        </p>
-                      </div>
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              );
-            })()}
-          </Reveal>
-
-          {/* ═══ Analytics ═══ */}
+          {/* ═══ Trends ═══ */}
           <div className="space-y-3">
-            <SectionLabel>Analytics</SectionLabel>
+            <SectionLabel>Trends</SectionLabel>
             <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
               <Reveal delay={0.1}><TaskVelocityChart data={taskVelocity} /></Reveal>
               <Reveal delay={0.13}><CostTrendChart data={dailyCosts} /></Reveal>
@@ -1090,169 +553,8 @@ export default function DashboardPage() {
               <Reveal delay={0.1} className="lg:col-span-2">
                 <ActivityHeatmapChart data={activityHeatmap} />
               </Reveal>
-              <Reveal delay={0.13}>
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">📈 Task Breakdown</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2 px-4 pb-3">
-                    {totalTaskCount === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p>No tasks yet</p>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="h-4 bg-muted rounded-full overflow-hidden flex">
-                          {done > 0 && <div className="h-full bg-emerald-500" style={{ width: `${(done / totalTaskCount) * 100}%` }} title={`Done: ${done}`} />}
-                          {inProgress > 0 && <div className="h-full bg-amber-500" style={{ width: `${(inProgress / totalTaskCount) * 100}%` }} title={`In Progress: ${inProgress}`} />}
-                          {todo > 0 && <div className="h-full bg-muted-foreground/30" style={{ width: `${(todo / totalTaskCount) * 100}%` }} title={`Todo: ${todo}`} />}
-                        </div>
-                        <div className="space-y-2">
-                          {[
-                            { label: "Done", count: done, color: "bg-emerald-500", pct: ((done / totalTaskCount) * 100).toFixed(0) },
-                            { label: "In Progress", count: inProgress, color: "bg-amber-500", pct: ((inProgress / totalTaskCount) * 100).toFixed(0) },
-                            { label: "Todo", count: todo, color: "bg-muted-foreground/30", pct: ((todo / totalTaskCount) * 100).toFixed(0) },
-                          ].map(item => (
-                            <div key={item.label} className="flex items-center justify-between text-sm">
-                              <div className="flex items-center gap-2">
-                                <span className={`w-3 h-3 rounded-sm ${item.color}`} />
-                                <span>{item.label}</span>
-                              </div>
-                              <span className="text-muted-foreground tabular-nums">
-                                {item.count} <span className="text-xs">({item.pct}%)</span>
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="pt-2 border-t border-border text-center">
-                          <span className="text-2xl font-bold text-emerald-500">
-                            {totalTaskCount > 0 ? ((done / totalTaskCount) * 100).toFixed(0) : 0}%
-                          </span>
-                          <p className="text-xs text-muted-foreground">Completion Rate</p>
-                        </div>
-                      </>
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              </Reveal>
+              <Reveal delay={0.13}><TopPerformersCard agents={agents} /></Reveal>
             </div>
-            <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
-              <Reveal delay={0.1} className="lg:col-span-2">
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="flex flex-row items-center gap-2 px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">📜 Activity Feed</CardTitle>
-                    <Link href="/activity" className="text-xs">
-                      <ShinyText text="View all →" speed={3} color="#6d4fa0" shineColor="#7221FA" className="text-xs" />
-                    </Link>
-                  </CardHeader>
-                  <CardContent className="space-y-1 px-4 pb-3">
-                    {activityFeed.length === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p>No activity yet</p>
-                        <p className="text-xs mt-1">Events will appear here as your agent-guild operates</p>
-                      </div>
-                    ) : (
-                      activityFeed.map((event) => {
-                        const config = EVENT_TYPE_CONFIG[event.eventType] || { label: event.eventType, icon: "📌", color: "text-muted-foreground" };
-                        return (
-                          <div key={event.id} className="flex items-start gap-3 py-2 border-b border-border last:border-0">
-                            <span className="text-base shrink-0 mt-0.5" aria-hidden="true">{config.icon}</span>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium truncate">{event.description}</p>
-                              <p className="text-xs text-muted-foreground">
-                                {event.actorName && <span>{event.actorName} · </span>}
-                                {formatRelativeTime(event.createdAt)}
-                              </p>
-                            </div>
-                            <Badge variant="outline" className={`text-[10px] shrink-0 ${config.color}`}>
-                              {config.label}
-                            </Badge>
-                          </div>
-                        );
-                      })
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              </Reveal>
-              <Reveal delay={0.13}>
-                <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                  <CardHeader className="px-4 pt-3 pb-1.5">
-                    <CardTitle className="text-sm">🏆 Top Performers</CardTitle>
-                  </CardHeader>
-                  <CardContent className="px-4 pb-3">
-                    {topPerformers.length === 0 ? (
-                      <div className="text-center py-4 text-muted-foreground text-xs">No completed tasks yet</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {topPerformers.map((agent, index) => (
-                          <div key={agent.id} className="flex items-center gap-2 py-1">
-                            <span className="text-lg" aria-hidden="true">{index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '🏅'}</span>
-                            <span className="text-xs truncate flex-1">{agent.name}</span>
-                            <Badge variant="outline" className="text-[10px]">{agent.tasksCompleted}</Badge>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </CardContent>
-                </SpotlightCard>
-              </Reveal>
-            </div>
-          </div>
-
-          {/* ═══ Integrations ═══ */}
-          <div className="space-y-3">
-            <SectionLabel>Integrations</SectionLabel>
-            <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-              <Reveal delay={0.1}><UsageWidget /></Reveal>
-              <Reveal delay={0.13}><CronWidget /></Reveal>
-              <Reveal delay={0.16}>
-                {currentOrg ? <CoordinatorDashboardWidget orgId={currentOrg.id} /> : null}
-              </Reveal>
-            </div>
-            <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-              <Reveal delay={0.1}>
-                {userAgent && currentOrg ? (
-                  <AgentMessagesWidget agentId={userAgent.id} orgId={currentOrg.id} />
-                ) : (
-                  <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                    <CardHeader className="px-4 pt-3 pb-1.5">
-                      <CardTitle className="text-sm">💬 Agent Messages</CardTitle>
-                    </CardHeader>
-                    <CardContent className="px-4 pb-3">
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p className="text-sm">Register as an agent to view messages</p>
-                        <Button asChild variant="outline" size="sm" className="mt-2">
-                          <Link href="/agents">Register Agent</Link>
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </SpotlightCard>
-                )}
-              </Reveal>
-              <Reveal delay={0.13}>
-                {userAgent && currentOrg ? (
-                  <AgentSessionsWidget agentId={userAgent.id} orgId={currentOrg.id} />
-                ) : (
-                  <SpotlightCard className="p-0 glass-card-enhanced h-full overflow-hidden rounded-xl">
-                    <CardHeader className="px-4 pt-3 pb-1.5">
-                      <CardTitle className="text-sm">🔄 Agent Sessions</CardTitle>
-                    </CardHeader>
-                    <CardContent className="px-4 pb-3">
-                      <div className="text-center py-4 text-muted-foreground">
-                        <p className="text-sm">Register as an agent to view sessions</p>
-                        <Button asChild variant="outline" size="sm" className="mt-2">
-                          <Link href="/agents">Register Agent</Link>
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </SpotlightCard>
-                )}
-              </Reveal>
-              <Reveal delay={0.16}><VitalsWidget /></Reveal>
-            </div>
-            <Reveal delay={0.1}>
-              <LiveFeedWidget />
-            </Reveal>
           </div>
         </TabsContent>
 
@@ -1280,6 +582,37 @@ export default function DashboardPage() {
             executing={dispatching}
             currencySymbol={currencySymbol}
           />
+        </TabsContent>
+
+        {/* Infra widgets fetch or subscribe on mount, so they only load once this tab is opened. */}
+        <TabsContent value="system" className="mt-3 space-y-5">
+          <div className="space-y-3">
+            <SectionLabel>Infrastructure</SectionLabel>
+            <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+              <UsageWidget />
+              <CronWidget />
+              <VitalsWidget />
+            </div>
+            <CoordinatorDashboardWidget orgId={currentOrg.id} />
+          </div>
+
+          <div className="space-y-3">
+            <SectionLabel>Comms</SectionLabel>
+            <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+              <ChannelsWidget agents={agents} />
+              {userAgent ? (
+                <AgentMessagesWidget agentId={userAgent.id} orgId={currentOrg.id} />
+              ) : (
+                <RegisterAgentCard icon="💬" title="Agent Messages" what="messages" />
+              )}
+              {userAgent ? (
+                <AgentSessionsWidget agentId={userAgent.id} orgId={currentOrg.id} />
+              ) : (
+                <RegisterAgentCard icon="🔄" title="Agent Sessions" what="sessions" />
+              )}
+            </div>
+            <LiveFeedWidget />
+          </div>
         </TabsContent>
       </Tabs>
     </div>

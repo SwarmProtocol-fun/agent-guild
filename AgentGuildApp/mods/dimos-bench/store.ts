@@ -20,13 +20,19 @@ function db() {
   return adminDb();
 }
 
+/** Reserve a run id up front: a run that starts a lineage names it after itself. */
+export function newRunId(): string {
+  return db().collection(RUNS).doc().id;
+}
+
 export async function saveRun(
+  id: string,
   run: RunSubmission,
   who: { agentId: string; agentName: string; orgId: string },
+  lineage: { lineageId: string; parentRunId: string | null; generation: number },
 ): Promise<BenchRun> {
-  const ref = db().collection(RUNS).doc();
-  const doc: BenchRun = { ...run, ...who, id: ref.id, createdAt: new Date().toISOString() };
-  await ref.set(doc);
+  const doc: BenchRun = { ...run, ...who, ...lineage, id, createdAt: new Date().toISOString() };
+  await db().collection(RUNS).doc(id).set(doc);
   return doc;
 }
 
@@ -35,10 +41,13 @@ export async function getRun(id: string): Promise<BenchRun | null> {
   return snap.exists ? (snap.data() as BenchRun) : null;
 }
 
-/** Newest first. Filter by suite or agent (one at a time keeps it index-free). */
-export async function listRuns(filter: { suite?: string; agentId?: string } = {}): Promise<BenchRun[]> {
+/** Newest first. Filter by lineage, suite or agent (one at a time keeps it index-free). */
+export async function listRuns(
+  filter: { lineageId?: string; suite?: string; agentId?: string } = {},
+): Promise<BenchRun[]> {
   let query: Query = db().collection(RUNS);
-  if (filter.suite) query = query.where("suite", "==", filter.suite);
+  if (filter.lineageId) query = query.where("lineageId", "==", filter.lineageId);
+  else if (filter.suite) query = query.where("suite", "==", filter.suite);
   else if (filter.agentId) query = query.where("agentId", "==", filter.agentId);
   else query = query.orderBy("createdAt", "desc");
   const snap = await query.limit(SCAN_LIMIT).get();
@@ -46,4 +55,22 @@ export async function listRuns(filter: { suite?: string; agentId?: string } = {}
     .map((d) => d.data() as BenchRun)
     .filter((r) => !filter.agentId || r.agentId === filter.agentId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function lineageExists(lineageId: string): Promise<boolean> {
+  const snap = await db().collection(RUNS).where("lineageId", "==", lineageId).limit(1).get();
+  return !snap.empty;
+}
+
+/** A run's ancestors via parentRunId, nearest first, at most `max` deep. */
+export async function getAncestors(run: BenchRun, max = 100): Promise<BenchRun[]> {
+  const chain: BenchRun[] = [];
+  let parentId = run.parentRunId;
+  while (parentId && chain.length < max) {
+    const parent = await getRun(parentId);
+    if (!parent) break;
+    chain.push(parent);
+    parentId = parent.parentRunId;
+  }
+  return chain;
 }

@@ -100,3 +100,61 @@ def test_cli_dry_run_prints_body(tmp_path: Path, capsys: pytest.CaptureFixture[s
 def test_cli_reports_bad_run_dir(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["submit", str(tmp_path / "missing"), "--dry-run"]) == 1
     assert "agentguild-dimos:" in capsys.readouterr().err
+
+
+# ── lineage + meta-agent commands ────────────────────────────────────────
+
+
+def test_harness_sha_tracks_code_not_location(tmp_path: Path) -> None:
+    from agentguild_dimos.lineage import harness_sha
+
+    for name in ("a", "b"):
+        (tmp_path / name / "__pycache__").mkdir(parents=True)
+        (tmp_path / name / "prompt.md").write_text("be careful")
+        (tmp_path / name / "__pycache__" / "x.pyc").write_bytes(b"noise" + name.encode())
+    assert harness_sha(tmp_path / "a") == harness_sha(tmp_path / "b")
+    (tmp_path / "b" / "prompt.md").write_text("be bold")
+    assert harness_sha(tmp_path / "a") != harness_sha(tmp_path / "b")
+
+
+def test_submit_as_next_generation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run_dir = make_run(tmp_path / "run", kwargs={"model": "m"})
+    notes = tmp_path / "improvement.md"
+    notes.write_text("retry tool calls that time out")
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "harness" / "agent.py").write_text("print(1)")
+    argv = ["submit", str(run_dir), "--dry-run", "--parent", "run123", "--improvement", str(notes)]
+    assert main([*argv, "--harness", str(tmp_path / "harness")]) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["parentRunId"] == "run123"
+    assert body["improvement"] == "retry tool calls that time out"
+    assert len(body["harnessSha"]) == 64
+    assert "generation" not in body  # the hub derives it
+
+
+def test_feedback_and_lineage_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agentguild_dimos import hub
+
+    make_identity(tmp_path, "agentA", "alpha")
+    monkeypatch.setattr(identity, "AGENT_GUILD_HOME", tmp_path)
+    monkeypatch.setattr(identity.resolve, "__defaults__", (None, tmp_path))
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_call(who, method, path, body=None, *, query=None, hub_url=None, timeout_s=30):
+        calls.append((method, path, query))
+        if path.endswith("/feedback"):
+            return {"failures": [{"caseId": "b"}], "improvementHistory": []}
+        return {"plateau": True, "decision": "stop"}
+
+    monkeypatch.setattr(hub, "call", fake_call)
+    out = tmp_path / "fb.json"
+    assert main(["feedback", "run9", "-o", str(out)]) == 0
+    assert json.loads(out.read_text())["failures"] == [{"caseId": "b"}]
+    assert main(["lineage", "lin1", "--patience", "2"]) == 0
+    assert json.loads(capsys.readouterr().out.split("\n", 1)[1])["decision"] == "stop"
+    assert calls == [
+        ("GET", "/mods/dimos-bench/runs/run9/feedback", None),
+        ("GET", "/mods/dimos-bench/lineages/lin1", {"patience": "2", "minDelta": "0.0"}),
+    ]

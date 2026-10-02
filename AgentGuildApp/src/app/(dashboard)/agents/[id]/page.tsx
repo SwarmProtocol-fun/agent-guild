@@ -18,11 +18,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { useWallet as useSolanaWalletAdapter } from "@solana/wallet-adapter-react";
-import { useWalletModal } from "@solana/wallet-adapter-react-ui";
 import { useOrg } from "@/contexts/OrgContext";
 import { useAgentGuildData } from "@/hooks/useAgentGuildData";
-import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { getScoreBand } from "@/lib/credit-scoring";
 import { getTier, type PolicyTierName } from "@/lib/credit-policy";
 import { heartbeatAgeLabel } from "@/lib/presence";
@@ -53,6 +50,7 @@ import {
 import { shortAddress } from "@/lib/chains";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { IdentityNftCopies } from "@/components/identity-nft-copies";
+import { AgentHarnessPanel } from "@/components/agent-harness-panel";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { useSession } from "@/contexts/SessionContext";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES } from "@/lib/agent-types";
@@ -162,9 +160,6 @@ function AgentDetailPage() {
   const { currentOrg } = useOrg();
   const { address: sessionAddress } = useSession();
   const agentGuild = useAgentGuildData();
-  const agentGuildWrite = useAgentGuildWrite();
-  const { connected: solanaConnected, publicKey: solanaWalletPublicKey } = useSolanaWalletAdapter();
-  const { setVisible: setWalletModalVisible } = useWalletModal();
 
 
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -223,6 +218,8 @@ function AgentDetailPage() {
   const [registerName, setRegisterName] = useState('');
   const [registerSkills, setRegisterSkills] = useState('');
   const [registerFeeRate, setRegisterFeeRate] = useState('500');
+  const [registerState, setRegisterState] = useState<{ isLoading: boolean; error: string | null; txHash: string | null }>({ isLoading: false, error: null, txHash: null });
+  const resetRegisterState = () => setRegisterState({ isLoading: false, error: null, txHash: null });
 
   // Memory management state
   const [memoryBackingUp, setMemoryBackingUp] = useState(false);
@@ -408,21 +405,33 @@ function AgentDetailPage() {
     setRegisterName(agent.name);
     setRegisterSkills((agent.capabilities ?? []).join(', '));
     setRegisterFeeRate('500');
-    agentGuildWrite.reset();
+    resetRegisterState();
     setShowRegister(true);
   };
 
   const handleRegisterSubmit = async () => {
-    if (!registerName.trim()) return;
-    if (!solanaConnected || !solanaWalletPublicKey) {
-      setWalletModalVisible(true);
-      return;
-    }
+    if (!agent || !currentOrg || !registerName.trim()) return;
     const feeRate = parseInt(registerFeeRate, 10);
     if (isNaN(feeRate) || feeRate < 0) return;
-    const txHash = await agentGuildWrite.registerAgent(registerName.trim(), registerSkills.trim(), agent?.asn || "", feeRate);
-    if (txHash) {
+    // Registers under the agent's own identity wallet (server-side, platform-sponsored) —
+    // not the dashboard user's connected wallet.
+    setRegisterState({ isLoading: true, error: null, txHash: null });
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.id}/register-onchain`, {
+        method: "POST",
+        headers: solanaAuthHeaders,
+        body: JSON.stringify({ orgId: currentOrg.id, name: registerName.trim(), skills: registerSkills.trim(), feeRateBps: feeRate }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setRegisterState({ isLoading: false, error: data.error || "Failed to register agent", txHash: null });
+        return;
+      }
+      setRegisterState({ isLoading: false, error: null, txHash: data.txSignature });
+      setAgent({ ...agent, onChainRegistered: true, onChainTxHash: data.txSignature, onChainError: undefined });
       agentGuild.refetch();
+    } catch (err) {
+      setRegisterState({ isLoading: false, error: err instanceof Error ? err.message : "Failed to register agent", txHash: null });
     }
   };
 
@@ -937,6 +946,7 @@ function AgentDetailPage() {
           <TabsTrigger value="passport" className="gap-1.5">
             <IdCard className="w-3.5 h-3.5" aria-hidden="true" /> Agent Passport
           </TabsTrigger>
+          <TabsTrigger value="harness">Harness</TabsTrigger>
         </TabsList>
 
       <TabsContent value="overview" className="space-y-6">
@@ -1777,6 +1787,10 @@ function AgentDetailPage() {
         </CardContent>
       </Card>
       </TabsContent>
+
+      <TabsContent value="harness" className="space-y-6">
+        <AgentHarnessPanel agentId={agentId} />
+      </TabsContent>
       </Tabs>
 
       {/* Edit Agent Dialog */}
@@ -1889,7 +1903,7 @@ function AgentDetailPage() {
       </Dialog>
 
       {/* Register On-Chain Dialog */}
-      <Dialog open={showRegister} onOpenChange={(open) => { setShowRegister(open); if (!open) agentGuildWrite.reset(); }}>
+      <Dialog open={showRegister} onOpenChange={(open) => { setShowRegister(open); if (!open) resetRegisterState(); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><Blocks className="w-4 h-4" aria-hidden="true" /> Register Agent On-Chain</DialogTitle>
@@ -1898,14 +1912,14 @@ function AgentDetailPage() {
             <p className="text-sm text-muted-foreground">
               Register <strong>{agent?.name}</strong> on the Solana Agent Registry program.
             </p>
-            {!solanaConnected && (
-              <div className="p-3 rounded-md bg-amber-50 border border-amber-200 text-sm text-amber-700 dark:bg-amber-950/20 dark:border-amber-800 dark:text-amber-400">
-                Connect a Solana wallet to sign this registration — you&apos;ll be prompted when you click Register.
-              </div>
-            )}
+            <div className="p-3 rounded-md bg-muted text-sm text-muted-foreground">
+              {agent?.solanaAddress
+                ? <>Registers under the agent&apos;s own wallet <span className="font-mono">{shortAddress(agent.solanaAddress)}</span>. Network fees are sponsored by the platform.</>
+                : <>Registers under the agent&apos;s own identity wallet. Network fees are sponsored by the platform.</>}
+            </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Agent Name *</label>
-              <Input value={registerName} onChange={e => setRegisterName(e.target.value)} disabled={agentGuildWrite.state.isLoading} />
+              <Input value={registerName} onChange={e => setRegisterName(e.target.value)} disabled={registerState.isLoading} />
             </div>
             <div>
               <label className="text-sm font-medium mb-1 block">Skills</label>
@@ -1913,7 +1927,7 @@ function AgentDetailPage() {
                 value={registerSkills}
                 onChange={e => setRegisterSkills(e.target.value)}
                 placeholder="e.g. research, analysis, trading"
-                disabled={agentGuildWrite.state.isLoading}
+                disabled={registerState.isLoading}
               />
               <p className="text-xs text-muted-foreground mt-1">Comma-separated list of skills stored onchain</p>
             </div>
@@ -1925,39 +1939,37 @@ function AgentDetailPage() {
                 onChange={e => setRegisterFeeRate(e.target.value)}
                 min={0}
                 max={10000}
-                disabled={agentGuildWrite.state.isLoading}
+                disabled={registerState.isLoading}
               />
               <p className="text-xs text-muted-foreground mt-1">500 bps = 5% fee on completed tasks</p>
             </div>
 
-            {agentGuildWrite.state.error && (
+            {registerState.error && (
               <div className="p-3 rounded-md bg-red-50 border border-red-200 text-sm text-red-600 dark:bg-red-950/20 dark:border-red-800 dark:text-red-400">
-                {agentGuildWrite.state.error}
+                {registerState.error}
               </div>
             )}
 
-            {agentGuildWrite.state.txHash && (
+            {registerState.txHash && (
               <div className="p-3 rounded-md bg-emerald-50 border border-emerald-200 text-sm text-emerald-700 dark:bg-emerald-950/20 dark:border-emerald-800 dark:text-emerald-400">
                 <p className="font-medium">Registration successful!</p>
-                <p className="text-xs font-mono mt-1 break-all">TX: {agentGuildWrite.state.txHash}</p>
+                <p className="text-xs font-mono mt-1 break-all">TX: {registerState.txHash}</p>
               </div>
             )}
 
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowRegister(false)} disabled={agentGuildWrite.state.isLoading}>
-                {agentGuildWrite.state.txHash ? 'Close' : 'Cancel'}
+              <Button variant="outline" onClick={() => setShowRegister(false)} disabled={registerState.isLoading}>
+                {registerState.txHash ? 'Close' : 'Cancel'}
               </Button>
-              {!agentGuildWrite.state.txHash && (
+              {!registerState.txHash && (
                 <Button
                   onClick={handleRegisterSubmit}
-                  disabled={agentGuildWrite.state.isLoading || !registerName.trim()}
+                  disabled={registerState.isLoading || !registerName.trim()}
                   className="bg-amber-600 hover:bg-amber-700 text-white"
                 >
-                  {agentGuildWrite.state.isLoading
+                  {registerState.isLoading
                     ? 'Registering...'
-                    : !solanaConnected
-                      ? <><Wallet className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Connect Wallet</>
-                      : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
+                    : <><Blocks className="w-3.5 h-3.5 mr-1.5" aria-hidden="true" /> Register</>}
                 </Button>
               )}
             </div>

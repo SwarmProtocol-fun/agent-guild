@@ -104,6 +104,17 @@ function sign(message) {
  * runtime's expected input/output format.
  */
 
+/**
+ * The agent's live playbook (owner-approved harness generation), which the
+ * daemon attaches to each forwarded message. Runtimes with a system prompt
+ * get it appended there; the others get it as a context field.
+ */
+function systemPromptFor(msg) {
+  const base = `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`;
+  const playbook = typeof msg.playbook === "string" ? msg.playbook.trim().slice(0, 8000) : "";
+  return playbook ? `${base}\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}, approved by your owner):\n${playbook}` : base;
+}
+
 const adapters = {
   // ── OpenClaw ─────────────────────────────────────────────────────────────
   // POST /chat or /v1/chat with { message, context }
@@ -121,6 +132,7 @@ const adapters = {
           fromType: msg.fromType,
           messageId: msg.id,
           platform: "agent-guild",
+          ...(msg.playbook ? { playbook: msg.playbook, playbookGeneration: msg.playbookGeneration } : {}),
         },
       }),
     });
@@ -162,7 +174,7 @@ const adapters = {
       headers: runtimeHeaders(),
       body: JSON.stringify({
         message: msg.text,
-        context: `Agent Guild channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})`,
+        context: `Agent Guild channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})${msg.playbook ? `\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}):\n${msg.playbook}` : ""}`,
       }),
     });
     const data = await resp.json();
@@ -181,7 +193,7 @@ const adapters = {
         messages: [
           {
             role: "system",
-            content: `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`,
+            content: systemPromptFor(msg),
           },
           {
             role: "user",
@@ -213,7 +225,7 @@ const adapters = {
         input: [
           {
             role: "system",
-            content: `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`,
+            content: systemPromptFor(msg),
           },
           {
             role: "user",
@@ -245,6 +257,7 @@ const adapters = {
         timestamp: msg.timestamp,
         attachments: msg.attachments || [],
         platform: "agent-guild",
+        ...(msg.playbook ? { playbook: msg.playbook, playbookGeneration: msg.playbookGeneration } : {}),
       }),
     });
     const data = await resp.json();

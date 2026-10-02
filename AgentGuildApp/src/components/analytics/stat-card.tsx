@@ -4,7 +4,6 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
-import CountUp from "@/components/reactbits/CountUp";
 import DecryptedText from "@/components/reactbits/DecryptedText";
 
 interface StatCardProps {
@@ -19,8 +18,6 @@ interface StatCardProps {
 export function StatCard({ title, value, icon: IconOrEmoji, change, changeLabel, prefix }: StatCardProps) {
   const isPositive = change !== undefined && change >= 0;
   const hasChange = change !== undefined && change !== 0;
-  const numericValue = parseFloat(value.replace(/[^0-9.-]/g, ''));
-  const isNumeric = !isNaN(numericValue) && isFinite(numericValue);
 
   return (
     <div className="gradient-border-spin overflow-hidden rounded-xl h-full">
@@ -44,11 +41,7 @@ export function StatCard({ title, value, icon: IconOrEmoji, change, changeLabel,
         </div>
         <div className="text-lg font-bold tracking-tight text-glow-gold leading-tight">
           {prefix}
-          {isNumeric ? (
-            <CountUp to={numericValue} duration={1.5} separator="," />
-          ) : (
-            value
-          )}
+          {value}
         </div>
         {(hasChange || changeLabel) && (
           <div className="flex items-center gap-1 mt-0.5">
