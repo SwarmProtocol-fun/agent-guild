@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2 } from "lucide-react";
+import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -176,6 +176,7 @@ export default function VaultPage() {
         <TabsList>
           <TabsTrigger value="bindings"><Link2 className="h-4 w-4 mr-1.5" />Bindings ({bindings.length})</TabsTrigger>
           <TabsTrigger value="secrets"><KeyRound className="h-4 w-4 mr-1.5" />Secrets ({secrets.length})</TabsTrigger>
+          <TabsTrigger value="tokens"><Ticket className="h-4 w-4 mr-1.5" />Agent tokens</TabsTrigger>
           <TabsTrigger value="audit"><ScrollText className="h-4 w-4 mr-1.5" />Audit log</TabsTrigger>
         </TabsList>
 
@@ -280,6 +281,42 @@ export default function VaultPage() {
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
                             </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ── Agent tokens ─────────────────────────────────────── */}
+        <TabsContent value="tokens" className="space-y-4">
+          <p className="text-sm text-muted-foreground max-w-3xl">
+            Agents can mint short-lived tokens (<code className="text-xs">agent-guild token --ttl 15m</code>) to hand to a runtime or sidecar
+            instead of their private key. Tokens expire on their own (24 hours at most). Revoking cuts off every token an agent has issued so far;
+            its key keeps working.
+          </p>
+          {agents.length === 0 ? <Empty text="No agents in this organization yet." /> : (
+            <Card>
+              <CardContent className="p-0">
+                <table className="w-full text-sm">
+                  <tbody>
+                    {agents.map((a) => (
+                      <tr key={a.id} className="border-b last:border-0">
+                        <td className="p-3 font-medium">{a.name}</td>
+                        <td className="p-3 text-xs text-muted-foreground font-mono hidden md:table-cell">{a.id}</td>
+                        <td className="p-3 text-right">
+                          {isOwner && (
+                            <Button size="sm" variant="outline" onClick={() => {
+                              if (confirm(`Revoke every token issued to ${a.name}?`)) {
+                                run(() => api(`/api/vault/tokens/revoke`, { method: "POST", body: JSON.stringify({ orgId, agentId: a.id }) }));
+                              }
+                            }}>
+                              <Ban className="h-3.5 w-3.5 mr-1" />Revoke tokens
+                            </Button>
                           )}
                         </td>
                       </tr>

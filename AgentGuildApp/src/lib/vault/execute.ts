@@ -13,6 +13,8 @@ export interface CallingAgent {
   agentId: string;
   agentName: string;
   orgId: string;
+  /** Set when the caller used a token restricted to specific bindings. */
+  allowedBindings?: string[];
 }
 
 export interface ExecuteResult {
@@ -30,6 +32,9 @@ export async function executeBinding(agent: CallingAgent, req: ExecuteRequest): 
   };
 
   const name = String(req.binding || "");
+  if (agent.allowedBindings && !agent.allowedBindings.includes(name)) {
+    return denied(name, `This token is not valid for binding "${name}"`);
+  }
   const b = await getBindingByName(agent.orgId, name);
   if (!b) return denied(name, `No binding named "${name}" in this org`, 404);
   if (!agentMayUse(b, agent.agentId)) {

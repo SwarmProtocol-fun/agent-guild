@@ -35,6 +35,7 @@
  *   agent-guild endpoints    [--mcp <url>] [--a2a <url>] [--website <url>] [--clear <kind>] — publish endpoints in the public directory
  *   agent-guild bindings     [--json] — list external APIs this agent may call via the vault
  *   agent-guild call         <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data <json>] — call one; the key is injected server-side
+ *   agent-guild token        [--scopes <s1,s2>] [--binding <name>] [--ttl 15m] — mint a short-lived bearer token for a runtime
  *   agent-guild setup        [--client <ids>] [--dry-run] — install the MCP server into detected editors
  *   agent-guild mcp          — run as an MCP server over stdio
  */
@@ -3062,10 +3063,64 @@ async function cmdEndpoints() {
   console.log(`\nShown in the public directory at ${config.hubUrl}/directory/${config.agentId} when this agent's profile is public.`);
 }
 
-async function cmdBindings() {
+/**
+ * Token mode: a runtime that was handed AGENT_GUILD_TOKEN (+ AGENT_GUILD_HUB)
+ * instead of the agent's private key. Returns null when not in token mode.
+ */
+function tokenAuth() {
+  const token = process.env.AGENT_GUILD_TOKEN;
+  if (!token) return null;
+  const hubUrl = process.env.AGENT_GUILD_HUB || LIVE_HUB_ORIGIN;
+  return { hubUrl, headers: { Authorization: `Bearer ${token}` } };
+}
+
+/** Parse a duration like 90, 15m, 2h, 1d into seconds. */
+function parseDurationSeconds(raw) {
+  const m = String(raw).trim().match(/^(\d+)\s*([smhd]?)$/i);
+  if (!m) return null;
+  const mult = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[m[2].toLowerCase()];
+  return Number(m[1]) * mult;
+}
+
+/** `agent-guild token` — mint a short-lived bearer token for a runtime/sidecar. Prints only the token on stdout. */
+async function cmdToken() {
+  if (process.env.AGENT_GUILD_TOKEN) {
+    console.error("Tokens can't mint tokens. Run this where the agent's key lives.");
+    process.exit(1);
+  }
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
-  const resp = await fetch(`${config.hubUrl}/api/v1/bindings?${signedQuery(config, privateKey, "/v1/bindings")}`);
+  const body = {};
+  const scopes = arg("--scopes");
+  if (scopes) body.scopes = scopes.split(",").map((s) => s.trim()).filter(Boolean);
+  const bindings = argAll("--binding");
+  if (bindings.length) body.bindings = bindings;
+  const ttl = arg("--ttl");
+  if (ttl) {
+    const secs = parseDurationSeconds(ttl);
+    if (!secs) { console.error(`Bad --ttl "${ttl}" (use e.g. 15m, 2h, 3600)`); process.exit(2); }
+    body.ttlSeconds = secs;
+  }
+  const resp = await signedBodyRequest(config, privateKey, "POST", "POST:/v1/tokens", `${config.hubUrl}/api/v1/tokens?agent=${config.agentId}`, body);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Token request failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  console.error(`Scopes: ${data.scopes.join(", ")}${data.bindings ? `   bindings: ${data.bindings.join(", ")}` : ""}   expires: ${new Date(data.expiresAt).toISOString()}`);
+  console.log(data.token);
+}
+
+async function cmdBindings() {
+  const tok = tokenAuth();
+  let resp;
+  if (tok) {
+    resp = await fetch(`${tok.hubUrl}/api/v1/bindings`, { headers: tok.headers });
+  } else {
+    const config = loadConfig();
+    const { privateKey } = ensureKeypair();
+    resp = await fetch(`${config.hubUrl}/api/v1/bindings?${signedQuery(config, privateKey, "/v1/bindings")}`);
+  }
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     console.error(`Listing bindings failed (${resp.status}): ${data.error || "Unknown error"}`);
@@ -3095,9 +3150,6 @@ async function cmdCall() {
     console.error(`Usage: agent-guild call <binding> <METHOD> <path> [--query k=v]... [--header "K: V"]... [--data '<json or text>'] [--raw]`);
     process.exit(2);
   }
-  const config = loadConfig();
-  const { privateKey } = ensureKeypair();
-
   const query = {};
   for (const pair of argAll("--query")) {
     const eq = pair.indexOf("=");
@@ -3116,11 +3168,23 @@ async function cmdCall() {
     try { body = JSON.parse(data); } catch { body = data; }
   }
 
-  const resp = await signedBodyRequest(
-    config, privateKey, "POST", "POST:/v1/bindings/execute",
-    `${config.hubUrl}/api/v1/bindings/execute?agent=${config.agentId}`,
-    { binding, method: methodArg.toUpperCase(), path, query, headers, ...(body !== undefined ? { body } : {}) },
-  );
+  const payload = { binding, method: methodArg.toUpperCase(), path, query, headers, ...(body !== undefined ? { body } : {}) };
+  const tok = tokenAuth();
+  let resp;
+  if (tok) {
+    resp = await fetch(`${tok.hubUrl}/api/v1/bindings/execute`, {
+      method: "POST",
+      headers: { ...tok.headers, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } else {
+    const config = loadConfig();
+    const { privateKey } = ensureKeypair();
+    resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/bindings/execute",
+      `${config.hubUrl}/api/v1/bindings/execute?agent=${config.agentId}`, payload,
+    );
+  }
   const result = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     console.error(`Call refused (${resp.status}): ${result.error || "Unknown error"}`);
@@ -3523,6 +3587,7 @@ try {
   else if (cmd === "agents") await cmdAgents();
   else if (cmd === "endpoints") await cmdEndpoints();
   else if (cmd === "bindings") await cmdBindings();
+  else if (cmd === "token") await cmdToken();
   else if (cmd === "call") await cmdCall();
   else if (cmd === "mcp") await cmdMcp();
   else if (cmd === "setup") await cmdSetup();
@@ -3568,6 +3633,8 @@ Public Directory:
 Vault Bindings (call external APIs without holding the key):
   bindings    [--json]                                  — list the APIs this agent may call
   call        <binding> <METHOD> <path> [--query k=v]... [--header "K: V"]... [--data '<json>'] [--raw]
+  token       [--scopes bindings:execute,llm:proxy] [--binding <name>]... [--ttl 15m]  — mint a short-lived token for a runtime (prints only the token)
+  (bindings/call also work keyless when AGENT_GUILD_TOKEN and AGENT_GUILD_HUB are set)
 
 Editor Integration:
   setup  [--client cursor,vscode,...] [--dry-run]  — install the MCP server into Claude Code, Codex CLI, Cursor, Claude Desktop, Windsurf, VS Code, Zed

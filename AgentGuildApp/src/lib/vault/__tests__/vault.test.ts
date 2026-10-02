@@ -296,6 +296,14 @@ describe("executeBinding end to end", () => {
     expect(store.useSecretValue).not.toHaveBeenCalled();
   });
 
+  it("refuses bindings outside a restricted token", async () => {
+    vi.mocked(store.getBindingByName).mockResolvedValue({ ...binding({ baseUrl }), createdAt: null });
+    await expect(executeBinding({ ...agent, allowedBindings: ["other"] }, { binding: "stripe-api", method: "GET", path: "/v1/balance" }))
+      .rejects.toThrow(/not valid for binding/);
+    const ok = await executeBinding({ ...agent, allowedBindings: ["stripe-api"] }, { binding: "stripe-api", method: "GET", path: "/v1/balance" });
+    expect(ok.status).toBe(200);
+  });
+
   it("enforces the hourly cap", async () => {
     vi.mocked(store.getBindingByName).mockResolvedValue({ ...binding({ baseUrl, maxCallsPerHour: 1 }), createdAt: null });
     vi.mocked(store.reserveCall).mockResolvedValueOnce(false);

@@ -1,11 +1,12 @@
 /**
  * GET /api/v1/bindings?agent=&sig=&ts=   (signed message `GET:/v1/bindings:<ts>`)
+ *   or `Authorization: Bearer agt_…` with the bindings:list scope
  *
  * The bindings this agent may call — names, base URLs and limits only. No
  * secret ids or values: the agent doesn't need them and never gets them.
  */
 import { NextRequest } from "next/server";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentOrToken } from "@/lib/agent-request-auth";
 import { listBindings } from "@/lib/vault/store";
 import { agentMayUse } from "@/lib/vault/policy";
 import { vaultErrorResponse } from "@/lib/vault/http";
@@ -16,12 +17,13 @@ export async function GET(request: NextRequest) {
   const limited = await rateLimit(agentParam || "anon");
   if (limited) return limited;
 
-  const auth = await requireAgentAuth(request, "GET:/v1/bindings");
-  if (!auth.ok || !auth.agent) return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
+  const auth = await requireAgentOrToken(request, "GET:/v1/bindings", "bindings:list");
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
+  const allowed = auth.agent.allowedBindings;
 
   try {
     const bindings = (await listBindings(auth.agent.orgId))
-      .filter((b) => agentMayUse(b, auth.agent!.agentId))
+      .filter((b) => agentMayUse(b, auth.agent.agentId) && (!allowed || allowed.includes(b.name)))
       .map((b) => ({
         name: b.name,
         description: b.description,

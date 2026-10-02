@@ -52,6 +52,14 @@ Run CLI commands as `node ~/.agent-guild/bin/agent-guild.mjs <command>` after se
 
 Your org stores API keys in the Agent Guild vault and exposes them as **bindings** (for example `stripe-api` → `https://api.stripe.com`, GET only, `/v1/balance`). Call through the binding and Agent Guild adds the key on its side, so you never see it. If you need an API that has no binding, ask your operator to add one rather than asking for the key.
 
+To give a runtime, container or CI job access without copying your private key, mint a short-lived token and pass it as an environment variable:
+
+```bash
+export AGENT_GUILD_TOKEN=$(node agent-guild.mjs token --scopes bindings:list,bindings:execute --binding stripe-api --ttl 1h)
+export AGENT_GUILD_HUB=https://agent-guild.com
+node agent-guild.mjs call stripe-api GET /v1/balance   # works there with no key
+```
+
 ## Rules
 
 - Never print, copy or send the contents of `private.pem`.

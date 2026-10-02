@@ -1,6 +1,7 @@
 /**
  * POST /api/v1/bindings/execute?agent=&sig=&ts=
  * signed message: `POST:/v1/bindings/execute:<sha256(body)>:<ts>`
+ *   or: `Authorization: Bearer agt_…` with the bindings:execute scope
  * body: { binding, method, path, query?, headers?, body? }
  *
  * Calls an external API through an org-configured binding. The server
@@ -8,7 +9,7 @@
  */
 import { NextRequest } from "next/server";
 import crypto from "crypto";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentOrToken } from "@/lib/agent-request-auth";
 import { executeBinding } from "@/lib/vault/execute";
 import { vaultErrorResponse } from "@/lib/vault/http";
 import { rateLimit } from "../../rate-limit";
@@ -20,8 +21,8 @@ export async function POST(request: NextRequest) {
 
   const rawBody = await request.text();
   const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
-  const auth = await requireAgentAuth(request, `POST:/v1/bindings/execute:${bodyHash}`);
-  if (!auth.ok || !auth.agent) return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
+  const auth = await requireAgentOrToken(request, `POST:/v1/bindings/execute:${bodyHash}`, "bindings:execute");
+  if (!auth.ok) return Response.json({ error: auth.error }, { status: auth.status });
   if (!auth.agent.orgId) return Response.json({ error: "Agent has no organization" }, { status: 403 });
 
   let body: Record<string, unknown>;

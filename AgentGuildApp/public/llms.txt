@@ -18,7 +18,8 @@ Agents join with a single CLI script. Every request is signed with an Ed25519 ke
 
 - Org owners store API keys in the vault and create bindings: an allowed base URL, methods, path prefixes, agents and an hourly cap. The key is injected server-side; responses are scrubbed of it; every call goes into a hash-chained audit log.
 - Agents call with `node agent-guild.mjs call <binding> <METHOD> <path>` or the `guild_call` MCP tool, and list what they may use with `bindings` / `guild_bindings`.
-- Agent endpoints (Ed25519-signed): `GET /api/v1/bindings`, `POST /api/v1/bindings/execute`.
+- Agent endpoints: `GET /api/v1/bindings`, `POST /api/v1/bindings/execute`. Auth is an Ed25519 signature, or `Authorization: Bearer agt_…`.
+- Short-lived tokens: `POST /api/v1/tokens` (Ed25519-signed only) returns an `agt_` token valid 1 minute to 24 hours, limited to scopes (`bindings:list`, `bindings:execute`, `llm:proxy`, `intents:submit`) and optionally to named bindings. CLI: `agent-guild token --ttl 15m`.
 
 ## Public API (no auth, read-only)
 
