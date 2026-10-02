@@ -19,7 +19,6 @@ import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 import { RotateCcw, X, FolderKanban, Target, Briefcase, Users, Loader2, Pencil, Wifi, TrendingUp } from "lucide-react";
 import {
-  getOrgStats,
   getTasksByOrg,
   getProjectsByOrg,
   getAgentsByOrg,
@@ -81,15 +80,12 @@ const AgentMap = dynamic(
 
 interface OrgStats {
   projectCount: number;
-  agentCount: number;
   taskCount: number;
   completedTasks: number;
   activeTasks: number;
   todoTasks: number;
   jobCount: number;
   openJobs: number;
-  claimedJobs: number;
-  closedJobs: number;
 }
 
 const statusColors: Record<string, string> = {
@@ -196,6 +192,7 @@ export default function DashboardPage() {
     "Generate a daily activity summary for the organization. Include task completion stats, agent activity highlights, any errors or failures, and key metrics like token usage and cost."
   );
   const [briefingSaving, setBriefingSaving] = useState(false);
+  const [briefingError, setBriefingError] = useState<string | null>(null);
   const [briefingAgentId, setBriefingAgentId] = useState<string>("");
 
   // Compute analytics data
@@ -209,9 +206,6 @@ export default function DashboardPage() {
     try {
       if (isInitial) { setLoading(true); setError(null); }
 
-      const orgStats = await getOrgStats(currentOrg.id);
-      setStats(orgStats);
-
       const [tasks, projects, agentsData, jobs, freshOrg] = await Promise.all([
         getTasksByOrg(currentOrg.id),
         getProjectsByOrg(currentOrg.id),
@@ -219,6 +213,17 @@ export default function DashboardPage() {
         getJobsByOrg(currentOrg.id),
         getOrganization(currentOrg.id),
       ]);
+
+      // Derived here rather than via getOrgStats, which re-reads all four collections.
+      setStats({
+        projectCount: projects.length,
+        taskCount: tasks.length,
+        completedTasks: tasks.filter(t => t.status === 'done').length,
+        activeTasks: tasks.filter(t => t.status === 'in_progress').length,
+        todoTasks: tasks.filter(t => t.status === 'todo').length,
+        jobCount: jobs.length,
+        openJobs: jobs.filter(j => j.status === 'open').length,
+      });
 
       setAgentSlots(freshOrg?.agentSlots || freshOrg?.swarmSlots || {});
 
@@ -248,7 +253,7 @@ export default function DashboardPage() {
 
       setRecentTasks(enrichedTasks);
 
-      const sortedJobs = jobs
+      const sortedJobs = [...jobs]
         .sort((a, b) => {
           const aTime = a.createdAt && typeof a.createdAt === 'object' && 'seconds' in a.createdAt
             ? (a.createdAt as any).seconds * 1000
@@ -294,12 +299,12 @@ export default function DashboardPage() {
       } catch (briefErr) {
         console.error("[Dashboard] Failed to load briefing cron job:", briefErr);
       }
+      setLastUpdated(new Date());
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load dashboard data');
     } finally {
       if (isInitial) setLoading(false);
-      setLastUpdated(new Date());
     }
   }, [currentOrg]);
 
@@ -332,6 +337,7 @@ export default function DashboardPage() {
   const handleBriefingSetup = useCallback(async () => {
     if (!currentOrg || (!account && !authenticated)) return;
     setBriefingSaving(true);
+    setBriefingError(null);
     try {
       const briefingAgent = briefingAgentId ? agents.find(a => a.id === briefingAgentId) : null;
       const scheduleLabel = parseCronToHuman(briefingSchedule);
@@ -392,6 +398,7 @@ export default function DashboardPage() {
       await loadDashboardData();
     } catch (err) {
       console.error("Failed to set up daily briefing:", err);
+      setBriefingError(err instanceof Error ? err.message : "Failed to save briefing");
     } finally {
       setBriefingSaving(false);
     }
@@ -860,7 +867,7 @@ export default function DashboardPage() {
                           id="briefing-agent"
                           value={briefingAgentId}
                           onChange={(e) => setBriefingAgentId(e.target.value)}
-                          className="w-full rounded-lg border border-border bg-zinc-900 px-2.5 py-1.5 text-xs text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&>option]:bg-zinc-900 [&>option]:text-white"
+                          className="w-full rounded-lg border border-border bg-background px-2.5 py-1.5 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&>option]:bg-background [&>option]:text-foreground"
                         >
                           <option value="">No agent assigned</option>
                           {agents.map((a) => (
@@ -884,9 +891,13 @@ export default function DashboardPage() {
                         />
                       </div>
 
+                      {briefingError && (
+                        <p role="alert" className="text-xs text-red-400">{briefingError}</p>
+                      )}
+
                       {/* Action buttons */}
                       <div className="flex justify-end gap-2 pt-1">
-                        <Button variant="outline" size="sm" onClick={() => setBriefingSetupMode(false)}>
+                        <Button variant="outline" size="sm" onClick={() => { setBriefingSetupMode(false); setBriefingError(null); }}>
                           Cancel
                         </Button>
                         <Button

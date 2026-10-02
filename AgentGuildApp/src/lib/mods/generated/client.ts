@@ -2,6 +2,7 @@
 import type { ClientMod } from "@agent-guild/sdk";
 
 export const clientMods: Record<string, () => Promise<{ default: ClientMod }>> = {
+  "dimos-bench": () => import("../../../../mods/dimos-bench/client"),
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/client"),
   "solana-settlement": () => import("../../../../mods/solana-settlement/client"),
   "tagem-wallet": () => import("../../../../mods/tagem-wallet/client"),

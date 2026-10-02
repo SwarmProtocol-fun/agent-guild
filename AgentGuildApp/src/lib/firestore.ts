@@ -590,8 +590,14 @@ export async function getTasksByOrg(orgId: string): Promise<Task[]> {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Task));
 }
 
-export async function getTasksByProject(projectId: string): Promise<Task[]> {
-  const q = query(collection(db, "tasks"), where("projectId", "==", projectId));
+// orgId is required: Firestore rules gate reads on isOrgMember(orgId), and a
+// query that doesn't constrain orgId is rejected outright (rules aren't filters).
+export async function getTasksByProject(projectId: string, orgId: string): Promise<Task[]> {
+  const q = query(
+    collection(db, "tasks"),
+    where("orgId", "==", orgId),
+    where("projectId", "==", projectId),
+  );
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Task));
 }
@@ -682,8 +688,13 @@ export async function ensureGeneralChannel(orgId: string): Promise<string> {
   });
 }
 
-export async function getChannelsByProject(projectId: string): Promise<Channel[]> {
-  const q = query(collection(db, "channels"), where("projectId", "==", projectId));
+// orgId is required for the same rules reason as getTasksByProject.
+export async function getChannelsByProject(projectId: string, orgId: string): Promise<Channel[]> {
+  const q = query(
+    collection(db, "channels"),
+    where("orgId", "==", orgId),
+    where("projectId", "==", projectId),
+  );
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Channel));
 }
@@ -867,8 +878,14 @@ export async function getJobsByOrg(orgId: string): Promise<Job[]> {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
 }
 
-export async function getJobsByProject(projectId: string): Promise<Job[]> {
-  const q = query(collection(db, "jobs"), where("projectId", "==", projectId));
+// orgId is required: Firestore rules gate reads on isOrgMember(orgId), and a
+// query that doesn't constrain orgId is rejected outright (rules aren't filters).
+export async function getJobsByProject(projectId: string, orgId: string): Promise<Job[]> {
+  const q = query(
+    collection(db, "jobs"),
+    where("orgId", "==", orgId),
+    where("projectId", "==", projectId),
+  );
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
 }

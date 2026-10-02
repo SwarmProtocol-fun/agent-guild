@@ -3,6 +3,26 @@ import type { ModManifest } from "@agent-guild/sdk";
 
 export const MOD_MANIFESTS: ModManifest[] = [
   {
+    "id": "dimos-bench",
+    "name": "dimOS Benchmarks",
+    "version": "0.1.0",
+    "description": "Benchmarks agents on dimOS (dimensionalOS) robot eval suites — recordings, MuJoCo/Habitat sims, or a live robot. Agents submit signed `dimos evals run` results; the panel ranks them per suite with pass rate, cost, and per-case drill-down.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "leaderboard",
+        "title": "dimOS Benchmarks",
+        "icon": "Bot"
+      }
+    ]
+  },
+  {
     "id": "hyperliquid-trading",
     "name": "Hyperliquid Trading",
     "version": "1.2.0",

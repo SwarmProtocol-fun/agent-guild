@@ -18,7 +18,7 @@ interface StatCardProps {
 
 export function StatCard({ title, value, icon: IconOrEmoji, change, changeLabel, prefix }: StatCardProps) {
   const isPositive = change !== undefined && change >= 0;
-  const hasChange = change !== undefined;
+  const hasChange = change !== undefined && change !== 0;
   const numericValue = parseFloat(value.replace(/[^0-9.-]/g, ''));
   const isNumeric = !isNaN(numericValue) && isFinite(numericValue);
 
@@ -50,16 +50,18 @@ export function StatCard({ title, value, icon: IconOrEmoji, change, changeLabel,
             value
           )}
         </div>
-        {hasChange && change !== 0 && (
+        {(hasChange || changeLabel) && (
           <div className="flex items-center gap-1 mt-0.5">
-            <span
-              className={cn(
-                "text-[10px] font-medium flex items-center gap-0.5",
-                isPositive ? "text-amber-600 dark:text-amber-400" : "text-red-500"
-              )}
-            >
-              {isPositive ? "↑" : "↓"} {Math.abs(change).toFixed(1)}%
-            </span>
+            {hasChange && (
+              <span
+                className={cn(
+                  "text-[10px] font-medium flex items-center gap-0.5",
+                  isPositive ? "text-amber-600 dark:text-amber-400" : "text-red-500"
+                )}
+              >
+                {isPositive ? "↑" : "↓"} {Math.abs(change).toFixed(1)}%
+              </span>
+            )}
             {changeLabel && (
               <span className="text-[10px] text-muted-foreground">{changeLabel}</span>
             )}

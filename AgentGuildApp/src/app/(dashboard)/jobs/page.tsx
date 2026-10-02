@@ -220,7 +220,7 @@ export default function JobBoardPage() {
       // Send notification to the project's channel
       if (job.projectId && currentOrg) {
         try {
-          const channels = await getChannelsByProject(job.projectId);
+          const channels = await getChannelsByProject(job.projectId, job.orgId);
           if (channels.length > 0) {
             const channelId = channels[0].id;
             await addDoc(collection(db, "messages"), {

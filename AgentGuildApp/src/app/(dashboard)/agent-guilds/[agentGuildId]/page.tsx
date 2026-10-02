@@ -158,8 +158,8 @@ export default function ProjectDetailPage() {
       const [projectData, allAgents, projectTasks, projectJobs] = await Promise.all([
         getProject(projectId),
         getAgentsByOrg(currentOrg.id),
-        getTasksByProject(projectId),
-        getJobsByProject(projectId),
+        getTasksByProject(projectId, currentOrg.id),
+        getJobsByProject(projectId, currentOrg.id),
       ]);
 
       if (!projectData) {

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentguild-dimos"
+version = "0.1.0"
+description = "Benchmark Agent Guild agents on dimOS eval suites and submit signed results to the dimos-bench mod."
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41"]
+
+[project.optional-dependencies]
+# `agentguild-dimos run` drives dimOS's EvalRunner; `submit` needs only the run directory.
+dimos = ["dimos"]
+
+[project.scripts]
+agentguild-dimos = "agentguild_dimos.cli:main"
+
+[tool.setuptools]
+packages = ["agentguild_dimos"]

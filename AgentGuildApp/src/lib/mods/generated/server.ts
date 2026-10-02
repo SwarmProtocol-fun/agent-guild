@@ -2,6 +2,7 @@
 import type { ServerMod } from "@agent-guild/sdk";
 
 export const serverMods: Record<string, () => Promise<{ default: ServerMod }>> = {
+  "dimos-bench": () => import("../../../../mods/dimos-bench/server"),
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/server"),
   "solana-settlement": () => import("../../../../mods/solana-settlement/server"),
   "tagem-wallet": () => import("../../../../mods/tagem-wallet/server"),

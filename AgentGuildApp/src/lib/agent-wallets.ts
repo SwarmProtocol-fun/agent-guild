@@ -186,7 +186,8 @@ export async function generateAgentWallet(
     encryptedSecretKey: encryptedValue,
     iv,
     keyVersion,
-    label: options?.label,
+    // Firestore isn't configured with ignoreUndefinedProperties — omit, don't write undefined.
+    ...(options?.label ? { label: options.label } : {}),
     createdBy,
     createdAt: FieldValue.serverTimestamp(),
     ...(hyperliquidRegistered ? { hyperliquidRegistered, hyperliquidNetwork } : {}),

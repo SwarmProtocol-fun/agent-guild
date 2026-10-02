@@ -238,7 +238,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
       if (job.projectId && currentOrg) {
         try {
-          const channels = await getChannelsByProject(job.projectId);
+          const channels = await getChannelsByProject(job.projectId, job.orgId);
           if (channels.length > 0) {
             const verb = reviewAction === 'approve' ? '✅ **Job Approved**' : '↩️ **Job Sent Back for Revisions**';
             await addDoc(collection(db, "messages"), {
@@ -349,7 +349,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
       if (job.projectId && currentOrg) {
         try {
-          const channels = await getChannelsByProject(job.projectId);
+          const channels = await getChannelsByProject(job.projectId, job.orgId);
           if (channels.length > 0) {
             await addDoc(collection(db, "messages"), {
               channelId: channels[0].id,
@@ -459,7 +459,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
       if (job.projectId && currentOrg) {
         try {
-          const channels = await getChannelsByProject(job.projectId);
+          const channels = await getChannelsByProject(job.projectId, job.orgId);
           if (channels.length > 0) {
             await addDoc(collection(db, "messages"), {
               channelId: channels[0].id,
