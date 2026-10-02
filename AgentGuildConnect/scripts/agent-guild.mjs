@@ -1568,7 +1568,7 @@ async function cmdDaemon() {
   console.log(`─────────────────────────────`);
   console.log(`  Agent:    ${config.agentName} (${config.agentId})`);
   console.log(`  Heartbeat: ${intervalSec}s`);
-  console.log(`  Reply poll: ${REPLY_POLL_INTERVAL_MS / 1000}s${config.replyCommand ? "" : " (no replyCommand configured — messages will be logged, not answered)"}`);
+  console.log(`  Reply poll: ${REPLY_POLL_INTERVAL_MS / 1000}s active, up to ${REPLY_POLL_IDLE_MS / 1000}s idle${config.replyCommand ? "" : " (no replyCommand configured — messages will be logged, not answered)"}`);
   console.log(`  DM belt:  ${DM_REPLY_TIMEOUT_MS / 1000}s, tools + vault in private DMs`);
   console.log(`  Hub:      ${config.hubUrl}`);
   console.log(`  Mode:     ${config.offline ? "OFFLINE (pending registration)" : "online"}`);
@@ -1613,9 +1613,21 @@ async function cmdDaemon() {
     await replyPollTick(config, privateKey, daemonState, webhookConfig);
   }
 
-  // Loop — heartbeat every intervalSec, message poll + auto-reply every 2s.
+  // Loop — heartbeat every intervalSec; message poll + auto-reply on an
+  // adaptive timer (see nextReplyPollDelay). Self-scheduling setTimeout, not
+  // setInterval, so a slow reply never stacks overlapping polls.
   const interval = setInterval(() => daemonTick(config, privateKey, daemonState), intervalMs);
-  const replyInterval = setInterval(() => replyPollTick(config, privateKey, daemonState, webhookConfig), REPLY_POLL_INTERVAL_MS);
+  let replyInterval = null;
+  const scheduleReplyPoll = () => {
+    replyInterval = setTimeout(async () => {
+      try {
+        await replyPollTick(config, privateKey, daemonState, webhookConfig);
+      } finally {
+        if (!shuttingDown) scheduleReplyPoll();
+      }
+    }, nextReplyPollDelay(daemonState));
+  };
+  scheduleReplyPoll();
 
   // Graceful shutdown. Checkout is sent only after the hub has confirmed
   // it understands presenceProtocol — an older hub treats every
@@ -1626,7 +1638,7 @@ async function cmdDaemon() {
     shuttingDown = true;
     console.log(`\nDaemon stopped (${signal}).`);
     clearInterval(interval);
-    clearInterval(replyInterval);
+    clearTimeout(replyInterval);
     if (config.presenceProtocol === 1) {
       try {
         await Promise.race([
@@ -1693,7 +1705,26 @@ async function daemonTick(config, privateKey, daemonState) {
 // Message Poll + Auto-Reply (PRD-REPLY)
 // ---------------------------------------------------------------------------
 
+// Every poll costs the hub several Firestore reads, so a fixed 2s poll from
+// an idle agent burned ~40k requests/day. Poll fast only while a
+// conversation is live, then back off (doubling) to the idle ceiling. Worst
+// case a human waits REPLY_POLL_IDLE_MS for the first reply in a quiet channel.
 const REPLY_POLL_INTERVAL_MS = 2000;
+const REPLY_POLL_IDLE_MS = 30000;
+const REPLY_POLL_ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+
+function nextReplyPollDelay(daemonState) {
+  const sinceActivity = Date.now() - (daemonState.lastMessageAt || 0);
+  if (sinceActivity < REPLY_POLL_ACTIVE_WINDOW_MS) {
+    daemonState.replyPollDelay = REPLY_POLL_INTERVAL_MS;
+  } else {
+    daemonState.replyPollDelay = Math.min(
+      (daemonState.replyPollDelay || REPLY_POLL_INTERVAL_MS) * 2,
+      REPLY_POLL_IDLE_MS,
+    );
+  }
+  return daemonState.replyPollDelay;
+}
 const REPLY_TIMEOUT_MS = 60000;
 // Private DMs run the builder belt (tools + vault). A real build does not
 // fit in the hub's one-minute chat budget.
@@ -2040,6 +2071,7 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
   }
 
   if (messages.length > 0) {
+    daemonState.lastMessageAt = Date.now();
     console.log(`[${now}] ${messages.length} new message(s)`);
     for (const msg of messages) {
       const tag = msg.fromType === "agent" ? "agent" : "HUMAN";

@@ -743,6 +743,19 @@ export async function getMessagesByChannel(channelId: string): Promise<Message[]
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Message));
 }
 
+/** Newest message in a channel — one read instead of the whole history. */
+export async function getLastMessageByChannel(channelId: string): Promise<Message | null> {
+  const q = query(
+    collection(db, "messages"),
+    where("channelId", "==", channelId),
+    orderBy("createdAt", "desc"),
+    fsLimit(1)
+  );
+  const snap = await getDocs(q);
+  const d = snap.docs[0];
+  return d ? ({ id: d.id, ...d.data() } as Message) : null;
+}
+
 // ─── Jobs ────────────────────────────────────────────────
 
 export interface Job {

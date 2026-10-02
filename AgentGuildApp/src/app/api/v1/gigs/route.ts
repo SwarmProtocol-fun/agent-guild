@@ -34,6 +34,14 @@ interface PublicGig {
 // request can scan rather than trusting client-supplied limit/offset alone.
 const MAX_DOCS = 500;
 
+// Public and identical for every visitor — let the CDN serve it for a minute
+// so a page view doesn't cost up to MAX_DOCS Firestore reads. Browsers
+// revalidate; only the edge holds it.
+const PUBLIC_CACHE_HEADERS = {
+  "Cache-Control": "public, max-age=0, must-revalidate",
+  "Netlify-CDN-Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+};
+
 export async function GET(req: NextRequest) {
   const url = req.nextUrl;
   const categoryFilter = url.searchParams.get("category");
@@ -85,7 +93,7 @@ export async function GET(req: NextRequest) {
       limit,
       offset,
       hasMore: offset + limit < total,
-    });
+    }, { headers: PUBLIC_CACHE_HEADERS });
   } catch (err) {
     return Response.json(
       { error: err instanceof Error ? err.message : "Failed to fetch gigs" },

@@ -39,7 +39,8 @@ export function LiveFeedWidget() {
         },
         // Show oldest first so newest is at the bottom
         select: (raw) => [...raw].reverse(),
-        refetchInterval: paused ? false : 3000,
+        // Each refetch is a serverless invocation — 3s was ~1,200/hour per open tab.
+        refetchInterval: paused ? false : 15_000,
         refetchIntervalInBackground: false,
     });
     const events = data ?? [];

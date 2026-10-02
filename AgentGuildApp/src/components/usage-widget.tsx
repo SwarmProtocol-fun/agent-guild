@@ -39,7 +39,8 @@ export function UsageWidget() {
             if (!res.ok) throw new Error("Failed to fetch usage data");
             return res.json();
         },
-        refetchInterval: 10000,
+        // Each refetch is a serverless invocation; usage totals move slowly.
+        refetchInterval: 60_000,
         refetchIntervalInBackground: false,
     });
 

@@ -45,11 +45,22 @@ export async function noteAgentHeartbeat(
     agentId: string,
     orgId?: string | null,
     extra?: { agentName?: string; latencyMs?: number; version?: string; uptime?: number },
-): Promise<void> {
+): Promise<string> {
     const agentRef = adminDb().collection("agents").doc(agentId);
     const snap = await agentRef.get();
-    const stored = snap.exists ? snap.data()?.status : undefined;
+    const data = snap.exists ? snap.data() : undefined;
+    const stored = data?.status;
     const status = stored === "paused" || stored === "busy" ? stored : "online";
+
+    // Daemons ping every 30s but presence only goes stale after
+    // PRESENCE_STALE_MS, so refreshing lastSeen on every ping doubles the
+    // write bill for nothing. Skip while nothing changed and the stored
+    // lastSeen is still recent; a status change or checkout always writes.
+    const lastSeenMs = data?.lastSeen instanceof Timestamp ? data.lastSeen.toMillis() : 0;
+    if (status === stored && !data?.offlineAt && Date.now() - lastSeenMs < HEARTBEAT_WRITE_MIN_MS) {
+        return status;
+    }
+
     await agentRef.set({
         status,
         lastSeen: FieldValue.serverTimestamp(),
@@ -57,9 +68,22 @@ export async function noteAgentHeartbeat(
     }, { merge: true });
     if (orgId) {
         await recordHeartbeat(orgId, agentId, extra);
-        await sweepStaleAgents(orgId);
+        // The sibling sweep reads every agent in the org. Run on every 30s
+        // ping it scaled reads with agents² — a 20-agent org cost >1M
+        // reads/day. Once per org per window is enough: readers derive live
+        // status from lastSeen anyway, and the global tick still sweeps.
+        const lastSweep = lastOrgSweepAt.get(orgId) || 0;
+        if (Date.now() - lastSweep >= ORG_SWEEP_INTERVAL_MS) {
+            lastOrgSweepAt.set(orgId, Date.now());
+            await sweepStaleAgents(orgId);
+        }
     }
+    return status;
 }
+
+const HEARTBEAT_WRITE_MIN_MS = PRESENCE_STALE_MS / 2;
+const ORG_SWEEP_INTERVAL_MS = PRESENCE_STALE_MS / 2;
+const lastOrgSweepAt = new Map<string, number>();
 
 /** Process checked out. Does not refresh lastSeen. */
 export async function noteAgentOffline(agentId: string): Promise<void> {

@@ -307,15 +307,15 @@ export default function DashboardPage() {
     loadDashboardData(true);
   }, [loadDashboardData]);
 
-  // Auto-refresh every 30 seconds. Skip ticks while the tab is in the
-  // background — this reload touches several collections (agents, computers,
-  // briefing cron, etc.), so a backgrounded dashboard tab shouldn't keep
-  // paying for it every 30s.
+  // Auto-refresh every 5 minutes. Skip ticks while the tab is in the
+  // background. Each reload reads every task, project, agent and job in the
+  // org plus 200 activity events. At 30s an open tab cost tens of thousands
+  // of Firestore reads an hour; the refresh button covers "show me now".
   useEffect(() => {
     if (!currentOrg) return;
     const interval = setInterval(() => {
       if (document.visibilityState === "visible") loadDashboardData();
-    }, 30_000);
+    }, 5 * 60_000);
     return () => clearInterval(interval);
   }, [currentOrg, loadDashboardData]);
 

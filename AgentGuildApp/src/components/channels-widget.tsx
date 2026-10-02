@@ -11,7 +11,7 @@ import { MessageSquare, Hash, Bot, FolderKanban } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import {
   getChannelsByOrg,
-  getMessagesByChannel,
+  getLastMessageByChannel,
   ensureAgentGroupChat,
   type Channel,
   type Message,
@@ -78,8 +78,7 @@ async function loadChannelPreviews(orgId: string): Promise<ChannelPreview[]> {
     deduped.map(async (channel): Promise<ChannelPreview> => {
       let lastMessage: Message | null = null;
       try {
-        const msgs = await getMessagesByChannel(channel.id);
-        lastMessage = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+        lastMessage = await getLastMessageByChannel(channel.id);
       } catch {
         // non-critical — show channel without a preview
       }
@@ -103,7 +102,8 @@ export function ChannelsWidget({ agents = [] }: ChannelsWidgetProps) {
     queryKey: ["dashboard-channels", currentOrg?.id],
     queryFn: () => loadChannelPreviews(currentOrg!.id),
     enabled: !!currentOrg,
-    refetchInterval: 20000,
+    // One read per channel per refetch — a minute is plenty for previews.
+    refetchInterval: 60_000,
     refetchIntervalInBackground: false,
   });
 

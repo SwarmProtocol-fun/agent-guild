@@ -84,24 +84,31 @@ export async function POST(req: NextRequest) {
     try {
         const agentRef = adminDb().collection("agents").doc(agentId!);
         const existing = await agentRef.get();
-        const orgId = existing.data()?.orgId as string | undefined;
+        const existingData = existing.data();
+        const orgId = existingData?.orgId as string | undefined;
         const checkingOut = body.presence === "offline";
 
+        // The daemon resends identical skills on every 30s heartbeat — only
+        // write when they actually changed.
+        const skillsChanged =
+            JSON.stringify(existingData?.reportedSkills ?? null) !== JSON.stringify(skills) ||
+            (!!bio && existingData?.bio !== bio);
+        if (skillsChanged) {
+            await agentRef.set({
+                reportedSkills: skills,
+                ...(bio ? { bio } : {}),
+            }, { merge: true });
+        }
+
+        // Skills + heartbeat in one place. noteAgentHeartbeat owns
+        // status/lastSeen so a stale "online" flag cannot survive a
+        // dead process, and a live ping clears an earlier checkout.
+        let status: string;
         if (checkingOut) {
-            await agentRef.set({
-                reportedSkills: skills,
-                ...(bio ? { bio } : {}),
-            }, { merge: true });
             await noteAgentOffline(agentId!);
+            status = "offline";
         } else {
-            // Skills + heartbeat in one place. noteAgentHeartbeat owns
-            // status/lastSeen so a stale "online" flag cannot survive a
-            // dead process, and a live ping clears an earlier checkout.
-            await agentRef.set({
-                reportedSkills: skills,
-                ...(bio ? { bio } : {}),
-            }, { merge: true });
-            await noteAgentHeartbeat(agentId!, orgId);
+            status = await noteAgentHeartbeat(agentId!, orgId);
         }
 
         // The heartbeat is the one signed call the CLI's daemon and `status`
@@ -109,19 +116,18 @@ export async function POST(req: NextRequest) {
         // on it so `agent-guild status` can show a live txHash/error without
         // a second round trip (registerOnChain runs non-blocking after
         // register returns, so its result isn't known at register time).
-        const agentSnap = await agentRef.get();
-        const agentData = agentSnap.data();
+        // Read from the snapshot above; on-chain fields aren't touched here.
 
         return Response.json({
             ok: true,
             agentId,
-            status: checkingOut ? "offline" : (agentData?.status || "online"),
+            status,
             presenceProtocol: 1,
             reportedSkills: skills.length,
-            asn: agentData?.asn ?? null,
-            onChainRegistered: agentData?.onChainRegistered === true,
-            onChainTxHash: agentData?.onChainTxHash ?? null,
-            onChainError: agentData?.onChainError ?? null,
+            asn: existingData?.asn ?? null,
+            onChainRegistered: existingData?.onChainRegistered === true,
+            onChainTxHash: existingData?.onChainTxHash ?? null,
+            onChainError: existingData?.onChainError ?? null,
         });
     } catch (err) {
         console.error("v1/report-skills error:", err);

@@ -46,6 +46,14 @@ interface BrowseItem {
 // without changing results while collections stay under the cap.
 const MAX_DOCS_PER_SOURCE = 500;
 
+// Public and identical for every visitor — let the CDN serve it for a minute
+// so a page view doesn't cost up to 3 × MAX_DOCS_PER_SOURCE Firestore reads. Browsers
+// revalidate; only the edge holds it.
+const PUBLIC_CACHE_HEADERS = {
+    "Cache-Control": "public, max-age=0, must-revalidate",
+    "Netlify-CDN-Cache-Control": "public, s-maxage=60, stale-while-revalidate=300",
+};
+
 export async function GET(req: NextRequest) {
     const url = req.nextUrl;
     const typeFilter = url.searchParams.get("type");
@@ -189,7 +197,7 @@ export async function GET(req: NextRequest) {
             limit,
             offset,
             hasMore: offset + limit < total,
-        });
+        }, { headers: PUBLIC_CACHE_HEADERS });
     } catch (err) {
         return Response.json(
             { error: err instanceof Error ? err.message : "Failed to fetch items" },
