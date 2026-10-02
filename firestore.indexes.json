@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "shroudEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId", "order": "ASCENDING" },
+        { "fieldPath": "at",    "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "vaultAudit",
       "queryScope": "COLLECTION",
       "fields": [

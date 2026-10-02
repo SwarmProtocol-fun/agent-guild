@@ -60,6 +60,10 @@ export AGENT_GUILD_HUB=https://agent-guild.com
 node agent-guild.mjs call stripe-api GET /v1/balance   # works there with no key
 ```
 
+## Model calls
+
+If your org has turned on the LLM proxy, point your Anthropic or OpenAI SDK at Agent Guild and use a token as the API key: `token --scopes llm:proxy --ttl 8h`, then base URL `https://agent-guild.com/api/v1/shroud/anthropic` (Anthropic) or `https://agent-guild.com/api/v1/shroud/openai/v1` (OpenAI). A request blocked by the proxy means something in your input looked like an injection: don't retry it verbatim.
+
 ## Rules
 
 - Never print, copy or send the contents of `private.pem`.

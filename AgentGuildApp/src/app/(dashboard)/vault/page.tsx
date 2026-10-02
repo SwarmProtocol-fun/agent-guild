@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook, Server } from "lucide-react";
+import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook, Server, ShieldHalf } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -74,6 +74,34 @@ interface ComputerRow {
   name: string;
   status: string;
   provider: string;
+}
+
+interface ShroudSettings {
+  enabled: boolean;
+  providerSecrets: { anthropic?: string; openai?: string };
+  allowedModels: string[];
+  maxTokensPerRequest: number;
+  dailyTokenBudgetPerAgent: number;
+  blockedDomains: string[];
+  injectionAction: "block" | "flag";
+  injectionThreshold: number;
+}
+
+interface ShroudEventRow {
+  id: string;
+  at: number;
+  agentId: string;
+  provider: string;
+  model: string;
+  stream: boolean;
+  score: number;
+  signals: string[];
+  redactions: string[];
+  responseSignals: string[];
+  blocked: boolean;
+  status: number;
+  inputTokens: number;
+  outputTokens: number;
 }
 
 interface AuditRow {
@@ -211,6 +239,7 @@ export default function VaultPage() {
           <TabsTrigger value="bindings"><Link2 className="h-4 w-4 mr-1.5" />Bindings ({bindings.length})</TabsTrigger>
           <TabsTrigger value="secrets"><KeyRound className="h-4 w-4 mr-1.5" />Secrets ({secrets.length})</TabsTrigger>
           <TabsTrigger value="runtimes"><Server className="h-4 w-4 mr-1.5" />Runtimes ({runtimes.filter((r) => !r.revoked).length})</TabsTrigger>
+          <TabsTrigger value="shroud"><ShieldHalf className="h-4 w-4 mr-1.5" />LLM proxy</TabsTrigger>
           <TabsTrigger value="tokens"><Ticket className="h-4 w-4 mr-1.5" />Agent tokens</TabsTrigger>
           <TabsTrigger value="audit"><ScrollText className="h-4 w-4 mr-1.5" />Audit log</TabsTrigger>
         </TabsList>
@@ -401,6 +430,11 @@ export default function VaultPage() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* ── LLM proxy (Shroud) ───────────────────────────────── */}
+        <TabsContent value="shroud" className="space-y-4">
+          <ShroudPanel orgId={orgId} isOwner={isOwner} secrets={secrets} agentName={agentName} />
         </TabsContent>
 
         {/* ── Agent tokens ─────────────────────────────────────── */}
@@ -609,6 +643,174 @@ function SecretDialog({ open, rotating, onClose, onSubmit }: {
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
+  orgId: string;
+  isOwner: boolean;
+  secrets: SecretRow[];
+  agentName: (id: string) => string;
+}) {
+  const [cfg, setCfg] = useState<ShroudSettings | null>(null);
+  const [events, setEvents] = useState<ShroudEventRow[]>([]);
+  const [models, setModels] = useState("");
+  const [domains, setDomains] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api<{ config: ShroudSettings; events: ShroudEventRow[] }>(`/api/vault/shroud?orgId=${orgId}`);
+      setCfg(d.config);
+      setEvents(d.events);
+      setModels(d.config.allowedModels.join(", "));
+      setDomains(d.config.blockedDomains.join(", "));
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    }
+  }, [orgId]);
+  useEffect(() => { load(); }, [load]);
+
+  if (!cfg) return <Loading />;
+  const set = (patch: Partial<ShroudSettings>) => setCfg({ ...cfg, ...patch });
+
+  const save = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api(`/api/vault/shroud`, { method: "PUT", body: JSON.stringify({ orgId, ...cfg, allowedModels: models, blockedDomains: domains }) });
+      setMsg({ ok: true, text: "Saved." });
+      await load();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const secretSelect = (provider: "anthropic" | "openai", label: string) => (
+    <div className="space-y-1">
+      <Label>{label}</Label>
+      <Select value={cfg.providerSecrets[provider] || "none"} disabled={!isOwner}
+        onValueChange={(v) => set({ providerSecrets: { ...cfg.providerSecrets, [provider]: v === "none" ? undefined : v } })}>
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">Not used</SelectItem>
+          {secrets.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground max-w-3xl">
+        Agents send their model calls through Agent Guild instead of straight to Anthropic or OpenAI. Each request is checked for prompt
+        injection and leaked secrets, secrets are removed before they reach the provider, and replies are cleaned of data-exfiltration links.
+        Agents never hold your LLM keys: they use a short-lived Agent Guild token, and the proxy adds your key from the vault.
+      </p>
+
+      <Card>
+        <CardContent className="p-4 space-y-4">
+          <label className="flex items-center gap-2 text-sm font-medium">
+            <input type="checkbox" checked={cfg.enabled} disabled={!isOwner} onChange={(e) => set({ enabled: e.target.checked })} />
+            Proxy on for this organization
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {secretSelect("anthropic", "Anthropic key (vault secret)")}
+            {secretSelect("openai", "OpenAI key (vault secret)")}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor="sh-models">Allowed models (empty = any)</Label>
+              <Input id="sh-models" disabled={!isOwner} placeholder="claude-sonnet-5-5, gpt-5" value={models} onChange={(e) => setModels(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-domains">Blocked domains</Label>
+              <Input id="sh-domains" disabled={!isOwner} placeholder="pastebin.com, *.ngrok.io" value={domains} onChange={(e) => setDomains(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-max">Max output tokens per request (0 = no cap)</Label>
+              <Input id="sh-max" type="number" min={0} disabled={!isOwner} value={cfg.maxTokensPerRequest} onChange={(e) => set({ maxTokensPerRequest: Number(e.target.value) || 0 })} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-budget">Daily tokens per agent (0 = unlimited)</Label>
+              <Input id="sh-budget" type="number" min={0} disabled={!isOwner} value={cfg.dailyTokenBudgetPerAgent} onChange={(e) => set({ dailyTokenBudgetPerAgent: Number(e.target.value) || 0 })} />
+            </div>
+            <div className="space-y-1">
+              <Label>Suspicious requests</Label>
+              <Select value={cfg.injectionAction} disabled={!isOwner} onValueChange={(v) => set({ injectionAction: v as "block" | "flag" })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="block">Block them</SelectItem>
+                  <SelectItem value="flag">Let them through, but flag them</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-th">Risk score threshold (1–100, default 40)</Label>
+              <Input id="sh-th" type="number" min={1} max={100} disabled={!isOwner} value={cfg.injectionThreshold} onChange={(e) => set({ injectionThreshold: Number(e.target.value) || 40 })} />
+            </div>
+          </div>
+          {msg && <p className={`text-sm ${msg.ok ? "text-emerald-500" : "text-red-500"}`}>{msg.text}</p>}
+          {isOwner && <div className="flex justify-end"><Button onClick={save} disabled={busy}>{busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}Save</Button></div>}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-4 space-y-2 text-sm">
+          <p className="font-medium">Point an agent at the proxy</p>
+          <pre className="bg-muted rounded p-3 text-xs font-mono overflow-x-auto">{[
+            "# on the agent's machine",
+            "export AG_TOKEN=$(node agent-guild.mjs token --scopes llm:proxy --ttl 8h)",
+            "",
+            "# Anthropic SDK",
+            'new Anthropic({ baseURL: "https://agent-guild.com/api/v1/shroud/anthropic", apiKey: process.env.AG_TOKEN })',
+            "",
+            "# OpenAI SDK",
+            'new OpenAI({ baseURL: "https://agent-guild.com/api/v1/shroud/openai/v1", apiKey: process.env.AG_TOKEN })',
+          ].join("\n")}</pre>
+          <p className="text-xs text-muted-foreground">Streaming works. Reply cleaning applies to non-streaming calls; streamed replies pass through unchanged (requests are still checked).</p>
+        </CardContent>
+      </Card>
+
+      {events.length === 0 ? <Empty text="No proxied calls yet." /> : (
+        <Card>
+          <CardContent className="p-0">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground border-b">
+                <tr>
+                  <th className="text-left font-medium p-3">When</th>
+                  <th className="text-left font-medium p-3">Agent</th>
+                  <th className="text-left font-medium p-3 hidden md:table-cell">Model</th>
+                  <th className="text-left font-medium p-3">Result</th>
+                  <th className="text-left font-medium p-3 hidden lg:table-cell">Signals</th>
+                  <th className="text-right font-medium p-3 hidden md:table-cell">Tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((e) => (
+                  <tr key={e.id} className="border-b last:border-0 align-top">
+                    <td className="p-3 text-xs whitespace-nowrap">{fmtTime(e.at)}</td>
+                    <td className="p-3 text-xs">{agentName(e.agentId)}</td>
+                    <td className="p-3 text-xs font-mono hidden md:table-cell">{e.model}{e.stream ? " (stream)" : ""}</td>
+                    <td className="p-3 text-xs">
+                      {e.blocked ? <Badge variant="destructive">Blocked · {e.score}</Badge>
+                        : e.score > 0 || e.responseSignals.length ? <Badge variant="outline">Flagged · {e.score}</Badge>
+                        : <span className="text-muted-foreground">{e.status}</span>}
+                      {e.redactions.length > 0 && <div className="text-muted-foreground mt-0.5">{e.redactions.length} secret(s) removed</div>}
+                    </td>
+                    <td className="p-3 text-[11px] text-muted-foreground font-mono hidden lg:table-cell break-all">{[...e.signals, ...e.responseSignals].join(" · ")}</td>
+                    <td className="p-3 text-xs text-right tabular-nums hidden md:table-cell">{e.inputTokens + e.outputTokens}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+    </div>
   );
 }
 
