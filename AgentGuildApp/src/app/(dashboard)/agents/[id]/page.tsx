@@ -51,6 +51,8 @@ import {
   type Skill,
 } from "@/lib/skills";
 import { shortAddress } from "@/lib/chains";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
+import { IdentityNftCopies } from "@/components/identity-nft-copies";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { useSession } from "@/contexts/SessionContext";
 import { getTypeColor, getTypeLabel, getTypeDescription, getGroupedTypes, AGENT_TYPE_CATEGORIES } from "@/lib/agent-types";
@@ -546,24 +548,29 @@ function AgentDetailPage() {
     setSolanaLoading(true);
     setSolanaError(null);
     try {
-      const recipientAddress = agent.solanaAddress || sessionAddress || "";
       const res = await fetch("/api/v1/metaplex/mint", {
         method: "POST",
         headers: solanaAuthHeaders,
-        body: JSON.stringify({
-          agentId: agent.id,
-          orgId: currentOrg.id,
-          recipientAddress,
-        }),
+        body: JSON.stringify({ agentId: agent.id, orgId: currentOrg.id }),
       });
       const data = await res.json();
       if (res.ok) {
-        setAgent({ ...agent, nftMintAddress: data.mintAddress, nftMintedAt: new Date() });
+        setAgent({
+          ...agent,
+          nftStandard: "mpl-core",
+          nftMintAddress: data.agentAsset,
+          nftCollectionAddress: data.collection,
+          nftPlatformAssetAddress: data.platformAsset,
+          nftOwnerAssetAddress: data.ownerAsset,
+          nftAgentAssetAddress: data.agentAsset,
+          nftMintError: undefined,
+          nftMintedAt: new Date(),
+        });
       } else {
-        setSolanaError(data.error || "Failed to mint identity NFT");
+        setSolanaError(data.error || "Failed to mint identity NFTs");
       }
     } catch (err) {
-      setSolanaError(err instanceof Error ? err.message : "Failed to mint identity NFT");
+      setSolanaError(err instanceof Error ? err.message : "Failed to mint identity NFTs");
     } finally {
       setSolanaLoading(false);
     }
@@ -1555,50 +1562,24 @@ function AgentDetailPage() {
             </div>
 
 
-            {/* Reputation Token (soulbound SPL token) */}
+            {/* Identity NFT (three soulbound Metaplex Core copies) */}
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-xs font-medium">Reputation Token</span>
                 <Badge variant="outline" className="text-xs">SOL</Badge>
               </div>
-              {agent.nftMintAddress ? (
-                <div className="grid grid-cols-2 gap-3 text-sm pl-2 border-l-2 border-purple-500/30">
-                  <div>
-                    <span className="text-xs text-muted-foreground">Solana Address</span>
-                    <p className="font-mono text-xs mt-0.5">{shortAddress(agent.solanaAddress || '')}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs text-muted-foreground">NFT Mint</span>
-                    <p className="font-mono text-xs mt-0.5">{shortAddress(agent.nftMintAddress)}</p>
-                  </div>
-                  <div>
-                    <span className="text-xs text-muted-foreground">Status</span>
-                    <p className="text-xs mt-0.5">
-                      <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                        Minted
-                      </span>
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <a
-                      href={`https://solscan.io/token/${agent.nftMintAddress}?cluster=devnet`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline"
-                    >
-                      View on Solscan <ExternalLink className="w-3 h-3" aria-hidden="true" />
-                    </a>
-                    <br />
-                    <button
-                      onClick={handleUpdateSolanaMetadata}
-                      disabled={solanaLoading}
-                      className="inline-flex items-center gap-1 text-xs text-purple-600 dark:text-purple-400 hover:underline disabled:opacity-50"
-                    >
-                      {solanaLoading ? "Updating..." : <>Update Metadata <RefreshCw className="w-3 h-3" aria-hidden="true" /></>}
-                    </button>
-                  </div>
-                </div>
+              {agent.nftMintAddress || agent.nftStandard === "mpl-core" ? (
+                <IdentityNftCopies
+                  agent={agent}
+                  sessionAddress={sessionAddress}
+                  isOrgOwner={Boolean(
+                    sessionAddress && currentOrg?.ownerAddress &&
+                    canonicalizeWalletAddress(currentOrg.ownerAddress) === canonicalizeWalletAddress(sessionAddress)
+                  )}
+                  loading={solanaLoading}
+                  onMint={handleMintSolanaNft}
+                  onRefresh={handleUpdateSolanaMetadata}
+                />
               ) : agent.solanaAddress ? (
                 <div className="pl-2 border-l-2 border-purple-500/30">
                   <p className="text-xs">

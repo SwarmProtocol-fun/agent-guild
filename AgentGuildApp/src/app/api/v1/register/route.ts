@@ -20,7 +20,8 @@ import { agentCheckIn, getOrganization, ensureAgentGroupChat } from "@/lib/fires
 import type { Agent } from "@/lib/firestore";
 import { generateASN } from "@/lib/credit-scoring";
 import { solanaAddressFromEd25519Pem } from "@/lib/solana/client";
-import { mintIdentityToken, registerAgentForOnChain } from "@/lib/solana/platform";
+import { registerAgentForOnChain } from "@/lib/solana/platform";
+import { ensureAgentIdentityNfts, needsIdentityNfts } from "@/lib/identity-nft-service";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { checkAndRestoreASN } from "@/lib/asn-auto-restore";
@@ -72,13 +73,6 @@ async function registerOnChain(
     return result.txSignature ? { txHash: result.txSignature } : null;
 }
 
-/** Mint a soulbound reputation token for the agent (platform-sponsored) */
-async function mintAgentIdentityToken(
-    agentAddress: string,
-): Promise<{ txHash: string; mintAddress?: string } | null> {
-    const result = await mintIdentityToken(agentAddress);
-    return result.mint ? { txHash: result.mint, mintAddress: result.mint } : null;
-}
 
 /**
  * Validate that no other agent with this ASN is currently active (online/busy).
@@ -220,16 +214,11 @@ async function reconnectAgent(
         });
     }
 
-    // Mint soulbound reputation token if not yet minted (non-blocking)
-    if (!data.nftMintAddress) {
-        mintAgentIdentityToken(agentAddress).then(async (result) => {
-            if (result?.mintAddress) {
-                await adminDb().collection("agents").doc(docId).update({
-                    nftMintAddress: result.mintAddress,
-                    nftMintedAt: new Date(),
-                });
-            }
-        }).catch(() => {});
+    // Mint any missing identity NFT copies — also migrates legacy SPL tokens
+    // and picks up the owner copy once the org owner links a Solana wallet
+    // (non-blocking; progress and errors are recorded on the agent doc).
+    if (needsIdentityNfts(data) || !data.nftOwnerAssetAddress) {
+        ensureAgentIdentityNfts(docId).catch(() => {});
     }
 
     // Self-test: confirm the write we just made is visible through the same
@@ -454,15 +443,9 @@ export async function POST(request: NextRequest) {
             }).catch(() => {});
         });
 
-        // Mint soulbound reputation token on Solana (non-blocking, platform-sponsored)
-        mintAgentIdentityToken(agentAddress).then(async (result) => {
-            if (result?.mintAddress) {
-                await adminDb().collection("agents").doc(ref.id).update({
-                    nftMintAddress: result.mintAddress,
-                    nftMintedAt: new Date(),
-                });
-            }
-        }).catch(() => {});
+        // Mint the soulbound identity NFTs — platform, org owner and agent
+        // copies (non-blocking, platform-sponsored)
+        ensureAgentIdentityNfts(ref.id).catch(() => {});
 
         // Create private memory topic + deposit first memory backup (non-blocking)
         (async () => {

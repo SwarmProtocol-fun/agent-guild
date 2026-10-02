@@ -1,11 +1,11 @@
 /**
  * Dynamic NFT Metadata API — Agent Identity NFT
  *
- * Returns ERC721 metadata JSON for AgentGuildAgentIdentityNFT.
+ * Returns ERC721 / Metaplex-compatible metadata JSON for an agent identity NFT.
  * Metadata updates dynamically based on current credit score and trust score.
  *
  * Endpoint: GET /api/nft/agent/{agentAddress}
- * Returns: OpenSea-compatible ERC721 metadata JSON
+ * Returns: OpenSea- and Metaplex-compatible metadata JSON
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -22,21 +22,27 @@ export async function GET(
   try {
     const { address } = await params;
 
-    if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    const isEvmAddress = /^0x[a-fA-F0-9]{40}$/.test(address || "");
+    // Solana addresses are base58 (case-sensitive) — never lowercase them.
+    // Metaplex Core identity NFTs point their uri here with the agent's Solana address.
+    const isSolanaAddress = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address || "");
+    if (!address || (!isEvmAddress && !isSolanaAddress)) {
       return NextResponse.json(
         { error: "Invalid agent address" },
         { status: 400 }
       );
     }
 
-    // Normalize address to lowercase
-    const normalizedAddress = address.toLowerCase();
+    const normalizedAddress = isEvmAddress ? address.toLowerCase() : address;
 
-    // Query Firestore for agent by wallet address or derived agent address
+    // Query Firestore for agent by walletAddress, agentAddress, or solanaAddress
     const agentsRef = adminDb().collection("agents");
     let querySnapshot = await agentsRef.where("walletAddress", "==", normalizedAddress).get();
     if (querySnapshot.empty) {
       querySnapshot = await agentsRef.where("agentAddress", "==", normalizedAddress).get();
+    }
+    if (querySnapshot.empty) {
+      querySnapshot = await agentsRef.where("solanaAddress", "==", normalizedAddress).get();
     }
 
     if (querySnapshot.empty) {
@@ -102,6 +108,7 @@ export async function GET(
     // Return OpenSea-compatible ERC721 metadata
     return NextResponse.json({
       name: `${name} #${asn}`,
+      symbol: "AGID",
       description: `Agent Guild Protocol Agent Identity\n\nThis NFT represents the on-chain identity and reputation of "${name}" on the Agent Guild Protocol. The credit score (300-900) and trust score (0-100) update automatically as the agent completes tasks and builds reputation.\n\nASN: ${asn}\nWallet: ${address}`,
       image: `https://agent-guild.com/api/nft/badge/${address}`,
       external_url: `https://agent-guild.com/agents/${agentDoc.id}`,

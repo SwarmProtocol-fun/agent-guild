@@ -35,6 +35,14 @@ export interface SolanaSender {
   sendTransaction(tx: Transaction, connection: Connection): Promise<string>;
 }
 
+/** The user's Solana account, able to sign arbitrary messages (e.g. wallet-link proofs). */
+export interface SolanaMessageSigner {
+  /** Base58 address of the Solana account. */
+  address: string;
+  /** Signs `message` (UTF-8) and resolves to the base64 Ed25519 signature. */
+  signMessage(message: string): Promise<string>;
+}
+
 export interface WalletAdapter {
   /** Unique id, matched against NEXT_PUBLIC_WALLET_PROVIDER. */
   id: string;
@@ -48,6 +56,8 @@ export interface WalletAdapter {
   ConnectButton: ComponentType<ConnectButtonProps>;
   /** The connected Solana wallet's sender, or null when none is connected. Omit if the adapter has no Solana support. */
   useSolanaSender?(): SolanaSender | null;
+  /** The user's Solana account as a message signer — even when they signed in with EVM — or null. Omit if the adapter has no Solana support. */
+  useSolanaMessageSigner?(): SolanaMessageSigner | null;
   /** localStorage key prefixes to purge on logout so the wallet doesn't auto-reconnect. */
   storagePrefixes: string[];
 }

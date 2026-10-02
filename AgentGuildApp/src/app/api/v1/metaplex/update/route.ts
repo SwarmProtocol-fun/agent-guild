@@ -1,12 +1,11 @@
 /**
  * POST /api/v1/metaplex/update
  *
- * Re-confirms an agent's soulbound reputation token is still minted and
- * frozen on-chain. There is no on-chain name/image metadata to update yet
- * (the token is a bare frozen SPL mint, not a Metaplex Token-Metadata NFT) —
- * this is a status refresh, not a metadata edit. Wiring real Metaplex
- * Token Metadata (name/symbol/uri, e.g. pointing at /api/nft/badge) is a
- * reasonable follow-up once this pass's core flows are validated.
+ * Re-confirms an agent's identity NFTs on-chain. For Metaplex Core
+ * identities, reports the current holder of each copy (platform, owner,
+ * agent); the metadata itself is served live from /api/nft/agent/{address},
+ * so there's nothing to rewrite on-chain. Agents still on the legacy bare
+ * SPL token get that token's balance/frozen status instead.
  *
  * Body: { agentId, orgId }
  */
@@ -16,6 +15,7 @@ import { PublicKey } from "@solana/web3.js";
 import { requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { getAgent } from "@/lib/firestore-admin";
 import { getConnection } from "@/lib/solana/client";
+import { fetchIdentityCopyOwner } from "@/lib/solana/identity-nft";
 
 export async function POST(request: NextRequest) {
     let body: Record<string, unknown>;
@@ -40,6 +40,28 @@ export async function POST(request: NextRequest) {
     }
     if (!agent.nftMintAddress || !agent.solanaAddress) {
         return Response.json({ error: "Agent has no minted reputation token on file" }, { status: 400 });
+    }
+
+    if (agent.nftStandard === "mpl-core") {
+        const copies = {
+            platform: agent.nftPlatformAssetAddress,
+            owner: agent.nftOwnerAssetAddress,
+            agent: agent.nftAgentAssetAddress,
+        };
+        const holders = Object.fromEntries(
+            await Promise.all(
+                Object.entries(copies).map(async ([copy, asset]) => [
+                    copy,
+                    asset ? { asset, holder: await fetchIdentityCopyOwner(asset) } : null,
+                ]),
+            ),
+        );
+        return Response.json({
+            standard: "mpl-core",
+            collection: agent.nftCollectionAddress,
+            mintAddress: agent.nftMintAddress,
+            copies: holders,
+        });
     }
 
     try {

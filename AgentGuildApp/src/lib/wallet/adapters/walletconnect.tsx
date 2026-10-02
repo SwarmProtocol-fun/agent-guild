@@ -36,7 +36,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
 import { SOLANA_RPC_URL } from "@/lib/solana/client";
-import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender } from "../types";
+import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner } from "../types";
 import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
@@ -62,7 +62,9 @@ const evmNetworks = Object.values(CHAIN_CONFIGS)
 // nothing here that depends on which devnet RPC is used.
 const networks = [...evmNetworks, solanaDevnet] as unknown as [AppKitNetwork, ...AppKitNetwork[]];
 
-const defaultNetwork = evmNetworks.find((n) => n.id === 296) ?? evmNetworks[0];
+// Solana is the default network — identity NFTs, escrow and lending all
+// settle there. EVM networks stay selectable in the modal.
+const defaultNetwork = solanaDevnet;
 
 // Wallets pinned to the top of the connect modal (e.g. Tangem, which is
 // WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
@@ -185,6 +187,21 @@ function useSolanaSender(): SolanaSender | null {
   return { address, sendTransaction: (tx, connection) => walletProvider.sendTransaction(tx, connection) };
 }
 
+// Email/social sign-in gives the user a Solana account alongside the EVM
+// one; this exposes it for signing even when EVM is the login identity.
+function useSolanaMessageSigner(): SolanaMessageSigner | null {
+  const { address, isConnected } = useAppKitAccount({ namespace: "solana" });
+  const { walletProvider } = useAppKitProvider<SolanaProvider>("solana");
+  if (!isConnected || !address || !walletProvider) return null;
+  return {
+    address,
+    signMessage: async (message) => {
+      const signature = await walletProvider.signMessage(new TextEncoder().encode(message));
+      return Buffer.from(signature).toString("base64");
+    },
+  };
+}
+
 function useDisconnect() {
   // Only reachable when AppKit was created; unconfigured → nothing to disconnect.
   return projectId ? useConfiguredDisconnect() : () => {};
@@ -229,5 +246,6 @@ export const walletConnectAdapter: WalletAdapter = {
   useDisconnect,
   ConnectButton,
   useSolanaSender,
+  useSolanaMessageSigner,
   storagePrefixes: ["wagmi.", "@appkit", "@w3m", "wc@2", "WALLETCONNECT", "walletConnect", "walletName", "solana-wallet-adapter"],
 };

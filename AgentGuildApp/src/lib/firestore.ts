@@ -191,8 +191,24 @@ export interface Agent {
   memoryTopicId?: string;
   /** Wallet address that owns/controls this agent */
   walletAddress?: string;
-  /** Solana NFT mint address (Metaplex agent identity) */
+  /** The agent's own identity NFT copy (Metaplex Core asset; legacy agents: bare SPL mint) */
   nftMintAddress?: string;
+  /** "mpl-core" once the identity is a Metaplex Core collection with three copies */
+  nftStandard?: "mpl-core";
+  /** Identity collection (master edition) the three copies belong to */
+  nftCollectionAddress?: string;
+  /** Copy #1 — held by the platform keypair */
+  nftPlatformAssetAddress?: string;
+  /** Copy #2 — held by the org owner's Solana wallet */
+  nftOwnerAssetAddress?: string;
+  /** Solana wallet copy #2 was minted to */
+  nftOwnerSolanaAddress?: string;
+  /** Copy #3 — held by the agent's Solana address (mirrored in nftMintAddress) */
+  nftAgentAssetAddress?: string;
+  /** Pre-Metaplex soulbound SPL token, kept after migration */
+  nftLegacyMintAddress?: string;
+  /** Last identity-NFT minting failure, cleared on success */
+  nftMintError?: string;
   /** When the agent identity NFT was minted */
   nftMintedAt?: unknown;
   /** EVM address of the NFT owner (when minted via EVM wallet, held by platform on-chain) */
