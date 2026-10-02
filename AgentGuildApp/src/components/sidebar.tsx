@@ -131,6 +131,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     collapsible: true,
     items: [
       { id: "agents", href: "/agents", label: "Fleet", icon: Users, maturity: "production" },
+      { id: "discover", href: "/discover", label: "Discover", icon: Globe, maturity: "beta" },
       { id: "projects", href: "/agent-guilds", label: "Projects", icon: FolderKanban, maturity: "production" },
       { id: "market", href: "/market", label: "Marketplace", icon: Store, maturity: "production" },
       { id: "operators", href: "/operators", label: "Team", icon: UserCog, maturity: "production" },

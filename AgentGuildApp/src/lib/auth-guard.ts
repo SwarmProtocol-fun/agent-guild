@@ -17,6 +17,7 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { authenticateAgent, type AuthResult } from "@/app/api/webhooks/auth";
 import { getOrganization, type Organization } from "@/lib/firestore";
+import { getAgent } from "@/lib/firestore-admin";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import crypto from "crypto";
 
@@ -228,6 +229,62 @@ export async function requireOrgAdmin(
   return { ok: true, org, walletAddress: wallet };
 }
 
+/**
+ * Wallets that control an agent's minted identity NFT — the Solana mint in
+ * `nftMintAddress`, owned by whichever address holds it (`nftOwnerEvmAddress`
+ * when minted to an EVM wallet, otherwise the agent's own on-chain
+ * addresses). Empty until `nftMintAddress` is set, so an agent with no NFT
+ * yet never grants access through this path.
+ */
+function identityNftOwnerWallets(agent: {
+  nftMintAddress?: string;
+  nftOwnerEvmAddress?: string;
+  walletAddress?: string;
+  solanaAddress?: string;
+  ethAddress?: string;
+  flowAddress?: string;
+  flowEvmAddress?: string;
+}): string[] {
+  if (!agent.nftMintAddress) return [];
+  return [
+    agent.nftOwnerEvmAddress,
+    agent.walletAddress,
+    agent.solanaAddress,
+    agent.ethAddress,
+    agent.flowAddress,
+    agent.flowEvmAddress,
+  ].filter((w): w is string => Boolean(w));
+}
+
+/**
+ * Verify the caller can access an agent's memory: either an org member/admin
+ * (requireOrgMember's existing check), or the wallet holding the agent's own
+ * identity NFT — the agent acting through the wallet its on-chain identity
+ * is bound to. Falls back to requireOrgMember's error/status when neither
+ * matches, so existing callers' error handling is unchanged.
+ */
+export async function requireMemoryAccess(
+  req: NextRequest,
+  orgId: string,
+  agentId: string,
+): Promise<OrgAuthResult> {
+  const orgAuth = await requireOrgMember(req, orgId);
+  if (orgAuth.ok) return orgAuth;
+
+  const wallet = getWalletAddress(req);
+  if (!wallet) return orgAuth;
+
+  const agent = await getAgent(agentId);
+  if (!agent || agent.orgId !== orgId) return orgAuth;
+
+  const ownerWallets = identityNftOwnerWallets(agent).map((w) => canonicalizeWalletAddress(w));
+  if (ownerWallets.includes(wallet)) {
+    return { ok: true, walletAddress: wallet };
+  }
+
+  return orgAuth;
+}
+
 // ─── Agent auth (unified Ed25519 + API key) ──────────────
 
 export interface AgentAuthResult {
@@ -294,6 +351,44 @@ export async function requireAgentAuth(
       orgId: auth.orgId,
       agentName: auth.agentName,
       agentType: auth.agentType,
+    },
+  };
+}
+
+/**
+ * Agent auth with an identity-NFT-wallet fallback: tries Ed25519/API-key
+ * auth first (the agent acting as itself via requireAgentAuth); if that
+ * fails, allows a caller whose wallet matches the target agent's recorded
+ * identity-NFT owner (see identityNftOwnerWallets, used by
+ * requireMemoryAccess for the org-wallet memory routes) to act as that
+ * agent instead. `agentIdHint` is the `agent`/`agentId` query param these
+ * routes already read for Ed25519/API-key auth — same value, reused to look
+ * up the agent for the wallet fallback.
+ */
+export async function requireAgentAuthOrIdentityNftWallet(
+  req: NextRequest,
+  signedMessagePrefix: string | undefined,
+  agentIdHint: string,
+): Promise<AgentAuthResult> {
+  const agentAuth = await requireAgentAuth(req, signedMessagePrefix);
+  if (agentAuth.ok) return agentAuth;
+
+  const wallet = getWalletAddress(req);
+  if (!wallet || !agentIdHint) return agentAuth;
+
+  const agent = await getAgent(agentIdHint);
+  if (!agent) return agentAuth;
+
+  const ownerWallets = identityNftOwnerWallets(agent).map((w) => canonicalizeWalletAddress(w));
+  if (!ownerWallets.includes(wallet)) return agentAuth;
+
+  return {
+    ok: true,
+    agent: {
+      agentId: agent.id,
+      agentName: agent.name,
+      orgId: agent.orgId,
+      agentType: agent.type,
     },
   };
 }

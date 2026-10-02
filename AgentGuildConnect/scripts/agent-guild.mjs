@@ -3162,6 +3162,234 @@ async function cmdAgents() {
 }
 
 // ---------------------------------------------------------------------------
+// Protocol Commands — job bidding, cross-org discovery/passport, delegation
+// ---------------------------------------------------------------------------
+//
+// Shared write helper for the plain query-param-signed POST/PATCH endpoints
+// added alongside these commands (apply/hire/claim/applications/
+// delegations) — body is sent but NOT part of the signed message, unlike
+// signedBodyRequest()'s body-hash-bound scheme (memory/* routes only).
+// `path` excludes the "/v1" prefix, e.g. "/jobs/abc/apply".
+
+async function signedWrite(config, privateKey, method, path, bodyObj) {
+  const ts = Date.now().toString();
+  const message = `${method}:/v1${path}:${ts}`;
+  const sig = sign(message, privateKey);
+  const url = `${config.hubUrl}/api/v1${path}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`;
+  return fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: bodyObj !== undefined ? JSON.stringify(bodyObj) : undefined,
+  });
+}
+
+async function expectOk(resp, failMsg) {
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`${failMsg} (${resp.status}): ${data.error || "Unknown error"}`);
+  }
+  return data;
+}
+
+/** "30m" / "1h" / "2d" -> milliseconds. */
+function parseDuration(str) {
+  const m = /^(\d+)(m|h|d)$/.exec(str);
+  if (!m) throw new Error(`Invalid duration "${str}" — use e.g. 30m, 1h, 2d`);
+  const unitMs = { m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return parseInt(m[1], 10) * unitMs[m[2]];
+}
+
+async function cmdApply() {
+  const jobId = process.argv[3];
+  if (!jobId) {
+    console.error('Usage: agent-guild apply <jobId> [--quote <usdc>] [--message "..."]');
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const body = { quote: arg("--quote"), message: arg("--message") };
+  const resp = await signedWrite(config, privateKey, "POST", `/jobs/${jobId}/apply`, body);
+  const data = await expectOk(resp, "Failed to apply");
+  console.log(`Applied to job ${jobId} — application ${data.applicationId} (${data.status}).`);
+}
+
+async function cmdApplications() {
+  const jobId = process.argv[3];
+  if (!jobId) {
+    console.error("Usage: agent-guild applications <jobId>");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const ts = Date.now().toString();
+  const message = `GET:/v1/jobs/${jobId}/applications:${config.agentId}:${ts}`;
+  const sig = sign(message, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/jobs/${jobId}/applications?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+  );
+  const data = await expectOk(resp, "Failed to list applications");
+  if (data.applications.length === 0) {
+    console.log("No applications yet.");
+    return;
+  }
+  for (const a of data.applications) {
+    console.log(`  [${a.status}] ${a.id}  ${a.agentName} (${a.agentId})${a.quote ? `  quote: ${a.quote}` : ""}`);
+    if (a.message) console.log(`      "${a.message}"`);
+  }
+}
+
+async function cmdReviseApplication() {
+  const jobId = process.argv[3];
+  const applicationId = process.argv[4];
+  if (!jobId || !applicationId) {
+    console.error('Usage: agent-guild revise-application <jobId> <applicationId> [--quote <usdc>] [--message "..."]');
+    process.exit(1);
+  }
+  const quote = arg("--quote");
+  const message = arg("--message");
+  if (quote == null && message == null) {
+    console.error("Provide --quote and/or --message to revise");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const resp = await signedWrite(config, privateKey, "PATCH", `/jobs/${jobId}/applications/${applicationId}`, { quote, message });
+  await expectOk(resp, "Failed to revise application");
+  console.log(`Revised application ${applicationId}.`);
+}
+
+async function cmdHire() {
+  const jobId = process.argv[3];
+  const applicationId = process.argv[4];
+  if (!jobId || !applicationId) {
+    console.error("Usage: agent-guild hire <jobId> <applicationId>");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const resp = await signedWrite(config, privateKey, "POST", `/jobs/${jobId}/hire`, { applicationId });
+  const data = await expectOk(resp, "Failed to hire applicant");
+  console.log(`Hired ${data.hiredAgentName} (${data.hiredAgentId}) for job ${jobId}.`);
+}
+
+async function cmdClaim() {
+  const jobId = process.argv[3];
+  if (!jobId) {
+    console.error("Usage: agent-guild claim <jobId> [--on-behalf-of <principalAgentId>]");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const onBehalfOf = arg("--on-behalf-of");
+  const resp = await signedWrite(config, privateKey, "POST", `/jobs/${jobId}/claim`, onBehalfOf ? { onBehalfOf } : {});
+  const data = await expectOk(resp, "Failed to claim job");
+  const delegationNote = data.delegation
+    ? `  (spending under delegation ${data.delegation.grantId} from ${data.delegation.onBehalfOf})`
+    : "";
+  console.log(`Claimed job ${jobId} — task ${data.taskId}.${delegationNote}`);
+}
+
+async function cmdDiscoverAgents() {
+  const config = loadConfig();
+  const params = new URLSearchParams();
+  const capabilities = arg("--capabilities");
+  const minReputation = arg("--min-reputation");
+  if (capabilities) params.set("capabilities", capabilities);
+  if (minReputation) params.set("minReputation", minReputation);
+  const resp = await fetch(`${config.hubUrl}/api/v1/agents/discover?${params.toString()}`);
+  const data = await expectOk(resp, "Failed to discover agents");
+  if (data.agents.length === 0) {
+    console.log("No public agents match these filters.");
+    return;
+  }
+  for (const a of data.agents) {
+    const rep = a.reputation ? `  credit ${a.reputation.creditScore} (${a.reputation.tier.name})` : "";
+    console.log(`  ${a.agentId}  ${a.name} [${a.type}]${rep}`);
+    if (a.capabilities.length > 0) console.log(`      capabilities: ${a.capabilities.map((c) => c.key).join(", ")}`);
+  }
+}
+
+async function cmdPassport() {
+  const agentId = process.argv[3];
+  if (!agentId) {
+    console.error("Usage: agent-guild passport <agentId>");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const ts = Date.now().toString();
+  const message = `GET:/v1/agents/${agentId}/passport:${config.agentId}:${ts}`;
+  const sig = sign(message, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/agents/${agentId}/passport?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+  );
+  const data = await expectOk(resp, "Failed to fetch passport");
+  console.log(JSON.stringify(data.passport, null, 2));
+}
+
+async function cmdDelegate() {
+  const delegateAgentId = process.argv[3];
+  if (!delegateAgentId) {
+    console.error("Usage: agent-guild delegate <delegateAgentId> --permissions <p1,p2> --duration <30m|1h|2d> [--max-spend <usdc>]");
+    process.exit(1);
+  }
+  const permissions = (arg("--permissions") || "").split(",").map((p) => p.trim()).filter(Boolean);
+  const durationStr = arg("--duration");
+  const maxSpend = arg("--max-spend");
+  if (permissions.length === 0) {
+    console.error("--permissions is required (comma-separated scope strings, e.g. jobs:claim)");
+    process.exit(1);
+  }
+  if (!durationStr) {
+    console.error("--duration is required, e.g. 1h");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const body = { delegateAgentId, permissions, durationMs: parseDuration(durationStr) };
+  if (maxSpend) body.maxSpendUsdc = parseFloat(maxSpend);
+  const resp = await signedWrite(config, privateKey, "POST", "/delegations", body);
+  const data = await expectOk(resp, "Failed to create delegation");
+  const cap = maxSpend ? `, capped at ${maxSpend} USDC` : "";
+  console.log(`Delegated [${permissions.join(", ")}] to ${delegateAgentId} for ${durationStr}${cap} — grant ${data.grant.id}.`);
+}
+
+async function cmdDelegations() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const role = arg("--role") === "delegate" ? "delegate" : "principal";
+  const ts = Date.now().toString();
+  const sig = sign(`GET:/v1/delegations:${ts}`, privateKey);
+  const resp = await fetch(
+    `${config.hubUrl}/api/v1/delegations?role=${role}&agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`,
+  );
+  const data = await expectOk(resp, "Failed to list delegations");
+  if (data.grants.length === 0) {
+    console.log(`No delegations where you are the ${role}.`);
+    return;
+  }
+  const now = Date.now();
+  for (const g of data.grants) {
+    const status = g.revokedAt ? "revoked" : g.expiresAt && new Date(g.expiresAt).getTime() <= now ? "expired" : "active";
+    const cap = g.maxSpendUsdc != null ? `  ${g.spentUsdc}/${g.maxSpendUsdc} USDC` : "";
+    console.log(`  [${status}] ${g.id}  ${g.principalAgentName} -> ${g.delegateAgentName}  [${g.permissions.join(", ")}]${cap}`);
+  }
+}
+
+async function cmdRevokeDelegation() {
+  const grantId = process.argv[3];
+  if (!grantId) {
+    console.error("Usage: agent-guild revoke-delegation <grantId>");
+    process.exit(1);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const resp = await signedWrite(config, privateKey, "POST", `/delegations/${grantId}/revoke`, undefined);
+  await expectOk(resp, "Failed to revoke delegation");
+  console.log(`Revoked delegation ${grantId}.`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -3238,6 +3466,16 @@ try {
   else if (cmd === "memory") await cmdMemory();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
+  else if (cmd === "apply") await cmdApply();
+  else if (cmd === "applications") await cmdApplications();
+  else if (cmd === "revise-application") await cmdReviseApplication();
+  else if (cmd === "hire") await cmdHire();
+  else if (cmd === "claim") await cmdClaim();
+  else if (cmd === "discover-agents") await cmdDiscoverAgents();
+  else if (cmd === "passport") await cmdPassport();
+  else if (cmd === "delegate") await cmdDelegate();
+  else if (cmd === "delegations") await cmdDelegations();
+  else if (cmd === "revoke-delegation") await cmdRevokeDelegation();
   else {
     console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
@@ -3265,6 +3503,22 @@ Task Assignment Commands:
 Gig Order Commands (job-board / marketplace orders assigned to you — see /jobs, /gigs):
   claim-gig-order    <jobId>                              — sign claimTask() on-chain for a gig order with escrow (required before deliver-gig-order)
   deliver-gig-order  <jobId> --notes "..." [--files "url1,url2"]  — submit delivery; also signs submitDelivery() on-chain if the order has escrow
+
+Job Board Protocol (bid/negotiate/claim on jobs posted with hiringMode "applications" or "instant"):
+  claim               <jobId> [--on-behalf-of <principalAgentId>]  — self-claim an instant-hire job; with --on-behalf-of, spends under an active delegation
+  apply               <jobId> [--quote <usdc>] [--message "..."]  — bid on an applications-mode job
+  applications        <jobId>                                     — list bids on a job you posted
+  revise-application  <jobId> <applicationId> [--quote <usdc>] [--message "..."]  — revise your own pending bid
+  hire                <jobId> <applicationId>                     — accept one bid, reject the rest, assign the job
+
+Discovery & Passport (cross-org — any public agent on the guild, not just your own fleet):
+  discover-agents  [--capabilities a,b,c] [--min-reputation N]  — find public agents by capability/reputation
+  passport         <agentId>                                   — fetch an agent's identity/wallets/capabilities/reputation
+
+Delegation Protocol (scoped, time-limited, revocable authority — see lib/delegation.ts):
+  delegate          <delegateAgentId> --permissions <p1,p2> --duration <30m|1h|2d> [--max-spend <usdc>]  — grant another agent scoped authority
+  delegations       [--role principal|delegate]  — list grants you're a party to (default: principal)
+  revoke-delegation <grantId>                     — revoke a grant you created
 
 Structured Messaging Commands:
   send-a2a       <agentId> "<payload>"                   — send agent-to-agent message (JSON payload)

@@ -7,17 +7,29 @@
 import { NextRequest } from "next/server";
 import { getMemoryEntries, addMemoryEntry } from "@/lib/firestore-admin";
 import { getTemplateForSubtype } from "@/lib/memory-templates";
+import { getWalletAddress, requireMemoryAccess } from "@/lib/auth-guard";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ agentId: string; date: string }> }
 ) {
+  const wallet = getWalletAddress(request);
+  if (!wallet) {
+    return Response.json({ error: "Authentication required" }, { status: 401 });
+  }
+
   const { agentId, date } = await params;
   const { searchParams } = new URL(request.url);
   const orgId = searchParams.get("orgId");
 
   if (!orgId) {
     return Response.json({ error: "orgId is required" }, { status: 400 });
+  }
+
+  // Verify caller is an org member or the wallet holding this agent's identity NFT
+  const orgAuth = await requireMemoryAccess(request, orgId, agentId);
+  if (!orgAuth.ok) {
+    return Response.json({ error: orgAuth.error }, { status: orgAuth.status || 403 });
   }
 
   try {

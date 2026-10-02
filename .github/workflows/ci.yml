@@ -247,6 +247,18 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      # `if: always()` above makes this job run even when a dependency
+      # failed — needed so it can report that failure explicitly rather
+      # than being skipped. Without this check, the step below always
+      # echoed success and exited 0 regardless of what `needs` actually
+      # did, making "Release Gate" useless as a required branch-protection
+      # status check (it could never fail).
+      - name: Fail if any required job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "One or more required jobs failed or were cancelled:"
+          echo '${{ toJSON(needs) }}'
+          exit 1
       - name: All checks passed
         run: |
           echo "✓ AgentGuildApp: lint, typecheck, test, build"

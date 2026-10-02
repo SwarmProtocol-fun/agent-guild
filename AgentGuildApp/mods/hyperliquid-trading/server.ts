@@ -74,6 +74,50 @@ async function getUniverseCoins(network: HlNetwork): Promise<string[]> {
   return meta.universe.map((a) => a.name);
 }
 
+interface MarketCoin {
+  coin: string;
+  markPx: number;
+  change24hPct: number;
+  volume24hUsd: number;
+  openInterestUsd: number;
+  fundingRatePct: number;
+  maxLeverage: number;
+}
+
+/**
+ * Whole-market snapshot (price, 24h change, volume, open interest, funding)
+ * across every tradeable perp — the overview used to decide what to trade,
+ * not any one agent's position. One `metaAndAssetCtxs` call returns the
+ * universe (name/leverage) and matching asset contexts (price/funding/OI) by
+ * index; delisted coins are dropped since they can't be traded. Sorted by
+ * 24h volume, the natural "what's active right now" ordering.
+ */
+async function getMarketOverview(network: HlNetwork): Promise<MarketCoin[]> {
+  type AssetCtx = { funding: string; openInterest: string; prevDayPx: string; dayNtlVlm: string; markPx: string };
+  type UniverseAsset = { name: string; maxLeverage: number; isDelisted?: boolean };
+  const [meta, ctxs] = await hlInfo<[{ universe: UniverseAsset[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" }, network);
+
+  const coins: MarketCoin[] = [];
+  meta.universe.forEach((asset, i) => {
+    const ctx = ctxs[i];
+    if (!ctx || asset.isDelisted) return;
+    const markPx = Number(ctx.markPx);
+    const prevDayPx = Number(ctx.prevDayPx);
+    coins.push({
+      coin: asset.name,
+      markPx,
+      change24hPct: prevDayPx ? ((markPx - prevDayPx) / prevDayPx) * 100 : 0,
+      volume24hUsd: Number(ctx.dayNtlVlm),
+      openInterestUsd: Number(ctx.openInterest) * markPx,
+      fundingRatePct: Number(ctx.funding) * 100,
+      maxLeverage: asset.maxLeverage,
+    });
+  });
+
+  coins.sort((a, b) => b.volume24hUsd - a.volume24hUsd);
+  return coins;
+}
+
 /**
  * Decrypts an agent's own stored Hyperliquid key for exactly one request.
  * There is no server-held master key — `masterSecret` is the agent's own
@@ -453,6 +497,17 @@ export default defineServerMod({
         const network = (new URL(req.url).searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
         const price = await getMidPrice(params.coin, network);
         return Response.json({ coin: params.coin, price });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /** GET /market?network=testnet|mainnet — whole-market overview (price, 24h change, volume, OI, funding) across every tradeable perp. */
+    "GET /market": async (req) => {
+      try {
+        const network = (new URL(req.url).searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
+        const coins = await getMarketOverview(network);
+        return Response.json({ coins });
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 502 });
       }

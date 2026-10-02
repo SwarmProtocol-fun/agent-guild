@@ -466,10 +466,25 @@ if (authMethod === "none") {
   console.error("Replies to agent-guild will fail.\n");
 }
 
-server.listen(PORT, () => {
+// Without BRIDGE_WEBHOOK_SECRET, verifySignature() accepts any POST to the
+// webhook endpoint — fine when the only caller is the sibling `agent-guild
+// daemon` process on the same host (the documented deployment, via
+// `--webhook http://localhost:<port>/...`), but anyone who can reach this
+// port otherwise could forge a message that gets forwarded to the LLM
+// runtime and posted back into the real channel as this agent's reply.
+// Default to loopback-only binding in that case so the port is only ever
+// reachable from this host; --host/BRIDGE_HOST overrides for an operator
+// who has verified it's safe to expose (e.g. firewalled network).
+const HOST = arg("--host") || process.env.BRIDGE_HOST || (WEBHOOK_SECRET ? undefined : "127.0.0.1");
+if (!WEBHOOK_SECRET) {
+  console.error(`Warning: BRIDGE_WEBHOOK_SECRET not set — binding to ${HOST} only. Set a secret before exposing this port beyond localhost.\n`);
+}
+
+const listenArgs = HOST ? [PORT, HOST] : [PORT];
+server.listen(...listenArgs, () => {
   console.log(`Agent Guild Runtime Bridge`);
   console.log(`─────────────────────────────────────`);
-  console.log(`  Port:       ${PORT}`);
+  console.log(`  Port:       ${PORT}${HOST ? ` (${HOST})` : ""}`);
   console.log(`  Runtime:    ${RUNTIME_TYPE}`);
   console.log(`  Endpoint:   ${RUNTIME_URL}`);
   console.log(`  Agent:      ${AGENT_ID}`);

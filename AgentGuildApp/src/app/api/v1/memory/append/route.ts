@@ -6,7 +6,7 @@
  */
 import { NextRequest } from "next/server";
 import crypto from "crypto";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentAuthOrIdentityNftWallet } from "@/lib/auth-guard";
 import { rateLimit } from "../../rate-limit";
 import { appendMemoryMd, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
   const rawBody = await request.text();
   const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
 
-  const auth = await requireAgentAuth(request, `POST:/v1/memory/append:${bodyHash}`);
+  const auth = await requireAgentAuthOrIdentityNftWallet(request, `POST:/v1/memory/append:${bodyHash}`, agentParam);
   if (!auth.ok || !auth.agent) {
     return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
   }

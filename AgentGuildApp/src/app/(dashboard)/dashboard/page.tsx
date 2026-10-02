@@ -785,7 +785,7 @@ export default function DashboardPage() {
               </Reveal>
 
               <Reveal delay={0.16}>
-                <ChannelsWidget />
+                <ChannelsWidget agents={agents} />
               </Reveal>
             </div>
           </div>

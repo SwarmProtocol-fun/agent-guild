@@ -475,6 +475,25 @@ async function unsubscribeFromChannel(ws, channelId) {
 }
 
 /**
+ * Verify `channelId` belongs to `orgId` before a legacy WS message handler
+ * (subscribe/message/typing/message:ack/task:assign/task:accept) acts on a
+ * client-supplied channelId. routeMessage's structured path (a2a/coord/
+ * broadcast/session, via message-router.mjs routeBroadcast) already does
+ * this check — these older inline handlers predate it and never got the
+ * same guard, which let any authenticated agent read or write into another
+ * org's channel by supplying its channelId. Fails closed on a lookup error.
+ */
+async function channelBelongsToOrg(channelId, orgId) {
+  try {
+    const channelDoc = await db.collection("channels").doc(channelId).get();
+    return channelDoc.exists && channelDoc.data().orgId === orgId;
+  } catch (err) {
+    log("error", "Failed to verify channel ownership", { channelId, orgId, error: err.message });
+    return false;
+  }
+}
+
+/**
  * Handle cross-instance Pub/Sub messages.
  * When another hub instance broadcasts a message, this handler
  * relays it to local WebSocket connections.
@@ -639,6 +658,14 @@ async function isAgentPaused(agentId) {
     return paused;
   } catch (err) {
     log("error", "Failed to check agent pause status", { agentId, error: err.message });
+    // Pause exists as an incident-response control, so a transient read
+    // error shouldn't silently let a just-paused agent keep operating —
+    // but failing every agent closed on any Firestore hiccup is its own
+    // availability risk. Split the difference: trust the last known state
+    // (even past its TTL) over an uninformed guess, and only fall back to
+    // "not paused" when there's truly no prior signal for this agent at all
+    // (first contact during an outage — rare, and bounded to one message).
+    if (cached) return cached.paused;
     return false; // Fail open — don't block if can't check
   }
 }
@@ -872,6 +899,14 @@ app.get("/diagnostics", async (req, res) => {
     });
   }
 
+  // Unauthenticated by design (first-run diagnostics), but still does
+  // several Firestore/Redis reads per call — rate-limit by IP (not agentId,
+  // which the caller fully controls) so it can't be used as an unbounded
+  // agentId-existence/pause-status oracle or Firestore-read amplifier.
+  if (!await checkRateLimit(`diag:${getClientIP(req)}`)) {
+    return res.status(429).json({ ok: false, error: "Rate limit exceeded" });
+  }
+
   const result = {
     agentId,
     ts: new Date().toISOString(),
@@ -1017,6 +1052,14 @@ app.post("/agents/:agentId/invoke", async (req, res) => {
     if (!fresh) {
       return res.status(401).json({ error: "Signature already used (replay rejected)" });
     }
+  }
+
+  // Every other authenticated path (WS messages, gateway WS messages) is
+  // rate-limited; this one wasn't — each accepted call holds a
+  // `pendingInvocations` entry (with its own timer) for up to
+  // INVOKE_TIMEOUT_MS, so an unrated flood grows that map unbounded.
+  if (!await checkRateLimit(agentId)) {
+    return res.status(429).json({ error: "Rate limit exceeded" });
   }
 
   // ── Check agent is online ──
@@ -1738,9 +1781,21 @@ wss.on("connection", async (ws, _req) => {
 
     // Subscribe/unsubscribe
     if (type === "subscribe" && channelId) {
+      if (!await channelBelongsToOrg(channelId, orgId)) {
+        ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+        return;
+      }
+      // Idempotent: repeated "subscribe" messages for a channel this
+      // connection already streams used to open a brand new Firestore
+      // onSnapshot listener every time (only cleaned up on full
+      // disconnect) — an authenticated connection re-subscribing
+      // repeatedly over its lifetime could pile up unbounded redundant
+      // listeners. state.channels already tracks what this ws streams.
+      const state = wsState.get(ws);
+      const alreadySubscribed = state?.channels.has(channelId);
       await subscribeToChannel(ws, channelId);
-      streamChannel(ws, channelId, channelId, agentId);
-      log("info", "Subscribed", { agentId, channelId });
+      if (!alreadySubscribed) streamChannel(ws, channelId, channelId, agentId);
+      log("info", "Subscribed", { agentId, channelId, alreadySubscribed });
       ws.send(JSON.stringify({ type: "subscribed", channelId }));
       return;
     }
@@ -1754,6 +1809,10 @@ wss.on("connection", async (ws, _req) => {
 
     // Send message
     if (type === "message" && channelId && content) {
+      if (!await channelBelongsToOrg(channelId, orgId)) {
+        ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+        return;
+      }
       const messageId = await persistMessage(agentId, agentName, orgId, channelId, content);
 
       // Warn if persistence failed
@@ -1788,6 +1847,10 @@ wss.on("connection", async (ws, _req) => {
 
     // Typing indicator
     if (type === "typing" && channelId) {
+      if (!await channelBelongsToOrg(channelId, orgId)) {
+        ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+        return;
+      }
       broadcastToChannel(channelId, {
         type: "typing",
         agentId,
@@ -1800,6 +1863,10 @@ wss.on("connection", async (ws, _req) => {
 
     // Message acknowledgment — receiver confirms they got a message
     if (type === "message:ack" && msg.messageId) {
+      if (channelId && !await channelBelongsToOrg(channelId, orgId)) {
+        ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+        return;
+      }
       broadcastToChannel(channelId || "", {
         type: "message:ack",
         messageId: msg.messageId,
@@ -1812,6 +1879,10 @@ wss.on("connection", async (ws, _req) => {
 
     // Task broadcast — agent assigns work to others via a channel
     if (type === "task:assign" && channelId) {
+      if (!await channelBelongsToOrg(channelId, orgId)) {
+        ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+        return;
+      }
       const taskPayload = {
         type: "task:assign",
         channelId,
@@ -1854,6 +1925,10 @@ wss.on("connection", async (ws, _req) => {
       };
 
       if (channelId) {
+        if (!await channelBelongsToOrg(channelId, orgId)) {
+          ws.send(JSON.stringify({ type: "error", error: "Channel not found in this org", code: "CHANNEL_FORBIDDEN" }));
+          return;
+        }
         broadcastToChannel(channelId, acceptPayload, ws);
         await persistMessage(agentId, agentName, orgId, channelId,
           `[ACK] ${agentName} accepted task ${msg.taskId}`);

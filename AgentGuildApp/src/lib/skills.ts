@@ -6,6 +6,7 @@
  * of available items from the marketplace.
  */
 
+import { hashModEntry, verifyModIntegrity } from "./mod-integrity";
 import {
     collection,
     doc,
@@ -236,6 +237,8 @@ export interface ModInstallation {
     config: Record<string, unknown>;
     installedBy: string;
     installedAt: Date | null;
+    /** SHA-256 of the mod's registry entry at install time (see mod-integrity.ts). */
+    contentHash?: string;
 }
 
 /** Resolved capability for an agent (merged from all sources) */
@@ -1258,6 +1261,11 @@ export async function installMod(
         installedBy,
         installedAt: serverTimestamp(),
         installedVersion: mod.version,
+        // Pins what was actually installed — verifyModInstallationIntegrity
+        // re-hashes the current registry entry against this to detect a mod
+        // changing (e.g. a new capability/permission) after an org already
+        // approved it, without re-prompting them to re-approve.
+        contentHash: await hashModEntry(mod),
     });
 
     // Backward compat: also write to legacy inventory
@@ -1303,8 +1311,28 @@ export async function getModInstallations(orgId: string): Promise<ModInstallatio
             config: data.config ?? {},
             installedBy: data.installedBy,
             installedAt: data.installedAt instanceof Timestamp ? data.installedAt.toDate() : null,
+            contentHash: data.contentHash,
         };
     });
+}
+
+/**
+ * Re-hashes a mod's current MOD_REGISTRY entry and compares it to the hash
+ * recorded when an org installed it (see installMod). A mismatch means the
+ * mod's capabilities/manifest changed since that org last approved it —
+ * surfacing that is more useful here than silently trusting it, since
+ * nothing currently re-prompts an org to re-approve a changed mod.
+ * Installations predating this field (no contentHash) can't be checked.
+ */
+export async function verifyModInstallationIntegrity(
+    installation: ModInstallation,
+): Promise<{ ok: boolean; reason?: string }> {
+    const mod = MOD_REGISTRY.find((m) => m.id === installation.modId);
+    if (!mod) return { ok: false, reason: "Mod no longer exists in the registry" };
+    if (!installation.contentHash) return { ok: true, reason: "No recorded hash to verify against (installed before integrity tracking)" };
+
+    const matches = await verifyModIntegrity(mod, undefined, installation.contentHash);
+    return matches ? { ok: true } : { ok: false, reason: "Mod content has changed since this org installed it" };
 }
 
 /** Toggle a mod installation on/off */

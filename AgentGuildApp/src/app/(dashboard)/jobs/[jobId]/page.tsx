@@ -32,6 +32,7 @@ import {
   getAgent,
   getJobApplications,
   applyToJob,
+  updateJobApplication,
   hireApplicant,
   getCompletedJobsByAgent,
   getGigReviewByJob,
@@ -66,6 +67,7 @@ import {
   Star,
   ChevronDown,
   ChevronUp,
+  Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -122,6 +124,11 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [submittingApplication, setSubmittingApplication] = useState(false);
   const [hiringApplicationId, setHiringApplicationId] = useState<string | null>(null);
   const [hireError, setHireError] = useState<string | null>(null);
+  const [editingApplicationId, setEditingApplicationId] = useState<string | null>(null);
+  const [editQuote, setEditQuote] = useState("");
+  const [editMessage, setEditMessage] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // Portfolio (expandable per applicant)
   const [expandedPortfolio, setExpandedPortfolio] = useState<string | null>(null);
@@ -417,6 +424,32 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     }
   };
 
+  const startEditApplication = (application: JobApplication) => {
+    setEditingApplicationId(application.id);
+    setEditQuote(application.quote ?? "");
+    setEditMessage(application.message ?? "");
+    setEditError(null);
+  };
+
+  const handleSaveEditApplication = async () => {
+    if (!editingApplicationId) return;
+    setSavingEdit(true);
+    setEditError(null);
+    try {
+      await updateJobApplication(editingApplicationId, {
+        quote: editQuote.trim() || undefined,
+        message: editMessage.trim() || undefined,
+      });
+      setEditingApplicationId(null);
+      await loadApplications();
+    } catch (error) {
+      console.error("Failed to revise application:", error);
+      setEditError(error instanceof Error ? error.message : "Failed to save changes");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const handleHire = async (application: JobApplication) => {
     if (!job || !currentOrg) return;
     setHiringApplicationId(application.id);
@@ -601,12 +634,34 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                             <Badge variant="outline" className="text-sm font-bold text-amber-600 border-amber-300">${app.quote}</Badge>
                           )}
                         </div>
-                        {app.message && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{app.message}</p>}
+                        {editingApplicationId === app.id ? (
+                          <div className="space-y-2 border rounded-md p-2 bg-muted/20">
+                            {editError && <p className="text-xs text-destructive">{editError}</p>}
+                            <div className="relative">
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+                              <Input className="pl-7 h-8 text-sm" placeholder="Revised quote" value={editQuote} onChange={(e) => setEditQuote(e.target.value)} />
+                            </div>
+                            <Textarea className="text-sm" placeholder="Revised pitch (optional)" value={editMessage} onChange={(e) => setEditMessage(e.target.value)} rows={3} />
+                            <div className="flex gap-2 justify-end">
+                              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setEditingApplicationId(null)} disabled={savingEdit}>Cancel</Button>
+                              <Button size="sm" className="h-7 text-xs" onClick={handleSaveEditApplication} disabled={savingEdit}>
+                                {savingEdit ? "Saving..." : "Save Revision"}
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          app.message && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{app.message}</p>
+                        )}
                         <div className="flex items-center gap-2 pt-1">
                           <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => togglePortfolio(app.agentId)}>
                             {isExpanded ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
                             Portfolio
                           </Button>
+                          {job.status === 'open' && app.status === 'pending' && currentOrg?.id === app.orgId && editingApplicationId !== app.id && (
+                            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => startEditApplication(app)}>
+                              <Pencil className="h-3 w-3 mr-1" />Revise
+                            </Button>
+                          )}
                           {job.status === 'open' && app.status === 'pending' && (
                             <Button
                               size="sm"

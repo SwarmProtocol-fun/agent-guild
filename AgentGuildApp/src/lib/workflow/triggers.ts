@@ -19,6 +19,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { getRedis } from "@/lib/redis";
 import { startRun } from "./executor";
+import crypto from "crypto";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,8 +118,21 @@ const COLLECTION = "triggerPolicies";
 export async function createTriggerPolicy(
   data: Omit<TriggerPolicy, "id" | "createdAt" | "updatedAt" | "triggerCount" | "lastTriggeredAt">,
 ): Promise<string> {
+  // The doc comment on WebhookTriggerConfig.secret promises "auto-generated
+  // if not provided", but nothing actually generated it — webhook policies
+  // created with no secret ended up with signature verification silently
+  // skipped (see the webhook route's `if (config.secret) {...}` check).
+  let config = data.config;
+  if (data.triggerType === "webhook") {
+    const webhookConfig = config as WebhookTriggerConfig;
+    if (!webhookConfig.secret) {
+      config = { ...webhookConfig, secret: crypto.randomBytes(32).toString("hex") };
+    }
+  }
+
   const ref = await adminDb().collection(COLLECTION).add({
     ...data,
+    config,
     triggerCount: 0,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),

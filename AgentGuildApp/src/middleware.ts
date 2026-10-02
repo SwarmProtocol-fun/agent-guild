@@ -105,6 +105,7 @@ const PROTECTED_PAGE_PREFIXES = [
   "/agent-guilds",
   "/jobs",
   "/gigs",
+  "/discover",
   "/missions",
   "/chat",
   "/settings",
@@ -198,9 +199,12 @@ export async function middleware(req: NextRequest) {
     }
   }
 
-  // Rate limit mutating /api/v1/* requests, keyed by client IP.
+  // Rate limit mutating /api/v1/* and /api/mods/* requests, keyed by client
+  // IP. Mod routes (handleModRequest in src/lib/mods/runtime.ts) have no
+  // rate limiting of their own — without this they were the one mutating
+  // API surface completely exempt from it.
   if (
-    pathname.startsWith("/api/v1") &&
+    (pathname.startsWith("/api/v1") || pathname.startsWith("/api/mods")) &&
     ["POST", "PUT", "PATCH", "DELETE"].includes(req.method)
   ) {
     const ip = getClientIP(req);

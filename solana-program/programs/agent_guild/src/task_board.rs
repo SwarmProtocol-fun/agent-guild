@@ -82,9 +82,15 @@ pub fn post_task(
 // `post_task` pulls `budget_lamports` into escrow immediately. Before this
 // instruction existed, a task nobody claimed before its `deadline` had no
 // way back to its poster — the escrow was locked on the TaskAccount PDA
-// forever (`TaskStatus::Expired` was declared but never reachable). This
-// only covers the unclaimed case: once a task is `Claimed`, it's on the
-// approve/dispute path instead, which is a separate, already-covered flow.
+// forever (`TaskStatus::Expired` was declared but never reachable).
+//
+// Also covers a `Claimed` task whose claimant never submits delivery: the
+// poster could already call `dispute_delivery` at any time, but resolving
+// that dispute still requires the single program `authority` to act — if
+// the claimant ghosts and the authority doesn't get to it, the poster had
+// no self-service way to reclaim their own escrow. Requiring
+// `delivery_hash.is_none()` here keeps this to the pure-abandonment case;
+// once delivery is submitted, approve/dispute is the right path instead.
 
 #[derive(Accounts)]
 pub struct ExpireTask<'info> {
@@ -100,7 +106,11 @@ pub struct ExpireTask<'info> {
 pub fn expire_task(ctx: Context<ExpireTask>) -> Result<()> {
     {
         let task = &ctx.accounts.task_account;
-        require!(task.status == TaskStatus::Open, AgentGuildError::TaskNotOpen);
+        require!(
+            task.status == TaskStatus::Open
+                || (task.status == TaskStatus::Claimed && task.delivery_hash.is_none()),
+            AgentGuildError::TaskNotOpen
+        );
         let now = Clock::get()?.unix_timestamp;
         require!(now > task.deadline, AgentGuildError::TaskNotExpired);
     }

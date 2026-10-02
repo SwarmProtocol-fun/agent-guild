@@ -47,9 +47,21 @@ interface ReferralStats {
   rewardUsd: number;
 }
 
-type Tab = "trade" | "positions" | "strategies" | "history" | "risk" | "referral";
+interface MarketCoin {
+  coin: string;
+  markPx: number;
+  change24hPct: number;
+  volume24hUsd: number;
+  openInterestUsd: number;
+  fundingRatePct: number;
+  maxLeverage: number;
+}
+
+type Tab = "market" | "trade" | "positions" | "strategies" | "history" | "risk" | "referral";
+type MarketSort = "volume" | "price" | "change" | "funding";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "market", label: "Market" },
   { id: "trade", label: "Trade" },
   { id: "positions", label: "Positions" },
   { id: "strategies", label: "Strategies" },
@@ -58,11 +70,49 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "referral", label: "Referral" },
 ];
 
+const MARKET_SORTS: { id: MarketSort; label: string }[] = [
+  { id: "volume", label: "Vol" },
+  { id: "price", label: "Price" },
+  { id: "change", label: "24h%" },
+  { id: "funding", label: "Funding" },
+];
+
+function formatPrice(n: number) {
+  return n.toLocaleString(undefined, n >= 1 ? { maximumFractionDigits: 2, minimumFractionDigits: 2 } : { maximumFractionDigits: 6 });
+}
+
+function formatCompactUsd(n: number) {
+  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
 const inputClass =
-  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground " +
+  "w-full rounded-sm border border-input bg-background px-2.5 py-1.5 text-sm placeholder:text-muted-foreground " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
-const labelClass = "block text-sm font-medium text-foreground mb-1";
+const labelClass = "block text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1";
+
+const monoClass = "font-mono tabular-nums";
+
+function pnlClass(value: number) {
+  return value >= 0 ? "text-green-600 dark:text-green-400" : "text-destructive";
+}
+
+function signed(value: number) {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function PulseDot({ tone }: { tone: "live" | "idle" | "danger" }) {
+  const color = { live: "bg-green-500", idle: "bg-muted-foreground/40", danger: "bg-destructive" }[tone];
+  return (
+    <span className="relative inline-flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
+      {tone === "live" && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${color} opacity-60`} />}
+      <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${color}`} />
+    </span>
+  );
+}
 
 function primaryButtonClass(extra = "") {
   return (
@@ -89,17 +139,30 @@ function Badge({ tone, children }: { tone: "neutral" | "success" | "danger" | "w
     danger: "bg-destructive/10 text-destructive",
     warning: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   }[tone];
-  return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${toneClass}`}>{children}</span>;
+  return (
+    <span className={`inline-flex items-center rounded-sm px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide ${toneClass}`}>
+      {children}
+    </span>
+  );
 }
 
-function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+function Section({ title, description, dense, right, children }: {
+  title: string;
+  description?: string;
+  dense?: boolean;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="rounded-lg border border-border bg-card p-4 space-y-3">
-      <div>
-        <h2 className="font-medium text-sm text-card-foreground">{title}</h2>
-        {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
+    <div className="rounded-sm border border-border bg-card">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+        <div>
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-card-foreground">{title}</h2>
+          {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
+        </div>
+        {right}
       </div>
-      {children}
+      <div className={dense ? "p-2 space-y-2" : "p-3 space-y-3"}>{children}</div>
     </div>
   );
 }
@@ -195,6 +258,49 @@ function TradingPanel({ api }: PanelProps) {
   }, [agentId]);
 
   const network: Network = walletStatus?.network ?? "testnet";
+
+  // ── Market overview ────────────────────────────────────────────────────────
+  const [marketCoins, setMarketCoins] = useState<MarketCoin[] | "loading" | "error" | null>(null);
+  const [marketQuery, setMarketQuery] = useState("");
+  const [marketSort, setMarketSort] = useState<MarketSort>("volume");
+
+  async function loadMarket() {
+    setMarketCoins((prev) => (Array.isArray(prev) ? prev : "loading"));
+    try {
+      const resp = await api(`market?network=${network}`);
+      const data = await resp.json();
+      if (data.error) {
+        setMarketCoins("error");
+        return;
+      }
+      setMarketCoins(data.coins ?? []);
+    } catch {
+      setMarketCoins("error");
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== "market") return;
+    loadMarket();
+    const id = setInterval(loadMarket, 15000);
+    return () => clearInterval(id);
+  }, [activeTab, network]);
+
+  const filteredMarket = Array.isArray(marketCoins)
+    ? marketCoins
+        .filter((c) => c.coin.toLowerCase().includes(marketQuery.toLowerCase()))
+        .sort((a, b) => {
+          if (marketSort === "price") return b.markPx - a.markPx;
+          if (marketSort === "change") return b.change24hPct - a.change24hPct;
+          if (marketSort === "funding") return b.fundingRatePct - a.fundingRatePct;
+          return b.volume24hUsd - a.volume24hUsd;
+        })
+    : [];
+
+  function pickCoin(c: string) {
+    setCoin(c);
+    setActiveTab("trade");
+  }
 
   // ── Trade form ───────────────────────────────────────────────────────────
   const [coin, setCoin] = useState("ETH");
@@ -531,17 +637,34 @@ function TradingPanel({ api }: PanelProps) {
   const pendingStrategies = Array.isArray(strategies) ? strategies.filter((s) => s.pendingSignal) : [];
 
   return (
-    <div className="p-6 max-w-2xl mx-auto space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-foreground">Hyperliquid Trading</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Each agent trades with its own Hyperliquid wallet, signed by a GatewayAgent worker running the official SDK.
-          There is no shared platform key — set a wallet below before trading.
-        </p>
+    <div className="max-w-3xl mx-auto space-y-3 p-4 text-sm">
+      <div className="flex items-center justify-between gap-3 rounded-sm border border-border bg-card px-3 py-2">
+        <div className="flex items-center gap-2">
+          <PulseDot tone={walletStatus?.hasWallet ? "live" : "idle"} />
+          <h1 className="text-sm font-semibold uppercase tracking-wide text-foreground">Hyperliquid Trading</h1>
+          {walletStatus?.hasWallet && (
+            <Badge tone={walletStatus.network === "mainnet" ? "danger" : "neutral"}>{walletStatus.network}</Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-4 text-xs">
+          {livePrice != null && (
+            <span className="text-muted-foreground">
+              {coin} <span className={`${monoClass} text-foreground`}>${livePrice.toLocaleString()}</span>
+            </span>
+          )}
+          {accountValue != null && (
+            <span className="text-muted-foreground">
+              Equity <span className={`${monoClass} text-foreground`}>${accountValue.toFixed(2)}</span>
+            </span>
+          )}
+        </div>
       </div>
+      <p className="text-xs text-muted-foreground px-1">
+        Each agent trades with its own wallet via a GatewayAgent worker running the official SDK — no shared platform key.
+      </p>
 
-      <Section title="Agent">
-        <div className="grid grid-cols-2 gap-2">
+      <Section title="Agent" dense>
+        <div className="grid grid-cols-3 gap-2">
           <div>
             <label htmlFor="orgId" className={labelClass}>Org ID</label>
             <input id="orgId" name="orgId" className={inputClass} value={orgId} onChange={(e) => setOrgId(e.target.value)} autoComplete="off" />
@@ -555,14 +678,13 @@ function TradingPanel({ api }: PanelProps) {
               autoComplete="off"
             />
           </div>
-        </div>
-        <div>
-          <label htmlFor="wallet" className={labelClass}>Hyperliquid wallet address</label>
-          <input
-            id="wallet" name="wallet" className={inputClass} placeholder="0x…" value={wallet}
-            onChange={(e) => setWallet(e.target.value)} autoComplete="off"
-          />
-          <p className="text-xs text-muted-foreground mt-1">The public address for the key set below — used to look up positions and account value.</p>
+          <div>
+            <label htmlFor="wallet" className={labelClass}>Wallet address</label>
+            <input
+              id="wallet" name="wallet" className={`${inputClass} ${monoClass}`} placeholder="0x…" value={wallet}
+              onChange={(e) => setWallet(e.target.value)} autoComplete="off"
+            />
+          </div>
         </div>
         <div>
           <label htmlFor="masterSecret" className={labelClass}>Passphrase</label>
@@ -577,15 +699,11 @@ function TradingPanel({ api }: PanelProps) {
         </div>
       </Section>
 
-      <Section title="Wallet">
-        {walletLoading ? (
-          <Spinner label="Checking wallet status…" />
-        ) : walletStatus?.hasWallet ? (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Badge tone="success">Wallet set</Badge>
-              <Badge tone={walletStatus.network === "mainnet" ? "danger" : "neutral"}>{walletStatus.network}</Badge>
-            </div>
+      <Section
+        title="Wallet"
+        dense
+        right={
+          walletStatus?.hasWallet ? (
             <div className="flex gap-2">
               <button type="button" className={secondaryButtonClass()} onClick={() => setWalletFormOpen((v) => !v)}>
                 Rotate key
@@ -594,18 +712,25 @@ function TradingPanel({ api }: PanelProps) {
                 Remove
               </button>
             </div>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between">
-            <Badge tone="warning">No wallet set — this agent can&apos;t trade yet</Badge>
+          ) : (
             <button type="button" className={primaryButtonClass()} onClick={() => setWalletFormOpen(true)} disabled={!agentId || !orgId}>
               Set wallet
             </button>
+          )
+        }
+      >
+        {walletLoading ? (
+          <Spinner label="Checking wallet status…" />
+        ) : walletStatus?.hasWallet ? (
+          <div className="flex items-center gap-2">
+            <Badge tone="success">Wallet set</Badge>
           </div>
+        ) : (
+          <Badge tone="warning">No wallet set — this agent can&apos;t trade yet</Badge>
         )}
 
         {walletFormOpen && (
-          <form className="space-y-2 border-t border-border pt-3" onSubmit={saveWallet}>
+          <form className="space-y-2 border-t border-border pt-2" onSubmit={saveWallet}>
             <div>
               <label htmlFor="walletKey" className={labelClass}>Hyperliquid private key</label>
               <input
@@ -635,11 +760,18 @@ function TradingPanel({ api }: PanelProps) {
       </Section>
 
       {pendingStrategies.length > 0 && (
-        <Section title="Pending signals" description="Triggered by a strategy's conditions — needs your passphrase to actually place the trade.">
-          <div className="space-y-2">
+        <div className="rounded-sm border border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-2 border-b border-amber-500/20 px-3 py-1.5">
+            <PulseDot tone="danger" />
+            <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+              Pending signals
+            </span>
+            <span className="text-xs text-muted-foreground">— needs your passphrase to fire</span>
+          </div>
+          <div className="divide-y divide-amber-500/10">
             {pendingStrategies.map((s) => (
-              <div key={s.id} className="flex items-center justify-between rounded-md bg-amber-500/10 px-3 py-2">
-                <span className="text-sm">
+              <div key={s.id} className="flex items-center justify-between px-3 py-1.5 text-sm">
+                <span className={monoClass}>
                   {s.type} · {s.coin} · ${s.sizeUsd}
                 </span>
                 <button
@@ -653,47 +785,137 @@ function TradingPanel({ api }: PanelProps) {
               </div>
             ))}
           </div>
-        </Section>
+        </div>
       )}
 
       <div role="tablist" aria-label="Trading sections" className="flex gap-1 border-b border-border overflow-x-auto">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            className={
-              "px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors " +
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
-              (activeTab === tab.id
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground")
-            }
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {TABS.map((tab) => {
+          const count =
+            tab.id === "positions" ? (Array.isArray(positions) ? positions.length : null) :
+            tab.id === "strategies" ? (Array.isArray(strategies) ? strategies.length : null) :
+            tab.id === "history" ? (history && history !== "loading" && history !== "error" ? history.stats.count : null) :
+            null;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              className={
+                "px-2.5 py-1.5 text-xs font-medium uppercase tracking-wide border-b-2 -mb-px whitespace-nowrap transition-colors " +
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
+                (activeTab === tab.id
+                  ? "border-primary text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground")
+              }
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}
+              {count != null && <span className={`ml-1 ${monoClass} text-muted-foreground`}>{count}</span>}
+            </button>
+          );
+        })}
       </div>
 
+      {activeTab === "market" && (
+        <Section
+          title="Market overview"
+          dense
+          description="Every tradeable perp, ranked by 24h volume — click a row to load it into Trade."
+          right={
+            <div className="flex items-center gap-2">
+              <div className="flex rounded-sm border border-border overflow-hidden">
+                {MARKET_SORTS.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={
+                      "px-2 py-1 text-[11px] font-medium uppercase tracking-wide transition-colors " +
+                      (marketSort === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")
+                    }
+                    onClick={() => setMarketSort(s.id)}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                className={`${inputClass} ${monoClass} w-24`}
+                placeholder="search"
+                value={marketQuery}
+                onChange={(e) => setMarketQuery(e.target.value)}
+              />
+              <button type="button" className={secondaryButtonClass()} onClick={loadMarket}>Refresh</button>
+            </div>
+          }
+        >
+          {marketCoins === "loading" && <Spinner label="Loading market…" />}
+          {marketCoins === "error" && <ErrorNote message="Couldn't load market overview." onRetry={loadMarket} />}
+          {Array.isArray(marketCoins) && filteredMarket.length === 0 && (
+            <p className="text-sm text-muted-foreground">No coins match &quot;{marketQuery}&quot;.</p>
+          )}
+          {Array.isArray(marketCoins) && filteredMarket.length > 0 && (
+            <div className="max-h-[28rem] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-card">
+                  <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                    <th className="pb-1 font-medium">Coin</th>
+                    <th className="pb-1 font-medium text-right">Price</th>
+                    <th className="pb-1 font-medium text-right">24h %</th>
+                    <th className="pb-1 font-medium text-right">Volume</th>
+                    <th className="pb-1 font-medium text-right">OI</th>
+                    <th className="pb-1 font-medium text-right">Funding</th>
+                    <th className="pb-1 font-medium text-right">Max lev</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {filteredMarket.map((c) => (
+                    <tr
+                      key={c.coin}
+                      className="cursor-pointer hover:bg-accent/50"
+                      onClick={() => pickCoin(c.coin)}
+                    >
+                      <td className="py-1.5 font-medium text-foreground">{c.coin}</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${formatPrice(c.markPx)}</td>
+                      <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.change24hPct)}`}>{signed(c.change24hPct)}%</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{formatCompactUsd(c.volume24hUsd)}</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{formatCompactUsd(c.openInterestUsd)}</td>
+                      <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.fundingRatePct)}`}>{c.fundingRatePct.toFixed(4)}%</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{c.maxLeverage}x</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Section>
+      )}
+
       {activeTab === "trade" && (
-        <Section title="Place a trade">
-          <form className="space-y-3" onSubmit={submitTrade}>
+        <Section title="Place a trade" dense>
+          <form className="space-y-2" onSubmit={submitTrade}>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label htmlFor="coin" className={labelClass}>Coin</label>
-                <input id="coin" name="coin" className={inputClass} value={coin} onChange={(e) => setCoin(e.target.value)} required />
+                <input id="coin" name="coin" className={`${inputClass} ${monoClass}`} value={coin} onChange={(e) => setCoin(e.target.value)} required />
               </div>
               <div>
                 <label htmlFor="sizeUsd" className={labelClass}>Size (USD)</label>
                 <input
-                  id="sizeUsd" name="sizeUsd" type="number" min="0" step="0.01" className={inputClass}
+                  id="sizeUsd" name="sizeUsd" type="number" min="0" step="0.01" className={`${inputClass} ${monoClass}`}
                   value={sizeUsd} onChange={(e) => setSizeUsd(e.target.value)} required
                 />
               </div>
             </div>
-            {livePrice != null && <p className="text-sm text-muted-foreground">Mid price: ${livePrice.toLocaleString()}</p>}
+            <div className="flex items-center justify-between rounded-sm border border-border bg-background px-2.5 py-1.5">
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <PulseDot tone={livePrice != null ? "live" : "idle"} />
+                Mid price
+              </span>
+              <span className={`${monoClass} text-sm text-foreground`}>
+                {livePrice != null ? `$${livePrice.toLocaleString()}` : "—"}
+              </span>
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label htmlFor="orderType" className={labelClass}>Order type</label>
@@ -743,102 +965,138 @@ function TradingPanel({ api }: PanelProps) {
       )}
 
       {activeTab === "positions" && (
-        <Section title="Positions & account">
-          <button type="button" className={secondaryButtonClass()} onClick={refreshAccount} disabled={!wallet}>
-            Refresh
-          </button>
-          {accountValue != null && <p className="text-sm text-muted-foreground">Account equity: ${accountValue.toFixed(2)}</p>}
-
+        <Section
+          title="Positions & account"
+          dense
+          right={
+            <div className="flex items-center gap-3">
+              {accountValue != null && (
+                <span className="text-xs text-muted-foreground">
+                  Equity <span className={`${monoClass} text-foreground`}>${accountValue.toFixed(2)}</span>
+                </span>
+              )}
+              <button type="button" className={secondaryButtonClass()} onClick={refreshAccount} disabled={!wallet}>
+                Refresh
+              </button>
+            </div>
+          }
+        >
           {positions === "loading" && <Spinner label="Loading positions…" />}
           {positions === "error" && <ErrorNote message="Couldn't load positions." onRetry={refreshAccount} />}
           {positions === null && <p className="text-sm text-muted-foreground">Enter a wallet address and refresh to see positions.</p>}
           {Array.isArray(positions) && positions.length === 0 && <p className="text-sm text-muted-foreground">No open positions.</p>}
           {Array.isArray(positions) && positions.length > 0 && (
-            <div className="space-y-2">
-              {positions.map((p) => (
-                <div key={p.coin} className="flex items-center justify-between rounded-md border border-border p-3 text-sm">
-                  <div>
-                    <div className="font-medium text-foreground">{p.coin} {p.size > 0 ? "long" : "short"}</div>
-                    <div className="text-muted-foreground">
-                      ${Math.abs(p.notionalUsd).toFixed(2)} notional · entry ${p.entryPrice.toFixed(2)} ·{" "}
-                      <span className={p.unrealizedPnl >= 0 ? "text-green-600 dark:text-green-400" : "text-destructive"}>
-                        {p.unrealizedPnl >= 0 ? "+" : ""}{p.unrealizedPnl.toFixed(2)} PnL
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className={secondaryButtonClass()}
-                    onClick={() => closePosition(p.coin)}
-                    disabled={closingCoin === p.coin || !masterSecret}
-                  >
-                    {closingCoin === p.coin ? "Closing…" : "Close"}
-                  </button>
-                </div>
-              ))}
-            </div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                  <th className="pb-1 font-medium">Coin</th>
+                  <th className="pb-1 font-medium text-right">Notional</th>
+                  <th className="pb-1 font-medium text-right">Entry</th>
+                  <th className="pb-1 font-medium text-right">PnL</th>
+                  <th className="pb-1 font-medium text-right"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {positions.map((p) => (
+                  <tr key={p.coin}>
+                    <td className="py-1.5">
+                      <span className="font-medium text-foreground">{p.coin}</span>{" "}
+                      <Badge tone={p.size > 0 ? "success" : "danger"}>{p.size > 0 ? "long" : "short"}</Badge>
+                    </td>
+                    <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${Math.abs(p.notionalUsd).toFixed(2)}</td>
+                    <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>${p.entryPrice.toFixed(2)}</td>
+                    <td className={`py-1.5 text-right ${monoClass} ${pnlClass(p.unrealizedPnl)}`}>{signed(p.unrealizedPnl)}</td>
+                    <td className="py-1.5 text-right">
+                      <button
+                        type="button"
+                        className={secondaryButtonClass()}
+                        onClick={() => closePosition(p.coin)}
+                        disabled={closingCoin === p.coin || !masterSecret}
+                      >
+                        {closingCoin === p.coin ? "Closing…" : "Close"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </Section>
       )}
 
       {activeTab === "strategies" && (
-        <Section title="Strategies" description="DCA, grid, and sniper conditions are detected automatically but still need your passphrase to execute (see Pending signals above).">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">{Array.isArray(strategies) ? `${strategies.length} strategies` : ""}</span>
-            <button type="button" className={secondaryButtonClass()} onClick={loadStrategies}>Refresh</button>
-          </div>
-
+        <Section
+          title="Strategies"
+          dense
+          description="DCA, grid, and sniper conditions are detected automatically but still need your passphrase to execute (see Pending signals above)."
+          right={<button type="button" className={secondaryButtonClass()} onClick={loadStrategies}>Refresh</button>}
+        >
           {strategies === "loading" && <Spinner label="Loading strategies…" />}
           {strategies === "error" && <ErrorNote message="Couldn't load strategies." onRetry={loadStrategies} />}
           {Array.isArray(strategies) && strategies.length === 0 && <p className="text-sm text-muted-foreground">No strategies yet — create one below.</p>}
-          {Array.isArray(strategies) && strategies.map((s) => (
-            <div key={s.id} className="rounded-md border border-border p-2 text-sm space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  {s.type} · {s.coin} · ${s.sizeUsd}
-                  {!s.enabled && <Badge tone="neutral">disabled</Badge>}
-                  {s.pendingSignal && <Badge tone="warning">pending</Badge>}
-                </span>
-                <div className="flex gap-2">
-                  {s.type === "signal" && (
-                    <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!masterSecret}>
-                      Fire
-                    </button>
-                  )}
-                  <button type="button" className={secondaryButtonClass()} onClick={() => toggleStrategy(s.id, !s.enabled)}>
-                    {s.enabled ? "Disable" : "Enable"}
-                  </button>
-                </div>
-              </div>
+          {Array.isArray(strategies) && strategies.length > 0 && (
+            <div className="divide-y divide-border rounded-sm border border-border">
+              {strategies.map((s) => (
+                <div key={s.id} className="p-2 text-sm space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className={`flex items-center gap-2 ${monoClass}`}>
+                      <Badge tone="neutral">{s.type}</Badge>
+                      {s.coin} · ${s.sizeUsd}
+                      {!s.enabled && <Badge tone="neutral">disabled</Badge>}
+                      {s.pendingSignal && <Badge tone="warning">pending</Badge>}
+                    </span>
+                    <div className="flex gap-2">
+                      {s.type === "signal" && (
+                        <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!masterSecret}>
+                          Fire
+                        </button>
+                      )}
+                      <button type="button" className={secondaryButtonClass()} onClick={() => toggleStrategy(s.id, !s.enabled)}>
+                        {s.enabled ? "Disable" : "Enable"}
+                      </button>
+                    </div>
+                  </div>
 
-              {s.type === "signal" && (
-                <div className="border-t border-border pt-2 flex items-center justify-between gap-2">
-                  {webhookUrls[s.id] || s.webhookToken ? (
-                    <>
-                      <code className="text-xs text-muted-foreground truncate">
-                        {webhookUrls[s.id] ?? "webhook configured — generate again to view the URL"}
-                      </code>
-                      <button
-                        type="button"
-                        className={secondaryButtonClass("text-destructive hover:bg-destructive/10 shrink-0")}
-                        onClick={() => revokeWebhook(s.id)}
-                        disabled={webhookBusyId === s.id}
-                      >
-                        Revoke webhook
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <span className="text-xs text-muted-foreground">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
-                      <button type="button" className={secondaryButtonClass("shrink-0")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
-                        {webhookBusyId === s.id ? "Generating…" : "Generate webhook"}
-                      </button>
-                    </>
+                  {s.type === "signal" && (
+                    <div className="border-t border-border pt-2 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        {webhookUrls[s.id] || s.webhookToken ? (
+                          <>
+                            <code className={`text-xs text-muted-foreground truncate ${monoClass}`}>
+                              {webhookUrls[s.id] ?? "webhook configured — generate again to view the URL"}
+                            </code>
+                            <button
+                              type="button"
+                              className={secondaryButtonClass("text-destructive hover:bg-destructive/10 shrink-0")}
+                              onClick={() => revokeWebhook(s.id)}
+                              disabled={webhookBusyId === s.id}
+                            >
+                              Revoke webhook
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="text-xs text-muted-foreground">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
+                            <button type="button" className={secondaryButtonClass("shrink-0")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
+                              {webhookBusyId === s.id ? "Generating…" : "Generate webhook"}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {webhookUrls[s.id] && (
+                        <p className="text-xs text-amber-600 dark:text-amber-500">
+                          TradingView&apos;s alert body for this webhook must include your wallet passphrase
+                          (masterSecret) in plain text — it will be stored and transmitted by TradingView&apos;s
+                          infrastructure, outside this platform&apos;s control. Only use a passphrase you&apos;re
+                          comfortable exposing to that third party.
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
-              )}
+              ))}
             </div>
-          ))}
+          )}
 
           <form className="space-y-2 border-t border-border pt-3" onSubmit={createStrategy}>
             <div className="grid grid-cols-3 gap-2">
@@ -917,8 +1175,11 @@ function TradingPanel({ api }: PanelProps) {
       )}
 
       {activeTab === "history" && (
-        <Section title="Trade history">
-          <button type="button" className={secondaryButtonClass()} onClick={loadHistory}>Refresh</button>
+        <Section
+          title="Trade history"
+          dense
+          right={<button type="button" className={secondaryButtonClass()} onClick={loadHistory}>Refresh</button>}
+        >
           {history === "loading" && <Spinner label="Loading history…" />}
           {history === "error" && <ErrorNote message="Couldn't load trade history." onRetry={loadHistory} />}
           {history && history !== "loading" && history !== "error" && (
@@ -927,24 +1188,38 @@ function TradingPanel({ api }: PanelProps) {
                 <p className="text-sm text-muted-foreground">No closed trades yet.</p>
               ) : (
                 <>
-                  <p className="text-sm text-muted-foreground">
-                    {history.stats.count} closed trades · win rate {(history.stats.winRate * 100).toFixed(0)}% ·{" "}
-                    <span className={history.stats.totalPnl >= 0 ? "text-green-600 dark:text-green-400" : "text-destructive"}>
-                      {history.stats.totalPnl >= 0 ? "+" : ""}{history.stats.totalPnl.toFixed(2)} total PnL
+                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                    <span><span className={`${monoClass} text-foreground`}>{history.stats.count}</span> closed</span>
+                    <span>win rate <span className={`${monoClass} text-foreground`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
+                    <span>
+                      total <span className={`${monoClass} ${pnlClass(history.stats.totalPnl)}`}>{signed(history.stats.totalPnl)}</span>
                     </span>
-                  </p>
-                  <div className="space-y-1">
-                    {history.trades.map((t) => (
-                      <div key={t.id} className="flex justify-between rounded-md border border-border p-2 text-sm">
-                        <span>{t.coin} {t.isBuy ? "buy" : "sell"} ${t.sizeUsd} ({t.status})</span>
-                        {t.realizedPnl != null && (
-                          <span className={t.realizedPnl >= 0 ? "text-green-600 dark:text-green-400" : "text-destructive"}>
-                            {t.realizedPnl >= 0 ? "+" : ""}{t.realizedPnl.toFixed(2)}
-                          </span>
-                        )}
-                      </div>
-                    ))}
                   </div>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                        <th className="pb-1 font-medium">Coin</th>
+                        <th className="pb-1 font-medium text-right">Size</th>
+                        <th className="pb-1 font-medium text-right">Status</th>
+                        <th className="pb-1 font-medium text-right">PnL</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {history.trades.map((t) => (
+                        <tr key={t.id}>
+                          <td className="py-1.5">
+                            <span className="font-medium text-foreground">{t.coin}</span>{" "}
+                            <Badge tone={t.isBuy ? "success" : "danger"}>{t.isBuy ? "buy" : "sell"}</Badge>
+                          </td>
+                          <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${t.sizeUsd}</td>
+                          <td className="py-1.5 text-right text-xs text-muted-foreground">{t.status}</td>
+                          <td className={`py-1.5 text-right ${monoClass} ${t.realizedPnl != null ? pnlClass(t.realizedPnl) : "text-muted-foreground"}`}>
+                            {t.realizedPnl != null ? signed(t.realizedPnl) : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </>
               )}
             </>
@@ -953,25 +1228,25 @@ function TradingPanel({ api }: PanelProps) {
       )}
 
       {activeTab === "risk" && (
-        <Section title="Risk limits" description="Enforced on every trade this agent places, manual or strategy-fired.">
+        <Section title="Risk limits" dense description="Enforced on every trade this agent places, manual or strategy-fired.">
           <form className="space-y-2" onSubmit={saveRiskConfig}>
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label htmlFor="riskLeverage" className={labelClass}>Leverage</label>
-                <input id="riskLeverage" name="riskLeverage" type="number" min="1" className={inputClass} value={riskLeverage} onChange={(e) => setRiskLeverage(e.target.value)} />
+                <input id="riskLeverage" name="riskLeverage" type="number" min="1" className={`${inputClass} ${monoClass}`} value={riskLeverage} onChange={(e) => setRiskLeverage(e.target.value)} />
               </div>
               <div>
                 <label htmlFor="riskMaxPosition" className={labelClass}>Max position $</label>
-                <input id="riskMaxPosition" name="riskMaxPosition" type="number" min="0" className={inputClass} value={riskMaxPosition} onChange={(e) => setRiskMaxPosition(e.target.value)} />
+                <input id="riskMaxPosition" name="riskMaxPosition" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxPosition} onChange={(e) => setRiskMaxPosition(e.target.value)} />
               </div>
               <div>
                 <label htmlFor="riskMaxDailyLoss" className={labelClass}>Max daily loss $</label>
-                <input id="riskMaxDailyLoss" name="riskMaxDailyLoss" type="number" min="0" className={inputClass} value={riskMaxDailyLoss} onChange={(e) => setRiskMaxDailyLoss(e.target.value)} />
+                <input id="riskMaxDailyLoss" name="riskMaxDailyLoss" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxDailyLoss} onChange={(e) => setRiskMaxDailyLoss(e.target.value)} />
               </div>
             </div>
             <button type="submit" className={primaryButtonClass()} disabled={!agentId}>Save risk limits</button>
             {riskConfig && (
-              <p className="text-sm text-muted-foreground">
+              <p className={`text-xs text-muted-foreground ${monoClass}`}>
                 Current: {riskConfig.leverage}x, max ${riskConfig.maxPositionUsd}/trade, max ${riskConfig.maxDailyLossUsd}/day loss
               </p>
             )}
@@ -981,32 +1256,32 @@ function TradingPanel({ api }: PanelProps) {
       )}
 
       {activeTab === "referral" && (
-        <Section title="Referral" description="Refer another agent and earn a cut of the trading volume it generates.">
+        <Section title="Referral" dense description="Refer another agent and earn a cut of the trading volume it generates.">
           {referral === "loading" && <Spinner label="Loading referral stats…" />}
           {referral === "error" && <ErrorNote message="Couldn't load referral stats." onRetry={loadReferral} />}
           {referral && referral !== "loading" && referral !== "error" && (
             <>
               <div>
                 <p className={labelClass}>Your referral code</p>
-                <code className="text-sm">{referral.code}</code>
+                <code className={`text-sm ${monoClass}`}>{referral.code}</code>
                 <p className="text-xs text-muted-foreground mt-1">Share this agent ID — anyone who applies it below counts toward your referral stats.</p>
               </div>
               <div className="grid grid-cols-3 gap-2 text-sm">
-                <div className="rounded-md border border-border p-2">
-                  <div className="text-muted-foreground text-xs">Referred agents</div>
-                  <div className="font-medium">{referral.referredCount}</div>
+                <div className="rounded-sm border border-border p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Referred agents</div>
+                  <div className={`font-medium ${monoClass}`}>{referral.referredCount}</div>
                 </div>
-                <div className="rounded-md border border-border p-2">
-                  <div className="text-muted-foreground text-xs">Volume generated</div>
-                  <div className="font-medium">${referral.totalVolumeUsd.toFixed(2)}</div>
+                <div className="rounded-sm border border-border p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Volume generated</div>
+                  <div className={`font-medium ${monoClass}`}>${referral.totalVolumeUsd.toFixed(2)}</div>
                 </div>
-                <div className="rounded-md border border-border p-2">
-                  <div className="text-muted-foreground text-xs">Reward earned</div>
-                  <div className="font-medium text-green-600 dark:text-green-400">${referral.rewardUsd.toFixed(2)}</div>
+                <div className="rounded-sm border border-border p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Reward earned</div>
+                  <div className={`font-medium ${monoClass} text-green-600 dark:text-green-400`}>${referral.rewardUsd.toFixed(2)}</div>
                 </div>
               </div>
               {referral.referredBy ? (
-                <p className="text-sm text-muted-foreground">Referred by <code>{referral.referredBy}</code>.</p>
+                <p className="text-sm text-muted-foreground">Referred by <code className={monoClass}>{referral.referredBy}</code>.</p>
               ) : (
                 <form className="flex gap-2 items-end border-t border-border pt-3" onSubmit={applyReferral}>
                   <div className="flex-1">

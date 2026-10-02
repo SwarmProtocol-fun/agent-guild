@@ -7,7 +7,7 @@
  */
 import { NextRequest } from "next/server";
 import crypto from "crypto";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentAuthOrIdentityNftWallet } from "@/lib/auth-guard";
 import { rateLimit } from "../../rate-limit";
 import { getOrCreateDailyNote, appendDailyNote, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: "date must be YYYY-MM-DD" }, { status: 400 });
   }
 
-  const auth = await requireAgentAuth(request, `GET:/v1/memory/daily:${agentParam}:${date}`);
+  const auth = await requireAgentAuthOrIdentityNftWallet(request, `GET:/v1/memory/daily:${agentParam}:${date}`, agentParam);
   if (!auth.ok || !auth.agent) {
     return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
   }
@@ -53,7 +53,7 @@ export async function POST(request: NextRequest) {
   const rawBody = await request.text();
   const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
 
-  const auth = await requireAgentAuth(request, `POST:/v1/memory/daily:${bodyHash}`);
+  const auth = await requireAgentAuthOrIdentityNftWallet(request, `POST:/v1/memory/daily:${bodyHash}`, agentParam);
   if (!auth.ok || !auth.agent) {
     return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
   }

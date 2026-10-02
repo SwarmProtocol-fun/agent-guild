@@ -18,16 +18,38 @@ describe("agent_guild", () => {
     [Buffer.from("treasury")],
     program.programId,
   );
+  // ProgramData account for this deployed program, owned by the BPF
+  // Upgradeable Loader — `initialize` now requires the payer to be its
+  // upgrade authority (see registry.rs), so tests must supply it too.
+  const BPF_LOADER_UPGRADEABLE_ID = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
+  const [programDataPda] = PublicKey.findProgramAddressSync(
+    [program.programId.toBuffer()],
+    BPF_LOADER_UPGRADEABLE_ID,
+  );
 
   async function airdrop(pubkey: PublicKey, sol: number) {
     const sig = await provider.connection.requestAirdrop(pubkey, sol * LAMPORTS_PER_SOL);
     await provider.connection.confirmTransaction(sig, "confirmed");
   }
 
+  // `initialize` requires `payer` to be the program's real upgrade authority
+  // (see registry.rs) — plain `anchor test`'s auto-started local validator
+  // genesis-loads the workspace program with upgrades frozen (not owned by
+  // any test wallet), so this test fails there with "Unauthorized". Run
+  // against a validator where the program was actually deployed normally
+  // instead, e.g.:
+  //   solana-test-validator --reset &
+  //   anchor deploy
+  //   anchor test --skip-local-validator --skip-build --skip-deploy
   it("initializes the guild config and treasury", async () => {
     await program.methods
       .initialize()
-      .accounts({ payer: wallet.publicKey, config: configPda, systemProgram: SystemProgram.programId })
+      .accounts({
+        payer: wallet.publicKey,
+        config: configPda,
+        programData: programDataPda,
+        systemProgram: SystemProgram.programId,
+      })
       .rpc();
 
     const config = await program.account.guildConfig.fetch(configPda);

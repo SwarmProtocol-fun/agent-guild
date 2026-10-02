@@ -10,11 +10,29 @@
  * the dashboard only pre-filters these in its agent picker, so a direct
  * API claim must check them itself. Credit-policy enforcement and the
  * agent's auto-created task happen inside claimJob().
+ *
+ * Body (optional):
+ *   onBehalfOf — another agent's ID. When set, the CALLER still does the
+ *                work (claimJob assigns it to the caller, same as always),
+ *                but this requires an active delegation grant from
+ *                onBehalfOf to the caller permitting "jobs:claim", and the
+ *                job's reward is debited against that grant's spend cap —
+ *                see lib/delegation.ts. This is the Delegation Protocol's
+ *                one enforcement point today: Agent A's budget pays for
+ *                work Agent B actually claims and executes.
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { getJob, getAgent, claimJob } from "@/lib/firestore";
+import { getActiveDelegation, recordDelegationSpend } from "@/lib/delegation";
+
+/** Same free-text-to-number convention as the dashboard's parseQuoteValue — Job.reward has no fixed format. */
+function parseRewardUsdc(reward?: string): number {
+  if (!reward) return 0;
+  const n = parseFloat(reward.replace(/[^0-9.]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
 
 export async function POST(
   request: NextRequest,
@@ -84,9 +102,48 @@ export async function POST(
       }
     }
 
+    const body = await request.json().catch(() => ({}));
+    const onBehalfOf = typeof body.onBehalfOf === "string" ? body.onBehalfOf : null;
+    const rewardUsdc = parseRewardUsdc(job.reward);
+
+    let delegationGrantId: string | null = null;
+    if (onBehalfOf && onBehalfOf !== verified.agentId) {
+      const grant = await getActiveDelegation(
+        verified.orgId,
+        onBehalfOf,
+        verified.agentId,
+        "jobs:claim",
+        rewardUsdc > 0 ? rewardUsdc : undefined,
+      );
+      if (!grant) {
+        return Response.json(
+          { error: `No active delegation from ${onBehalfOf} grants you jobs:claim (with sufficient spend headroom, if this job has a reward)` },
+          { status: 403 }
+        );
+      }
+      delegationGrantId = grant.id;
+    }
+
     const taskId = await claimJob(jobId, verified.agentId, verified.orgId, job.projectId || "", verified.agentName);
 
-    return Response.json({ jobId, status: "in_progress", taskId, claimedAt: Date.now() });
+    if (delegationGrantId && rewardUsdc > 0) {
+      try {
+        await recordDelegationSpend(delegationGrantId, rewardUsdc);
+      } catch (spendErr) {
+        // The claim already succeeded — a failed debit here is bookkeeping
+        // drift on the grant, not a reason to undo an assignment the job
+        // board and the agent's own auto-created task already reflect.
+        console.error("Failed to record delegation spend after claim:", spendErr);
+      }
+    }
+
+    return Response.json({
+      jobId,
+      status: "in_progress",
+      taskId,
+      claimedAt: Date.now(),
+      ...(delegationGrantId ? { delegation: { grantId: delegationGrantId, onBehalfOf } } : {}),
+    });
   } catch (err: any) {
     console.error("Claim job error:", err);
     // claimJob() throws plain Errors for credit-policy rejections — surface those as 403, not 500.

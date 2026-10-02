@@ -52,4 +52,8 @@ pub enum AgentGuildError {
     ReasonTooLong,
     #[msg("Proposal is not pending")]
     ProposalNotPending,
+    #[msg("Credit score must be between 300 and 900")]
+    InvalidCreditScore,
+    #[msg("Trust score must be between 0 and 100")]
+    InvalidTrustScore,
 }

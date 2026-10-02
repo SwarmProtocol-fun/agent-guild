@@ -2,14 +2,16 @@
  * GET  /api/v1/memory/working?agent=&sig=&ts=   (or ?agentId=&apiKey=)
  * PUT  /api/v1/memory/working?agent=&sig=&ts=   body: { content, section? }
  *
- * Agent-signed working memory (WORKING.md). The agent's identity comes
- * entirely from requireAgentAuth (Ed25519 or API key) — there is no
- * agentId path param, so there's no separate "does this agent own this
- * memory" check to get wrong.
+ * Agent-signed working memory (WORKING.md). The agent's identity comes from
+ * requireAgentAuthOrIdentityNftWallet: Ed25519 or API key first (the agent
+ * acting as itself), falling back to a caller wallet that holds the agent's
+ * identity NFT — there is no separate agentId path param, so the `agent`/
+ * `agentId` query param IS the "does this agent own this memory" check for
+ * both paths.
  */
 import { NextRequest } from "next/server";
 import crypto from "crypto";
-import { requireAgentAuth } from "@/lib/auth-guard";
+import { requireAgentAuthOrIdentityNftWallet } from "@/lib/auth-guard";
 import { rateLimit } from "../../rate-limit";
 import { getOrCreateWorkingMd, updateWorkingMd, isAllowedSection, ALLOWED_SECTIONS } from "@/lib/agent-memory-server";
 
@@ -23,7 +25,7 @@ export async function GET(request: NextRequest) {
   const limited = await rateLimit(agentParam || "anon");
   if (limited) return limited;
 
-  const auth = await requireAgentAuth(request, `GET:/v1/memory/working:${agentParam}`);
+  const auth = await requireAgentAuthOrIdentityNftWallet(request, `GET:/v1/memory/working:${agentParam}`, agentParam);
   if (!auth.ok || !auth.agent) {
     return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
   }
@@ -48,7 +50,7 @@ export async function PUT(request: NextRequest) {
   const rawBody = await request.text();
   const bodyHash = crypto.createHash("sha256").update(rawBody).digest("hex");
 
-  const auth = await requireAgentAuth(request, `PUT:/v1/memory/working:${bodyHash}`);
+  const auth = await requireAgentAuthOrIdentityNftWallet(request, `PUT:/v1/memory/working:${bodyHash}`, agentParam);
   if (!auth.ok || !auth.agent) {
     return Response.json({ error: auth.error || "Unauthorized" }, { status: 401 });
   }

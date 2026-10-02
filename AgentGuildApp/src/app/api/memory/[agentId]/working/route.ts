@@ -18,7 +18,7 @@ import {
 } from "@/lib/memory-templates";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { getWalletAddress, requireOrgMember } from "@/lib/auth-guard";
+import { getWalletAddress, requireMemoryAccess } from "@/lib/auth-guard";
 
 export async function GET(
   request: NextRequest,
@@ -37,8 +37,8 @@ export async function GET(
     return Response.json({ error: "orgId is required" }, { status: 400 });
   }
 
-  // Verify caller is a member of the org
-  const orgAuth = await requireOrgMember(request, orgId);
+  // Verify caller is an org member or the wallet holding this agent's identity NFT
+  const orgAuth = await requireMemoryAccess(request, orgId, agentId);
   if (!orgAuth.ok) {
     return Response.json({ error: orgAuth.error }, { status: orgAuth.status || 403 });
   }
@@ -113,8 +113,8 @@ export async function PUT(
     );
   }
 
-  // Verify caller is a member of the org
-  const orgAuth = await requireOrgMember(request, orgId as string);
+  // Verify caller is an org member or the wallet holding this agent's identity NFT
+  const orgAuth = await requireMemoryAccess(request, orgId as string, agentId);
   if (!orgAuth.ok) {
     return Response.json({ error: orgAuth.error }, { status: orgAuth.status || 403 });
   }

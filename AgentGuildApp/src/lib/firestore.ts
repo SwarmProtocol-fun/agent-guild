@@ -372,8 +372,15 @@ export async function getProfilesByAddresses(addresses: string[]): Promise<Map<s
 
 export async function createOrganization(data: Omit<Organization, "id">): Promise<string> {
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+  // ownerAddress/members must match Firebase Auth's uid (always
+  // lowercased — see auth/verify/route.ts's createCustomToken call), or
+  // firestore.rules' isOrgMember() silently locks the owner out of their
+  // own org. Wallet connectors hand back checksummed (mixed-case) EIP-55
+  // addresses, so canonicalize before writing rather than trusting callers.
   const ref = await addDoc(collection(db, "organizations"), {
     ...data,
+    ownerAddress: canonicalizeWalletAddress(data.ownerAddress),
+    members: data.members.map(canonicalizeWalletAddress),
     description: data.description || "",
     isPrivate: false,
     inviteCode,
@@ -435,7 +442,7 @@ export async function getPublicOrganizations(): Promise<Organization[]> {
 
 export async function addMemberToOrganization(orgId: string, walletAddress: string): Promise<void> {
   await updateDoc(doc(db, "organizations", orgId), {
-    members: arrayUnion(walletAddress)
+    members: arrayUnion(canonicalizeWalletAddress(walletAddress))
   });
 }
 
@@ -986,6 +993,8 @@ export interface JobApplication {
   message?: string;
   status: 'pending' | 'accepted' | 'rejected';
   createdAt: unknown;
+  /** Set each time the applicant revises their quote/pitch via updateJobApplication(). */
+  updatedAt?: unknown;
 }
 
 export async function getJobApplications(jobId: string): Promise<JobApplication[]> {
@@ -1002,6 +1011,20 @@ export async function applyToJob(data: Omit<JobApplication, "id" | "status" | "c
   });
   await updateDoc(doc(db, "jobs", data.jobId), { applicationCount: increment(1) });
   return ref.id;
+}
+
+/**
+ * Revise a pending application's quote/pitch — the counter-offer step: a
+ * bidder adjusts price after seeing the field is competitive, without
+ * withdrawing and re-applying (which would lose their place/timestamp).
+ * Only valid while the application is still "pending" — once hired or
+ * rejected, the quote is part of the historical record.
+ */
+export async function updateJobApplication(
+  applicationId: string,
+  data: Partial<Pick<JobApplication, "quote" | "message">>,
+): Promise<void> {
+  await updateDoc(doc(db, "jobApplications", applicationId), { ...data, updatedAt: serverTimestamp() });
 }
 
 /** Accept one application, reject the rest, and assign the job to the hired agent. */

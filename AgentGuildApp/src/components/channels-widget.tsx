@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import SpotlightCard from "@/components/reactbits/SpotlightCard";
@@ -14,7 +15,9 @@ import {
   ensureAgentGroupChat,
   type Channel,
   type Message,
+  type Agent,
 } from "@/lib/firestore";
+import { ChannelPromptModal } from "@/components/channel-prompt-modal";
 
 interface ChannelPreview {
   channel: Channel;
@@ -88,8 +91,13 @@ async function loadChannelPreviews(orgId: string): Promise<ChannelPreview[]> {
   return previews.sort((a, b) => b.activityMs - a.activityMs);
 }
 
-export function ChannelsWidget() {
+interface ChannelsWidgetProps {
+  agents?: Agent[];
+}
+
+export function ChannelsWidget({ agents = [] }: ChannelsWidgetProps) {
   const { currentOrg } = useOrg();
+  const [promptChannel, setPromptChannel] = useState<Channel | null>(null);
 
   const { data: previews = [], isLoading: loading } = useQuery<ChannelPreview[]>({
     queryKey: ["dashboard-channels", currentOrg?.id],
@@ -124,10 +132,11 @@ export function ChannelsWidget() {
           </div>
         ) : (
           visible.map(({ channel, lastMessage, activityMs }, index) => (
-            <Link
+            <button
               key={channel.id}
-              href="/chat"
-              className="flex items-center gap-2.5 py-2 border-b border-border last:border-0 animate-in fade-in slide-in-from-bottom-2 hover:bg-amber-500/5 -mx-2 px-2 rounded-md transition-colors"
+              type="button"
+              onClick={() => setPromptChannel(channel)}
+              className="flex items-center gap-2.5 py-2 w-full text-left border-b border-border last:border-0 animate-in fade-in slide-in-from-bottom-2 hover:bg-amber-500/5 -mx-2 px-2 rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               style={{ animationDelay: `${index * 80}ms`, animationFillMode: "both" }}
             >
               <span className="shrink-0">{channelIcon(channel)}</span>
@@ -142,10 +151,16 @@ export function ChannelsWidget() {
                     : "No messages yet"}
                 </p>
               </div>
-            </Link>
+            </button>
           ))
         )}
       </CardContent>
+      <ChannelPromptModal
+        open={!!promptChannel}
+        onOpenChange={(open) => { if (!open) setPromptChannel(null); }}
+        channel={promptChannel}
+        agents={agents}
+      />
     </SpotlightCard>
   );
 }

@@ -87,8 +87,13 @@ pub fn deposit_revenue(ctx: Context<DepositRevenue>, amount: u64) -> Result<()> 
         amount,
     )?;
 
-    let compute_share = amount * COMPUTE_BPS / BPS_DENOMINATOR;
-    let growth_share = amount * GROWTH_BPS / BPS_DENOMINATOR;
+    // Widen to u128 before multiplying (matches resolve_dispute's bps math)
+    // — plain u64 * u64 here overflows for amounts above ~3.69e15 lamports,
+    // which panics the transaction under `overflow-checks = true` instead of
+    // silently wrapping, but is still an avoidable failure mode for a
+    // chain-wide deposit path.
+    let compute_share = (amount as u128 * COMPUTE_BPS as u128 / BPS_DENOMINATOR as u128) as u64;
+    let growth_share = (amount as u128 * GROWTH_BPS as u128 / BPS_DENOMINATOR as u128) as u64;
     // Reserve absorbs any bps-rounding dust so the buckets always sum to `amount`.
     let reserve_share = amount - compute_share - growth_share;
 

@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::bpf_loader_upgradeable;
 
 use crate::errors::AgentGuildError;
 use crate::state::{AgentAccount, AsnRecord, GuildConfig, MAX_ASN_LEN, MAX_NAME_LEN, MAX_SKILLS_LEN};
@@ -6,6 +7,9 @@ use crate::state::{AgentAccount, AsnRecord, GuildConfig, MAX_ASN_LEN, MAX_NAME_L
 const DEFAULT_CREDIT_SCORE: u16 = 680;
 const DEFAULT_TRUST_SCORE: u8 = 50;
 const MAX_FEE_RATE_BPS: u16 = 10_000;
+const MIN_CREDIT_SCORE: u16 = 300;
+const MAX_CREDIT_SCORE: u16 = 900;
+const MAX_TRUST_SCORE: u8 = 100;
 
 fn validate_registration_inputs(name: &str, skills: &str, asn: &str, fee_rate_bps: u16) -> Result<()> {
     require!(name.len() <= MAX_NAME_LEN, AgentGuildError::NameTooLong);
@@ -29,6 +33,21 @@ pub struct Initialize<'info> {
         bump
     )]
     pub config: Account<'info, GuildConfig>,
+    /// This program's own ProgramData account (owned by the BPF Upgradeable
+    /// Loader). The `seeds`/`seeds::program` constraint ties it to *this*
+    /// deployed program specifically — an attacker can't substitute some
+    /// other program's ProgramData to pass the check below. Requiring
+    /// `payer` to be its current upgrade authority closes the race where
+    /// whoever calls `initialize` first after deployment becomes the
+    /// permanent `config.authority` (which gates every privileged
+    /// instruction, including treasury withdrawal).
+    #[account(
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = bpf_loader_upgradeable::ID,
+        constraint = program_data.upgrade_authority_address == Some(payer.key()) @ AgentGuildError::Unauthorized,
+    )]
+    pub program_data: Account<'info, ProgramData>,
     pub system_program: Program<'info, System>,
 }
 
@@ -189,6 +208,7 @@ pub fn update_skills(ctx: Context<UpdateSkills>, new_skills: String) -> Result<(
 
 #[derive(Accounts)]
 pub struct DeactivateAgent<'info> {
+    #[account(mut)]
     pub agent_wallet: Signer<'info>,
     #[account(
         mut,
@@ -196,6 +216,16 @@ pub struct DeactivateAgent<'info> {
         bump = agent_account.bump
     )]
     pub agent_account: Account<'info, AgentAccount>,
+    // Closing this PDA here (instead of leaving it permanently `init`'d)
+    // releases the ASN for reuse — without it, deactivating never frees the
+    // name, not even for the original owner to re-register later.
+    #[account(
+        mut,
+        seeds = [b"asn", agent_account.asn.as_bytes()],
+        bump = asn_record.bump,
+        close = agent_wallet,
+    )]
+    pub asn_record: Account<'info, AsnRecord>,
 }
 
 pub fn deactivate_agent(ctx: Context<DeactivateAgent>) -> Result<()> {
@@ -221,6 +251,17 @@ pub struct UpdateCredit<'info> {
 }
 
 pub fn update_credit(ctx: Context<UpdateCredit>, credit_score: u16, trust_score: u8) -> Result<()> {
+    // The Solidity original this program replaces enforced these same
+    // bounds (creditScore 300-900, trustScore <=100) — this port dropped
+    // them, letting the authority (gated above, not a public path, but
+    // still worth bounding) write values that corrupt downstream
+    // reputation-tier logic.
+    require!(
+        credit_score >= MIN_CREDIT_SCORE && credit_score <= MAX_CREDIT_SCORE,
+        AgentGuildError::InvalidCreditScore
+    );
+    require!(trust_score <= MAX_TRUST_SCORE, AgentGuildError::InvalidTrustScore);
+
     let agent = &mut ctx.accounts.agent_account;
     agent.credit_score = credit_score;
     agent.trust_score = trust_score;

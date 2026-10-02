@@ -6,9 +6,10 @@
  *   Requires x-wallet-address header — the offer is funded by that wallet once accepted.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { getWalletAddress, unauthorized } from "@/lib/auth-guard";
+import { getWalletAddress, unauthorized, forbidden } from "@/lib/auth-guard";
 import { createLoanOffer, listOpenLoanOffers, listLoanOffersForWallet } from "@/lib/lending/lending-service";
 import type { LoanKind } from "@/lib/lending/types";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 
 export async function GET(req: NextRequest) {
     try {
@@ -20,6 +21,14 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({ offers });
         }
         if (lenderWallet) {
+            // A lender's full offer history (including withdrawn/non-open
+            // offers and notes) is private — only the lender themselves may
+            // request it, unlike the `open=1` marketplace browse above.
+            const caller = getWalletAddress(req);
+            if (!caller) return unauthorized("Missing x-wallet-address header");
+            if (caller !== canonicalizeWalletAddress(lenderWallet)) {
+                return forbidden("Can only list your own loan offers");
+            }
             const offers = await listLoanOffersForWallet(lenderWallet);
             return NextResponse.json({ offers });
         }
