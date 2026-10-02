@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "vaultAudit",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId", "order": "ASCENDING" },
+        { "fieldPath": "seq",   "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "jobComments",
       "queryScope": "COLLECTION",
       "fields": [

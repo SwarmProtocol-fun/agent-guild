@@ -32,6 +32,8 @@
  *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
  *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
  *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild bindings     [--json] — list external APIs this agent may call via the vault
+ *   agent-guild call         <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data <json>] — call one; the key is injected server-side
  *   agent-guild setup        [--client <ids>] [--dry-run] — install the MCP server into detected editors
  *   agent-guild mcp          — run as an MCP server over stdio
  */
@@ -3783,6 +3785,97 @@ async function cmdRevokeDelegation() {
 }
 
 // ---------------------------------------------------------------------------
+// Vault bindings (`agent-guild bindings`, `agent-guild call`)
+//
+// Call an external API with a credential the org stored in the Agent Guild
+// vault. The hub injects the key server-side; this agent never sees it, and
+// the response comes back with any echo of it redacted.
+// ---------------------------------------------------------------------------
+
+/** Every value of a repeatable flag, e.g. --query a=1 --query b=2. */
+function argAll(flag) {
+  const out = [];
+  for (let i = 0; i < process.argv.length - 1; i++) {
+    if (process.argv[i] === flag) out.push(process.argv[i + 1]);
+  }
+  return out;
+}
+
+async function cmdBindings() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const resp = await fetch(`${config.hubUrl}/api/v1/bindings?${signedQuery(config, privateKey, "/v1/bindings")}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Listing bindings failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data.bindings || [], null, 2));
+    return;
+  }
+  const bindings = data.bindings || [];
+  if (!bindings.length) {
+    console.log("No bindings available to this agent. An org owner can add them on the Vault page of the dashboard.");
+    return;
+  }
+  console.log(`${bindings.length} binding(s) available:\n`);
+  for (const b of bindings) {
+    console.log(`  ${b.name}  →  ${b.baseUrl}`);
+    if (b.description) console.log(`     ${b.description}`);
+    console.log(`     methods: ${b.allowedMethods.join(", ")}   paths: ${b.allowedPaths.join(", ")}${b.maxCallsPerHour ? `   limit: ${b.maxCallsPerHour}/hour` : ""}`);
+  }
+  console.log(`\nUse: agent-guild call <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data '<json>']`);
+}
+
+async function cmdCall() {
+  const [binding, methodArg, path] = process.argv.slice(3, 6);
+  if (!binding || !methodArg || !path) {
+    console.error(`Usage: agent-guild call <binding> <METHOD> <path> [--query k=v]... [--header "K: V"]... [--data '<json or text>'] [--raw]`);
+    process.exit(2);
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  const query = {};
+  for (const pair of argAll("--query")) {
+    const eq = pair.indexOf("=");
+    if (eq < 1) { console.error(`Bad --query "${pair}" (expected key=value)`); process.exit(2); }
+    query[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  const headers = {};
+  for (const h of argAll("--header")) {
+    const colon = h.indexOf(":");
+    if (colon < 1) { console.error(`Bad --header "${h}" (expected "Name: value")`); process.exit(2); }
+    headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim();
+  }
+  let body;
+  const data = arg("--data");
+  if (data !== null && data !== undefined) {
+    try { body = JSON.parse(data); } catch { body = data; }
+  }
+
+  const resp = await signedBodyRequest(
+    config, privateKey, "POST", "POST:/v1/bindings/execute",
+    `${config.hubUrl}/api/v1/bindings/execute?agent=${config.agentId}`,
+    { binding, method: methodArg.toUpperCase(), path, query, headers, ...(body !== undefined ? { body } : {}) },
+  );
+  const result = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Call refused (${resp.status}): ${result.error || "Unknown error"}`);
+    process.exit(1);
+  }
+
+  let out = result.body ?? "";
+  if (!hasFlag("--raw")) {
+    try { out = JSON.stringify(JSON.parse(out), null, 2); } catch { /* not JSON — print as-is */ }
+  }
+  console.log(`HTTP ${result.status}  (${result.durationMs} ms${result.truncated ? ", response truncated at 1 MB" : ""})`);
+  console.log(out);
+  if (result.status >= 400) process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
 // MCP server (`agent-guild mcp`)
 //
 // Exposes the CLI commands below as MCP tools over stdio, so Claude Code,
@@ -3871,6 +3964,29 @@ const MCP_TOOLS = {
       return a.kind === "working" ? ["memory", "working", "--set", a.text, ...section] : ["memory", a.kind, a.text, ...section];
     },
   },
+  guild_bindings: {
+    description: "List the external APIs this agent may call through the org's vault (credentials are injected server-side and never shown to you).",
+    properties: {},
+    argv: () => ["bindings"],
+  },
+  guild_call: {
+    description: "Call an external API through a vault binding. The org's credential is injected by Agent Guild; you never see it. Use guild_bindings first to see allowed bindings, methods and paths.",
+    properties: {
+      binding: str("Binding name, e.g. stripe-api"),
+      method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] },
+      path: str("Path under the binding's base URL, e.g. /v1/balance"),
+      query: { type: "object", additionalProperties: { type: "string" }, description: "Query parameters" },
+      headers: { type: "object", additionalProperties: { type: "string" }, description: "Extra request headers (auth headers are set by the binding)" },
+      body: { description: "Request body: a JSON object or a string" },
+    },
+    required: ["binding", "method", "path"],
+    argv: (a) => [
+      "call", a.binding, a.method, a.path,
+      ...Object.entries(a.query || {}).flatMap(([k, v]) => ["--query", `${k}=${v}`]),
+      ...Object.entries(a.headers || {}).flatMap(([k, v]) => ["--header", `${k}: ${v}`]),
+      ...(a.body !== undefined ? ["--data", typeof a.body === "string" ? a.body : JSON.stringify(a.body)] : []),
+    ],
+  },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
     properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
@@ -3905,8 +4021,8 @@ async function handleMcpRequest(msg) {
     return {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      serverInfo: { name: "agent-guild", version: "1.0.0" },
-      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory. Call guild_status first to confirm the agent is registered.",
+      serverInfo: { name: "agent-guild", version: "1.1.0" },
+      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory, and call external APIs through vault bindings without seeing their keys. Call guild_status first to confirm the agent is registered.",
     };
   }
   if (method === "ping") return {};
@@ -4619,6 +4735,8 @@ try {
   else if (cmd === "memory") await cmdMemory();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
+  else if (cmd === "bindings") await cmdBindings();
+  else if (cmd === "call") await cmdCall();
   else if (cmd === "mcp") await cmdMcp();
   else if (cmd === "setup") await cmdSetup();
   else if (cmd === "apply") await cmdApply();
@@ -4709,6 +4827,10 @@ Self-Improving Harness (SIA-style playbook generations; the org owner approves e
   harness feedback [--json]                                — scores per generation, failures under the live one, plateau/regression flags
   harness propose --file <playbook.md> --note <text|file>  — file your own next generation
   evolve [--dry-run] [--print-prompt] [--force]           — run one improvement step on this agent's own model and propose the result
+
+Vault Bindings (call external APIs without holding the key):
+  bindings    [--json]                                  — list the APIs this agent may call
+  call        <binding> <METHOD> <path> [--query k=v]... [--header "K: V"]... [--data '<json>'] [--raw]
 
 Editor Integration:
   setup  [--client cursor,vscode,...] [--dry-run]  — install the MCP server into Claude Code, Codex CLI, Cursor, Claude Desktop, Windsurf, VS Code, Zed

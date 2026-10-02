@@ -10,7 +10,7 @@ import { useSession } from "@/contexts/SessionContext";
 import { useSkin } from "@/contexts/SkinContext";
 import { getOwnedItems, SKILL_REGISTRY } from "@/lib/skills";
 import {
-  LayoutDashboard, FolderKanban, Users, Briefcase, MessageSquare,
+  LayoutDashboard, FolderKanban, Users, Briefcase, MessageSquare, KeyRound,
   LayoutGrid, Shield, Clock, Activity, BarChart3, Settings,
   Map, FileText, ChevronLeft, ChevronRight, ChevronDown, GripVertical,
   Command, Coins, Stethoscope, Brain, UserCog, Network, HardDrive, BookOpen, Store, Building2,
@@ -135,6 +135,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
       { id: "projects", href: "/agent-guilds", label: "Projects", icon: FolderKanban, maturity: "production" },
       { id: "market", href: "/market", label: "Marketplace", icon: Store, maturity: "production" },
       { id: "operators", href: "/operators", label: "Team", icon: UserCog, maturity: "production" },
+      { id: "vault", href: "/vault", label: "Vault", icon: KeyRound, maturity: "beta" },
       { id: "compute-overview", href: "/compute", label: "Compute", icon: Monitor, maturity: "production" },
       { id: "compute-computers", href: "/compute/computers", label: "Computers", icon: HardDrive, maturity: "production" },
       { id: "compute-workspaces", href: "/compute/workspaces", label: "Workspaces", icon: Layers, maturity: "beta" },
