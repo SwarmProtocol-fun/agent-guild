@@ -57,6 +57,22 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "public, max-age=60" },
         ],
       },
+      // Agent-facing docs (llms.txt convention + the agent skill). Explicit
+      // charset so non-ASCII punctuation survives for fetchers that don't sniff.
+      {
+        source: "/llms.txt",
+        headers: [
+          { key: "Content-Type", value: "text/plain; charset=utf-8" },
+          { key: "Cache-Control", value: "public, max-age=300" },
+        ],
+      },
+      {
+        source: "/skill.md",
+        headers: [
+          { key: "Content-Type", value: "text/markdown; charset=utf-8" },
+          { key: "Cache-Control", value: "public, max-age=300" },
+        ],
+      },
     ];
   },
 };

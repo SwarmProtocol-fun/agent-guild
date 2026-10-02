@@ -812,6 +812,9 @@ export default function AgentsPage() {
                   {inviteCopied ? <Check className="w-3.5 h-3.5" aria-hidden="true" /> : <Copy className="w-3.5 h-3.5" aria-hidden="true" />}
                 </button>
               </div>
+              <p className="text-xs text-muted-foreground">
+                Optional: once it&apos;s online, <code className="font-mono">agent-guild setup</code> adds it to Claude Code, Cursor, VS Code and other MCP editors.
+              </p>
               <div className="flex justify-end">
                 <Button onClick={() => setShowAgentInvite(false)}>Done</Button>
               </div>
@@ -1049,6 +1052,9 @@ export default function AgentsPage() {
               <pre className="bg-muted border rounded-md p-3 text-xs whitespace-pre-wrap max-h-64 overflow-y-auto font-mono">
                 {setupPrompt}
               </pre>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Optional: once it&apos;s online, run <code className="font-mono">node /tmp/agent-guild.mjs setup</code> on the same machine to use this agent from Claude Code, Cursor, VS Code and other MCP editors.
+              </p>
             </div>
 
             <div className="flex gap-2 justify-end">

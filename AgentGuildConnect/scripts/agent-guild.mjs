@@ -32,6 +32,8 @@
  *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
  *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
  *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild setup        [--client <ids>] [--dry-run] — install the MCP server into detected editors
+ *   agent-guild mcp          — run as an MCP server over stdio
  */
 
 import crypto from "node:crypto";
@@ -3781,6 +3783,316 @@ async function cmdRevokeDelegation() {
 }
 
 // ---------------------------------------------------------------------------
+// MCP server (`agent-guild mcp`)
+//
+// Exposes the CLI commands below as MCP tools over stdio, so Claude Code,
+// Cursor, VS Code, etc. can drive this agent natively. stdout carries the
+// JSON-RPC protocol, and every command here prints straight to stdout and may
+// process.exit(), so each tool call runs this same script as a child process
+// and returns what it printed. Signing, identity resolution and error text
+// stay exactly what the CLI already does.
+// ---------------------------------------------------------------------------
+const SELF_PATH = fileURLToPath(import.meta.url);
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+const MCP_TOOL_TIMEOUT_MS = 60000;
+
+const str = (description) => ({ type: "string", description });
+const int = (description) => ({ type: "integer", description });
+
+/** name → { description, properties, required, argv(args) } */
+const MCP_TOOLS = {
+  guild_status: {
+    description: "Show this agent's Agent Guild status and send a heartbeat.",
+    properties: {},
+    argv: () => ["status"],
+  },
+  guild_check_messages: {
+    description: "Fetch new messages from the agent's channels since the last check (JSON).",
+    properties: { since: str("Unix ms timestamp to fetch from (optional)"), history: { type: "boolean", description: "Fetch full channel history" } },
+    argv: (a) => ["check", "--json", ...(a.since ? ["--since", String(a.since)] : []), ...(a.history ? ["--history"] : [])],
+  },
+  guild_send: {
+    description: "Send a message to an Agent Guild channel.",
+    properties: { channelId: str("Channel ID"), text: str("Message text") },
+    required: ["channelId", "text"],
+    argv: (a) => ["send", a.channelId, a.text],
+  },
+  guild_reply: {
+    description: "Reply to a specific message in a channel.",
+    properties: { channelId: str("Channel ID"), messageId: str("Message ID to reply to"), text: str("Reply text") },
+    required: ["channelId", "messageId", "text"],
+    argv: (a) => ["reply", a.channelId, a.messageId, a.text],
+  },
+  guild_assignments: {
+    description: "List task assignments for this agent.",
+    properties: { status: str("Filter: pending, accepted, completed, rejected"), limit: int("Max results (default 20)") },
+    argv: (a) => ["assignments", ...(a.status ? ["--status", a.status] : []), ...(a.limit ? ["--limit", String(a.limit)] : [])],
+  },
+  guild_accept: {
+    description: "Accept a pending task assignment.",
+    properties: { assignmentId: str("Assignment ID"), notes: str("Optional notes") },
+    required: ["assignmentId"],
+    argv: (a) => ["accept", a.assignmentId, ...(a.notes ? ["--notes", a.notes] : [])],
+  },
+  guild_reject: {
+    description: "Reject a pending task assignment.",
+    properties: { assignmentId: str("Assignment ID"), reason: str("Why it is being rejected") },
+    required: ["assignmentId", "reason"],
+    argv: (a) => ["reject", a.assignmentId, a.reason],
+  },
+  guild_complete: {
+    description: "Mark an accepted assignment as completed.",
+    properties: { assignmentId: str("Assignment ID"), notes: str("Completion notes / deliverable summary") },
+    required: ["assignmentId"],
+    argv: (a) => ["complete", a.assignmentId, ...(a.notes ? ["--notes", a.notes] : [])],
+  },
+  guild_discover: {
+    description: "Find other agents in this org by skill, type or status.",
+    properties: { skill: str("Skill id"), type: str("Agent type"), status: str("online, busy or offline") },
+    argv: (a) => ["discover", ...(a.skill ? ["--skill", a.skill] : []), ...(a.type ? ["--type", a.type] : []), ...(a.status ? ["--status", a.status] : [])],
+  },
+  guild_context: {
+    description: "Fetch working, long-term and daily memory plus recent chat as one context payload (markdown).",
+    properties: { q: str("Keyword filter"), limit: int("Max items") },
+    argv: (a) => ["context", "--markdown", ...(a.q ? ["--q", a.q] : []), ...(a.limit ? ["--limit", String(a.limit)] : [])],
+  },
+  guild_memory_read: {
+    description: "Read working memory or a daily journal entry.",
+    properties: { kind: { type: "string", enum: ["working", "daily"] }, date: str("YYYY-MM-DD for daily (default today)") },
+    required: ["kind"],
+    argv: (a) => ["memory", a.kind, ...(a.kind === "daily" && a.date ? ["--date", a.date] : [])],
+  },
+  guild_memory_write: {
+    description: "Write memory: replace working memory, append to long-term memory, or append to today's journal.",
+    properties: { kind: { type: "string", enum: ["working", "append", "daily"] }, text: str("Content to write"), section: str("Optional section name") },
+    required: ["kind", "text"],
+    argv: (a) => {
+      const section = a.section ? ["--section", a.section] : [];
+      return a.kind === "working" ? ["memory", "working", "--set", a.text, ...section] : ["memory", a.kind, a.text, ...section];
+    },
+  },
+  guild_work_mode: {
+    description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
+    properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
+    argv: (a) => ["work-mode", ...(a.mode ? [a.mode] : []), ...(a.capacity ? ["--capacity", String(a.capacity)] : [])],
+  },
+};
+
+function runMcpTool(argv) {
+  return new Promise((resolve) => {
+    const identity = ACTIVE_IDENTITY_OVERRIDE ? ["--as", ACTIVE_IDENTITY_OVERRIDE] : [];
+    const child = spawn(process.execPath, [SELF_PATH, ...identity, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let errOut = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { errOut += d; });
+    const timer = setTimeout(() => child.kill("SIGKILL"), MCP_TOOL_TIMEOUT_MS);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const text = [out.trim(), errOut.trim()].filter(Boolean).join("\n\n") || "(no output)";
+      resolve({ text, isError: code !== 0 });
+    });
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ text: `Failed to run command: ${e.message}`, isError: true });
+    });
+  });
+}
+
+async function handleMcpRequest(msg) {
+  const { method, params } = msg;
+  if (method === "initialize") {
+    return {
+      protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
+      capabilities: { tools: {} },
+      serverInfo: { name: "agent-guild", version: "1.0.0" },
+      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory. Call guild_status first to confirm the agent is registered.",
+    };
+  }
+  if (method === "ping") return {};
+  if (method === "tools/list") {
+    return {
+      tools: Object.entries(MCP_TOOLS).map(([name, t]) => ({
+        name,
+        description: t.description,
+        inputSchema: { type: "object", properties: t.properties, ...(t.required ? { required: t.required } : {}) },
+      })),
+    };
+  }
+  if (method === "tools/call") {
+    const tool = MCP_TOOLS[params?.name];
+    if (!tool) throw Object.assign(new Error(`Unknown tool: ${params?.name}`), { code: -32602 });
+    const args = params.arguments || {};
+    const missing = (tool.required || []).filter((k) => args[k] === undefined || args[k] === "");
+    if (missing.length) {
+      return { content: [{ type: "text", text: `Missing required argument(s): ${missing.join(", ")}` }], isError: true };
+    }
+    const { text, isError } = await runMcpTool(tool.argv(args));
+    return { content: [{ type: "text", text }], isError };
+  }
+  throw Object.assign(new Error(`Method not found: ${method}`), { code: -32601 });
+}
+
+async function cmdMcp() {
+  const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+  let buffer = "";
+  process.stdin.setEncoding("utf-8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let nl;
+    while ((nl = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch {
+        send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+        continue;
+      }
+      // Notifications (no id) need no response.
+      if (msg.id === undefined || msg.id === null) continue;
+      handleMcpRequest(msg)
+        .then((result) => send({ jsonrpc: "2.0", id: msg.id, result }))
+        .catch((e) => send({ jsonrpc: "2.0", id: msg.id, error: { code: e.code || -32603, message: e.message || String(e) } }));
+    }
+  });
+  await new Promise((resolve) => process.stdin.on("end", resolve));
+}
+
+// ---------------------------------------------------------------------------
+// Editor setup (`agent-guild setup`)
+//
+// Registers this installed script as an MCP server in every supported client
+// found on this machine. Unlike the single-file build served from
+// agent-guild.com, this one imports ./solana-escrow.mjs, so it is registered
+// where it is installed rather than copied to ~/.agent-guild/bin. Existing config files are
+// backed up first, and a file that isn't plain JSON (comments, trailing
+// commas) is left alone and the snippet printed instead.
+// ---------------------------------------------------------------------------
+const STABLE_SCRIPT_PATH = SELF_PATH;
+
+function appDataDir() {
+  if (process.platform === "win32") return process.env.APPDATA || join(HOME, "AppData", "Roaming");
+  if (process.platform === "darwin") return join(HOME, "Library", "Application Support");
+  return process.env.XDG_CONFIG_HOME || join(HOME, ".config");
+}
+
+/** Each client: where it lives, how to detect it, and how to merge our server entry. */
+function mcpClients() {
+  const app = appDataDir();
+  return [
+    { id: "cursor", name: "Cursor", detect: join(HOME, ".cursor"), file: join(HOME, ".cursor", "mcp.json"), key: "mcpServers", entry: (s) => s },
+    { id: "claude-desktop", name: "Claude Desktop", detect: join(app, "Claude"), file: join(app, "Claude", "claude_desktop_config.json"), key: "mcpServers", entry: (s) => s },
+    { id: "windsurf", name: "Windsurf", detect: join(HOME, ".codeium", "windsurf"), file: join(HOME, ".codeium", "windsurf", "mcp_config.json"), key: "mcpServers", entry: (s) => s },
+    { id: "vscode", name: "VS Code", detect: join(app, "Code", "User"), file: join(app, "Code", "User", "mcp.json"), key: "servers", entry: (s) => ({ type: "stdio", ...s }) },
+    { id: "zed", name: "Zed", detect: join(HOME, ".config", "zed"), file: join(HOME, ".config", "zed", "settings.json"), key: "context_servers", entry: (s) => ({ source: "custom", ...s }) },
+  ];
+}
+
+function onPath(bin) {
+  const dirs = (process.env.PATH || "").split(process.platform === "win32" ? ";" : ":");
+  const exts = process.platform === "win32" ? [".cmd", ".exe", ""] : [""];
+  return dirs.some((d) => exts.some((e) => {
+    try { accessSync(join(d, bin + e), fsConstants.X_OK); return true; } catch { return false; }
+  }));
+}
+
+function runQuiet(bin, args) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    child.on("close", (code) => resolve({ ok: code === 0, out: out.trim() }));
+    child.on("error", (e) => resolve({ ok: false, out: e.message }));
+  });
+}
+
+function writeJsonClientConfig(client, server, dryRun) {
+  let data = {};
+  if (existsSync(client.file)) {
+    const raw = readFileSync(client.file, "utf-8");
+    if (raw.trim()) {
+      try { data = JSON.parse(raw); } catch {
+        return { ok: false, detail: `${client.file} isn't plain JSON (comments?) — left untouched. Add under "${client.key}":\n${JSON.stringify({ "agent-guild": client.entry(server) }, null, 2)}` };
+      }
+    }
+  }
+  data[client.key] = { ...(data[client.key] || {}), "agent-guild": client.entry(server) };
+  if (dryRun) return { ok: true, detail: `would write ${client.file}` };
+  mkdirSync(dirname(client.file), { recursive: true });
+  if (existsSync(client.file)) writeFileSync(`${client.file}.bak`, readFileSync(client.file));
+  const tmp = `${client.file}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
+  renameSync(tmp, client.file);
+  return { ok: true, detail: client.file };
+}
+
+async function cmdSetup() {
+  const dryRun = hasFlag("--dry-run");
+  const only = arg("--client")?.split(",").map((s) => s.trim()).filter(Boolean);
+  const wants = (id) => !only || only.includes(id);
+
+  // Pin the identity that is active right now, so the server keeps talking
+  // as this agent even though the stable copy resolves a different SKILL_DIR.
+  let agentId = null;
+  let agentName = null;
+  if (existsSync(CONFIG_PATH)) {
+    try {
+      const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+      agentId = config.agentId || null;
+      agentName = config.agentName || config.name || null;
+    } catch { /* unreadable config → set up unpinned */ }
+  }
+
+  const args = [STABLE_SCRIPT_PATH, ...(agentId ? ["--as", agentId] : []), "mcp"];
+  const server = { command: "node", args };
+
+  console.log(agentId
+    ? `Setting up the Agent Guild MCP server for ${agentName ? `${agentName} ` : ""}(${agentId})${dryRun ? " [dry run]" : ""}\n`
+    : `No registered agent found — the MCP server will be installed, but tools will fail until you run \`agent-guild register\` or \`agent-guild join\`.\n`);
+
+  let configured = 0;
+
+  if (wants("claude-code") && onPath("claude")) {
+    if (dryRun) {
+      console.log(`  ✓ Claude Code     would run: claude mcp add --scope user agent-guild -- node ${args.join(" ")}`);
+    } else {
+      await runQuiet("claude", ["mcp", "remove", "--scope", "user", "agent-guild"]);
+      const r = await runQuiet("claude", ["mcp", "add", "--scope", "user", "agent-guild", "--", "node", ...args]);
+      console.log(r.ok ? "  ✓ Claude Code     (user scope)" : `  ✗ Claude Code     ${r.out}`);
+      if (r.ok) configured++;
+    }
+  }
+
+  if (wants("codex") && existsSync(join(HOME, ".codex"))) {
+    const file = join(HOME, ".codex", "config.toml");
+    const existing = existsSync(file) ? readFileSync(file, "utf-8") : "";
+    if (existing.includes("[mcp_servers.agent-guild]")) {
+      console.log(`  • Codex CLI       already configured (${file}) — edit it by hand to change`);
+    } else if (dryRun) {
+      console.log(`  ✓ Codex CLI       would append to ${file}`);
+    } else {
+      const block = `\n[mcp_servers.agent-guild]\ncommand = "node"\nargs = ${JSON.stringify(args)}\n`;
+      appendFileSync(file, block);
+      console.log(`  ✓ Codex CLI       ${file}`);
+      configured++;
+    }
+  }
+
+  for (const client of mcpClients()) {
+    if (!wants(client.id) || !existsSync(client.detect)) continue;
+    const r = writeJsonClientConfig(client, server, dryRun);
+    console.log(`  ${r.ok ? "✓" : "✗"} ${client.name.padEnd(15)} ${r.detail}`);
+    if (r.ok && !dryRun) configured++;
+  }
+
+  console.log(configured || dryRun
+    ? `\nDone. Restart your editor to load the "agent-guild" tools.`
+    : `\nNo supported clients found. Add this to any MCP client's config:\n${JSON.stringify({ mcpServers: { "agent-guild": server } }, null, 2)}`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -4307,6 +4619,8 @@ try {
   else if (cmd === "memory") await cmdMemory();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
+  else if (cmd === "mcp") await cmdMcp();
+  else if (cmd === "setup") await cmdSetup();
   else if (cmd === "apply") await cmdApply();
   else if (cmd === "applications") await cmdApplications();
   else if (cmd === "revise-application") await cmdReviseApplication();
@@ -4395,6 +4709,10 @@ Self-Improving Harness (SIA-style playbook generations; the org owner approves e
   harness feedback [--json]                                — scores per generation, failures under the live one, plateau/regression flags
   harness propose --file <playbook.md> --note <text|file>  — file your own next generation
   evolve [--dry-run] [--print-prompt] [--force]           — run one improvement step on this agent's own model and propose the result
+
+Editor Integration:
+  setup  [--client cursor,vscode,...] [--dry-run]  — install the MCP server into Claude Code, Codex CLI, Cursor, Claude Desktop, Windsurf, VS Code, Zed
+  mcp                                             — run as an MCP server over stdio (what \`setup\` configures)
 
 Multi-Identity Commands:
   agents                        — list every org+name identity registered from this machine
