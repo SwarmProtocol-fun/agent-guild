@@ -211,8 +211,7 @@ type AccessDenied = { error: string; status: number };
 /**
  * Authorizes a request against a specific orgId. Every route below used to
  * trust `body.orgId` outright whenever there was no verified agent signature
- * (`ctx.agent` isn't wired up by the runtime yet — see RouteContext in
- * sdk.ts) — any signed-in operator could act on an org they have no
+ * — any signed-in operator could act on an org they have no
  * relationship to (set/delete another org's trading wallet, place trades,
  * loosen risk limits, plant strategies, hijack referral rewards). This
  * mirrors `solana-settlement`'s `ctx.session.role` check and
@@ -390,9 +389,8 @@ export default defineServerMod({
      *
      * orgId/agentId fall back to the body only for browser-session calls —
      * a verified agent signature (ctx.agent) always takes precedence, same
-     * as every other route here. ctx.agent isn't wired up by the runtime yet
-     * (see RouteContext in sdk.ts), so a browser-session call is authorized
-     * by requireOrgAccess instead: the caller must be a member of orgId, not
+     * as every other route here. A browser-session call is authorized by
+     * requireOrgAccess instead: the caller must be a member of orgId, not
      * merely signed in to the platform — this is any caller in the same org
      * setting the agent's wallet, not a cryptographic guarantee that only
      * the agent itself does.
@@ -912,6 +910,16 @@ export default defineServerMod({
       if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
       const denied = await requireOrgAccess(ctx, strategy.orgId);
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
+      // Same gate as POST /trade — uninstalling the mod (or turning off this
+      // capability) must stop a daemon that still holds the passphrase.
+      // Checked before anything clears pendingSignal, so the signal stays set.
+      try {
+        await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 403 });
+      }
+
       if (!strategy.pendingSignal) {
         return Response.json({ error: "Strategy has no pending signal" }, { status: 400 });
       }

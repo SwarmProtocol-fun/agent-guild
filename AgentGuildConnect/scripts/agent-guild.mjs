@@ -36,7 +36,7 @@
 
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, constants as fsConstants } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, readdirSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { solanaKeypairFromPrivateKeyPem, claimTaskOnChain, submitDeliveryOnChain, sha256Bytes32 } from "./solana-escrow.mjs";
@@ -1688,6 +1688,7 @@ async function daemonTick(config, privateKey, daemonState) {
       ? ` (reply-poll DOWN: ${daemonState.replyPollFailures}x, ${daemonState.replyPollLastError})`
       : "";
     console.log(`[${now}] heartbeat ok${pollNote}`);
+    await modTick(config, privateKey, now);
     return true;
   } catch (err) {
     console.error(`[${now}] heartbeat failed: ${err.message}`);
@@ -1929,12 +1930,24 @@ async function processReply(config, privateKey, msg, ctx = {}) {
     history: ctx.history || [],
   };
 
+  // The DM belt only (PRD-MOD-BELT FR-7/FR-8): hub memory goes into the
+  // prompt as data, and tool keys an installed mod requires go into the
+  // tool environment. A hub reply gets neither.
+  const caps = ctx.belt ? await capsForReply(config, privateKey) : [];
+  const useMemory = ctx.belt && hasCap(caps, "memory-store");
+  if (useMemory) payload.memoryContext = await fetchMemoryContext(config, privateKey, now);
+  const keyEnv = ctx.belt ? toolKeyEnv(caps) : {};
+
   const result = await runReplyCommand(replyCommand, payload, {
     AGENT_GUILD_AGENT_NAME: config.agentName || "",
     AGENT_GUILD_AGENT_TYPE: config.agentType || "",
     AGENT_GUILD_AGENT_BIO: config.bio || "",
     AGENT_GUILD_AGENT_ID: config.agentId || "",
     AGENT_GUILD_CHANNEL_KIND: ctx.belt ? "dm" : "hub",
+    AGENT_GUILD_CLI: fileURLToPath(import.meta.url),
+    AGENT_GUILD_CAPABILITIES: caps.map((c) => c.key).join(","),
+    AGENT_GUILD_TOOL_KEYS: Object.keys(keyEnv).join(","),
+    ...keyEnv,
   }, ctx.belt ? DM_REPLY_TIMEOUT_MS : REPLY_TIMEOUT_MS);
   if (!result.ok) {
     await handleReplyFailure(config, privateKey, msg, now, result.error);
@@ -1949,6 +1962,7 @@ async function processReply(config, privateKey, msg, ctx = {}) {
 
   recordReplySuccess(msg.id);
   console.log(`[${now}] replied: channel=${msg.channelId} humanMsg=${msg.id} sentMsg=${sent.data?.messageId}`);
+  if (useMemory) await appendReplyMemory(config, privateKey, msg, sent.data?.messageId, now);
 }
 
 /**
@@ -3452,6 +3466,456 @@ async function cmdRevokeDelegation() {
 // Router
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Installed mods (PRD-MOD-BELT)
+//
+// A human installs a mod from the dashboard; this daemon learns about it
+// from the signed GET /v1/capabilities on each heartbeat. Secrets the mods
+// need live only on this machine, mode 0600, under this identity's folder:
+//   hyperliquid.pass  — passphrase that decrypts the hub-held testnet key
+//   keys/<NAME>       — values for a mod's requiredKeys (agent-guild key set)
+// None of them is ever printed, logged, or put in a query string.
+// ---------------------------------------------------------------------------
+
+const HL_MOD = "hyperliquid-trading";
+const KEY_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
+
+function identityHome() {
+  return dirname(CONFIG_PATH);
+}
+
+function hlPassPath() {
+  return join(identityHome(), "hyperliquid.pass");
+}
+
+function hlInfoPath() {
+  return join(identityHome(), "hyperliquid.json");
+}
+
+function toolKeysDir() {
+  return join(identityHome(), "keys");
+}
+
+/** Write a secret file mode 0600 (chmod too — an existing file keeps its old mode otherwise). */
+function writeSecretFile(path, value) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, value, { mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+/** This agent's installed capabilities — [{ key, name, modId, slug, requiredKeys }]. Throws on failure. */
+async function fetchCapabilities(config, privateKey) {
+  const ts = Date.now().toString();
+  const sig = sign(`GET:/v1/capabilities:${ts}`, privateKey);
+  const resp = await fetch(`${config.hubUrl}/api/v1/capabilities?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(`${resp.status} ${data.error || "capabilities fetch failed"}`);
+  return Array.isArray(data.capabilities) ? data.capabilities : [];
+}
+
+const hasCap = (caps, key) => caps.some((c) => c.key === key);
+
+async function cmdCapabilities() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const caps = await fetchCapabilities(config, privateKey);
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(caps, null, 2));
+    return;
+  }
+  if (caps.length === 0) {
+    console.log("No capabilities. A human installs mods from the dashboard.");
+    return;
+  }
+  for (const c of caps) {
+    const keys = c.requiredKeys?.length ? `  keys: ${c.requiredKeys.join(",")}` : "";
+    console.log(`${c.key}  (${c.slug})${keys}`);
+  }
+}
+
+/** Signed call to /api/mods/hyperliquid-trading/<modPath>. The body is not part of the signature (runtime.ts). */
+async function hlRequest(config, privateKey, method, modPath, body) {
+  const ts = Date.now().toString();
+  const sig = sign(`${method}:/mods/${HL_MOD}/${modPath}:${ts}`, privateKey);
+  const resp = await fetch(`${config.hubUrl}/api/mods/${HL_MOD}/${modPath}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, {
+    method,
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(`${method} /${modPath} (${resp.status}): ${data.error || "request failed"}`);
+  return data;
+}
+
+function hlUsage(msg) {
+  console.error(`${msg}
+
+Usage (testnet only):
+  hyperliquid setup --key-file <path> --max-position-usd <n> --max-daily-loss-usd <n> --leverage <n> [--address 0x…]
+  hyperliquid status
+  hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>
+  hyperliquid strategy dca --coin <COIN> --size-usd <n> --interval-ms <n>
+  hyperliquid pending`);
+  process.exit(2);
+}
+
+function positiveNumber(flag) {
+  const raw = arg(flag);
+  const n = Number(raw);
+  if (raw === undefined || !Number.isFinite(n) || n <= 0) hlUsage(`${flag} must be a positive number`);
+  return n;
+}
+
+function readPassphrase() {
+  if (!existsSync(hlPassPath())) return null;
+  const pass = readFileSync(hlPassPath(), "utf8").trim();
+  return pass || null;
+}
+
+/** EVM address for a secp256k1 key, or null when the noble libs aren't installed. */
+async function evmAddress(privateKeyHex) {
+  try {
+    const { secp256k1 } = await import("@noble/curves/secp256k1");
+    const { keccak_256 } = await import("@noble/hashes/sha3");
+    const pub = secp256k1.getPublicKey(privateKeyHex, false).slice(1);
+    return `0x${Buffer.from(keccak_256(pub).slice(-20)).toString("hex")}`;
+  } catch {
+    return null;
+  }
+}
+
+async function hlStatus(config, privateKey) {
+  const [wallet, risk] = await Promise.all([
+    hlRequest(config, privateKey, "GET", `wallet/${config.agentId}`),
+    hlRequest(config, privateKey, "GET", `risk-config/${config.agentId}`),
+  ]);
+  return { hasWallet: !!wallet.hasWallet, network: wallet.network ?? null, risk: risk.config ?? null };
+}
+
+/** trade/strategy/pending refuse unless a wallet and a risk config are both on the hub. */
+async function hlRequireReady(config, privateKey) {
+  const s = await hlStatus(config, privateKey);
+  if (!s.hasWallet) throw new Error("No Hyperliquid wallet for this agent. Run `hyperliquid setup` first.");
+  if (!s.risk) throw new Error("No risk config for this agent. Run `hyperliquid setup` first.");
+  if (s.network !== "testnet") throw new Error(`Wallet network is ${s.network}; this CLI only trades testnet.`);
+  return s;
+}
+
+function hlRequirePass() {
+  const pass = readPassphrase();
+  if (!pass) throw new Error(`hyperliquid skipped: no passphrase (${hlPassPath()} is missing). Run \`hyperliquid setup\`.`);
+  return pass;
+}
+
+async function cmdHyperliquid() {
+  const sub = process.argv[3];
+  if (!sub) hlUsage("Missing subcommand");
+  if (hasFlag("--mainnet") || (arg("--network") && arg("--network") !== "testnet")) {
+    hlUsage("Mainnet is not supported. Testnet only.");
+  }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  if (sub === "setup") {
+    const keyFile = arg("--key-file");
+    if (!keyFile) hlUsage("--key-file is required");
+    const maxPositionUsd = positiveNumber("--max-position-usd");
+    const maxDailyLossUsd = positiveNumber("--max-daily-loss-usd");
+    const leverage = positiveNumber("--leverage");
+
+    let hex;
+    try {
+      hex = readFileSync(keyFile, "utf8").trim().replace(/^0x/i, "");
+    } catch (err) {
+      hlUsage(`Cannot read --key-file: ${err.code || "error"}`);
+    }
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) hlUsage("--key-file must hold one 32-byte hex private key");
+
+    const address = arg("--address") || await evmAddress(hex);
+    if (!address) hlUsage("Could not derive the wallet address; pass --address 0x…");
+
+    if (!readPassphrase()) {
+      writeSecretFile(hlPassPath(), crypto.randomBytes(32).toString("hex") + "\n");
+      console.log(`Generated passphrase file ${hlPassPath()} (mode 0600)`);
+    }
+    const masterSecret = readPassphrase();
+
+    await hlRequest(config, privateKey, "POST", "wallet", { privateKey: `0x${hex}`, masterSecret, network: "testnet" });
+    await hlRequest(config, privateKey, "POST", "risk-config", { leverage, maxPositionUsd, maxDailyLossUsd });
+    writeSecretFile(hlInfoPath(), JSON.stringify({ address, network: "testnet" }, null, 2) + "\n");
+    console.log(`Wallet set: ${address} (testnet)`);
+    console.log(`Risk: maxPositionUsd=${maxPositionUsd} maxDailyLossUsd=${maxDailyLossUsd} leverage=${leverage}`);
+    return;
+  }
+
+  if (sub === "status") {
+    const s = await hlStatus(config, privateKey);
+    let address = null;
+    try { address = JSON.parse(readFileSync(hlInfoPath(), "utf8")).address || null; } catch { /* not set up here */ }
+    console.log(`wallet: ${s.hasWallet ? "yes" : "no"}${address ? ` (${address})` : ""}`);
+    console.log(`network: ${s.network ?? "none"}`);
+    if (s.risk) {
+      console.log(`maxPositionUsd: ${s.risk.maxPositionUsd}`);
+      console.log(`maxDailyLossUsd: ${s.risk.maxDailyLossUsd}`);
+      console.log(`leverage: ${s.risk.leverage}`);
+    } else {
+      console.log("risk: none");
+    }
+    console.log(`passphrase file: ${readPassphrase() ? "present" : "missing"}`);
+    return;
+  }
+
+  if (sub === "trade") {
+    const coin = (arg("--coin") || "").toUpperCase();
+    const side = arg("--side");
+    if (!coin) hlUsage("--coin is required");
+    if (side !== "buy" && side !== "sell") hlUsage("--side must be buy or sell");
+    const sizeUsd = positiveNumber("--size-usd");
+    const masterSecret = hlRequirePass();
+    await hlRequireReady(config, privateKey);
+    const res = await hlRequest(config, privateKey, "POST", "trade", { coin, isBuy: side === "buy", sizeUsd, masterSecret });
+    console.log(`trade queued: ${side} ${coin} $${sizeUsd} taskId=${res.taskId}`);
+    return;
+  }
+
+  if (sub === "strategy") {
+    if (process.argv[4] !== "dca") hlUsage("Only `strategy dca` is supported");
+    const coin = (arg("--coin") || "").toUpperCase();
+    if (!coin) hlUsage("--coin is required");
+    const sizeUsd = positiveNumber("--size-usd");
+    const intervalMs = positiveNumber("--interval-ms");
+    let wallet = arg("--address");
+    if (!wallet) {
+      try { wallet = JSON.parse(readFileSync(hlInfoPath(), "utf8")).address; } catch { /* below */ }
+    }
+    if (!wallet) hlUsage("No wallet address on file; pass --address 0x… or rerun setup");
+    hlRequirePass();
+    await hlRequireReady(config, privateKey);
+    const res = await hlRequest(config, privateKey, "POST", "strategy", { wallet, type: "dca", coin, sizeUsd, params: { intervalMs } });
+    console.log(`strategy created: dca ${coin} $${sizeUsd} every ${intervalMs}ms id=${res.id}`);
+    return;
+  }
+
+  if (sub === "pending") {
+    const quiet = hasFlag("--quiet");
+    const masterSecret = hlRequirePass();
+    const { strategies = [] } = await hlRequest(config, privateKey, "GET", `strategy/${config.agentId}/pending`);
+    if (strategies.length === 0) {
+      if (!quiet) console.log("no pending strategies");
+      return;
+    }
+    await hlRequireReady(config, privateKey);
+    let failed = 0;
+    for (const s of strategies) {
+      try {
+        const res = await hlRequest(config, privateKey, "POST", `strategy/${s.id}/execute-pending`, { masterSecret });
+        console.log(`executed strategy=${s.id} taskId=${res.taskId}`);
+      } catch (err) {
+        failed++;
+        console.error(`strategy=${s.id} ${err.message}`);
+      }
+    }
+    if (failed) process.exit(1);
+    return;
+  }
+
+  hlUsage(`Unknown subcommand: ${sub}`);
+}
+
+/** Read a secret value from stdin — piped, or typed with echo off. Never from argv. */
+function readSecretInput(prompt) {
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) {
+      let data = "";
+      stdin.setEncoding("utf8");
+      stdin.on("data", (d) => { data += d; });
+      stdin.on("end", () => resolve(data.replace(/\r?\n$/, "")));
+      stdin.on("error", reject);
+      return;
+    }
+    process.stderr.write(prompt);
+    let data = "";
+    stdin.setRawMode(true);
+    stdin.setEncoding("utf8");
+    stdin.resume();
+    const onData = (ch) => {
+      if (ch === "\u0003") { stdin.setRawMode(false); process.stderr.write("\n"); process.exit(130); }
+      if (ch === "\r" || ch === "\n" || ch === "\u0004") {
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.off("data", onData);
+        process.stderr.write("\n");
+        resolve(data);
+        return;
+      }
+      if (ch === "\u007f") { data = data.slice(0, -1); return; }
+      data += ch;
+    };
+    stdin.on("data", onData);
+  });
+}
+
+function listToolKeyNames() {
+  try {
+    return readdirSync(toolKeysDir()).filter((n) => KEY_NAME_RE.test(n)).sort();
+  } catch {
+    return [];
+  }
+}
+
+async function cmdKey() {
+  const sub = process.argv[3];
+  loadConfig();
+  if (sub === "set") {
+    const name = process.argv[4];
+    if (!name || !KEY_NAME_RE.test(name)) {
+      console.error("Usage: key set <NAME>   (NAME like GITHUB_TOKEN; the value is read from stdin)");
+      process.exit(2);
+    }
+    const value = (await readSecretInput(`Value for ${name} (hidden): `)).trim();
+    if (!value) {
+      console.error("Empty value — nothing written.");
+      process.exit(1);
+    }
+    writeSecretFile(join(toolKeysDir(), name), value);
+    console.log(`wrote ${name}`);
+    return;
+  }
+  if (sub === "list") {
+    const names = listToolKeyNames();
+    console.log(names.length ? names.join("\n") : "no keys");
+    return;
+  }
+  console.error("Usage: key set <NAME> | key list");
+  process.exit(2);
+}
+
+// --- Daemon side ------------------------------------------------------------
+
+// Last capability list the daemon fetched. processReply reads it for the DM
+// belt (memory context, tool keys); daemonTick refreshes it every heartbeat.
+const modState = { caps: null, capsSig: null, hlNote: null, running: false };
+
+function logModNote(now, note) {
+  if (modState.hlNote === note) return;
+  modState.hlNote = note;
+  if (note) console.log(`[${now}] ${note}`);
+}
+
+/** Run one CLI subcommand of this script as this agent; resolves { code, stdout, stderr }. */
+function runSelf(config, args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--as", config.agentId, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", (err) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: err.message }); });
+    child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
+  });
+}
+
+/**
+ * FR-5. After the heartbeat: refresh capabilities, and when hyperliquid-trade
+ * is installed, fire whatever the hub tick marked pending. Never throws and
+ * never affects the heartbeat's own result.
+ */
+async function modTick(config, privateKey, now) {
+  if (modState.running) return;
+  modState.running = true;
+  try {
+    let caps;
+    try {
+      caps = await fetchCapabilities(config, privateKey);
+    } catch (err) {
+      console.error(`[${now}] capabilities fetch failed: ${err.message}`);
+      return;
+    }
+    modState.caps = caps;
+    const capsSig = caps.map((c) => c.key).sort().join(",");
+    if (capsSig !== modState.capsSig) {
+      modState.capsSig = capsSig;
+      console.log(`[${now}] capabilities: ${capsSig || "none"}`);
+    }
+
+    if (!hasCap(caps, "hyperliquid-trade")) {
+      logModNote(now, "hyperliquid-trade capability absent");
+      return;
+    }
+    if (!readPassphrase()) {
+      logModNote(now, "hyperliquid skipped: no passphrase");
+      return;
+    }
+    logModNote(now, null);
+
+    const res = await runSelf(config, ["hyperliquid", "pending", "--quiet"]);
+    for (const line of res.stdout.split("\n").filter(Boolean)) console.log(`[${now}] hyperliquid ${line}`);
+    if (res.code !== 0) {
+      const detail = res.stderr.trim().split("\n").filter(Boolean).pop() || `exit ${res.code}`;
+      console.error(`[${now}] hyperliquid pending failed: ${detail.slice(0, 300)}`);
+    }
+  } catch (err) {
+    console.error(`[${now}] hyperliquid pending failed: ${err.message}`);
+  } finally {
+    modState.running = false;
+  }
+}
+
+/** Fresh capability list for a DM reply; falls back to the heartbeat's copy. */
+async function capsForReply(config, privateKey) {
+  try {
+    modState.caps = await fetchCapabilities(config, privateKey);
+  } catch { /* use the last good list */ }
+  return modState.caps || [];
+}
+
+/** FR-7: prompt-ready memory for a DM reply, or "" on failure. */
+async function fetchMemoryContext(config, privateKey, now) {
+  try {
+    const ts = Date.now().toString();
+    const sig = sign(`GET:/v1/context:${config.agentId}:${ts}`, privateKey);
+    const params = new URLSearchParams({ agent: config.agentId, sig, ts, format: "markdown", limit: "30" });
+    const resp = await fetch(`${config.hubUrl}/api/v1/context?${params.toString()}`);
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    return await resp.text();
+  } catch (err) {
+    console.error(`[${now}] context fetch failed: ${err.message}`);
+    return "";
+  }
+}
+
+/** FR-7: one memory line per sent DM reply. Logged, never fatal. */
+async function appendReplyMemory(config, privateKey, msg, sentId, now) {
+  try {
+    const entry = `DM reply: channel=${msg.channelId} humanMsg=${msg.id} sentMsg=${sentId || "unknown"}`;
+    const resp = await signedBodyRequest(config, privateKey, "POST", "POST:/v1/memory/append",
+      `${config.hubUrl}/api/v1/memory/append?agent=${config.agentId}`, { entry });
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    console.log(`[${now}] memory append ok: humanMsg=${msg.id}`);
+  } catch (err) {
+    console.error(`[${now}] memory append failed: ${err.message}`);
+  }
+}
+
+/**
+ * FR-8: tool keys the DM belt may export — only names some installed
+ * capability lists in requiredKeys, and only when the file exists.
+ */
+function toolKeyEnv(caps) {
+  const allowed = new Set(caps.flatMap((c) => c.requiredKeys || []));
+  const env = {};
+  for (const name of listToolKeyNames()) {
+    if (!allowed.has(name)) continue;
+    try {
+      const value = readFileSync(join(toolKeysDir(), name), "utf8").trim();
+      if (value) env[name] = value;
+    } catch { /* unreadable — skip */ }
+  }
+  return env;
+}
+
 /**
  * Keep one daemon alive. A crash restarts it so a DM that arrived while it
  * was down is still answered. SIGINT/SIGTERM stops the child and does not
@@ -3535,6 +3999,9 @@ try {
   else if (cmd === "delegate") await cmdDelegate();
   else if (cmd === "delegations") await cmdDelegations();
   else if (cmd === "revoke-delegation") await cmdRevokeDelegation();
+  else if (cmd === "capabilities") await cmdCapabilities();
+  else if (cmd === "hyperliquid") await cmdHyperliquid();
+  else if (cmd === "key") await cmdKey();
   else {
     console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
@@ -3591,6 +4058,15 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Installed Mods (a human installs from the dashboard; testnet only):
+  capabilities [--json]                                    — what this agent's org has installed for it
+  hyperliquid setup --key-file <path> --max-position-usd <n> --max-daily-loss-usd <n> --leverage <n>
+  hyperliquid status | pending
+  hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>
+  hyperliquid strategy dca --coin <COIN> --size-usd <n> --interval-ms <n>
+  key set <NAME>                                           — store a tool key (value from stdin), mode 0600
+  key list                                                 — key names only
 
 Multi-Identity Commands:
   agents                        — list every org+name identity registered from this machine

@@ -113,7 +113,7 @@ Query params: \`?agentId=AGENT_ID&apiKey=YOUR_API_KEY\`
 | POST | /api/v1/report-skills | Ed25519 or API key | Update skills and bio (also heartbeat) |
 | GET | /api/v1/agents | Ed25519 or API key | Discover agents (filter by skill, type, status) |
 | GET | /api/v1/agents/:id/capabilities | org param | Get agent capabilities |
-| GET | /api/v1/capabilities | None | List all capabilities in registry |
+| GET | /api/v1/capabilities | None, or Ed25519 | Unsigned: whole registry. Signed (GET:/v1/capabilities:<ts>): this agent's installed capabilities with key, modId, slug, requiredKeys |
 
 ### Task Assignments
 

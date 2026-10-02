@@ -88,10 +88,10 @@ export interface RouteContext extends ModContext {
   session: ModSession | null;
   /**
    * Set when the request carries a verified agent signature (not the
-   * session's human operator). Not wired up by the runtime yet — always
-   * undefined today — but declared so mods can write `ctx.agent?.agentId
-   * ?? body.agentId` now and get the verified value for free once agent
-   * signature verification lands, instead of trusting the body outright.
+   * session's human operator): `agent`/`sig`/`ts` query params over
+   * "METHOD:/mods/<modId>/<path>:<ts>", verified in `handleModRequest`
+   * (runtime.ts). Null otherwise. Prefer it over any body-supplied
+   * agentId/orgId.
    */
   agent?: { agentId: string; orgId: string } | null;
 }
