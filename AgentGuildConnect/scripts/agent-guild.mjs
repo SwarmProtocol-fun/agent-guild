@@ -1904,8 +1904,8 @@ async function handleReplyFailure(config, privateKey, msg, now, detail) {
  * forget from replyPollTick's perspective) so a slow LLM call never blocks
  * the next 2s tick; inFlightReplyIds is what stops that from double-replying.
  *
- * `ctx.isDm`/`ctx.isHub` tell the reply command which session/sandbox to run
- * under (see grok-reply.mjs); `ctx.history` is the last few prior messages
+ * `ctx.belt` (an owner message in this agent's DM) picks the builder belt
+ * session; everything else runs sandboxed (see grok-reply.mjs); `ctx.history` is the last few prior messages
  * in this channel, so "do that" has something to point at.
  */
 async function processReply(config, privateKey, msg, ctx = {}) {
@@ -1934,8 +1934,8 @@ async function processReply(config, privateKey, msg, ctx = {}) {
     AGENT_GUILD_AGENT_TYPE: config.agentType || "",
     AGENT_GUILD_AGENT_BIO: config.bio || "",
     AGENT_GUILD_AGENT_ID: config.agentId || "",
-    AGENT_GUILD_CHANNEL_KIND: ctx.isDm ? "dm" : "hub",
-  }, ctx.isDm ? DM_REPLY_TIMEOUT_MS : REPLY_TIMEOUT_MS);
+    AGENT_GUILD_CHANNEL_KIND: ctx.belt ? "dm" : "hub",
+  }, ctx.belt ? DM_REPLY_TIMEOUT_MS : REPLY_TIMEOUT_MS);
   if (!result.ok) {
     await handleReplyFailure(config, privateKey, msg, now, result.error);
     return;
@@ -2126,7 +2126,12 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     if (inFlightReplyIds.has(msg.id)) continue; // a reply for this id is already generating
 
     inFlightReplyIds.add(msg.id);
-    const ctx = { isDm, isHub, history: historyForMsg.get(msg.id) || [] };
+    // The DM belt (shell, bypassPermissions) is for the org owner only. Any
+    // org member can post in this DM, so everyone else gets the sandboxed
+    // hub-style reply. fromOwner comes from the hub (v1/messages), which
+    // checks the sender wallet; a hub too old to send it means no belt.
+    const belt = isDm && msg.fromOwner === true;
+    const ctx = { isDm, isHub, belt, history: historyForMsg.get(msg.id) || [] };
     const run = () => processReply(config, privateKey, msg, ctx)
       .catch((err) => { console.error(`reply queue (${msg.id}): ${err.message}`); })
       .finally(() => inFlightReplyIds.delete(msg.id));

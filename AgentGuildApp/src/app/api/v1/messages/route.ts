@@ -33,6 +33,8 @@ const SCOPE_TTL_MS = 60_000;
 type ChannelScope = {
     channelIds: string[];
     channelMeta: Record<string, { name: string; projectId: string }>;
+    /** Lowercased org owner wallet, or "" — see fromOwner below. */
+    ownerAddress: string;
 };
 const scopeCache = new Map<string, { scope: ChannelScope; expiresAt: number }>();
 
@@ -103,7 +105,13 @@ async function getChannelScope(agentId: string, fallbackOrgId: string): Promise<
         }
     }
 
-    const scope = { channelIds, channelMeta };
+    let ownerAddress = "";
+    if (orgId) {
+        const orgSnap = await adminDb().collection("organizations").doc(orgId).get();
+        ownerAddress = String(orgSnap.data()?.ownerAddress || "").toLowerCase();
+    }
+
+    const scope = { channelIds, channelMeta, ownerAddress };
     scopeCache.set(agentId, { scope, expiresAt: Date.now() + SCOPE_TTL_MS });
     return scope;
 }
@@ -160,7 +168,7 @@ export async function GET(request: NextRequest) {
         if (!scope) {
             return Response.json({ error: "Agent not found" }, { status: 404 });
         }
-        const { channelIds, channelMeta } = scope;
+        const { channelIds, channelMeta, ownerAddress } = scope;
 
         if (channelIds.length === 0) {
             return Response.json({ messages: [], channels: [] });
@@ -173,6 +181,7 @@ export async function GET(request: NextRequest) {
             channelName: string;
             from: string;
             fromType: string;
+            fromOwner: boolean;
             text: string;
             timestamp: number;
             attachments?: Array<{ url: string; name: string; type: string; size: number }>;
@@ -207,6 +216,13 @@ export async function GET(request: NextRequest) {
                     channelName: channelMeta[channelId]?.name || channelId,
                     from: m.senderName || m.senderId || "unknown",
                     fromType: m.senderType || "user",
+                    // True only for a human message whose senderId is the org
+                    // owner's wallet. firestore.rules pins a human message's
+                    // senderId to the signed-in wallet and freezes it after
+                    // create, so a member cannot post as the owner. The
+                    // daemon gives the DM builder belt (shell) only to these.
+                    fromOwner: m.senderType === "human" && !!ownerAddress &&
+                        String(m.senderId || "").toLowerCase() === ownerAddress,
                     text: m.content || m.text || "",
                     timestamp: m.createdAt?.toMillis?.() || m.ts || 0,
                 };

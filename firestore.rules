@@ -313,12 +313,24 @@ service cloud.firestore {
     // is itself orgId-scoped above. Scope messages transitively through
     // their parent channel instead of trusting a possibly-absent field.
     match /messages/{docId} {
-      allow read, update, delete: if request.auth != null &&
+      allow read, delete: if request.auth != null &&
         exists(/databases/$(database)/documents/channels/$(resource.data.channelId)) &&
         isOrgMember(get(/databases/$(database)/documents/channels/$(resource.data.channelId)).data.orgId);
+      // Who sent it and what it says are fixed at create. An agent DM runs
+      // shell for its org owner's messages (v1/messages `fromOwner`), so a
+      // member must not be able to rewrite one, or relabel their own as it.
+      allow update: if request.auth != null &&
+        exists(/databases/$(database)/documents/channels/$(resource.data.channelId)) &&
+        isOrgMember(get(/databases/$(database)/documents/channels/$(resource.data.channelId)).data.orgId) &&
+        !request.resource.data.diff(resource.data).affectedKeys()
+          .hasAny(['senderId', 'senderAddress', 'senderType', 'channelId', 'content', 'text']);
+      // A human message is sent as the signed-in wallet (auth.uid is the
+      // lowercased address), never as someone else's.
       allow create: if request.auth != null &&
         exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId)) &&
-        isOrgMember(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data.orgId);
+        isOrgMember(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data.orgId) &&
+        (request.resource.data.get('senderType', '') != 'human' ||
+          string(request.resource.data.get('senderId', '')).lower() == request.auth.uid);
     }
 
     // ── Category B: owner-scoped, not org-scoped ────────────────────────
