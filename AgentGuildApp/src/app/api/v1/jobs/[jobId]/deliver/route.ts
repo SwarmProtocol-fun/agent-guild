@@ -14,7 +14,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, submitJobDelivery, recordEscrowDelivered } from "@/lib/firestore";
+import { getJob, submitJobDelivery, recordEscrowDelivered } from "@/lib/jobs-admin";
 
 export async function POST(
   request: NextRequest,

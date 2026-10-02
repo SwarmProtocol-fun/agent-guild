@@ -19,7 +19,6 @@ import {
   arrayRemove,
   increment,
   writeBatch,
-  runTransaction,
   limit as fsLimit,
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -32,6 +31,7 @@ export interface Organization {
   id: string;
   name: string;
   description?: string;
+  /** @deprecated Legacy — codes now live server-side in orgInvites; use useOrgInviteCode. */
   inviteCode?: string;
   ownerAddress: string;
   logoUrl?: string;
@@ -128,6 +128,8 @@ export interface Agent {
   offlineAt?: unknown;
   projectIds: string[];
   apiKey?: string;
+  /** SHA-256 of the agent's API key; agent auth compares against this */
+  apiKeyHash?: string;
   avatarUrl?: string;
   /** When the agent was paused (if status is 'paused') */
   pausedAt?: unknown;
@@ -371,7 +373,9 @@ export async function getProfilesByAddresses(addresses: string[]): Promise<Map<s
 // ─── Organizations ──────────────────────────────────────
 
 export async function createOrganization(data: Omit<Organization, "id">): Promise<string> {
-  const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+  // No inviteCode here: org docs are readable by every signed-in wallet, so a
+  // code stored on one could be read by anyone. Codes are created on demand,
+  // server-side, by GET /api/v1/orgs/:orgId/invite-code (useOrgInviteCode).
   // ownerAddress/members must match Firebase Auth's uid (always
   // lowercased — see auth/verify/route.ts's createCustomToken call), or
   // firestore.rules' isOrgMember() silently locks the owner out of their
@@ -383,7 +387,6 @@ export async function createOrganization(data: Omit<Organization, "id">): Promis
     members: data.members.map(canonicalizeWalletAddress),
     description: data.description || "",
     isPrivate: false,
-    inviteCode,
     createdAt: serverTimestamp(),
   });
   return ref.id;
@@ -773,6 +776,9 @@ export interface Job {
   sellerOrgId?: string;
   /** Real on-chain escrow state for this order, when the gig had escrowEnabled. */
   escrow?: GigEscrow;
+  /** Set server-side once the upfront SOL payment is verified on-chain (gig-payment-verify.ts). */
+  upfrontVerifiedAt?: unknown;
+  upfrontVerifiedLamports?: number;
   // Delivery & Review
   deliveryNotes?: string;
   deliveryFiles?: string[]; // URLs to uploaded files
@@ -1282,28 +1288,22 @@ export async function getGigReviews(gigId: string): Promise<GigReview[]> {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as GigReview));
 }
 
-/** Adds a review and atomically rolls it into the gig's avgRating/ratingCount. */
+/**
+ * Adds a review and rolls it into the gig's avgRating/ratingCount. Goes through
+ * POST /api/v1/gigs/:gigId/reviews, which verifies the caller actually bought
+ * and approved this order — rules deny direct client writes to reviews and
+ * rating counters. orgId/authorAddress are derived server-side from the job
+ * and session, not taken from `data`.
+ */
 export async function addGigReview(data: Omit<GigReview, "id" | "createdAt">): Promise<string> {
-  const existing = await getGigReviewByJob(data.jobId);
-  if (existing) throw new Error("This order has already been reviewed");
-
-  const reviewRef = doc(collection(db, "gigReviews"));
-  const gigRef = doc(db, "gigs", data.gigId);
-
-  await runTransaction(db, async (tx) => {
-    const gigSnap = await tx.get(gigRef);
-    if (!gigSnap.exists()) throw new Error("Gig not found");
-    const gigData = gigSnap.data() as Gig;
-    const prevCount = gigData.ratingCount ?? 0;
-    const prevAvg = gigData.avgRating ?? 0;
-    const nextCount = prevCount + 1;
-    const nextAvg = (prevAvg * prevCount + data.rating) / nextCount;
-
-    tx.set(reviewRef, { ...data, createdAt: serverTimestamp() });
-    tx.update(gigRef, { avgRating: nextAvg, ratingCount: nextCount });
+  const res = await fetch(`/api/v1/gigs/${encodeURIComponent(data.gigId)}/reviews`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobId: data.jobId, rating: data.rating, review: data.review }),
   });
-
-  return reviewRef.id;
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Failed to submit review");
+  return body.id as string;
 }
 
 // ─── Agent Communications ───────────────────────────────

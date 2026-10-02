@@ -10,8 +10,7 @@
  *   - hub/index.mjs verifyGatewayEd25519() — WebSocket auth
  */
 import crypto from "crypto";
-import { db } from "@/lib/firebase";
-import { doc, getDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 
 // ── Nonce tracking (gateway-specific) ─────────────────────
 
@@ -97,10 +96,9 @@ export async function verifyGatewayRequest(
   if (!checkAndRecordNonce(signatureBase64)) return null;
 
   try {
-    const snap = await getDoc(doc(db, "gatewayWorkers", gatewayId));
-    if (!snap.exists()) return null;
-
+    const snap = await adminDb().collection("gatewayWorkers").doc(gatewayId).get();
     const data = snap.data();
+    if (!data) return null;
     const publicKeyPem = data.publicKey;
     if (!publicKeyPem) return null;
 

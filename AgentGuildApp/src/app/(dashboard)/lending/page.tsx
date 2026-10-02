@@ -23,17 +23,13 @@ import { db } from "@/lib/firebase";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-dialog";
 import type { Agent } from "@/lib/firestore";
-import type { LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
+import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
+import { poolSharePrice as sharePrice, freeShares } from "@/lib/lending/math";
 
 type Tab = "pools" | "fund" | "offers" | "positions";
 
 function fmt(n: number): string {
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-}
-
-function sharePrice(pool: LendingPool): number {
-    if (pool.totalShares <= 0) return 1;
-    return (pool.availableLiquidityUsd + pool.totalLentUsd) / pool.totalShares;
 }
 
 export default function LendingMarketplacePage() {
@@ -47,6 +43,9 @@ export default function LendingMarketplacePage() {
     const [positions, setPositions] = useState<Record<string, PoolPosition>>({});
     const [fundedLoans, setFundedLoans] = useState<Loan[]>([]);
     const [pendingWithdrawals, setPendingWithdrawals] = useState<PoolWithdrawalRequest[]>([]);
+    const [payouts, setPayouts] = useState<{ owedToYou: LendingPayout[]; owedByYou: LendingPayout[] }>({ owedToYou: [], owedByYou: [] });
+    const [settlingPayout, setSettlingPayout] = useState<LendingPayout | null>(null);
+    const [positionsError, setPositionsError] = useState<string | null>(null);
     const [agentNames, setAgentNames] = useState<Record<string, string>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -95,11 +94,15 @@ export default function LendingMarketplacePage() {
 
                 const myOffersRes = await fetch(`/api/v1/lending/offers?lenderWallet=${sessionAddress}`);
                 setMyOffers(myOffersRes.ok ? (await myOffersRes.json()).offers : []);
+
+                const payoutsRes = await fetch("/api/v1/lending/payouts?mine=1");
+                setPayouts(payoutsRes.ok ? await payoutsRes.json() : { owedToYou: [], owedByYou: [] });
             } else {
                 setPositions({});
                 setFundedLoans([]);
                 setPendingWithdrawals([]);
                 setMyOffers([]);
+                setPayouts({ owedToYou: [], owedByYou: [] });
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : "Failed to load lending data");
@@ -184,7 +187,7 @@ export default function LendingMarketplacePage() {
                                 const price = sharePrice(pool);
                                 const yieldPct = pool.totalDepositedUsd > 0 ? (pool.totalInterestEarnedUsd / pool.totalDepositedUsd) * 100 : 0;
                                 const position = positions[pool.id];
-                                const positionValue = position ? position.shares * price : 0;
+                                const positionValue = position ? freeShares(position) * price : 0;
                                 return (
                                     <Card key={pool.id}>
                                         <CardHeader>
@@ -323,7 +326,7 @@ export default function LendingMarketplacePage() {
                                             {pools.filter((p) => positions[p.id]).map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <span>{p.name}</span>
-                                                    <span className="font-mono">${fmt(positions[p.id].shares * sharePrice(p))}</span>
+                                                    <span className="font-mono">${fmt(freeShares(positions[p.id]) * sharePrice(p))}</span>
                                                 </div>
                                             ))}
                                         </div>
@@ -336,7 +339,59 @@ export default function LendingMarketplacePage() {
                                             {pendingWithdrawals.filter((w) => w.status === "pending_payout").map((w) => (
                                                 <div key={w.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <span>${fmt(w.amountUsd)} requested</span>
-                                                    <Badge variant="outline" className="text-[10px]">awaiting admin payout</Badge>
+                                                    <div className="flex items-center gap-2">
+                                                        <Badge variant="outline" className="text-[10px]">awaiting admin payout</Badge>
+                                                        <Button
+                                                            size="sm"
+                                                            variant="ghost"
+                                                            className="h-6 text-[10px] px-2"
+                                                            onClick={async () => {
+                                                                setPositionsError(null);
+                                                                const res = await fetch(`/api/v1/lending/pools/withdrawals/${w.id}/cancel`, { method: "POST" });
+                                                                if (!res.ok) setPositionsError((await res.json().catch(() => ({}))).error || "Failed to cancel withdrawal");
+                                                                setRefreshKey((k) => k + 1);
+                                                            }}
+                                                        >
+                                                            Cancel
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                {positionsError && (
+                                    <div className="flex items-center gap-2 text-xs text-red-500">
+                                        <AlertCircle className="h-3.5 w-3.5" /> {positionsError}
+                                    </div>
+                                )}
+                                {payouts.owedByYou.some((p) => p.status === "pending") && (
+                                    <div>
+                                        <h3 className="text-sm font-semibold mb-2">Refunds You Owe</h3>
+                                        <div className="space-y-2">
+                                            {payouts.owedByYou.filter((p) => p.status === "pending").map((p) => (
+                                                <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-amber-500/30 text-xs">
+                                                    <div>
+                                                        <div>${fmt(p.amountUsd)} to <span className="font-mono">{p.toWallet.slice(0, 6)}…{p.toWallet.slice(-4)}</span></div>
+                                                        <div className="text-[10px] text-muted-foreground">{p.reason}</div>
+                                                    </div>
+                                                    <Button size="sm" className="h-6 text-[10px] px-2" onClick={() => setSettlingPayout(p)}>Send Refund</Button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                {payouts.owedToYou.length > 0 && (
+                                    <div>
+                                        <h3 className="text-sm font-semibold mb-2">Payouts Owed to You</h3>
+                                        <div className="space-y-2">
+                                            {payouts.owedToYou.map((p) => (
+                                                <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
+                                                    <div>
+                                                        <div>${fmt(p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")}</div>
+                                                        <div className="text-[10px] text-muted-foreground">{p.reason}</div>
+                                                    </div>
+                                                    <Badge variant="outline" className="text-[10px]">{p.status === "paid" ? "paid" : "queued"}</Badge>
                                                 </div>
                                             ))}
                                         </div>
@@ -404,7 +459,7 @@ export default function LendingMarketplacePage() {
                     pool={poolDialog.pool}
                     mode={poolDialog.mode}
                     walletAddress={sessionAddress}
-                    maxWithdraw={poolDialog.mode === "withdraw" && positions[poolDialog.pool.id] ? positions[poolDialog.pool.id].shares * sharePrice(poolDialog.pool) : undefined}
+                    maxWithdraw={poolDialog.mode === "withdraw" && positions[poolDialog.pool.id] ? freeShares(positions[poolDialog.pool.id]) * sharePrice(poolDialog.pool) : undefined}
                     onClose={() => setPoolDialog(null)}
                     onDone={() => {
                         setPoolDialog(null);
@@ -424,6 +479,30 @@ export default function LendingMarketplacePage() {
                         setRefreshKey((k) => k + 1);
                     }}
                 />
+            )}
+
+            {settlingPayout && (
+                <Dialog open onOpenChange={(open) => !open && setSettlingPayout(null)}>
+                    <DialogContent className="max-w-sm">
+                        <DialogHeader><DialogTitle>Send Refund</DialogTitle></DialogHeader>
+                        <OnChainSendStep
+                            recipientAddress={settlingPayout.toWallet}
+                            amountUsd={settlingPayout.amountUsd}
+                            helperText={`${settlingPayout.reason}. Send exactly this amount from your wallet, then paste the signature.`}
+                            submitLabel="Confirm Refund"
+                            onSubmit={async (txSig) => {
+                                const res = await fetch(`/api/v1/lending/payouts/${settlingPayout.id}/confirm`, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ txSig }),
+                                });
+                                if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to confirm refund");
+                                setSettlingPayout(null);
+                                setRefreshKey((k) => k + 1);
+                            }}
+                        />
+                    </DialogContent>
+                </Dialog>
             )}
 
             <CreateLoanOfferDialog
@@ -459,6 +538,24 @@ function PoolActionDialog({
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [done, setDone] = useState(false);
+    const [refundedUsd, setRefundedUsd] = useState(0);
+    // undefined = still loading; null = uncapped
+    const [capacityUsd, setCapacityUsd] = useState<number | null | undefined>(undefined);
+    const [blockedReason, setBlockedReason] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (mode === "deposit" && walletAddress) {
+            fetch(`/api/v1/lending/pools/${pool.id}/deposit-limit`)
+                .then((r) => r.json())
+                .then((d) => {
+                    setCapacityUsd(d.capacityUsd ?? null);
+                    if (d.paused) setBlockedReason("Lending is paused — deposits are temporarily closed.");
+                    else if (d.allowed === false) setBlockedReason("Lending is in a closed beta and this wallet isn't on the allowlist yet.");
+                    else if (d.capacityUsd === 0) setBlockedReason("This pool (or your wallet) has reached its beta deposit cap.");
+                })
+                .catch(() => setCapacityUsd(null));
+        }
+    }, [mode, pool.id, walletAddress]);
 
     useEffect(() => {
         if (mode === "deposit") {
@@ -515,6 +612,11 @@ function PoolActionDialog({
                         <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
                             <CheckCircle2 className="h-4 w-4" /> {mode === "deposit" ? "Deposit Verified" : "Withdrawal Requested"}
                         </div>
+                        {mode === "deposit" && refundedUsd > 0 && (
+                            <p className="text-xs text-amber-500">
+                                ${fmt(refundedUsd)} was over the beta deposit cap and wasn&apos;t credited — a refund from the treasury has been queued (see My Positions).
+                            </p>
+                        )}
                         {mode === "withdraw" && (
                             <p className="text-xs text-muted-foreground">
                                 A platform admin will send the USDC from the treasury shortly — this pool has no signing key of its own.
@@ -530,6 +632,12 @@ function PoolActionDialog({
                             {mode === "withdraw" && maxWithdraw !== undefined && (
                                 <p className="text-[10px] text-muted-foreground mt-1">Max: ${fmt(maxWithdraw)}</p>
                             )}
+                            {mode === "deposit" && typeof capacityUsd === "number" && capacityUsd > 0 && (
+                                <p className="text-[10px] text-muted-foreground mt-1">Beta limit: up to ${fmt(capacityUsd)}</p>
+                            )}
+                            {mode === "deposit" && blockedReason && (
+                                <p className="text-[10px] text-amber-500 mt-1">{blockedReason}</p>
+                            )}
                         </div>
                         {error && (
                             <div className="p-2 rounded-lg border border-red-500/20 bg-red-500/5 flex items-center gap-2 text-xs text-red-400">
@@ -540,7 +648,10 @@ function PoolActionDialog({
                             <Button
                                 size="sm"
                                 onClick={() => setStep("send")}
-                                disabled={!(amountUsd > 0) || !treasury}
+                                disabled={
+                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined
+                                    || (typeof capacityUsd === "number" && amountUsd > capacityUsd)
+                                }
                                 className="w-full h-8 text-xs gap-1"
                             >
                                 {!treasury && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -565,10 +676,9 @@ function PoolActionDialog({
                                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
                                 body: JSON.stringify({ amountUsd, txSig }),
                             });
-                            if (!res.ok) {
-                                const body = await res.json().catch(() => ({}));
-                                throw new Error(body.error || "Deposit verification failed");
-                            }
+                            const body = await res.json().catch(() => ({}));
+                            if (!res.ok) throw new Error(body.error || "Deposit verification failed");
+                            setRefundedUsd(body.refundedUsd || 0);
                             setDone(true);
                         }}
                     />

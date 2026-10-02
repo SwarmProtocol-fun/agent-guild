@@ -21,16 +21,34 @@ export interface PolicyGuardResult {
 }
 
 /**
+ * Where resolveAgentPolicy reads its inputs from. Defaults to the client SDK
+ * (this module must stay importable from the browser bundle); server code
+ * passes Admin SDK loaders instead — see `adminPolicyLoaders` in
+ * credit-policy-settings-admin.ts — because the client SDK has no signed-in
+ * user on the server and Firestore rules deny its reads.
+ */
+export interface PolicyLoaders {
+  getAgent(agentId: string): Promise<import("./firestore").Agent | null>;
+  getCreditPolicyConfig(): Promise<import("./credit-policy-settings").CreditPolicyConfig>;
+  getOrgPolicyOverride(orgId: string): Promise<import("./credit-policy").OrgPolicyOverride | null>;
+}
+
+async function clientPolicyLoaders(): Promise<PolicyLoaders> {
+  const { getAgent } = await import("@/lib/firestore");
+  const { getCreditPolicyConfig, getOrgPolicyOverride } = await import("@/lib/credit-policy-settings");
+  return { getAgent, getCreditPolicyConfig, getOrgPolicyOverride };
+}
+
+/**
  * Resolve effective credit policy for an agent.
  * Loads agent from Firestore → resolves tier from scores/flags →
  * applies org overrides → checks enforcement toggle.
  *
  * Returns a passthrough Standard-tier policy if enforcement is disabled.
  */
-export async function resolveAgentPolicy(agentId: string): Promise<PolicyGuardResult> {
-  const { getAgent } = await import("@/lib/firestore");
+export async function resolveAgentPolicy(agentId: string, loaders?: PolicyLoaders): Promise<PolicyGuardResult> {
+  const { getAgent, getCreditPolicyConfig, getOrgPolicyOverride } = loaders ?? await clientPolicyLoaders();
   const { resolvePolicyTier, resolveEffectivePolicy, getTier } = await import("@/lib/credit-policy");
-  const { getCreditPolicyConfig, getOrgPolicyOverride } = await import("@/lib/credit-policy-settings");
 
   // 1. Load agent
   const agent = await getAgent(agentId);

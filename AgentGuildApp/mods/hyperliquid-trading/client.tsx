@@ -89,15 +89,15 @@ function formatCompactUsd(n: number) {
 }
 
 const inputClass =
-  "w-full rounded-sm border border-input bg-background px-2.5 py-1.5 text-sm placeholder:text-muted-foreground " +
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
+  "w-full rounded-sm border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2.5 py-1.5 text-sm placeholder:text-[hsl(var(--muted-foreground))] " +
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))]";
 
-const labelClass = "block text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1";
+const labelClass = "block text-[11px] font-medium uppercase tracking-wide text-[hsl(var(--muted-foreground))] mb-1";
 
 const monoClass = "font-mono tabular-nums";
 
 function pnlClass(value: number) {
-  return value >= 0 ? "text-green-600 dark:text-green-400" : "text-destructive";
+  return value >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400";
 }
 
 function signed(value: number) {
@@ -105,7 +105,7 @@ function signed(value: number) {
 }
 
 function PulseDot({ tone }: { tone: "live" | "idle" | "danger" }) {
-  const color = { live: "bg-green-500", idle: "bg-muted-foreground/40", danger: "bg-destructive" }[tone];
+  const color = { live: "bg-green-500", idle: "bg-[hsl(var(--muted-foreground))]/40", danger: "bg-red-500" }[tone];
   return (
     <span className="relative inline-flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
       {tone === "live" && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${color} opacity-60`} />}
@@ -116,27 +116,27 @@ function PulseDot({ tone }: { tone: "live" | "idle" | "danger" }) {
 
 function primaryButtonClass(extra = "") {
   return (
-    "inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground " +
-    "transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50 " +
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background " +
+    "inline-flex items-center justify-center rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-white " +
+    "transition-colors hover:bg-[hsl(var(--primary))]/90 disabled:pointer-events-none disabled:opacity-50 " +
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))] " +
     extra
   );
 }
 
 function secondaryButtonClass(extra = "") {
   return (
-    "inline-flex items-center justify-center rounded-md border border-input bg-background px-3 py-1.5 text-sm font-medium " +
-    "transition-colors hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50 " +
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background " +
+    "inline-flex items-center justify-center rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-1.5 text-sm font-medium " +
+    "transition-colors hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] disabled:pointer-events-none disabled:opacity-50 " +
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))] " +
     extra
   );
 }
 
 function Badge({ tone, children }: { tone: "neutral" | "success" | "danger" | "warning"; children: React.ReactNode }) {
   const toneClass = {
-    neutral: "bg-muted text-muted-foreground",
+    neutral: "bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]",
     success: "bg-green-600/10 text-green-700 dark:text-green-400",
-    danger: "bg-destructive/10 text-destructive",
+    danger: "bg-red-500/10 text-red-600 dark:text-red-400",
     warning: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
   }[tone];
   return (
@@ -154,11 +154,11 @@ function Section({ title, description, dense, right, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-sm border border-border bg-card">
-      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+    <div className="rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+      <div className="flex items-center justify-between gap-2 border-b border-[hsl(var(--border))] px-3 py-2">
         <div>
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-card-foreground">{title}</h2>
-          {description && <p className="text-xs text-muted-foreground mt-0.5">{description}</p>}
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-[hsl(var(--card-foreground))]">{title}</h2>
+          {description && <p className="text-xs text-[hsl(var(--muted-foreground))] mt-0.5">{description}</p>}
         </div>
         {right}
       </div>
@@ -169,9 +169,9 @@ function Section({ title, description, dense, right, children }: {
 
 function Spinner({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-2 text-sm text-muted-foreground py-4" role="status">
+    <div className="flex items-center gap-2 text-sm text-[hsl(var(--muted-foreground))] py-4" role="status">
       <span
-        className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-foreground motion-reduce:animate-none"
+        className="h-4 w-4 animate-spin rounded-full border-2 border-[hsl(var(--muted-foreground))]/30 border-t-foreground motion-reduce:animate-none"
         aria-hidden="true"
       />
       {label}
@@ -181,7 +181,7 @@ function Spinner({ label }: { label: string }) {
 
 function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <div className="flex items-center justify-between gap-3 rounded-md bg-[hsl(var(--destructive))]/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
       <span>{message}</span>
       {onRetry && (
         <button type="button" className={secondaryButtonClass("shrink-0")} onClick={onRetry}>
@@ -638,28 +638,28 @@ function TradingPanel({ api }: PanelProps) {
 
   return (
     <div className="max-w-3xl mx-auto space-y-3 p-4 text-sm">
-      <div className="flex items-center justify-between gap-3 rounded-sm border border-border bg-card px-3 py-2">
+      <div className="flex items-center justify-between gap-3 rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2">
         <div className="flex items-center gap-2">
           <PulseDot tone={walletStatus?.hasWallet ? "live" : "idle"} />
-          <h1 className="text-sm font-semibold uppercase tracking-wide text-foreground">Hyperliquid Trading</h1>
+          <h1 className="text-sm font-semibold uppercase tracking-wide text-[hsl(var(--foreground))]">Hyperliquid Trading</h1>
           {walletStatus?.hasWallet && (
             <Badge tone={walletStatus.network === "mainnet" ? "danger" : "neutral"}>{walletStatus.network}</Badge>
           )}
         </div>
         <div className="flex items-center gap-4 text-xs">
           {livePrice != null && (
-            <span className="text-muted-foreground">
-              {coin} <span className={`${monoClass} text-foreground`}>${livePrice.toLocaleString()}</span>
+            <span className="text-[hsl(var(--muted-foreground))]">
+              {coin} <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${livePrice.toLocaleString()}</span>
             </span>
           )}
           {accountValue != null && (
-            <span className="text-muted-foreground">
-              Equity <span className={`${monoClass} text-foreground`}>${accountValue.toFixed(2)}</span>
+            <span className="text-[hsl(var(--muted-foreground))]">
+              Equity <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${accountValue.toFixed(2)}</span>
             </span>
           )}
         </div>
       </div>
-      <p className="text-xs text-muted-foreground px-1">
+      <p className="text-xs text-[hsl(var(--muted-foreground))] px-1">
         Each agent trades with its own wallet via a GatewayAgent worker running the official SDK — no shared platform key.
       </p>
 
@@ -693,7 +693,7 @@ function TradingPanel({ api }: PanelProps) {
             placeholder="Decrypts this agent's wallet — never stored" value={masterSecret}
             onChange={(e) => setMasterSecret(e.target.value)} autoComplete="off"
           />
-          <p className="text-xs text-muted-foreground mt-1">
+          <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
             Held only in this tab while it&apos;s open. Required for every trade, close, or strategy execution below.
           </p>
         </div>
@@ -708,7 +708,7 @@ function TradingPanel({ api }: PanelProps) {
               <button type="button" className={secondaryButtonClass()} onClick={() => setWalletFormOpen((v) => !v)}>
                 Rotate key
               </button>
-              <button type="button" className={secondaryButtonClass("text-destructive hover:bg-destructive/10")} onClick={removeWallet}>
+              <button type="button" className={secondaryButtonClass("text-red-600 dark:text-red-400 hover:bg-[hsl(var(--destructive))]/10")} onClick={removeWallet}>
                 Remove
               </button>
             </div>
@@ -730,7 +730,7 @@ function TradingPanel({ api }: PanelProps) {
         )}
 
         {walletFormOpen && (
-          <form className="space-y-2 border-t border-border pt-2" onSubmit={saveWallet}>
+          <form className="space-y-2 border-t border-[hsl(var(--border))] pt-2" onSubmit={saveWallet}>
             <div>
               <label htmlFor="walletKey" className={labelClass}>Hyperliquid private key</label>
               <input
@@ -753,10 +753,10 @@ function TradingPanel({ api }: PanelProps) {
                 Save
               </button>
             </div>
-            {!masterSecret && <p className="text-xs text-muted-foreground">Enter a passphrase above first — it encrypts this key.</p>}
+            {!masterSecret && <p className="text-xs text-[hsl(var(--muted-foreground))]">Enter a passphrase above first — it encrypts this key.</p>}
           </form>
         )}
-        {walletActionStatus && <p className="text-xs text-muted-foreground">{walletActionStatus}</p>}
+        {walletActionStatus && <p className="text-xs text-[hsl(var(--muted-foreground))]">{walletActionStatus}</p>}
       </Section>
 
       {pendingStrategies.length > 0 && (
@@ -766,7 +766,7 @@ function TradingPanel({ api }: PanelProps) {
             <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
               Pending signals
             </span>
-            <span className="text-xs text-muted-foreground">— needs your passphrase to fire</span>
+            <span className="text-xs text-[hsl(var(--muted-foreground))]">— needs your passphrase to fire</span>
           </div>
           <div className="divide-y divide-amber-500/10">
             {pendingStrategies.map((s) => (
@@ -788,7 +788,7 @@ function TradingPanel({ api }: PanelProps) {
         </div>
       )}
 
-      <div role="tablist" aria-label="Trading sections" className="flex gap-1 border-b border-border overflow-x-auto">
+      <div role="tablist" aria-label="Trading sections" className="flex gap-1 border-b border-[hsl(var(--border))] overflow-x-auto">
         {TABS.map((tab) => {
           const count =
             tab.id === "positions" ? (Array.isArray(positions) ? positions.length : null) :
@@ -803,15 +803,15 @@ function TradingPanel({ api }: PanelProps) {
               aria-selected={activeTab === tab.id}
               className={
                 "px-2.5 py-1.5 text-xs font-medium uppercase tracking-wide border-b-2 -mb-px whitespace-nowrap transition-colors " +
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] " +
                 (activeTab === tab.id
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground")
+                  ? "border-[hsl(var(--primary))] text-[hsl(var(--foreground))]"
+                  : "border-transparent text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]")
               }
               onClick={() => setActiveTab(tab.id)}
             >
               {tab.label}
-              {count != null && <span className={`ml-1 ${monoClass} text-muted-foreground`}>{count}</span>}
+              {count != null && <span className={`ml-1 ${monoClass} text-[hsl(var(--muted-foreground))]`}>{count}</span>}
             </button>
           );
         })}
@@ -822,16 +822,17 @@ function TradingPanel({ api }: PanelProps) {
           title="Market overview"
           dense
           description="Every tradeable perp, ranked by 24h volume — click a row to load it into Trade."
-          right={
-            <div className="flex items-center gap-2">
-              <div className="flex rounded-sm border border-border overflow-hidden">
+          right={<button type="button" className={secondaryButtonClass()} onClick={loadMarket}>Refresh</button>}
+        >
+          <div className="flex items-center justify-between gap-2">
+              <div className="flex shrink-0 rounded-sm border border-[hsl(var(--border))] overflow-hidden">
                 {MARKET_SORTS.map((s) => (
                   <button
                     key={s.id}
                     type="button"
                     className={
                       "px-2 py-1 text-[11px] font-medium uppercase tracking-wide transition-colors " +
-                      (marketSort === s.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")
+                      (marketSort === s.id ? "bg-[hsl(var(--primary))] text-white" : "text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]")
                     }
                     onClick={() => setMarketSort(s.id)}
                   >
@@ -840,25 +841,23 @@ function TradingPanel({ api }: PanelProps) {
                 ))}
               </div>
               <input
-                className={`${inputClass} ${monoClass} w-24`}
-                placeholder="search"
+                aria-label="Search coins"
+                className={`${inputClass} ${monoClass} max-w-48`}
+                placeholder="search coin"
                 value={marketQuery}
                 onChange={(e) => setMarketQuery(e.target.value)}
               />
-              <button type="button" className={secondaryButtonClass()} onClick={loadMarket}>Refresh</button>
-            </div>
-          }
-        >
+          </div>
           {marketCoins === "loading" && <Spinner label="Loading market…" />}
           {marketCoins === "error" && <ErrorNote message="Couldn't load market overview." onRetry={loadMarket} />}
           {Array.isArray(marketCoins) && filteredMarket.length === 0 && (
-            <p className="text-sm text-muted-foreground">No coins match &quot;{marketQuery}&quot;.</p>
+            <p className="text-sm text-[hsl(var(--muted-foreground))]">No coins match &quot;{marketQuery}&quot;.</p>
           )}
           {Array.isArray(marketCoins) && filteredMarket.length > 0 && (
             <div className="max-h-[28rem] overflow-y-auto">
               <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-card">
-                  <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <thead className="sticky top-0 bg-[hsl(var(--card))]">
+                  <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
                     <th className="pb-1 font-medium">Coin</th>
                     <th className="pb-1 font-medium text-right">Price</th>
                     <th className="pb-1 font-medium text-right">24h %</th>
@@ -868,20 +867,20 @@ function TradingPanel({ api }: PanelProps) {
                     <th className="pb-1 font-medium text-right">Max lev</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border">
+                <tbody className="divide-y divide-[hsl(var(--border))]">
                   {filteredMarket.map((c) => (
                     <tr
                       key={c.coin}
-                      className="cursor-pointer hover:bg-accent/50"
+                      className="cursor-pointer hover:bg-[hsl(var(--accent))]/50"
                       onClick={() => pickCoin(c.coin)}
                     >
-                      <td className="py-1.5 font-medium text-foreground">{c.coin}</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${formatPrice(c.markPx)}</td>
+                      <td className="py-1.5 font-medium text-[hsl(var(--foreground))]">{c.coin}</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${formatPrice(c.markPx)}</td>
                       <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.change24hPct)}`}>{signed(c.change24hPct)}%</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{formatCompactUsd(c.volume24hUsd)}</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{formatCompactUsd(c.openInterestUsd)}</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{formatCompactUsd(c.volume24hUsd)}</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{formatCompactUsd(c.openInterestUsd)}</td>
                       <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.fundingRatePct)}`}>{c.fundingRatePct.toFixed(4)}%</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>{c.maxLeverage}x</td>
+                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{c.maxLeverage}x</td>
                     </tr>
                   ))}
                 </tbody>
@@ -907,12 +906,12 @@ function TradingPanel({ api }: PanelProps) {
                 />
               </div>
             </div>
-            <div className="flex items-center justify-between rounded-sm border border-border bg-background px-2.5 py-1.5">
-              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <div className="flex items-center justify-between rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2.5 py-1.5">
+              <span className="flex items-center gap-1.5 text-xs text-[hsl(var(--muted-foreground))]">
                 <PulseDot tone={livePrice != null ? "live" : "idle"} />
                 Mid price
               </span>
-              <span className={`${monoClass} text-sm text-foreground`}>
+              <span className={`${monoClass} text-sm text-[hsl(var(--foreground))]`}>
                 {livePrice != null ? `$${livePrice.toLocaleString()}` : "—"}
               </span>
             </div>
@@ -946,7 +945,7 @@ function TradingPanel({ api }: PanelProps) {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <input id="isBuy" name="isBuy" type="checkbox" checked={isBuy} onChange={(e) => setIsBuy(e.target.checked)} className="h-4 w-4 rounded border-input focus-visible:ring-2 focus-visible:ring-ring" />
+              <input id="isBuy" name="isBuy" type="checkbox" checked={isBuy} onChange={(e) => setIsBuy(e.target.checked)} className="h-4 w-4 rounded border-[hsl(var(--input))] focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]" />
               <label htmlFor="isBuy" className="text-sm">Buy (unchecked = sell)</label>
             </div>
             <div className="flex gap-2">
@@ -957,9 +956,9 @@ function TradingPanel({ api }: PanelProps) {
                 Check status
               </button>
             </div>
-            {!walletStatus?.hasWallet && <p className="text-xs text-muted-foreground">Set a wallet above before trading.</p>}
-            {taskId && <p className="text-xs text-muted-foreground">task: {taskId}</p>}
-            {tradeStatus && <p className="text-sm text-muted-foreground">{tradeStatus}</p>}
+            {!walletStatus?.hasWallet && <p className="text-xs text-[hsl(var(--muted-foreground))]">Set a wallet above before trading.</p>}
+            {taskId && <p className="text-xs text-[hsl(var(--muted-foreground))]">task: {taskId}</p>}
+            {tradeStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{tradeStatus}</p>}
           </form>
         </Section>
       )}
@@ -971,8 +970,8 @@ function TradingPanel({ api }: PanelProps) {
           right={
             <div className="flex items-center gap-3">
               {accountValue != null && (
-                <span className="text-xs text-muted-foreground">
-                  Equity <span className={`${monoClass} text-foreground`}>${accountValue.toFixed(2)}</span>
+                <span className="text-xs text-[hsl(var(--muted-foreground))]">
+                  Equity <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${accountValue.toFixed(2)}</span>
                 </span>
               )}
               <button type="button" className={secondaryButtonClass()} onClick={refreshAccount} disabled={!wallet}>
@@ -983,12 +982,12 @@ function TradingPanel({ api }: PanelProps) {
         >
           {positions === "loading" && <Spinner label="Loading positions…" />}
           {positions === "error" && <ErrorNote message="Couldn't load positions." onRetry={refreshAccount} />}
-          {positions === null && <p className="text-sm text-muted-foreground">Enter a wallet address and refresh to see positions.</p>}
-          {Array.isArray(positions) && positions.length === 0 && <p className="text-sm text-muted-foreground">No open positions.</p>}
+          {positions === null && <p className="text-sm text-[hsl(var(--muted-foreground))]">Enter a wallet address and refresh to see positions.</p>}
+          {Array.isArray(positions) && positions.length === 0 && <p className="text-sm text-[hsl(var(--muted-foreground))]">No open positions.</p>}
           {Array.isArray(positions) && positions.length > 0 && (
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
                   <th className="pb-1 font-medium">Coin</th>
                   <th className="pb-1 font-medium text-right">Notional</th>
                   <th className="pb-1 font-medium text-right">Entry</th>
@@ -996,15 +995,15 @@ function TradingPanel({ api }: PanelProps) {
                   <th className="pb-1 font-medium text-right"></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-border">
+              <tbody className="divide-y divide-[hsl(var(--border))]">
                 {positions.map((p) => (
                   <tr key={p.coin}>
                     <td className="py-1.5">
-                      <span className="font-medium text-foreground">{p.coin}</span>{" "}
+                      <span className="font-medium text-[hsl(var(--foreground))]">{p.coin}</span>{" "}
                       <Badge tone={p.size > 0 ? "success" : "danger"}>{p.size > 0 ? "long" : "short"}</Badge>
                     </td>
-                    <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${Math.abs(p.notionalUsd).toFixed(2)}</td>
-                    <td className={`py-1.5 text-right ${monoClass} text-muted-foreground`}>${p.entryPrice.toFixed(2)}</td>
+                    <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${Math.abs(p.notionalUsd).toFixed(2)}</td>
+                    <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>${p.entryPrice.toFixed(2)}</td>
                     <td className={`py-1.5 text-right ${monoClass} ${pnlClass(p.unrealizedPnl)}`}>{signed(p.unrealizedPnl)}</td>
                     <td className="py-1.5 text-right">
                       <button
@@ -1033,9 +1032,9 @@ function TradingPanel({ api }: PanelProps) {
         >
           {strategies === "loading" && <Spinner label="Loading strategies…" />}
           {strategies === "error" && <ErrorNote message="Couldn't load strategies." onRetry={loadStrategies} />}
-          {Array.isArray(strategies) && strategies.length === 0 && <p className="text-sm text-muted-foreground">No strategies yet — create one below.</p>}
+          {Array.isArray(strategies) && strategies.length === 0 && <p className="text-sm text-[hsl(var(--muted-foreground))]">No strategies yet — create one below.</p>}
           {Array.isArray(strategies) && strategies.length > 0 && (
-            <div className="divide-y divide-border rounded-sm border border-border">
+            <div className="divide-y divide-[hsl(var(--border))] rounded-sm border border-[hsl(var(--border))]">
               {strategies.map((s) => (
                 <div key={s.id} className="p-2 text-sm space-y-2">
                   <div className="flex items-center justify-between">
@@ -1058,16 +1057,16 @@ function TradingPanel({ api }: PanelProps) {
                   </div>
 
                   {s.type === "signal" && (
-                    <div className="border-t border-border pt-2 space-y-1">
+                    <div className="border-t border-[hsl(var(--border))] pt-2 space-y-1">
                       <div className="flex items-center justify-between gap-2">
                         {webhookUrls[s.id] || s.webhookToken ? (
                           <>
-                            <code className={`text-xs text-muted-foreground truncate ${monoClass}`}>
+                            <code className={`text-xs text-[hsl(var(--muted-foreground))] truncate ${monoClass}`}>
                               {webhookUrls[s.id] ?? "webhook configured — generate again to view the URL"}
                             </code>
                             <button
                               type="button"
-                              className={secondaryButtonClass("text-destructive hover:bg-destructive/10 shrink-0")}
+                              className={secondaryButtonClass("text-red-600 dark:text-red-400 hover:bg-[hsl(var(--destructive))]/10 shrink-0")}
                               onClick={() => revokeWebhook(s.id)}
                               disabled={webhookBusyId === s.id}
                             >
@@ -1076,7 +1075,7 @@ function TradingPanel({ api }: PanelProps) {
                           </>
                         ) : (
                           <>
-                            <span className="text-xs text-muted-foreground">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
+                            <span className="text-xs text-[hsl(var(--muted-foreground))]">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
                             <button type="button" className={secondaryButtonClass("shrink-0")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
                               {webhookBusyId === s.id ? "Generating…" : "Generate webhook"}
                             </button>
@@ -1098,7 +1097,7 @@ function TradingPanel({ api }: PanelProps) {
             </div>
           )}
 
-          <form className="space-y-2 border-t border-border pt-3" onSubmit={createStrategy}>
+          <form className="space-y-2 border-t border-[hsl(var(--border))] pt-3" onSubmit={createStrategy}>
             <div className="grid grid-cols-3 gap-2">
               <div>
                 <label htmlFor="strategyType" className={labelClass}>Type</label>
@@ -1162,14 +1161,14 @@ function TradingPanel({ api }: PanelProps) {
                   </div>
                 )}
                 {sniperMode === "new-listing" && (
-                  <p className="text-xs text-muted-foreground self-end pb-2 col-span-1">
+                  <p className="text-xs text-[hsl(var(--muted-foreground))] self-end pb-2 col-span-1">
                     Fires once, the moment a new Hyperliquid perp lists. Auto-disarms after firing.
                   </p>
                 )}
               </div>
             )}
             <button type="submit" className={primaryButtonClass()} disabled={!agentId || !wallet}>Create strategy</button>
-            {strategyStatus && <p className="text-sm text-muted-foreground">{strategyStatus}</p>}
+            {strategyStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{strategyStatus}</p>}
           </form>
         </Section>
       )}
@@ -1185,35 +1184,35 @@ function TradingPanel({ api }: PanelProps) {
           {history && history !== "loading" && history !== "error" && (
             <>
               {history.stats.count === 0 ? (
-                <p className="text-sm text-muted-foreground">No closed trades yet.</p>
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">No closed trades yet.</p>
               ) : (
                 <>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <span><span className={`${monoClass} text-foreground`}>{history.stats.count}</span> closed</span>
-                    <span>win rate <span className={`${monoClass} text-foreground`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
+                  <div className="flex items-center gap-3 text-xs text-[hsl(var(--muted-foreground))]">
+                    <span><span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.stats.count}</span> closed</span>
+                    <span>win rate <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
                     <span>
                       total <span className={`${monoClass} ${pnlClass(history.stats.totalPnl)}`}>{signed(history.stats.totalPnl)}</span>
                     </span>
                   </div>
                   <table className="w-full text-sm">
                     <thead>
-                      <tr className="text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                      <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
                         <th className="pb-1 font-medium">Coin</th>
                         <th className="pb-1 font-medium text-right">Size</th>
                         <th className="pb-1 font-medium text-right">Status</th>
                         <th className="pb-1 font-medium text-right">PnL</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-border">
+                    <tbody className="divide-y divide-[hsl(var(--border))]">
                       {history.trades.map((t) => (
                         <tr key={t.id}>
                           <td className="py-1.5">
-                            <span className="font-medium text-foreground">{t.coin}</span>{" "}
+                            <span className="font-medium text-[hsl(var(--foreground))]">{t.coin}</span>{" "}
                             <Badge tone={t.isBuy ? "success" : "danger"}>{t.isBuy ? "buy" : "sell"}</Badge>
                           </td>
-                          <td className={`py-1.5 text-right ${monoClass} text-foreground`}>${t.sizeUsd}</td>
-                          <td className="py-1.5 text-right text-xs text-muted-foreground">{t.status}</td>
-                          <td className={`py-1.5 text-right ${monoClass} ${t.realizedPnl != null ? pnlClass(t.realizedPnl) : "text-muted-foreground"}`}>
+                          <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${t.sizeUsd}</td>
+                          <td className="py-1.5 text-right text-xs text-[hsl(var(--muted-foreground))]">{t.status}</td>
+                          <td className={`py-1.5 text-right ${monoClass} ${t.realizedPnl != null ? pnlClass(t.realizedPnl) : "text-[hsl(var(--muted-foreground))]"}`}>
                             {t.realizedPnl != null ? signed(t.realizedPnl) : "—"}
                           </td>
                         </tr>
@@ -1246,11 +1245,11 @@ function TradingPanel({ api }: PanelProps) {
             </div>
             <button type="submit" className={primaryButtonClass()} disabled={!agentId}>Save risk limits</button>
             {riskConfig && (
-              <p className={`text-xs text-muted-foreground ${monoClass}`}>
+              <p className={`text-xs text-[hsl(var(--muted-foreground))] ${monoClass}`}>
                 Current: {riskConfig.leverage}x, max ${riskConfig.maxPositionUsd}/trade, max ${riskConfig.maxDailyLossUsd}/day loss
               </p>
             )}
-            {riskStatus && <p className="text-sm text-muted-foreground">{riskStatus}</p>}
+            {riskStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{riskStatus}</p>}
           </form>
         </Section>
       )}
@@ -1264,26 +1263,26 @@ function TradingPanel({ api }: PanelProps) {
               <div>
                 <p className={labelClass}>Your referral code</p>
                 <code className={`text-sm ${monoClass}`}>{referral.code}</code>
-                <p className="text-xs text-muted-foreground mt-1">Share this agent ID — anyone who applies it below counts toward your referral stats.</p>
+                <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">Share this agent ID — anyone who applies it below counts toward your referral stats.</p>
               </div>
               <div className="grid grid-cols-3 gap-2 text-sm">
-                <div className="rounded-sm border border-border p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Referred agents</div>
+                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Referred agents</div>
                   <div className={`font-medium ${monoClass}`}>{referral.referredCount}</div>
                 </div>
-                <div className="rounded-sm border border-border p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Volume generated</div>
+                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Volume generated</div>
                   <div className={`font-medium ${monoClass}`}>${referral.totalVolumeUsd.toFixed(2)}</div>
                 </div>
-                <div className="rounded-sm border border-border p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Reward earned</div>
+                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
+                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Reward earned</div>
                   <div className={`font-medium ${monoClass} text-green-600 dark:text-green-400`}>${referral.rewardUsd.toFixed(2)}</div>
                 </div>
               </div>
               {referral.referredBy ? (
-                <p className="text-sm text-muted-foreground">Referred by <code className={monoClass}>{referral.referredBy}</code>.</p>
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">Referred by <code className={monoClass}>{referral.referredBy}</code>.</p>
               ) : (
-                <form className="flex gap-2 items-end border-t border-border pt-3" onSubmit={applyReferral}>
+                <form className="flex gap-2 items-end border-t border-[hsl(var(--border))] pt-3" onSubmit={applyReferral}>
                   <div className="flex-1">
                     <label htmlFor="referralCodeInput" className={labelClass}>Have a referral code?</label>
                     <input
@@ -1295,7 +1294,7 @@ function TradingPanel({ api }: PanelProps) {
                   <button type="submit" className={primaryButtonClass()} disabled={!agentId || !referralCodeInput}>Apply</button>
                 </form>
               )}
-              {referralStatus && <p className="text-sm text-muted-foreground">{referralStatus}</p>}
+              {referralStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{referralStatus}</p>}
             </>
           )}
         </Section>

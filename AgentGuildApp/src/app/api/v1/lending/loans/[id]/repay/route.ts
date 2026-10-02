@@ -5,8 +5,9 @@
  * `amountUsd` USDC on-chain from their own wallet to the lender (the treasury
  * for pool loans, the solo lender's wallet for solo loans). Verifies that
  * transfer, then accrues interest to now and applies the payment (interest
- * first, then principal), closing the loan out (repaid/defaulted) if the
- * payment clears the balance or the loan is overdue.
+ * first, then principal), closing the loan out as repaid if the payment
+ * clears the balance. A late partial payment keeps the loan active; anything
+ * sent beyond the balance is recorded as owed back to the borrower.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";

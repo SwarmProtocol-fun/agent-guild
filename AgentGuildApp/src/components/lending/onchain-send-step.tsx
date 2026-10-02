@@ -23,10 +23,13 @@ interface OnChainSendStepProps {
     onSubmit: (txSig: string) => Promise<void>;
 }
 
+// Mirrors the server's SOLANA_CLUSTER (lib/solana/lending-verify.ts) for display only.
+const DEFAULT_ASSET_LABEL = process.env.NEXT_PUBLIC_SOLANA_CLUSTER === "mainnet-beta" ? "USDC (Solana)" : "USDC (Solana devnet)";
+
 export function OnChainSendStep({
     recipientAddress,
     amountUsd,
-    assetLabel = "USDC (Solana devnet)",
+    assetLabel = DEFAULT_ASSET_LABEL,
     helperText,
     submitLabel = "Verify & Continue",
     onSubmit,

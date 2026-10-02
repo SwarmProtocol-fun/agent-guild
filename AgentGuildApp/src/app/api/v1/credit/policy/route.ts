@@ -7,6 +7,8 @@
 
 import { NextRequest } from "next/server";
 import { resolveAgentPolicy } from "@/lib/agent-policy";
+import { adminPolicyLoaders } from "@/lib/credit-policy-settings-admin";
+import { requireAgentViewer } from "@/lib/auth-guard";
 
 export async function GET(req: NextRequest) {
     const agentId = req.nextUrl.searchParams.get("agentId");
@@ -14,7 +16,10 @@ export async function GET(req: NextRequest) {
         return Response.json({ error: "agentId query parameter is required" }, { status: 400 });
     }
 
-    const result = await resolveAgentPolicy(agentId);
+    const viewer = await requireAgentViewer(req, agentId, "GET:/v1/credit/policy");
+    if (!viewer.ok) return Response.json({ error: viewer.error }, { status: viewer.status ?? 403 });
+
+    const result = await resolveAgentPolicy(agentId, adminPolicyLoaders);
     if (!result.ok || !result.policy) {
         return Response.json(
             { error: result.error || "Unable to resolve policy" },

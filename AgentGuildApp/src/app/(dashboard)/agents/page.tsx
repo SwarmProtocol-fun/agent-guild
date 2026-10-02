@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useOrg } from "@/contexts/OrgContext";
+import { useOrgInviteCode } from "@/hooks/useOrgInviteCode";
 import { useWalletAccount } from "@/lib/wallet";
 import { createAgent, updateAgent, deleteAgent, getTasksByOrg, getJobsByOrg, type Agent, type Task, type Job } from "@/lib/firestore";
 import { applyLivePresence } from "@/lib/presence";
@@ -109,6 +110,7 @@ export default function AgentsPage() {
   const [showRegister, setShowRegister] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
   const { currentOrg } = useOrg();
+  const inviteCode = useOrgInviteCode(currentOrg?.id);
   const account = useWalletAccount();
   const { registerAgent: registerOnChain } = useAgentGuildWrite();
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -162,7 +164,7 @@ export default function AgentsPage() {
       orgId: currentOrg?.id || '',
       agentId: agent.id,
       apiKey: key,
-      inviteCode: currentOrg?.inviteCode,
+      inviteCode: inviteCode ?? undefined,
     });
     setSetupPrompt(prompt);
     setSetupApiKey(key);
@@ -363,7 +365,7 @@ export default function AgentsPage() {
         orgId: currentOrg.id,
         agentId: newAgentId,
         apiKey,
-        inviteCode: currentOrg.inviteCode,
+        inviteCode: inviteCode ?? undefined,
       });
 
       setSetupPrompt(prompt);
@@ -472,12 +474,12 @@ export default function AgentsPage() {
         </Button>
       </div>
 
-      {currentOrg.inviteCode && (
+      {inviteCode && (
         <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-950/20 px-4 py-2 text-sm">
           <span className="text-muted-foreground">Organization Invite Code:</span>
-          <span className="font-bold tracking-widest text-amber-400">{currentOrg.inviteCode}</span>
+          <span className="font-bold tracking-widest text-amber-400">{inviteCode}</span>
           <button
-            onClick={() => navigator.clipboard.writeText(currentOrg.inviteCode || '')}
+            onClick={() => navigator.clipboard.writeText(inviteCode || '')}
             className="ml-1 p-2 rounded text-muted-foreground hover:text-foreground hover:bg-amber-500/10"
             title="Copy invite code"
           >

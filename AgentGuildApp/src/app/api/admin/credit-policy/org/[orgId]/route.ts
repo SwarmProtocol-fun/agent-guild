@@ -12,7 +12,7 @@ import {
     unauthorized,
     forbidden,
 } from "@/lib/auth-guard";
-import { getOrgPolicyOverride, setOrgPolicyOverride } from "@/lib/credit-policy-settings";
+import { getOrgPolicyOverride, setOrgPolicyOverride } from "@/lib/credit-policy-settings-admin";
 
 export async function GET(
     req: NextRequest,

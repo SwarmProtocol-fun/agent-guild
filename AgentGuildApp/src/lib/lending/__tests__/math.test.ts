@@ -82,11 +82,18 @@ describe("applyPayment", () => {
         expect(result.finalStatus).toBe("active");
     });
 
-    it("caps the applied amount at what's actually owed (no overpayment)", () => {
+    it("caps the applied amount at what's owed and reports the excess for refund", () => {
         const loan = makeLoan({ interestAccruedUsd: 10, principalRemainingUsd: 100 });
         const result = applyPayment(loan, 1_000_000, loan.originatedAt!);
         expect(result.appliedUsd).toBe(110);
+        expect(result.excessUsd).toBe(999_890);
         expect(result.remainingBalanceUsd).toBe(0);
+    });
+
+    it("reports zero excess for an exact or partial payment", () => {
+        const loan = makeLoan({ interestAccruedUsd: 10, principalRemainingUsd: 100 });
+        expect(applyPayment(loan, 110, loan.originatedAt!).excessUsd).toBe(0);
+        expect(applyPayment(loan, 50, loan.originatedAt!).excessUsd).toBe(0);
     });
 
     it("marks the loan repaid once the full balance clears", () => {
@@ -96,11 +103,12 @@ describe("applyPayment", () => {
         expect(result.remainingBalanceUsd).toBe(0);
     });
 
-    it("marks the loan defaulted when a balance remains past the due date", () => {
+    it("keeps a late partial payment active (overdue) rather than auto-defaulting", () => {
         const loan = makeLoan({ interestAccruedUsd: 10, principalRemainingUsd: 1000, dueAt: 1_000_000 });
         const result = applyPayment(loan, 50, 2_000_000); // well past dueAt, partial payment
         expect(result.isOverdue).toBe(true);
-        expect(result.finalStatus).toBe("defaulted");
+        expect(result.finalStatus).toBe("active");
+        expect(result.loan.principalRemainingUsd).toBe(960);
     });
 
     it("stays active for a partial payment before the due date", () => {

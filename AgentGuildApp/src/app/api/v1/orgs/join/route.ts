@@ -1,7 +1,17 @@
+/**
+ * POST /api/v1/orgs/join — join an organization with its human-member invite code.
+ *
+ * Auth: wallet session. Body: { inviteCode: string } (6 chars).
+ * Codes resolve through orgInvites (server-only) — see resolveOrgInviteCode.
+ * Rate limited per wallet so codes can't be brute-forced.
+ */
 import { NextResponse } from 'next/server';
+import { FieldValue } from 'firebase-admin/firestore';
 import { validateSession } from '@/lib/session';
-import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, updateDoc, doc, arrayUnion } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase-admin';
+import { resolveOrgInviteCode } from '@/lib/firestore-admin';
+import { canonicalizeWalletAddress } from '@/lib/wallet-address';
+import { rateLimit } from '../../rate-limit';
 
 export async function POST(req: Request) {
   try {
@@ -9,6 +19,10 @@ export async function POST(req: Request) {
     if (!session) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    const walletAddress = session.sub.toLowerCase();
+
+    const limited = await rateLimit(`org-join:${walletAddress}`);
+    if (limited) return limited;
 
     const { inviteCode } = await req.json().catch(() => ({}));
 
@@ -16,34 +30,28 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Invalid invite code format' }, { status: 400 });
     }
 
-    const q = query(
-      collection(db, 'organizations'),
-      where('inviteCode', '==', inviteCode.toUpperCase())
-    );
-
-    const snapshot = await getDocs(q);
-
-    if (snapshot.empty) {
+    const orgId = await resolveOrgInviteCode(inviteCode);
+    if (!orgId) {
       return NextResponse.json({ error: 'Invalid or expired invite code' }, { status: 404 });
     }
 
-    const orgDoc = snapshot.docs[0];
-    const orgData = orgDoc.data();
-    const orgId = orgDoc.id;
-    const walletAddress = session.sub.toLowerCase();
+    const orgRef = adminDb().collection('organizations').doc(orgId);
+    const orgData = (await orgRef.get()).data();
+    if (!orgData) {
+      return NextResponse.json({ error: 'Invalid or expired invite code' }, { status: 404 });
+    }
 
     // Check if user is already a member
     const members = (orgData.members as string[]) || [];
-    const isMember = members.some((m) => m.toLowerCase() === walletAddress);
+    const isMember =
+      (orgData.ownerAddress && canonicalizeWalletAddress(orgData.ownerAddress) === canonicalizeWalletAddress(walletAddress)) ||
+      members.some((m) => m.toLowerCase() === walletAddress);
 
     if (isMember) {
       return NextResponse.json({ error: 'You are already a member of this organization' }, { status: 400 });
     }
 
-    // Add user to the members array
-    await updateDoc(doc(db, 'organizations', orgId), {
-      members: arrayUnion(walletAddress),
-    });
+    await orgRef.update({ members: FieldValue.arrayUnion(walletAddress) });
 
     return NextResponse.json({ success: true, orgId });
   } catch (error: unknown) {

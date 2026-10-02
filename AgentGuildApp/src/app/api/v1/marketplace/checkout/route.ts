@@ -12,9 +12,9 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { SKILL_REGISTRY, type SubscriptionPlan } from "@/lib/skills";
+import { SKILL_REGISTRY, type MarketPricing, type SubscriptionPlan } from "@/lib/skills";
 // [agent-guild-core] mod-gateway extracted — remote mod lookup disabled
-const getModService = async (_id: string) => null;
+const getModService = async (_id: string): Promise<{ name?: string; pricing?: MarketPricing } | null> => null;
 
 export async function POST(req: NextRequest) {
   const wallet = req.headers.get("x-wallet-address")?.toLowerCase();

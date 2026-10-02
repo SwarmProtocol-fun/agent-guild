@@ -13,7 +13,7 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, getJobApplications } from "@/lib/firestore";
+import { getJob, getJobApplications } from "@/lib/jobs-admin";
 
 export async function GET(
   request: NextRequest,

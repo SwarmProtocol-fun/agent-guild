@@ -16,8 +16,10 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { authenticateAgent, type AuthResult } from "@/app/api/webhooks/auth";
-import { getOrganization, type Organization } from "@/lib/firestore";
-import { getAgent } from "@/lib/firestore-admin";
+import type { Organization } from "@/lib/firestore";
+// Admin SDK — these guards run server-side, where the client SDK has no
+// signed-in user and Firestore rules deny every read.
+import { getAgent, getOrganization } from "@/lib/firestore-admin";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import crypto from "crypto";
 
@@ -410,6 +412,33 @@ export async function requirePlatformAdminOrOrgMember(
   }
 
   return requireOrgMember(req, orgId);
+}
+
+// ─── Agent viewer: admin, agent's org member, or the agent itself ─────
+
+/**
+ * Allow a platform admin, a wallet-session member of the agent's org, or the
+ * agent itself (Ed25519 or API key, via requireAgentAuth). For read-only
+ * routes exposing one agent's private data, e.g. its credit policy.
+ */
+export async function requireAgentViewer(
+  req: NextRequest,
+  agentId: string,
+  signedMessagePrefix: string,
+): Promise<{ ok: boolean; error?: string; status?: number }> {
+  if (requirePlatformAdmin(req).ok) return { ok: true };
+
+  const agent = await getAgent(agentId);
+  if (!agent) return { ok: false, error: "Agent not found", status: 404 };
+
+  if (getWalletAddress(req) && (await requireOrgMember(req, agent.orgId)).ok) {
+    return { ok: true };
+  }
+
+  const agentAuth = await requireAgentAuth(req, signedMessagePrefix);
+  if (agentAuth.ok && agentAuth.agent?.agentId === agentId) return { ok: true };
+
+  return { ok: false, error: "Not authorized to view this agent", status: 403 };
 }
 
 // ─── Combined: platform admin OR agent auth ──────────────

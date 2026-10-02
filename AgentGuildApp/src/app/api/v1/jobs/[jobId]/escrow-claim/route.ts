@@ -9,12 +9,17 @@
  * the resulting signature against the Firestore order. Call it right after
  * that transaction confirms.
  *
+ * Also verifies the buyer's upfront payment on-chain (402 if it doesn't check
+ * out) — the buyer's browser writes the escrow record, so until this passes
+ * the agent has no proof it has been paid. Don't start work on a 402.
+ *
  * Body: { claimTxSig: string }
  */
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, recordEscrowClaimed } from "@/lib/firestore";
+import { getJob, recordEscrowClaimed } from "@/lib/jobs-admin";
+import { verifyGigUpfrontPayment } from "@/lib/solana/gig-payment-verify";
 
 export async function POST(
   request: NextRequest,
@@ -70,6 +75,14 @@ export async function POST(
     const claimTxSig = typeof body.claimTxSig === "string" ? body.claimTxSig.trim() : "";
     if (!claimTxSig) {
       return Response.json({ error: "claimTxSig is required" }, { status: 400 });
+    }
+
+    const payment = await verifyGigUpfrontPayment(jobId);
+    if (!payment.verified) {
+      return Response.json(
+        { error: `Upfront payment not verified: ${payment.reason}. Do not start work.`, retryable: payment.retryable ?? false },
+        { status: payment.retryable ? 409 : 402 }
+      );
     }
 
     await recordEscrowClaimed(jobId, claimTxSig);

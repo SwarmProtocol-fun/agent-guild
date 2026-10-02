@@ -14,7 +14,7 @@
  */
 import { NextRequest } from "next/server";
 import { getWalletAddress, requireOrgMember } from "@/lib/auth-guard";
-import { getJob, recordEscrowDisputed } from "@/lib/firestore";
+import { getJob, recordEscrowDisputed } from "@/lib/jobs-admin";
 import { fileDispute } from "@/lib/credit-ops/disputes";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {

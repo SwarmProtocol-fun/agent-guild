@@ -93,6 +93,10 @@ export function GigEscrowOrderForm({ gig, buyerOrgId, requirements, onOrdered, o
           fundTxSig: result.txSig,
         }
       );
+      // Kick off server-side on-chain verification of the upfront payment so
+      // the seller sees it as verified. It can lag until the transfer
+      // finalizes; the seller's escrow-claim step re-checks, so don't block.
+      fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/verify-payment`, { method: "POST" }).catch(() => {});
       onOrdered(jobId);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to place escrow order");

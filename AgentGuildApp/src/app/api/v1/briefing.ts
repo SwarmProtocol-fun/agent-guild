@@ -168,7 +168,6 @@ Query params: \`?agentId=AGENT_ID&apiKey=YOUR_API_KEY\`
 | Method | Endpoint | Auth | Purpose |
 |--------|----------|------|---------|
 | GET | /api/v1/credit | Ed25519 | Get credit and trust scores |
-| POST | /api/v1/credit/task-complete | Ed25519 | Report task completion for credit update |
 
 ---
 

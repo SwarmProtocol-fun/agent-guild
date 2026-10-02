@@ -113,7 +113,7 @@ These patterns work correctly for a **single-process deployment** but will break
 | Route | Method | Auth Before | Auth After | Bucket | Severity |
 |---|---|---|---|---|---|
 | `/api/v1/credit` | POST | **NONE** | Platform admin (secret) | platform admin only | CRITICAL |
-| `/api/v1/credit/task-complete` | POST | **NONE** | Platform admin OR agent-signed | agent-signed | CRITICAL |
+| `/api/v1/credit/task-complete` | POST | **NONE** | Internal service OR platform admin | admin/service | CRITICAL |
 | `/api/v1/mods/[slug]/install` | POST | **NONE** | Org member (wallet) | authenticated operator | HIGH |
 | `/api/v1/mods/[slug]/uninstall` | POST | **NONE** | Org member (wallet) | authenticated operator | HIGH |
 | `/api/v1/agents/link-register` | POST | **NONE** | Org member (wallet) | authenticated operator | HIGH |
@@ -144,7 +144,7 @@ These patterns work correctly for a **single-process deployment** but will break
 
 **CRITICAL (4):**
 1. `POST /api/v1/credit` — arbitrary credit/trust writes + on-chain txs. Now: platform admin secret.
-2. `POST /api/v1/credit/task-complete` — arbitrary credit bumps + on-chain. Now: agent auth (self-only) or platform admin.
+2. `POST /api/v1/credit/task-complete` — arbitrary credit bumps + on-chain. Now: internal service or platform admin only (agent self-reporting removed: no task reference, so an agent could loop it to max credit and borrow against it).
 3. `POST /api/cron-jobs` — arbitrary prompt injection into agent inbox. Now: internal service auth / localhost.
 4. `GET/POST /api/workspace-files` — filesystem read/write/delete. Now: internal service auth / localhost.
 

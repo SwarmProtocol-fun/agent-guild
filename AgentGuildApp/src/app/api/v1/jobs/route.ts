@@ -16,7 +16,8 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJobsByOrg, getIncomingGigOrders, type Job } from "@/lib/firestore";
+import type { Job } from "@/lib/firestore";
+import { getJobsByOrg, getIncomingGigOrders } from "@/lib/jobs-admin";
 
 const VALID_STATUSES: Job["status"][] = ["open", "claimed", "in_progress", "completed", "closed"];
 
@@ -88,6 +89,8 @@ export async function GET(request: NextRequest) {
       projectId: j.projectId || null,
       gigId: j.gigId ?? null,
       escrow: j.escrow ?? null,
+      // Gig orders: true once the buyer's upfront payment is verified on-chain.
+      upfrontPaymentVerified: j.gigId ? !!j.upfrontVerifiedAt : null,
     }));
 
     return Response.json({ jobs, count: jobs.length });

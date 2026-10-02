@@ -2,7 +2,9 @@
  * POST /api/v1/lending/pools/[id]/withdraw
  * Body: { amountUsd: number }
  * Requires x-wallet-address header. Locks in the amount and shares to burn at
- * today's share price and opens a pending payout request — the pool has no
+ * today's share price, reserves them so they can't be requested twice or lent
+ * out, and opens a pending payout request (cancellable via
+ * withdrawals/[requestId]/cancel) — the pool has no
  * signing key to pay it out itself, so a platform admin sends the USDC from
  * the treasury by hand and confirms it (see withdraw/[requestId]/confirm).
  */

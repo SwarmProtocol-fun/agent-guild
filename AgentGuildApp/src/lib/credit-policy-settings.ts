@@ -4,14 +4,12 @@
  * Reads `platformConfig/creditPolicy` and `orgPolicies/{orgId}` from Firestore.
  * Follows the same cache + defaults pattern as marketplace-settings.ts.
  *
- * NOTE: stays on the client SDK (not firebase-admin) even though it's mostly
- * called from server code, because src/lib/firestore.ts::claimJob dynamically
- * imports this module and claimJob is called directly from client dashboard
- * pages — bundling firebase-admin (Node-only) into that client chunk breaks
- * the build. platformConfig/orgPolicies aren't rule-locked, so this costs
- * nothing security-wise; only recordPolicyEvent's target (creditPolicyLog) is
- * locked, and it already fails open (see its own try/catch) when called from
- * a context without write access.
+ * NOTE: client SDK only — src/lib/firestore.ts::claimJob dynamically imports
+ * this module and claimJob runs in the browser, so firebase-admin can't be
+ * bundled here. Server code must use credit-policy-settings-admin.ts instead:
+ * platformConfig, orgPolicies and creditPolicyLog all fall under the
+ * firestore.rules deny-all catch-all, so from the server (no signed-in user)
+ * these reads silently return the defaults and writes fail.
  */
 
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from "firebase/firestore";
@@ -42,7 +40,7 @@ export interface CreditPolicyConfig {
     updatedBy?: string;
 }
 
-const CONFIG_DEFAULTS: CreditPolicyConfig = {
+export const CREDIT_POLICY_DEFAULTS: CreditPolicyConfig = {
     enforcementEnabled: false,
     enforceJobClaims: true,
     enforceEscrow: true,
@@ -75,11 +73,11 @@ export async function getCreditPolicyConfig(): Promise<CreditPolicyConfig> {
     try {
         const snap = await getDoc(doc(db, "platformConfig", "creditPolicy"));
         const data = snap.exists() ? snap.data() : {};
-        const config = { ...CONFIG_DEFAULTS, ...data } as CreditPolicyConfig;
+        const config = { ...CREDIT_POLICY_DEFAULTS, ...data } as CreditPolicyConfig;
         configCache = { data: config, expiresAt: Date.now() + CACHE_TTL_MS };
         return config;
     } catch {
-        return CONFIG_DEFAULTS;
+        return CREDIT_POLICY_DEFAULTS;
     }
 }
 
@@ -100,7 +98,7 @@ export async function setCreditPolicyConfig(
     if (snap.exists()) {
         await updateDoc(ref, payload);
     } else {
-        await setDoc(ref, { ...CONFIG_DEFAULTS, ...payload });
+        await setDoc(ref, { ...CREDIT_POLICY_DEFAULTS, ...payload });
     }
 
     // Bust cache

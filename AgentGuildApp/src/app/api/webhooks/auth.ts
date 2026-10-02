@@ -8,8 +8,7 @@
  * and auto-migrated to hashed format on successful auth.
  */
 import crypto from "crypto";
-import { db } from "@/lib/firebase";
-import { doc, getDoc, updateDoc } from "firebase/firestore";
+import { adminDb } from "@/lib/firebase-admin";
 
 export interface AuthResult {
     agentId: string;
@@ -54,11 +53,10 @@ export async function authenticateAgent(
     if (!agentId || !apiKey) return null;
 
     try {
-        const agentRef = doc(db, "agents", agentId);
-        const agentSnap = await getDoc(agentRef);
-        if (!agentSnap.exists()) return null;
-
+        const agentRef = adminDb().collection("agents").doc(agentId);
+        const agentSnap = await agentRef.get();
         const data = agentSnap.data();
+        if (!data) return null;
 
         // Reject if access has been revoked
         if (data.tokenRevokedAt) return null;
@@ -75,7 +73,7 @@ export async function authenticateAgent(
             if (authenticated) {
                 // Auto-migrate: store hash, remove plaintext
                 try {
-                    await updateDoc(agentRef, {
+                    await agentRef.update({
                         apiKeyHash: incomingHash,
                         apiKey: null,
                     });

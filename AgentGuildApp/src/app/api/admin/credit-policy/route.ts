@@ -7,7 +7,7 @@
 
 import { NextRequest } from "next/server";
 import { requirePlatformAdmin, unauthorized } from "@/lib/auth-guard";
-import { getCreditPolicyConfig, setCreditPolicyConfig } from "@/lib/credit-policy-settings";
+import { getCreditPolicyConfig, setCreditPolicyConfig } from "@/lib/credit-policy-settings-admin";
 
 export async function GET(req: NextRequest) {
     const auth = requirePlatformAdmin(req);

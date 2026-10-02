@@ -12,14 +12,7 @@
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../verify';
 import { rateLimit } from '../rate-limit';
-import { db } from '@/lib/firebase';
-import {
-  collection,
-  getDocs,
-  addDoc,
-  query,
-  where,
-} from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase-admin';
 
 /**
  * GET /api/v1/coordinators
@@ -45,19 +38,18 @@ export async function GET(req: NextRequest) {
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
 
-    const constraints = [
-      where('orgId', '==', agent.orgId),
-      where('active', '==', true),
-    ];
+    let q = adminDb()
+      .collection('coordinators')
+      .where('orgId', '==', agent.orgId)
+      .where('active', '==', true);
 
     if (projectId) {
-      constraints.push(where('projectId', '==', projectId));
+      q = q.where('projectId', '==', projectId);
     } else if (channelId) {
-      constraints.push(where('channelId', '==', channelId));
+      q = q.where('channelId', '==', channelId);
     }
 
-    const q = query(collection(db, 'coordinators'), ...constraints);
-    const snapshot = await getDocs(q);
+    const snapshot = await q.get();
     const coordinators = snapshot.docs.map((d) => ({
       id: d.id,
       ...d.data(),
@@ -107,13 +99,12 @@ export async function POST(req: NextRequest) {
     }
 
     // Check if already registered
-    const existingQ = query(
-      collection(db, 'coordinators'),
-      where('agentId', '==', agent.agentId),
-      where('orgId', '==', agent.orgId),
-      where('active', '==', true)
-    );
-    const existing = await getDocs(existingQ);
+    const existing = await adminDb()
+      .collection('coordinators')
+      .where('agentId', '==', agent.agentId)
+      .where('orgId', '==', agent.orgId)
+      .where('active', '==', true)
+      .get();
 
     if (!existing.empty) {
       return Response.json(
@@ -123,7 +114,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Create coordinator
-    const coordRef = await addDoc(collection(db, 'coordinators'), {
+    const coordRef = await adminDb().collection('coordinators').add({
       agentId: agent.agentId,
       agentName: agent.agentName,
       orgId: agent.orgId,

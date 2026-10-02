@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useOrg } from '@/contexts/OrgContext';
+import { useOrgInviteCode } from "@/hooks/useOrgInviteCode";
 import { useWalletAccount } from "@/lib/wallet";
 import { updateOrganization, getProfile, setProfile, removeMemberFromOrganization } from '@/lib/firestore';
 
@@ -21,6 +22,7 @@ import Link from 'next/link';
 
 export default function SettingsPage() {
   const { currentOrg, refreshOrgs } = useOrg();
+  const inviteCode = useOrgInviteCode(currentOrg?.id);
   const account = useWalletAccount();
   const address = account?.address;
   const { skin, setSkin, skins, availableSkins, refreshInstalled, scanLines, setScanLines } = useSkin();
@@ -460,19 +462,19 @@ export default function SettingsPage() {
                 />
               </div>
 
-              {currentOrg.inviteCode && (
+              {inviteCode && (
                 <div>
                   <label className="block text-sm font-medium mb-1.5">Invite Code</label>
                   <div className="flex items-center gap-2">
                     <code className="flex-1 rounded-md border border-amber-300 bg-amber-950/30 px-3 py-2 text-lg font-bold tracking-widest text-amber-400">
-                      {currentOrg.inviteCode}
+                      {inviteCode}
                     </code>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        navigator.clipboard.writeText(currentOrg.inviteCode || '');
+                        navigator.clipboard.writeText(inviteCode || '');
                       }}
                     >
                       📋 Copy
@@ -782,7 +784,7 @@ export default function SettingsPage() {
               <p>Total members: {currentOrg.members.length}</p>
             </div>
 
-            {currentOrg.inviteCode && (
+            {inviteCode && (
                <div className="mt-6 p-4 rounded-md border border-amber-500/30 bg-amber-500/5">
                  <p className="text-sm font-medium mb-2 text-amber-500">Invite New Members</p>
                  <p className="text-xs text-muted-foreground mb-3">
@@ -790,13 +792,13 @@ export default function SettingsPage() {
                  </p>
                  <div className="flex items-center gap-2">
                    <code className="flex-1 rounded-md border border-amber-300 bg-black/50 px-3 py-2 text-center text-lg font-mono font-bold tracking-widest text-amber-400">
-                     {currentOrg.inviteCode}
+                     {inviteCode}
                    </code>
                    <Button
                      type="button"
                      className="bg-amber-600 hover:bg-amber-700 text-white"
                      onClick={() => {
-                       navigator.clipboard.writeText(currentOrg.inviteCode || '');
+                       navigator.clipboard.writeText(inviteCode || '');
                        setMessage({ type: 'success', text: 'Invite code copied to clipboard!' });
                      }}
                    >

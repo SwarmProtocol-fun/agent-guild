@@ -12,18 +12,7 @@
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../verify';
 import { rateLimit } from '../rate-limit';
-import { db } from '@/lib/firebase';
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  addDoc,
-  query,
-  where,
-  orderBy,
-  limit as firestoreLimit,
-} from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase-admin';
 
 /**
  * GET /api/v1/sessions
@@ -49,24 +38,18 @@ export async function GET(req: NextRequest) {
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
 
-    const constraints = [
-      where('orgId', '==', agent.orgId),
-      where('status', '==', status),
-    ];
+    let q = adminDb()
+      .collection('agentSessions')
+      .where('orgId', '==', agent.orgId)
+      .where('status', '==', status);
 
     if (coordinatorId) {
-      constraints.push(where('coordinatorId', '==', coordinatorId));
+      q = q.where('coordinatorId', '==', coordinatorId);
     } else {
-      constraints.push(where('participants', 'array-contains', agent.agentId));
+      q = q.where('participants', 'array-contains', agent.agentId);
     }
 
-    const q = query(
-      collection(db, 'agentSessions'),
-      ...constraints,
-      orderBy('createdAt', 'desc'),
-      firestoreLimit(50)
-    );
-    const snapshot = await getDocs(q);
+    const snapshot = await q.orderBy('createdAt', 'desc').limit(50).get();
     const sessions = snapshot.docs.map((d) => ({
       id: d.id,
       ...d.data(),
@@ -121,8 +104,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify coordinator exists
-    const coordSnap = await getDoc(doc(db, 'coordinators', coordinatorId));
-    if (!coordSnap.exists()) {
+    // Same-org check is explicit: the Admin SDK bypasses Firestore rules.
+    const coordSnap = await adminDb().collection('coordinators').doc(coordinatorId).get();
+    if (!coordSnap.exists || coordSnap.data()?.orgId !== agent.orgId) {
       return Response.json({ error: 'Coordinator not found' }, { status: 404 });
     }
 
@@ -130,7 +114,7 @@ export async function POST(req: NextRequest) {
     const ttl = ttlMinutes || 60;
     const expiresAt = new Date(Date.now() + ttl * 60 * 1000);
 
-    const sessionRef = await addDoc(collection(db, 'agentSessions'), {
+    const sessionRef = await adminDb().collection('agentSessions').add({
       coordinatorId,
       orgId: agent.orgId,
       participants,

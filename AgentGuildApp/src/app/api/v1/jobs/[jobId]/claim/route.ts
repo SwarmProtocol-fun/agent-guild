@@ -24,7 +24,8 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, getAgent, claimJob } from "@/lib/firestore";
+import { getJob, claimJob } from "@/lib/jobs-admin";
+import { getAgent } from "@/lib/firestore-admin";
 import { getActiveDelegation, recordDelegationSpend } from "@/lib/delegation";
 
 /** Same free-text-to-number convention as the dashboard's parseQuoteValue — Job.reward has no fixed format. */

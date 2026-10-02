@@ -86,7 +86,11 @@ service cloud.firestore {
     // a verified wallet address.
     match /organizations/{orgId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null;
+      // inviteCode is server-managed (orgInvites, via the Admin SDK): org docs
+      // are readable by every signed-in wallet, so a code stored here could be
+      // read by anyone, and a client-planted code would be honored by the
+      // legacy-code migration in resolveOrgInviteCode.
+      allow create: if request.auth != null && !request.resource.data.keys().hasAny(['inviteCode']);
       // Owner or an EXISTING member can update — but only the owner may
       // touch `ownerAddress` or `members`. Membership is checked only
       // against the document already stored (resource.data) — never
@@ -110,7 +114,7 @@ service cloud.firestore {
         (request.auth.uid in resource.data.members &&
          !request.resource.data.diff(resource.data).affectedKeys()
            .hasAny(['ownerAddress', 'members']))
-      );
+      ) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['inviteCode']);
       allow delete: if request.auth != null &&
         request.auth.uid == resource.data.ownerAddress;
     }
@@ -129,120 +133,177 @@ service cloud.firestore {
     // is used there instead.
 
     // ── Category A: org-scoped via `orgId` ──────────────────────────────
+    // Updates may not re-point `orgId`: membership is only checked against
+    // the doc's current org, so without this a member could move a task,
+    // approval or job into any other org (e.g. inject work into a
+    // competitor's board).
+    function orgIdUnchanged() {
+      return request.resource.data.orgId == resource.data.orgId;
+    }
     match /activityEvents/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentComms/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentInstalls/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentMemories/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentMessages/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentSessions/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /agentSkills/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+    }
+    // Credit/trust/identity fields on an agent drive money decisions
+    // (lending origination, credit limits, job trust gates — all read
+    // server-side via Admin SDK). Clients may create an agent only with the
+    // default scores and may never change these fields afterwards; only
+    // server code (Admin SDK, bypasses rules) mutates them.
+    function agentProtectedFields() {
+      return ['creditScore', 'trustScore', 'asn', 'apiKeyHash', 'apiKey',
+              'restoredFromBackup', 'walletAddress', 'solanaAddress',
+              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress'];
     }
     match /agents/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
-      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) &&
+        request.resource.data.orgId == resource.data.orgId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(agentProtectedFields());
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId) &&
+        request.resource.data.get('creditScore', 680) == 680 &&
+        request.resource.data.get('trustScore', 50) == 50 &&
+        !request.resource.data.keys().hasAny(['restoredFromBackup', 'walletAddress', 'solanaAddress',
+                                              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress']);
     }
     match /approvals/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /assignmentNotifications/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /channels/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /coordinators/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /cronJobs/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /gateways/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /installedSkills/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /jobApplications/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /jobComments/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
+    // upfrontVerified*: set only by server-side on-chain payment verification
+    // (src/lib/solana/gig-payment-verify.ts) — a buyer must not be able to
+    // mark their own gig order as paid.
     match /jobs/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
-      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['upfrontVerifiedAt', 'upfrontVerifiedLamports']);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId) &&
+        !request.resource.data.keys().hasAny(['upfrontVerifiedAt', 'upfrontVerifiedLamports']);
     }
     match /kanbanBoards/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /kanbanTasks/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /leases/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /marketSubscriptions/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /modInstallations/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /operators/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /projects/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /reports/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /systemVitals/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /taskAssignments/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
     match /tasks/{docId} {
-      allow read, update, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
 
@@ -321,24 +382,31 @@ service cloud.firestore {
     // 0-5 rating scale (src/lib/firestore.ts's GigReview.rating).
     match /gigs/{docId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null && isOrgMember(request.resource.data.agentOrgId);
+      allow create: if request.auth != null && isOrgMember(request.resource.data.agentOrgId) &&
+        request.resource.data.get('orderCount', 0) == 0 &&
+        request.resource.data.get('avgRating', 0) == 0 &&
+        request.resource.data.get('ratingCount', 0) == 0;
+      // Rating counters are written only by POST /api/v1/gigs/:gigId/reviews
+      // (Admin SDK), which verifies the reviewer bought and approved the
+      // order. Previously any signed-in wallet could bump ratingCount and set
+      // avgRating to any 0–5 value (tanking a competitor in one write), and
+      // the listing's own org could rewrite all three counters freely.
       allow update: if request.auth != null && (
-        isOrgMember(resource.data.agentOrgId) ||
+        (isOrgMember(resource.data.agentOrgId) &&
+         request.resource.data.agentOrgId == resource.data.agentOrgId &&
+         !request.resource.data.diff(resource.data).affectedKeys()
+           .hasAny(['avgRating', 'ratingCount', 'orderCount'])) ||
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['orderCount', 'updatedAt']) &&
-         request.resource.data.orderCount == resource.data.orderCount + 1) ||
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['avgRating', 'ratingCount', 'updatedAt']) &&
-         request.resource.data.ratingCount == resource.data.ratingCount + 1 &&
-         request.resource.data.avgRating >= 0 && request.resource.data.avgRating <= 5)
+         request.resource.data.orderCount == resource.data.orderCount + 1)
       );
       allow delete: if request.auth != null && isOrgMember(resource.data.agentOrgId);
     }
-    // gigReviews: one per completed order (src/lib/firestore.ts's
-    // addGigReview), read broadly so any org can see a gig's reviews
-    // (getGigReviews), writable only by the reviewer who authored it.
+    // gigReviews: one per completed order, read broadly so any org can see
+    // a gig's reviews (getGigReviews).
+    // Writes go through POST /api/v1/gigs/:gigId/reviews only (see above).
     match /gigReviews/{docId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null && request.resource.data.authorAddress == request.auth.uid;
-      allow update, delete: if request.auth != null && resource.data.authorAddress == request.auth.uid;
+      allow write: if false;
     }
 
     // nodes: no orgId or any other org/owner field on the AgentGuildNode

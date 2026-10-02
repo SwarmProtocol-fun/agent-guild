@@ -9,8 +9,7 @@
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../../verify';
 import { rateLimit } from '../../rate-limit';
-import { db } from '@/lib/firebase';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase-admin';
 
 /**
  * PATCH /api/v1/sessions/:id
@@ -49,10 +48,10 @@ export async function PATCH(
       );
     }
 
-    const sessionRef = doc(db, 'agentSessions', sessionId);
-    const sessionSnap = await getDoc(sessionRef);
+    const sessionRef = adminDb().collection('agentSessions').doc(sessionId);
+    const sessionSnap = await sessionRef.get();
 
-    if (!sessionSnap.exists()) {
+    if (!sessionSnap.exists) {
       return Response.json({ error: 'Session not found' }, { status: 404 });
     }
 
@@ -89,7 +88,7 @@ export async function PATCH(
       updateData.closedBy = agent.agentId;
     }
 
-    await updateDoc(sessionRef, updateData);
+    await sessionRef.update(updateData);
 
     return Response.json({
       success: true,
@@ -132,9 +131,9 @@ export async function GET(
     const agent = await verifyAgentRequest(agentId, signedMessage, sig);
     if (!agent) return unauthorized();
 
-    const sessionSnap = await getDoc(doc(db, 'agentSessions', sessionId));
+    const sessionSnap = await adminDb().collection('agentSessions').doc(sessionId).get();
 
-    if (!sessionSnap.exists()) {
+    if (!sessionSnap.exists) {
       return Response.json({ error: 'Session not found' }, { status: 404 });
     }
 

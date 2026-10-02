@@ -13,7 +13,7 @@ import { NextRequest } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import { updateCreditOnChain as updateCreditOnSolana } from "@/lib/solana/platform";
-import { requirePlatformAdminOrAgent, unauthorized } from "@/lib/auth-guard";
+import { requireInternalService, requirePlatformAdmin, unauthorized } from "@/lib/auth-guard";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
 import { fireWebhooks } from "@/lib/credit-webhooks";
 import { invalidateCache } from "@/lib/credit-cache";
@@ -31,9 +31,15 @@ async function updateCreditOnChain(
 }
 
 export async function POST(request: NextRequest) {
-    // Auth: platform admin or authenticated agent
-    const auth = await requirePlatformAdminOrAgent(request, "POST:/v1/credit/task-complete");
-    if (!auth.ok) return unauthorized(auth.error);
+    // Auth: internal service or platform admin only. Agents must NOT be able
+    // to call this for themselves — it takes no task/job reference, so a
+    // self-reporting agent could loop it to reach max credit and then borrow
+    // against that score in lending. Same gate as /api/v1/credit-events/ingest.
+    const serviceAuth = requireInternalService(request);
+    const adminAuth = requirePlatformAdmin(request);
+    if (!serviceAuth.ok && !adminAuth.ok) {
+        return unauthorized("Internal service or platform admin credentials required");
+    }
 
     let body: Record<string, unknown>;
     try {
@@ -45,11 +51,6 @@ export async function POST(request: NextRequest) {
     const agentId = body.agentId as string | undefined;
     if (!agentId) {
         return Response.json({ error: "agentId is required" }, { status: 400 });
-    }
-
-    // If agent-authed, verify the agent can only record completions for itself
-    if (auth.agent && auth.agent.agentId !== agentId) {
-        return Response.json({ error: "Agents can only record their own task completions" }, { status: 403 });
     }
 
     // Load agent from Firestore
@@ -131,10 +132,10 @@ export async function POST(request: NextRequest) {
     try {
         const { resolveAgentPolicy } = await import("@/lib/agent-policy");
         const { calculateFeeWithMultiplier } = await import("@/lib/credit-policy");
-        const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
+        const { getCreditPolicyConfig, recordPolicyEvent, adminPolicyLoaders } = await import("@/lib/credit-policy-settings-admin");
 
         const config = await getCreditPolicyConfig();
-        const policyResult = await resolveAgentPolicy(agentId);
+        const policyResult = await resolveAgentPolicy(agentId, adminPolicyLoaders);
 
         if (config.enforcementEnabled && config.enforceFeeMultipliers && policyResult.ok && policyResult.policy) {
             const fee = calculateFeeWithMultiplier(policyResult.policy, 15); // 15% base platform fee

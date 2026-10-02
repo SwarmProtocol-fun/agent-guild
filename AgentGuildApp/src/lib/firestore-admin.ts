@@ -14,6 +14,7 @@
  * use src/lib/firestore.ts, which goes through the client SDK and is scoped
  * by Firestore rules.
  */
+import { randomInt } from "crypto";
 import { adminDb } from "./firebase-admin";
 import { FieldValue, type Query } from "firebase-admin/firestore";
 import type {
@@ -700,22 +701,97 @@ export async function getAgentInviteByCode(code: string): Promise<AgentInvite | 
   return { id: doc.id, ...doc.data() } as AgentInvite;
 }
 
+// ─── Org (human-member) invite codes ────────────────────
+// Stored in orgInvites/{CODE} → { orgId }, server-only (firestore.rules
+// catch-all denies clients). They used to live on organizations.inviteCode,
+// but every signed-in wallet can read every org doc, so anyone could list
+// all codes and join any org via /api/v1/orgs/join. Legacy codes still on an
+// org doc are moved here the first time they're resolved or fetched;
+// scripts/migrate-org-invite-codes.mjs moves the rest in one pass.
+
+const ORG_INVITES = "orgInvites";
+// No 0/O/1/I — codes are read aloud and retyped. 32^6 ≈ 1.07e9.
+const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function newOrgInviteCode(): string {
+  let code = "";
+  for (let i = 0; i < 6; i++) code += INVITE_ALPHABET[randomInt(INVITE_ALPHABET.length)];
+  return code;
+}
+
+/** Move an org's legacy organizations.inviteCode into orgInvites. Returns the code. */
+async function migrateLegacyOrgInviteCode(orgId: string, code: string): Promise<string> {
+  const db = adminDb();
+  const batch = db.batch();
+  batch.set(db.collection(ORG_INVITES).doc(code), { orgId, createdAt: FieldValue.serverTimestamp(), migrated: true });
+  batch.update(db.collection("organizations").doc(orgId), { inviteCode: FieldValue.delete() });
+  await batch.commit();
+  return code;
+}
+
+/** Resolve a human-member invite code to its org id, or null. */
+export async function resolveOrgInviteCode(rawCode: string): Promise<string | null> {
+  const code = rawCode.trim().toUpperCase();
+  if (!/^[A-Z0-9]{6}$/.test(code)) return null;
+
+  const invite = await adminDb().collection(ORG_INVITES).doc(code).get();
+  if (invite.exists) return (invite.data()?.orgId as string) ?? null;
+
+  const legacy = await adminDb().collection("organizations").where("inviteCode", "==", code).limit(1).get();
+  if (legacy.empty) return null;
+  const orgId = legacy.docs[0].id;
+  await migrateLegacyOrgInviteCode(orgId, code);
+  return orgId;
+}
+
+/** An org's current invite code, creating one if it has none. Caller must check membership. */
+export async function getOrCreateOrgInviteCode(orgId: string): Promise<string> {
+  const db = adminDb();
+  const existing = await db.collection(ORG_INVITES).where("orgId", "==", orgId).limit(1).get();
+  if (!existing.empty) return existing.docs[0].id;
+
+  const org = await db.collection("organizations").doc(orgId).get();
+  const legacyCode = org.data()?.inviteCode as string | undefined;
+  if (legacyCode) return migrateLegacyOrgInviteCode(orgId, legacyCode.toUpperCase());
+
+  return createOrgInviteCode(orgId);
+}
+
+/** Replace an org's invite code(s) with a fresh one — old codes stop working. Caller must check ownership. */
+export async function rotateOrgInviteCode(orgId: string): Promise<string> {
+  const db = adminDb();
+  const existing = await db.collection(ORG_INVITES).where("orgId", "==", orgId).get();
+  const batch = db.batch();
+  existing.docs.forEach((d) => batch.delete(d.ref));
+  batch.update(db.collection("organizations").doc(orgId), { inviteCode: FieldValue.delete() });
+  await batch.commit();
+  return createOrgInviteCode(orgId);
+}
+
+async function createOrgInviteCode(orgId: string): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = newOrgInviteCode();
+    try {
+      // create() fails if the code is taken, so collisions retry instead of
+      // silently re-pointing another org's code.
+      await adminDb().collection(ORG_INVITES).doc(code).create({ orgId, createdAt: FieldValue.serverTimestamp() });
+      return code;
+    } catch (err) {
+      if ((err as { code?: number }).code !== 6) throw err; // 6 = ALREADY_EXISTS
+    }
+  }
+  throw new Error("Could not allocate a unique invite code");
+}
+
 /**
- * Look up an organization by its human-member invite code
- * (organizations.inviteCode — see the comment above AgentInvite). Used only
- * to tell an operator who pasted the wrong kind of code apart: an org code
- * 404s at /api/v1/invite/:code because that route resolves agent invites,
- * not org invites.
+ * Look up an organization by its human-member invite code. Used only to tell
+ * an operator who pasted the wrong kind of code apart: an org code 404s at
+ * /api/v1/invite/:code because that route resolves agent invites, not org
+ * invites.
  */
 export async function getOrganizationByInviteCode(code: string): Promise<Organization | null> {
-  const snap = await adminDb()
-    .collection("organizations")
-    .where("inviteCode", "==", code.toUpperCase())
-    .limit(1)
-    .get();
-  if (snap.empty) return null;
-  const doc = snap.docs[0];
-  return { id: doc.id, ...doc.data() } as Organization;
+  const orgId = await resolveOrgInviteCode(code);
+  return orgId ? getOrganization(orgId) : null;
 }
 
 // ─── Agents ─────────────────────────────────────────────

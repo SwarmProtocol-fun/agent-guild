@@ -110,9 +110,14 @@ export function RequestLoanDialog({
                             {source === "pool" ? "Loan Approved" : "Request Posted"}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                            {source === "pool"
-                                ? "The pool reserved the liquidity. A platform admin will send the real USDC disbursement shortly — the loan activates once that's confirmed on-chain."
-                                : "This request is now visible on the lending marketplace for a solo lender to fund."}
+                            {kind === "trust"
+                                ? "Next: post the collateral from the Loans panel (a USDC transfer to the lending treasury). "
+                                    + (source === "pool"
+                                        ? "Once it's verified, a platform admin sends the disbursement and the loan activates."
+                                        : "Once it's verified, the request goes live on the marketplace for a solo lender to fund.")
+                                : source === "pool"
+                                    ? "The pool reserved the liquidity. A platform admin will send the real USDC disbursement shortly — the loan activates once that's confirmed on-chain."
+                                    : "This request is now visible on the lending marketplace for a solo lender to fund."}
                         </p>
                         <Button size="sm" onClick={handleClose} className="w-full h-8 text-xs">Done</Button>
                     </div>
@@ -197,6 +202,12 @@ export function RequestLoanDialog({
                                 rows={2}
                             />
                         </div>
+
+                        {kind === "trust" && (
+                            <p className="text-[11px] text-muted-foreground">
+                                Trust loans are collateralized: after requesting, you&apos;ll post collateral (sized by your credit tier) to the lending treasury. It&apos;s returned to your wallet when the loan is repaid, or applied to the balance on default.
+                            </p>
+                        )}
 
                         {error && (
                             <div className="p-2 rounded-lg border border-red-500/20 bg-red-500/5 flex items-center gap-2 text-xs text-red-400">

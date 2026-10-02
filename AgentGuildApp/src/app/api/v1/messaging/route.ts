@@ -11,8 +11,7 @@
 import { NextRequest } from 'next/server';
 import { verifyAgentRequest, unauthorized } from '../verify';
 import { rateLimit } from '../rate-limit';
-import { db } from '@/lib/firebase';
-import { collection, addDoc } from 'firebase/firestore';
+import { adminDb } from '@/lib/firebase-admin';
 import {
   createA2AMessage,
   createCoordMessage,
@@ -115,7 +114,7 @@ export async function POST(req: NextRequest) {
     message.metadata = { ...message.metadata, orgId: agent.orgId };
 
     // Store in Firestore (will be picked up by hub or polling agents)
-    const messageRef = await addDoc(collection(db, 'agentMessages'), {
+    const messageRef = await adminDb().collection('agentMessages').add({
       ...message,
       orgId: agent.orgId,
       timestamp: new Date(message.timestamp),
