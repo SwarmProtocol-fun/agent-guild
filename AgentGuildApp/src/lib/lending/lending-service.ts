@@ -32,7 +32,7 @@ import { invalidateCache } from "@/lib/credit-cache";
 import { ingestCreditEvent } from "@/lib/credit-events/ingest";
 import type { CreditEventType } from "@/lib/credit-events/types";
 import { recomputeAndSync } from "@/lib/scoring-engine";
-import { verifyUsdcTransfer, claimUsdcTransferInTxn, treasuryAddress, type VerifyTransferInput } from "@/lib/solana/lending-verify";
+import { verifyUsdcTransfer, verifySolTransfer, claimUsdcTransferInTxn, treasuryAddress, type VerifyTransferInput } from "@/lib/solana/lending-verify";
 import {
     MIN_LOAN_USD,
     MAX_CONCURRENT_LOANS,
@@ -64,6 +64,7 @@ import type {
     PoolWithdrawalRequest,
     EligibilitySummary,
     LoanOffer,
+    DepositAsset,
 } from "./types";
 
 const POOLS = "lendingPools";
@@ -226,6 +227,7 @@ export async function confirmPoolDeposit(
     wallet: string,
     amountUsd: number,
     txSig: string,
+    asset: DepositAsset = "usdc",
 ): Promise<{ pool: LendingPool; position: PoolPosition | null; creditedUsd: number; refundedUsd: number }> {
     if (!(amountUsd > 0)) throw new Error("Deposit amount must be positive");
 
@@ -238,7 +240,10 @@ export async function confirmPoolDeposit(
         purpose: "pool_deposit",
         refId: poolId,
     };
-    await verifyUsdcTransfer(transfer);
+    // Native SOL is devnet-only test liquidity, credited at a fixed USD rate;
+    // the pool ledger (and every payout out of it) stays in USD.
+    const lamports = asset === "sol" ? (await verifySolTransfer(transfer)).lamports : undefined;
+    if (asset !== "sol") await verifyUsdcTransfer(transfer);
 
     const limits = lendingLimits();
     const poolRef = adminDb().collection(POOLS).doc(poolId);
@@ -265,11 +270,12 @@ export async function confirmPoolDeposit(
                 toWallet: wallet,
                 amountUsd: refundedUsd,
                 poolId,
-                reason: limits.paused
+                reason: (limits.paused
                     ? "Deposit arrived while lending was paused"
                     : !isWalletAllowed(limits, wallet)
                         ? "Wallet is not on the lending beta allowlist"
-                        : "Deposit exceeded the pool or per-wallet beta cap",
+                        : "Deposit exceeded the pool or per-wallet beta cap")
+                    + (asset === "sol" ? " (deposited as devnet SOL)" : ""),
             });
         }
 
@@ -278,6 +284,8 @@ export async function confirmPoolDeposit(
             walletAddress: wallet,
             amountUsd: creditedUsd,
             refundedUsd: refundedUsd > 0 ? refundedUsd : undefined,
+            asset: asset === "sol" ? "sol" : undefined,
+            lamports,
             txSig,
             depositedAt: at,
         }));

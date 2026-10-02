@@ -26,6 +26,10 @@ interface OrgContextValue {
   refreshOrgs: () => Promise<void>;
   /** Create a new organization */
   createOrg: (name: string, description?: string) => Promise<void>;
+  /** Merge a partial update into currentOrg (and the matching entry in organizations)
+   *  without refetching — call after a direct updateOrganization() write elsewhere
+   *  so consumers of useOrg() see the change immediately. */
+  patchCurrentOrg: (updates: Partial<Organization>) => void;
   /** Number of agents registered under currentOrg */
   agentCount: number;
   /** Whether the agent count for currentOrg is still loading */
@@ -42,6 +46,7 @@ const OrgContext = createContext<OrgContextValue>({
   selectOrg: () => { },
   refreshOrgs: async () => { },
   createOrg: async () => { },
+  patchCurrentOrg: () => { },
   agentCount: 0,
   agentsLoading: true,
   refreshAgentCount: async () => { },
@@ -166,6 +171,11 @@ export function OrgProvider({ children }: { children: ReactNode }) {
     }
   }, [address, refreshOrgs, organizations]);
 
+  const patchCurrentOrg = useCallback((updates: Partial<Organization>) => {
+    setCurrentOrg(prev => (prev ? { ...prev, ...updates } : prev));
+    setOrganizations(prev => prev.map(o => (o.id === currentOrg?.id ? { ...o, ...updates } : o)));
+  }, [currentOrg?.id]);
+
   const refreshAgentCount = useCallback(async () => {
     if (!currentOrg) {
       setAgentCount(0);
@@ -252,6 +262,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
       selectOrg,
       refreshOrgs,
       createOrg,
+      patchCurrentOrg,
       agentCount,
       agentsLoading,
       refreshAgentCount,

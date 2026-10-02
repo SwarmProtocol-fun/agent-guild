@@ -22,11 +22,15 @@ import { getDoc, doc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-dialog";
+import { BorrowPanel } from "@/components/lending/borrow-panel";
 import type { Agent } from "@/lib/firestore";
-import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
-import { poolSharePrice as sharePrice, freeShares } from "@/lib/lending/math";
+import type { DepositAsset, LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
+import { poolSharePrice as sharePrice, freeShares, solLamportsForUsd, LAMPORTS_PER_SOL } from "@/lib/lending/math";
+import { useSolanaSender } from "@/lib/wallet";
+import { getConnection } from "@/lib/solana/client";
+import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 
-type Tab = "pools" | "fund" | "offers" | "positions";
+type Tab = "borrow" | "pools" | "fund" | "offers" | "positions";
 
 function fmt(n: number): string {
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -144,13 +148,14 @@ export default function LendingMarketplacePage() {
                     Lending Marketplace
                 </h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                    Fund the community pool for diversified, lower-risk returns, or back a single agent&apos;s loan directly for a higher rate.
+                    Apply for a loan for one of your agents, fund the community pool for diversified, lower-risk returns, or back a single agent&apos;s loan directly for a higher rate.
                 </p>
             </div>
 
             {/* Tabs */}
             <div className="flex items-center gap-1 border-b border-border">
                 {([
+                    { key: "borrow", label: "Borrow" },
                     { key: "pools", label: "Pools" },
                     { key: "fund", label: `Fund a Loan (${openLoans.length})` },
                     { key: "offers", label: `Loan Offers (${openOffers.length})` },
@@ -181,6 +186,8 @@ export default function LendingMarketplacePage() {
                 </div>
             ) : (
                 <>
+                    {activeTab === "borrow" && <BorrowPanel />}
+
                     {activeTab === "pools" && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {pools.map((pool) => {
@@ -535,6 +542,10 @@ function PoolActionDialog({
     const [step, setStep] = useState<"amount" | "send">("amount");
     const [amount, setAmount] = useState("100");
     const [treasury, setTreasury] = useState<string | null>(null);
+    // Non-null only on devnet, where native SOL deposits are accepted at this rate.
+    const [solUsdRate, setSolUsdRate] = useState<number | null>(null);
+    const [asset, setAsset] = useState<DepositAsset>("usdc");
+    const solanaSender = useSolanaSender();
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [done, setDone] = useState(false);
@@ -565,12 +576,38 @@ function PoolActionDialog({
                     if (!r.ok) throw new Error(body.error || "Lending treasury not configured");
                     return body;
                 })
-                .then((d) => setTreasury(d.treasuryAddress))
+                .then((d) => {
+                    setTreasury(d.treasuryAddress);
+                    setSolUsdRate(typeof d.solUsdRate === "number" ? d.solUsdRate : null);
+                })
                 .catch((err) => setError(err instanceof Error ? err.message : "Failed to load treasury address"));
         }
     }, [mode]);
 
     const amountUsd = parseFloat(amount) || 0;
+    const lamports = asset === "sol" && solUsdRate ? solLamportsForUsd(amountUsd, solUsdRate) : 0;
+    const solAmountLabel = `${(lamports / LAMPORTS_PER_SOL).toLocaleString(undefined, { maximumFractionDigits: 9 })} SOL (devnet)`;
+    // Deposits are verified as coming from the signed-in wallet, so it must be a Solana account.
+    const signedInWithEvm = !!walletAddress && walletAddress.startsWith("0x");
+    const canWalletSend = !!solanaSender && solanaSender.address === walletAddress;
+
+    const sendSolWithWallet = async (): Promise<string> => {
+        if (!solanaSender || !treasury) throw new Error("Connect a Solana wallet first");
+        const connection = getConnection();
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+        const tx = new Transaction({ feePayer: new PublicKey(solanaSender.address), blockhash, lastValidBlockHeight }).add(
+            SystemProgram.transfer({
+                fromPubkey: new PublicKey(solanaSender.address),
+                toPubkey: new PublicKey(treasury),
+                lamports,
+            }),
+        );
+        const sig = await solanaSender.sendTransaction(tx, connection);
+        // The server only credits finalized transfers.
+        const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
+        if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
+        return sig;
+    };
 
     const requestWithdrawal = async () => {
         if (!walletAddress) {
@@ -626,6 +663,23 @@ function PoolActionDialog({
                     </div>
                 ) : step === "amount" ? (
                     <div className="space-y-4">
+                        {mode === "deposit" && solUsdRate !== null && (
+                            <div>
+                                <Label className="text-xs">Pay with</Label>
+                                <div className="mt-1 grid grid-cols-2 gap-1 rounded-lg border border-border p-1">
+                                    {(["usdc", "sol"] as const).map((a) => (
+                                        <button
+                                            key={a}
+                                            type="button"
+                                            onClick={() => setAsset(a)}
+                                            className={`h-7 rounded-md text-xs font-medium transition-colors ${asset === a ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"}`}
+                                        >
+                                            {a === "usdc" ? "USDC" : "SOL (devnet)"}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         <div>
                             <Label className="text-xs">Amount (USD)</Label>
                             <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="mt-1" />
@@ -635,8 +689,18 @@ function PoolActionDialog({
                             {mode === "deposit" && typeof capacityUsd === "number" && capacityUsd > 0 && (
                                 <p className="text-[10px] text-muted-foreground mt-1">Beta limit: up to ${fmt(capacityUsd)}</p>
                             )}
+                            {mode === "deposit" && asset === "sol" && solUsdRate !== null && amountUsd > 0 && (
+                                <p className="text-[10px] text-muted-foreground mt-1">
+                                    = {solAmountLabel} at the devnet test rate of ${fmt(solUsdRate)}/SOL
+                                </p>
+                            )}
                             {mode === "deposit" && blockedReason && (
                                 <p className="text-[10px] text-amber-500 mt-1">{blockedReason}</p>
+                            )}
+                            {mode === "deposit" && signedInWithEvm && (
+                                <p className="text-[10px] text-amber-500 mt-1">
+                                    You&apos;re signed in with an EVM wallet. Deposits must come from the wallet you&apos;re signed in with, so sign in with a Solana wallet (Phantom, Solflare) to deposit.
+                                </p>
                             )}
                         </div>
                         {error && (
@@ -649,7 +713,7 @@ function PoolActionDialog({
                                 size="sm"
                                 onClick={() => setStep("send")}
                                 disabled={
-                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined
+                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined || signedInWithEvm
                                     || (typeof capacityUsd === "number" && amountUsd > capacityUsd)
                                 }
                                 className="w-full h-8 text-xs gap-1"
@@ -668,13 +732,18 @@ function PoolActionDialog({
                     <OnChainSendStep
                         recipientAddress={treasury!}
                         amountUsd={amountUsd}
+                        amountLabel={asset === "sol" ? solAmountLabel : undefined}
+                        helperText={asset === "sol"
+                            ? `Worth $${fmt(amountUsd)} in the pool. Make sure your wallet is on Devnet. Send with your connected wallet, or send the exact amount yourself and paste the signature.`
+                            : undefined}
+                        onSendWithWallet={asset === "sol" && canWalletSend ? sendSolWithWallet : undefined}
                         submitLabel="Verify Deposit"
                         onSubmit={async (txSig) => {
                             if (!walletAddress) throw new Error("Connect a wallet first");
                             const res = await fetch(`/api/v1/lending/pools/${pool.id}/deposit`, {
                                 method: "POST",
                                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
-                                body: JSON.stringify({ amountUsd, txSig }),
+                                body: JSON.stringify({ amountUsd, txSig, asset }),
                             });
                             const body = await res.json().catch(() => ({}));
                             if (!res.ok) throw new Error(body.error || "Deposit verification failed");

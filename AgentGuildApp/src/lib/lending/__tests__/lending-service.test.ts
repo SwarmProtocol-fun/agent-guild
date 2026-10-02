@@ -9,11 +9,13 @@ import { FakeFirestore, fakeFieldValue, fakeTimestamp, type FakeTxn } from "./fa
 
 const db = new FakeFirestore();
 const verifyUsdcTransfer = vi.fn(async (input: { txSig: string; expectedAmountUsd: number }) => ({ txSig: input.txSig, receivedUsd: input.expectedAmountUsd }));
+const verifySolTransfer = vi.fn(async (input: { txSig: string; expectedAmountUsd: number }) => ({ txSig: input.txSig, receivedUsd: input.expectedAmountUsd, lamports: 2_000_000_000 }));
 
 vi.mock("@/lib/firebase-admin", () => ({ adminDb: () => db }));
 vi.mock("firebase-admin/firestore", () => ({ FieldValue: fakeFieldValue, Timestamp: fakeTimestamp }));
 vi.mock("@/lib/solana/lending-verify", () => ({
     verifyUsdcTransfer: (input: { txSig: string; expectedAmountUsd: number }) => verifyUsdcTransfer(input),
+    verifySolTransfer: (input: { txSig: string; expectedAmountUsd: number }) => verifySolTransfer(input),
     claimUsdcTransferInTxn: (txn: FakeTxn, input: { txSig: string; purpose: string }) =>
         txn.create(db.collection("lendingOnChainTxs").doc(input.txSig), { purpose: input.purpose }),
     treasuryAddress: () => "TREASURY",
@@ -131,6 +133,17 @@ describe("pool deposits", () => {
         expect(res.refundedUsd).toBe(200);
         expect((await getPool(pool.id))!.availableLiquidityUsd).toBe(300);
         expect(payouts("deposit_refund")).toMatchObject([{ fromWallet: "TREASURY", toWallet: "LENDER1", amountUsd: 200, status: "pending" }]);
+    });
+
+    it("credits a native SOL deposit in USD and records the lamports received", async () => {
+        verifyUsdcTransfer.mockClear();
+        const [pool] = await listPools();
+        const res = await confirmPoolDeposit(pool.id, "LENDER1", 300, nextSig(), "sol");
+        expect(verifySolTransfer).toHaveBeenCalledWith(expect.objectContaining({ expectedAmountUsd: 300, expectedToWallet: "TREASURY" }));
+        expect(verifyUsdcTransfer).not.toHaveBeenCalled();
+        expect(res.creditedUsd).toBe(300);
+        expect((await getPool(pool.id))!.availableLiquidityUsd).toBe(300);
+        expect(db.all("lendingPoolDeposits")).toMatchObject([{ amountUsd: 300, asset: "sol", lamports: 2_000_000_000 }]);
     });
 
     it("credits nothing and refunds everything while paused", async () => {

@@ -314,6 +314,35 @@
         { "fieldPath": "fromWallet", "order": "ASCENDING" },
         { "fieldPath": "createdAt",  "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "coordinators",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",        "order": "ASCENDING" },
+        { "fieldPath": "active",       "order": "ASCENDING" },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "coordinators",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",        "order": "ASCENDING" },
+        { "fieldPath": "projectId",    "order": "ASCENDING" },
+        { "fieldPath": "active",       "order": "ASCENDING" },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "coordinators",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",        "order": "ASCENDING" },
+        { "fieldPath": "channelId",    "order": "ASCENDING" },
+        { "fieldPath": "active",       "order": "ASCENDING" },
+        { "fieldPath": "registeredAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

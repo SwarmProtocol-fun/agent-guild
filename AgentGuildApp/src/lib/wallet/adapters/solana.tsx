@@ -19,7 +19,7 @@ import { PhantomWalletAdapter, SolflareWalletAdapter } from "@solana/wallet-adap
 import "@solana/wallet-adapter-react-ui/styles.css";
 import { Button } from "@/components/ui/button";
 import { SOLANA_RPC_URL } from "@/lib/solana/client";
-import type { ConnectButtonProps, WalletAdapter, WalletState } from "../types";
+import type { ConnectButtonProps, SolanaSender, WalletAdapter, WalletState } from "../types";
 
 function Provider({ children }: { children: ReactNode }) {
     const wallets = useMemo(() => [new PhantomWalletAdapter(), new SolflareWalletAdapter()], []);
@@ -50,6 +50,12 @@ function useSignMessage() {
     };
 }
 
+function useSolanaSender(): SolanaSender | null {
+    const { publicKey, connected, sendTransaction } = useSolanaWalletAdapter();
+    if (!connected || !publicKey) return null;
+    return { address: publicKey.toBase58(), sendTransaction: (tx, connection) => sendTransaction(tx, connection) };
+}
+
 function useDisconnect() {
     const { disconnect } = useSolanaWalletAdapter();
     return () => disconnect();
@@ -73,5 +79,6 @@ export const solanaWalletAdapter: WalletAdapter = {
     useSignMessage,
     useDisconnect,
     ConnectButton,
+    useSolanaSender,
     storagePrefixes: ["walletName", "solana-wallet-adapter"],
 };

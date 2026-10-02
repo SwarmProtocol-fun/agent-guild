@@ -301,9 +301,22 @@ export interface ComputeLease {
   memoryMb?: number;
   cpuCores?: number;
   error?: string;
+  /** Latest screenshot published by the node daemon */
+  screenshotUrl?: string;
+  /** Actions queued for the node daemon to execute */
+  pendingActions?: LeaseAction[];
+  /** Results written back by the node daemon, keyed by action id */
+  actionResults?: Record<string, { success: boolean; data?: Record<string, unknown>; error?: string; durationMs?: number }>;
   createdAt: unknown;
   startedAt?: unknown;
   endedAt?: unknown;
+}
+
+export interface LeaseAction {
+  id: string;
+  actionType: string;
+  payload: Record<string, unknown>;
+  queuedAt: number;
 }
 
 export interface Attachment {
@@ -815,8 +828,11 @@ export interface Job {
 }
 
 export async function createJob(data: Omit<Job, "id">): Promise<string> {
+  const clean = Object.fromEntries(
+    Object.entries(data).filter(([, v]) => v !== undefined)
+  );
   const ref = await addDoc(collection(db, "jobs"), {
-    ...data,
+    ...clean,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -1666,6 +1682,15 @@ export async function createLease(data: Omit<ComputeLease, "id" | "createdAt" | 
     createdAt: serverTimestamp(),
   });
   return ref.id;
+}
+
+export async function getLease(id: string): Promise<ComputeLease | null> {
+  const snap = await getDoc(doc(db, "leases", id));
+  return snap.exists() ? ({ id: snap.id, ...snap.data() } as ComputeLease) : null;
+}
+
+export async function queueLeaseAction(id: string, action: LeaseAction): Promise<void> {
+  await updateDoc(doc(db, "leases", id), { pendingActions: arrayUnion(action) });
 }
 
 export async function updateLease(id: string, data: Partial<ComputeLease>): Promise<void> {

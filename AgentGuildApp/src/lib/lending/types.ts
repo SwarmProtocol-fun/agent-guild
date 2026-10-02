@@ -177,11 +177,21 @@ export interface PoolWithdrawalRequest {
 }
 
 /** Audit trail of verified on-chain deposits into a pool. */
+/**
+ * What a pool deposit was paid in. "sol" (native SOL) is devnet-only test
+ * liquidity, valued at a fixed SOL→USD rate — the pool ledger itself stays USD.
+ */
+export type DepositAsset = "usdc" | "sol";
+
 export interface PoolDepositRecord {
     id: string;
     poolId: string;
     walletAddress: string;
     amountUsd: number;
+    /** Omitted for USDC (the default). */
+    asset?: DepositAsset;
+    /** Native SOL deposits only: lamports actually received by the treasury. */
+    lamports?: number;
     /** Part of the transfer that wasn't credited (beta cap / paused / not allowlisted) and was queued for refund. */
     refundedUsd?: number;
     txSig: string;

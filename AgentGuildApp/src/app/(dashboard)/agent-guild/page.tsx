@@ -66,7 +66,7 @@ const GRID_ORDER = [0, -1, 1, 2, -2, 3, 4, -1, 5]; // -2 = emblem, -1 = spacer
 // ═══════════════════════════════════════════════════════════════
 
 export default function AgentGuildPage() {
-  const { currentOrg } = useOrg();
+  const { currentOrg, patchCurrentOrg } = useOrg();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [assignments, setAssignments] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
   const [loading, setLoading] = useState(true);
@@ -107,6 +107,7 @@ export default function AgentGuildPage() {
     try {
       await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
+      patchCurrentOrg({ agentSlots: updated });
 
       // Notify Agent Hub about the new assignment
       const agent = agents.find(a => a.id === agentId);
@@ -143,6 +144,7 @@ export default function AgentGuildPage() {
     try {
       await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
+      patchCurrentOrg({ agentSlots: updated });
 
       const agent = agents.find(a => a.id === agentId);
       if (agent) {
@@ -174,6 +176,7 @@ export default function AgentGuildPage() {
     try {
       await updateOrganization(currentOrg.id, { agentSlots: updated } as Partial<typeof currentOrg>);
       setAssignments(updated);
+      patchCurrentOrg({ agentSlots: updated });
     } catch (err) {
       console.error("Failed to unassign agent:", err);
       setAssignError(err instanceof Error ? err.message : "Failed to unassign agent");

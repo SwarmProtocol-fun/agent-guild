@@ -30,9 +30,13 @@ import type { AppKitNetwork } from "@reown/appkit/networks";
 import { solanaDevnet } from "@reown/appkit/networks";
 import type { Provider as SolanaProvider } from "@reown/appkit-utils/solana";
 import { PhantomWalletAdapter, SolflareWalletAdapter } from "@solana/wallet-adapter-wallets";
+import { ConnectionProvider, WalletProvider as SolanaWalletProviderBase } from "@solana/wallet-adapter-react";
+import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
+import "@solana/wallet-adapter-react-ui/styles.css";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
-import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus } from "../types";
+import { SOLANA_RPC_URL } from "@/lib/solana/client";
+import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender } from "../types";
 import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
@@ -109,11 +113,21 @@ if (projectId) {
   );
 }
 
+// Solana-program components (agent registration, gig escrow, useAgentGuildWrite)
+// call @solana/wallet-adapter-react hooks directly, which throw without a
+// WalletProvider ancestor — so mount one here too, alongside AppKit.
 function Provider({ children }: { children: ReactNode }) {
   const queryClient = useMemo(() => new QueryClient(), []);
+  const solanaWallets = useMemo(() => [new PhantomWalletAdapter(), new SolflareWalletAdapter()], []);
   return (
     <WagmiProvider config={wagmiAdapter.wagmiConfig}>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <ConnectionProvider endpoint={SOLANA_RPC_URL}>
+          <SolanaWalletProviderBase wallets={solanaWallets} autoConnect>
+            <WalletModalProvider>{children}</WalletModalProvider>
+          </SolanaWalletProviderBase>
+        </ConnectionProvider>
+      </QueryClientProvider>
     </WagmiProvider>
   );
 }
@@ -164,6 +178,13 @@ function useSignMessage() {
   };
 }
 
+function useSolanaSender(): SolanaSender | null {
+  const { address, isConnected } = useAppKitAccount({ namespace: "solana" });
+  const { walletProvider } = useAppKitProvider<SolanaProvider>("solana");
+  if (!isConnected || !address || !walletProvider) return null;
+  return { address, sendTransaction: (tx, connection) => walletProvider.sendTransaction(tx, connection) };
+}
+
 function useDisconnect() {
   // Only reachable when AppKit was created; unconfigured → nothing to disconnect.
   return projectId ? useConfiguredDisconnect() : () => {};
@@ -207,5 +228,6 @@ export const walletConnectAdapter: WalletAdapter = {
   useSignMessage,
   useDisconnect,
   ConnectButton,
-  storagePrefixes: ["wagmi.", "@appkit", "@w3m", "wc@2", "WALLETCONNECT", "walletConnect"],
+  useSolanaSender,
+  storagePrefixes: ["wagmi.", "@appkit", "@w3m", "wc@2", "WALLETCONNECT", "walletConnect", "walletName", "solana-wallet-adapter"],
 };

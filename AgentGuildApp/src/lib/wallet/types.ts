@@ -10,6 +10,7 @@
  * so the hooks below are safe to call unconditionally in components.
  */
 import type { ComponentType, ReactNode } from "react";
+import type { Connection, Transaction } from "@solana/web3.js";
 
 export type WalletStatus = "connected" | "connecting" | "disconnected";
 
@@ -26,6 +27,14 @@ export interface ConnectButtonProps {
   className?: string;
 }
 
+/** A connected Solana wallet that can sign and broadcast a transaction. */
+export interface SolanaSender {
+  /** Base58 address of the Solana account that will sign. */
+  address: string;
+  /** Signs and broadcasts `tx` (fee payer and blockhash may be left for the wallet); resolves to its signature. */
+  sendTransaction(tx: Transaction, connection: Connection): Promise<string>;
+}
+
 export interface WalletAdapter {
   /** Unique id, matched against NEXT_PUBLIC_WALLET_PROVIDER. */
   id: string;
@@ -37,6 +46,8 @@ export interface WalletAdapter {
   useSignMessage(): (message: string) => Promise<string>;
   useDisconnect(): () => Promise<void> | void;
   ConnectButton: ComponentType<ConnectButtonProps>;
+  /** The connected Solana wallet's sender, or null when none is connected. Omit if the adapter has no Solana support. */
+  useSolanaSender?(): SolanaSender | null;
   /** localStorage key prefixes to purge on logout so the wallet doesn't auto-reconnect. */
   storagePrefixes: string[];
 }

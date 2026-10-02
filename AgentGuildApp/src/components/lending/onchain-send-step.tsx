@@ -5,11 +5,14 @@
  * solo loan funding, repayment, admin payouts). This component never signs
  * anything; it just collects the signature after the user sends it
  * themselves, and hands it to the caller's onSubmit to verify server-side.
+ * Callers may also pass onSendWithWallet, which has the connected wallet sign
+ * and send the transfer and resolves once it's finalized — the paste path
+ * stays available as a fallback.
  */
 "use client";
 
 import { useState } from "react";
-import { Loader2, AlertCircle, CheckCircle2, Copy, Check } from "lucide-react";
+import { Loader2, AlertCircle, CheckCircle2, Copy, Check, Wallet } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,6 +23,10 @@ interface OnChainSendStepProps {
     assetLabel?: string;
     helperText?: string;
     submitLabel?: string;
+    /** Overrides the "Send" row's value (default: `${amountUsd} ${assetLabel}`). */
+    amountLabel?: string;
+    /** Signs and sends the transfer from the connected wallet; resolves to a finalized signature. */
+    onSendWithWallet?: () => Promise<string>;
     onSubmit: (txSig: string) => Promise<void>;
 }
 
@@ -32,11 +39,14 @@ export function OnChainSendStep({
     assetLabel = DEFAULT_ASSET_LABEL,
     helperText,
     submitLabel = "Verify & Continue",
+    amountLabel,
+    onSendWithWallet,
     onSubmit,
 }: OnChainSendStepProps) {
     const [txSig, setTxSig] = useState("");
     const [copied, setCopied] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [sending, setSending] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const handleCopy = () => {
@@ -58,12 +68,37 @@ export function OnChainSendStep({
         }
     };
 
+    const handleSendWithWallet = async () => {
+        if (!onSendWithWallet) return;
+        setSending(true);
+        setError(null);
+        let sig: string;
+        try {
+            sig = await onSendWithWallet();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Wallet transaction failed");
+            setSending(false);
+            return;
+        }
+        // Keep the signature visible so a failed verification can be retried with the button below.
+        setTxSig(sig);
+        setSending(false);
+        setLoading(true);
+        try {
+            await onSubmit(sig);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Verification failed");
+        } finally {
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="space-y-4">
             <div className="rounded-lg border border-border p-3 space-y-2">
                 <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Send</span>
-                    <span className="font-bold">{amountUsd} {assetLabel}</span>
+                    <span className="font-bold">{amountLabel ?? `${amountUsd} ${assetLabel}`}</span>
                 </div>
                 <div className="flex justify-between text-sm items-center">
                     <span className="text-muted-foreground">To</span>
@@ -76,6 +111,13 @@ export function OnChainSendStep({
                     </button>
                 </div>
             </div>
+
+            {onSendWithWallet && (
+                <Button size="sm" onClick={handleSendWithWallet} disabled={sending || loading} className="w-full h-8 text-xs gap-1">
+                    {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wallet className="h-3 w-3" />}
+                    {sending ? "Waiting for wallet & finalization…" : "Send with wallet"}
+                </Button>
+            )}
 
             <p className="text-xs text-muted-foreground">
                 {helperText || "Send the exact amount above from your own wallet, then paste the transaction signature below."}
@@ -97,7 +139,13 @@ export function OnChainSendStep({
                 </div>
             )}
 
-            <Button size="sm" onClick={handleSubmit} disabled={loading || !txSig.trim()} className="w-full h-8 text-xs gap-1">
+            <Button
+                size="sm"
+                variant={onSendWithWallet ? "outline" : "default"}
+                onClick={handleSubmit}
+                disabled={loading || sending || !txSig.trim()}
+                className="w-full h-8 text-xs gap-1"
+            >
                 {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <CheckCircle2 className="h-3 w-3" />}
                 {submitLabel}
             </Button>

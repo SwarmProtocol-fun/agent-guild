@@ -2,7 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 
 vi.mock("@/lib/firebase-admin", () => ({ adminDb: vi.fn() }));
 
-import { tokenBalanceDelta, usdcMintAddress, lendingCluster } from "../lending-verify";
+import { tokenBalanceDelta, usdcMintAddress, lendingCluster, lamportBalanceDelta, devnetSolUsdRate } from "../lending-verify";
+import { solLamportsForUsd } from "@/lib/lending/math";
 
 const MINT = "MintAAA";
 const bal = (owner: string, amount: string, mint = MINT) => ({ owner, mint, uiTokenAmount: { amount } });
@@ -30,6 +31,39 @@ describe("tokenBalanceDelta", () => {
 
     it("handles null/undefined balance arrays", () => {
         expect(tokenBalanceDelta(null, undefined, "A", MINT)).toBe(0);
+    });
+});
+
+describe("lamportBalanceDelta", () => {
+    it("reports the recipient's gain and the sender's loss including the fee", () => {
+        const keys = ["SENDER", "TREASURY", "11111111111111111111111111111111"];
+        const pre = [5_000_000_000, 1_000_000_000, 1];
+        const post = [2_999_995_000, 3_000_000_000, 1];
+        expect(lamportBalanceDelta(keys, pre, post, "TREASURY")).toBe(2_000_000_000);
+        expect(lamportBalanceDelta(keys, pre, post, "SENDER")).toBe(-2_000_005_000);
+        expect(lamportBalanceDelta(keys, pre, post, "NOBODY")).toBe(0);
+    });
+});
+
+describe("devnet SOL deposits", () => {
+    const env = { ...process.env };
+    afterEach(() => {
+        process.env = { ...env };
+    });
+
+    it("rounds the required lamports up so the treasury never gets less than the USD credited", () => {
+        expect(solLamportsForUsd(150, 150)).toBe(1_000_000_000);
+        expect(solLamportsForUsd(100, 150)).toBe(666_666_667);
+    });
+
+    it("uses the configured rate on devnet and refuses SOL on mainnet", () => {
+        process.env.SOLANA_CLUSTER = "devnet";
+        process.env.LENDING_DEVNET_SOL_USD = "200";
+        expect(devnetSolUsdRate()).toBe(200);
+        process.env.LENDING_DEVNET_SOL_USD = "nope";
+        expect(() => devnetSolUsdRate()).toThrow(/positive number/);
+        process.env.SOLANA_CLUSTER = "mainnet-beta";
+        expect(devnetSolUsdRate()).toBeNull();
     });
 });
 

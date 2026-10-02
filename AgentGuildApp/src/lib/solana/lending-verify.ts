@@ -22,6 +22,7 @@
 import { Connection } from "@solana/web3.js";
 import { adminDb } from "@/lib/firebase-admin";
 import { getChain } from "@/lib/chains";
+import { LAMPORTS_PER_SOL, solLamportsForUsd } from "@/lib/lending/math";
 
 // Same devnet USDC-Dev mint as settlement/solana-adapter.ts.
 const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -155,6 +156,74 @@ export async function verifyUsdcTransfer(input: VerifyTransferInput): Promise<Ve
     }
 
     return { txSig, receivedUsd };
+}
+
+// Devnet SOL has no market price; this is just the rate test deposits are
+// credited at. Override with LENDING_DEVNET_SOL_USD.
+const DEFAULT_DEVNET_SOL_USD = 150;
+
+/**
+ * SOL→USD rate native-SOL pool deposits are credited at, or null when native
+ * SOL isn't accepted. Devnet only: on mainnet the treasury would hold SOL
+ * while owing USDC, so SOL deposits are refused there outright.
+ */
+export function devnetSolUsdRate(): number | null {
+    if (lendingCluster() !== "devnet") return null;
+    const raw = process.env.LENDING_DEVNET_SOL_USD;
+    const rate = raw ? Number(raw) : DEFAULT_DEVNET_SOL_USD;
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error(`LENDING_DEVNET_SOL_USD must be a positive number (got "${raw}")`);
+    return rate;
+}
+
+/**
+ * Net lamport change for `owner` across a transaction. `accountKeys` must be
+ * the full key list (static + lookup-table) so it lines up index-for-index
+ * with pre/postBalances.
+ */
+export function lamportBalanceDelta(accountKeys: string[], pre: number[], post: number[], owner: string): number {
+    return accountKeys.reduce((acc, key, i) => (key === owner ? acc + ((post[i] ?? 0) - (pre[i] ?? 0)) : acc), 0);
+}
+
+export interface VerifiedSolTransfer extends VerifiedTransfer {
+    lamports: number;
+}
+
+/**
+ * Native-SOL counterpart of verifyUsdcTransfer() — devnet only. Checks the
+ * treasury's lamport balance rose by at least the SOL equivalent of
+ * expectedAmountUsd and the sender's fell by at least as much (the sender's
+ * drop also includes the network fee when they paid it, so it's >=, never ==).
+ * Same contract: read-only, the caller claims the signature with
+ * claimUsdcTransferInTxn() inside the crediting transaction.
+ */
+export async function verifySolTransfer(input: VerifyTransferInput): Promise<VerifiedSolTransfer> {
+    const { txSig, expectedFromWallet, expectedToWallet, expectedAmountUsd } = input;
+    const rate = devnetSolUsdRate();
+    if (rate === null) throw new Error("Native SOL deposits are only accepted on devnet — send USDC instead");
+
+    const claimed = await adminDb().collection(ONCHAIN_TX_COLLECTION).doc(txSig).get();
+    if (claimed.exists) throw new Error("This transaction signature has already been used for a different credit");
+
+    const tx = await connection().getTransaction(txSig, { maxSupportedTransactionVersion: 0, commitment: "finalized" });
+    if (!tx) throw new Error("Transaction not found or not finalized yet — wait a few seconds and retry");
+    if (tx.meta?.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(tx.meta.err)}`);
+    if (!tx.meta) throw new Error("Transaction has no balance metadata");
+
+    const keys = tx.transaction.message.getAccountKeys({ accountKeysFromLookups: tx.meta.loadedAddresses });
+    const accountKeys = Array.from({ length: keys.length }, (_, i) => keys.get(i)!.toBase58());
+    const { preBalances, postBalances } = tx.meta;
+
+    const requiredLamports = solLamportsForUsd(expectedAmountUsd, rate);
+    const received = lamportBalanceDelta(accountKeys, preBalances, postBalances, expectedToWallet);
+    if (received < requiredLamports) {
+        throw new Error(`Expected at least ${requiredLamports / LAMPORTS_PER_SOL} SOL to arrive at ${expectedToWallet}, found ${received / LAMPORTS_PER_SOL}`);
+    }
+    const sent = -lamportBalanceDelta(accountKeys, preBalances, postBalances, expectedFromWallet);
+    if (sent < requiredLamports) {
+        throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${requiredLamports / LAMPORTS_PER_SOL} SOL`);
+    }
+
+    return { txSig, receivedUsd: (received / LAMPORTS_PER_SOL) * rate, lamports: received };
 }
 
 /**

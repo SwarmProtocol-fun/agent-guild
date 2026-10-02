@@ -1,6 +1,6 @@
 import type { ComputeProvider } from "../provider";
 import type { InstanceConfig, ProviderResult, ActionEnvelope, ActionResult } from "../types";
-import { createLease, updateLease } from "../../firestore";
+import { createLease, updateLease, getLease, queueLeaseAction, onLeaseChange } from "../../firestore";
 
 export class AgentGuildNodeProvider implements ComputeProvider {
   readonly name = "agent-guild-node";
@@ -52,19 +52,45 @@ export class AgentGuildNodeProvider implements ComputeProvider {
     await updateLease(providerInstanceId, { status: "stopping" });
   }
 
-  async takeScreenshot(_providerInstanceId: string): Promise<{ url: string; base64?: string }> {
-    // For containerized agents, taking manual screenshots might require a VNC connection inside the container
-    // We mock this for MVP unless the agent pushes screenshots.
-    return { url: "https://via.placeholder.com/800x600.png?text=Node+Screenshot+Mock" };
+  async takeScreenshot(providerInstanceId: string): Promise<{ url: string; base64?: string }> {
+    // Screenshots are published to the lease by the node daemon
+    const lease = await getLease(providerInstanceId);
+    if (!lease) throw new Error(`Lease ${providerInstanceId} not found`);
+    if (!lease.screenshotUrl) throw new Error("Node has not published a screenshot for this container yet");
+    return { url: lease.screenshotUrl };
   }
 
   async executeAction(providerInstanceId: string, action: ActionEnvelope): Promise<ActionResult> {
-    // In the future, this pushes the action to the 'actions' subcollection on the lease
-    return {
-      success: true,
-      data: { message: "Action forwarded to node daemon", actionType: action.actionType },
-      durationMs: 100,
-    };
+    // Queue the action on the lease, then wait for the node daemon to write back its result
+    const start = Date.now();
+    const actionId = action.idempotencyKey || `${start}-${Math.random().toString(36).slice(2, 8)}`;
+
+    await queueLeaseAction(providerInstanceId, {
+      id: actionId,
+      actionType: action.actionType,
+      payload: action.payload,
+      queuedAt: start,
+    });
+
+    return new Promise<ActionResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsubscribe();
+        reject(new Error("Action timeout"));
+      }, action.timeoutMs);
+
+      const unsubscribe = onLeaseChange(providerInstanceId, (lease) => {
+        const result = lease?.actionResults?.[actionId];
+        if (!lease || !result) return;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve({
+          success: result.success,
+          data: result.data,
+          error: result.error,
+          durationMs: result.durationMs ?? Date.now() - start,
+        });
+      });
+    });
   }
 
   async getVncUrl(providerInstanceId: string): Promise<string> {

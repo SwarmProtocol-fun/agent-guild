@@ -57,19 +57,11 @@ interface VitalsData {
     uptime?: string;
 }
 
-const DEMO_VITALS: VitalsData = {
-    cpu: { usage: 23, chip: "Apple M2" },
-    memory: { usedBytes: 12.4e9, totalBytes: 16e9, percent: 77 },
-    disk: { usedBytes: 234e9, totalBytes: 512e9, percent: 46 },
-    hostname: "agent-guild-node-01",
-    uptime: "14d 7h",
-};
-
 export function VitalsWidget({ data }: { data?: VitalsData | null }) {
     const { currentOrg } = useOrg();
 
     // Fetch real vitals when no data prop is provided, refreshing every 60s
-    const { data: fetched } = useQuery({
+    const { data: fetched, isLoading } = useQuery({
         queryKey: ["vitals", currentOrg?.id],
         queryFn: async () => {
             const v = await getLatestVitals(currentOrg!.id);
@@ -81,8 +73,7 @@ export function VitalsWidget({ data }: { data?: VitalsData | null }) {
         refetchIntervalInBackground: false,
     });
 
-    const vitals: VitalsData = data || fetched || DEMO_VITALS;
-    const isDemo = !data && !fetched;
+    const vitals = data || fetched || null;
 
     return (
         <Card className="p-4 bg-card/80 border-border overflow-hidden">
@@ -92,36 +83,39 @@ export function VitalsWidget({ data }: { data?: VitalsData | null }) {
                     <h3 className="text-sm font-semibold">System Vitals</h3>
                 </div>
                 <div className="flex items-center gap-2">
-                    {isDemo && (
-                        <span className="text-[9px] text-muted-foreground/50 italic">Demo data</span>
-                    )}
-                    {vitals.hostname && (
+                    {vitals?.hostname && (
                         <span className="text-[9px] text-muted-foreground font-mono truncate ml-2">
                             {vitals.hostname} {vitals.uptime && `· ${vitals.uptime}`}
                         </span>
                     )}
                 </div>
             </div>
-            <div className="flex justify-around gap-2 overflow-hidden">
-                <CircularGauge
-                    value={vitals.cpu.usage}
-                    label="CPU"
-                    icon={Cpu}
-                    detail={vitals.cpu.chip}
-                />
-                <CircularGauge
-                    value={vitals.memory.percent}
-                    label="Memory"
-                    icon={MemoryStick}
-                    detail={`${fmtBytes(vitals.memory.usedBytes)} / ${fmtBytes(vitals.memory.totalBytes)}`}
-                />
-                <CircularGauge
-                    value={vitals.disk.percent}
-                    label="Disk"
-                    icon={HardDrive}
-                    detail={`${fmtBytes(vitals.disk.usedBytes)} / ${fmtBytes(vitals.disk.totalBytes)}`}
-                />
-            </div>
+            {!vitals ? (
+                <p className="text-xs text-muted-foreground text-center py-6">
+                    {isLoading ? "Loading vitals…" : "No vitals reported yet — connect a node to see live CPU, memory, and disk."}
+                </p>
+            ) : (
+                <div className="flex justify-around gap-2 overflow-hidden">
+                    <CircularGauge
+                        value={vitals.cpu.usage}
+                        label="CPU"
+                        icon={Cpu}
+                        detail={vitals.cpu.chip}
+                    />
+                    <CircularGauge
+                        value={vitals.memory.percent}
+                        label="Memory"
+                        icon={MemoryStick}
+                        detail={`${fmtBytes(vitals.memory.usedBytes)} / ${fmtBytes(vitals.memory.totalBytes)}`}
+                    />
+                    <CircularGauge
+                        value={vitals.disk.percent}
+                        label="Disk"
+                        icon={HardDrive}
+                        detail={`${fmtBytes(vitals.disk.usedBytes)} / ${fmtBytes(vitals.disk.totalBytes)}`}
+                    />
+                </div>
+            )}
         </Card>
     );
 }

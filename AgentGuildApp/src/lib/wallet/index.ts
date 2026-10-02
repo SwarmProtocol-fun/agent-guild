@@ -10,7 +10,7 @@
 import { walletAdapters, DEFAULT_WALLET_ADAPTER } from "./adapters";
 import type { WalletAdapter } from "./types";
 
-export type { WalletAdapter, WalletState, WalletStatus } from "./types";
+export type { WalletAdapter, WalletState, WalletStatus, SolanaSender } from "./types";
 
 const requested = process.env.NEXT_PUBLIC_WALLET_PROVIDER || DEFAULT_WALLET_ADAPTER;
 const adapter: WalletAdapter = walletAdapters[requested] ?? walletAdapters[DEFAULT_WALLET_ADAPTER];
@@ -24,6 +24,8 @@ export const ConnectWalletButton = adapter.ConnectButton;
 export const useWallet = adapter.useWallet;
 export const useWalletSignMessage = adapter.useSignMessage;
 export const useDisconnectWallet = adapter.useDisconnect;
+/** Connected Solana wallet that can send a transaction, or null (none connected / adapter has no Solana). */
+export const useSolanaSender = adapter.useSolanaSender ?? (() => null);
 
 /** Drop-in for the old `useActiveAccount()`: `{ address }` or undefined. */
 export function useWalletAccount(): { address: string } | undefined {

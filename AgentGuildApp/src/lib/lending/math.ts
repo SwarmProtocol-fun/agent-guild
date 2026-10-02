@@ -6,6 +6,17 @@
 
 import type { Loan, LendingPool, PoolPosition } from "./types";
 
+export const LAMPORTS_PER_SOL = 1_000_000_000;
+
+/**
+ * Lamports a native-SOL deposit of `amountUsd` must carry at `solUsdRate`.
+ * Rounded up so the treasury never receives less than the USD credited —
+ * client (quote) and server (verify) both call this, so they always agree.
+ */
+export function solLamportsForUsd(amountUsd: number, solUsdRate: number): number {
+    return Math.ceil((amountUsd / solUsdRate) * LAMPORTS_PER_SOL);
+}
+
 /** Accrue simple daily interest on the remaining principal up to `asOf` (unix seconds). */
 export function accrue(loan: Loan, asOf: number): Loan {
     const last = loan.lastAccrualAt ?? loan.originatedAt ?? asOf;
