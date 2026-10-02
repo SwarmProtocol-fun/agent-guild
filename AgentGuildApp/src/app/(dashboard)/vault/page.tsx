@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook } from "lucide-react";
+import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook, Server } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -56,6 +56,24 @@ interface BindingRow {
   agentIds: string[];
   maxCallsPerHour: number;
   revoked: boolean;
+}
+
+interface RuntimeRow {
+  computerId: string;
+  agentId: string;
+  scopes: string[];
+  bindings: string[] | null;
+  enrolled: boolean;
+  enrolledAt: number | null;
+  lastTokenAt: number | null;
+  revoked: boolean;
+}
+
+interface ComputerRow {
+  id: string;
+  name: string;
+  status: string;
+  provider: string;
 }
 
 interface AuditRow {
@@ -100,17 +118,22 @@ export default function VaultPage() {
   const [rotating, setRotating] = useState<SecretRow | null>(null);
   const [showBinding, setShowBinding] = useState(false);
   const [scheduling, setScheduling] = useState<SecretRow | null>(null);
+  const [runtimes, setRuntimes] = useState<RuntimeRow[]>([]);
+  const [computers, setComputers] = useState<ComputerRow[]>([]);
+  const [showRuntime, setShowRuntime] = useState(false);
 
   const load = useCallback(async () => {
     if (!orgId) return;
     setLoading(true);
     setError(null);
     try {
-      const [s, b, a] = await Promise.all([
+      const [s, b, a, r] = await Promise.all([
         api<{ secrets: SecretRow[]; provider: { provider: string; configured: boolean } }>(`/api/vault/secrets?orgId=${orgId}`),
         api<{ bindings: BindingRow[] }>(`/api/vault/bindings?orgId=${orgId}`),
         api<{ entries: AuditRow[]; chain: { intact: boolean; brokenAt: number | null } }>(`/api/vault/audit?orgId=${orgId}&limit=100`),
+        api<{ runtimes: RuntimeRow[] }>(`/api/vault/runtimes?orgId=${orgId}`),
       ]);
+      setRuntimes(r.runtimes);
       setSecrets(s.secrets);
       setProvider(s.provider);
       setBindings(b.bindings);
@@ -125,7 +148,9 @@ export default function VaultPage() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    if (orgId) getAgentsByOrg(orgId).then(setAgents).catch(() => setAgents([]));
+    if (!orgId) return;
+    getAgentsByOrg(orgId).then(setAgents).catch(() => setAgents([]));
+    api<{ computers: ComputerRow[] }>(`/api/compute/computers?orgId=${orgId}`).then((d) => setComputers(d.computers || [])).catch(() => setComputers([]));
   }, [orgId]);
 
   const agentName = (id: string) => (id === "*" ? "All agents" : agents.find((a) => a.id === id)?.name || id);
@@ -185,6 +210,7 @@ export default function VaultPage() {
         <TabsList>
           <TabsTrigger value="bindings"><Link2 className="h-4 w-4 mr-1.5" />Bindings ({bindings.length})</TabsTrigger>
           <TabsTrigger value="secrets"><KeyRound className="h-4 w-4 mr-1.5" />Secrets ({secrets.length})</TabsTrigger>
+          <TabsTrigger value="runtimes"><Server className="h-4 w-4 mr-1.5" />Runtimes ({runtimes.filter((r) => !r.revoked).length})</TabsTrigger>
           <TabsTrigger value="tokens"><Ticket className="h-4 w-4 mr-1.5" />Agent tokens</TabsTrigger>
           <TabsTrigger value="audit"><ScrollText className="h-4 w-4 mr-1.5" />Audit log</TabsTrigger>
         </TabsList>
@@ -324,6 +350,59 @@ export default function VaultPage() {
           )}
         </TabsContent>
 
+        {/* ── Runtimes ─────────────────────────────────────────── */}
+        <TabsContent value="runtimes" className="space-y-4">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm text-muted-foreground max-w-3xl">
+              Give a compute machine vault access as one of your agents. The machine gets a revocable credential that it swaps for 1-hour
+              tokens; no raw keys or private keys are copied onto it. On the machine, <code className="text-xs">agent-guild call &lt;binding&gt; GET /path</code> just works.
+            </p>
+            {isOwner && <Button size="sm" onClick={() => setShowRuntime(true)} disabled={!computers.length || !agents.length}><Plus className="h-4 w-4 mr-1" />Connect machine</Button>}
+          </div>
+          {loading ? <Loading /> : runtimes.length === 0 ? <Empty text={computers.length ? "No machines connected yet." : "This organization has no compute machines yet."} /> : (
+            <Card>
+              <CardContent className="p-0">
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-muted-foreground border-b">
+                    <tr>
+                      <th className="text-left font-medium p-3">Machine</th>
+                      <th className="text-left font-medium p-3">Acts as</th>
+                      <th className="text-left font-medium p-3 hidden md:table-cell">Access</th>
+                      <th className="text-left font-medium p-3">Status</th>
+                      <th className="p-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {runtimes.map((r) => (
+                      <tr key={r.computerId} className={`border-b last:border-0 ${r.revoked ? "opacity-60" : ""}`}>
+                        <td className="p-3">{computers.find((c) => c.id === r.computerId)?.name || <span className="font-mono text-xs">{r.computerId}</span>}</td>
+                        <td className="p-3">{agentName(r.agentId)}</td>
+                        <td className="p-3 hidden md:table-cell text-xs text-muted-foreground">{r.scopes.join(", ")}{r.bindings ? ` · ${r.bindings.join(", ")}` : " · all bindings"}</td>
+                        <td className="p-3 text-xs">
+                          {r.revoked ? <Badge variant="destructive">Revoked</Badge>
+                            : r.enrolled ? <span>Connected{r.lastTokenAt ? ` · last token ${fmtTime(r.lastTokenAt)}` : ""}</span>
+                            : <span className="text-amber-500">Waiting for install</span>}
+                        </td>
+                        <td className="p-3 text-right">
+                          {isOwner && !r.revoked && (
+                            <Button size="sm" variant="outline" onClick={() => {
+                              if (confirm("Disconnect this machine from the vault?")) {
+                                run(() => api(`/api/vault/runtimes/revoke`, { method: "POST", body: JSON.stringify({ orgId, computerId: r.computerId }) }));
+                              }
+                            }}>
+                              <Ban className="h-3.5 w-3.5 mr-1" />Disconnect
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
         {/* ── Agent tokens ─────────────────────────────────────── */}
         <TabsContent value="tokens" className="space-y-4">
           <p className="text-sm text-muted-foreground max-w-3xl">
@@ -413,6 +492,20 @@ export default function VaultPage() {
         onSubmit={(name, value, description) => run(() => rotating
           ? api(`/api/vault/secrets/${rotating.id}`, { method: "PUT", body: JSON.stringify({ orgId, value }) })
           : api(`/api/vault/secrets`, { method: "POST", body: JSON.stringify({ orgId, name, value, description }) }), { inline: true })}
+      />
+      <RuntimeDialog
+        open={showRuntime}
+        onClose={() => setShowRuntime(false)}
+        computers={computers}
+        agents={agents}
+        bindings={bindings}
+        onConnect={async (payload) => {
+          let result: { pushed: boolean; pushError: string | null; installCommand: string } | null = null;
+          const err = await run(async () => {
+            result = await api(`/api/vault/runtimes`, { method: "POST", body: JSON.stringify({ orgId, ...payload }) });
+          }, { inline: true });
+          return { error: err, result };
+        }}
       />
       <RotationDialog
         secret={scheduling}
@@ -514,6 +607,107 @@ function SecretDialog({ open, rotating, onClose, onSubmit }: {
             </Button>
           </div>
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RuntimeDialog({ open, onClose, computers, agents, bindings, onConnect }: {
+  open: boolean;
+  onClose: () => void;
+  computers: ComputerRow[];
+  agents: Agent[];
+  bindings: BindingRow[];
+  onConnect: (payload: { computerId: string; agentId: string; scopes: string[]; bindings?: string[] }) =>
+    Promise<{ error: string | null; result: { pushed: boolean; pushError: string | null; installCommand: string } | null }>;
+}) {
+  const [computerId, setComputerId] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [scopes, setScopes] = useState<string[]>(["bindings:list", "bindings:execute"]);
+  const [onlyBindings, setOnlyBindings] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<{ pushed: boolean; pushError: string | null; installCommand: string } | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setComputerId(computers[0]?.id || ""); setAgentId(agents[0]?.id || "");
+    setScopes(["bindings:list", "bindings:execute"]); setOnlyBindings([]); setError(null); setResult(null);
+  }, [open, computers, agents]);
+
+  const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+
+  const connect = async () => {
+    setBusy(true);
+    const res = await onConnect({ computerId, agentId, scopes, ...(onlyBindings.length ? { bindings: onlyBindings } : {}) });
+    setBusy(false);
+    setError(res.error);
+    if (res.result) setResult(res.result);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader><DialogTitle>Connect a machine to the vault</DialogTitle></DialogHeader>
+        {result ? (
+          <div className="space-y-3 text-sm">
+            {result.pushed
+              ? <p>Installed on the machine. It&apos;s connected as soon as the install finishes.</p>
+              : <p>Couldn&apos;t install automatically{result.pushError ? ` (${result.pushError})` : ""}. Run this on the machine within 10 minutes. The code inside works once.</p>}
+            {!result.pushed && <pre className="bg-muted rounded p-2 text-[11px] font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">{result.installCommand}</pre>}
+            <div className="flex justify-end gap-2">
+              {!result.pushed && <Button variant="outline" onClick={() => navigator.clipboard.writeText(result.installCommand)}>Copy command</Button>}
+              <Button onClick={onClose}>Done</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Machine</Label>
+                <Select value={computerId} onValueChange={setComputerId}>
+                  <SelectTrigger><SelectValue placeholder="Choose" /></SelectTrigger>
+                  <SelectContent>{computers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} ({c.status})</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Acts as agent</Label>
+                <Select value={agentId} onValueChange={setAgentId}>
+                  <SelectTrigger><SelectValue placeholder="Choose" /></SelectTrigger>
+                  <SelectContent>{agents.map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Allowed</Label>
+              {[["bindings:list", "List bindings"], ["bindings:execute", "Call APIs through bindings"], ["llm:proxy", "Use the LLM proxy"]].map(([v, label]) => (
+                <label key={v} className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={scopes.includes(v)} onChange={() => setScopes(toggle(scopes, v))} />{label}
+                </label>
+              ))}
+            </div>
+            {bindings.length > 0 && (
+              <div className="space-y-2">
+                <Label>Only these bindings (leave empty for all the agent may use)</Label>
+                <div className="flex flex-wrap gap-2">
+                  {bindings.filter((b) => !b.revoked).map((b) => (
+                    <button key={b.id} type="button" onClick={() => setOnlyBindings(toggle(onlyBindings, b.name))}
+                      className={`px-2.5 py-1 rounded border text-xs font-mono ${onlyBindings.includes(b.name) ? "border-primary bg-primary/10" : "border-border text-muted-foreground"}`}>
+                      {b.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {error && <p className="text-sm text-red-500">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button onClick={connect} disabled={busy || !computerId || !agentId || !scopes.length}>
+                {busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}Connect
+              </Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

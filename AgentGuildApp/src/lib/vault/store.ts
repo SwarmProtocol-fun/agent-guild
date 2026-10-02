@@ -252,7 +252,8 @@ export interface AuditEntry {
     | "binding.created" | "binding.updated" | "binding.revoked" | "binding.deleted"
     | "binding.executed" | "binding.denied"
     | "tokens.revoked"
-    | "secret.rotation_configured" | "secret.rotation_due" | "secret.rotation_failed";
+    | "secret.rotation_configured" | "secret.rotation_due" | "secret.rotation_failed"
+    | "runtime.connected" | "runtime.revoked";
   actorType: "user" | "agent";
   actorId: string;
   target: string;
