@@ -2057,11 +2057,33 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     : advanceLastPoll(state.lastPoll, since, messages);
   freshState.channelHistory = freshState.channelHistory || {};
   const historyForMsg = new Map();
+  // A held cursor re-fetches the same messages every tick. Keyed by msg.id
+  // so a re-fetch is neither appended again nor logged/forwarded as new.
+  // Entries written before ids were stored match on from+timestamp+text.
+  const newMessages = [];
+  for (const [chanId, arr] of Object.entries(freshState.channelHistory)) {
+    const keys = new Set();
+    freshState.channelHistory[chanId] = arr.filter((h) => {
+      const key = h.id || `${h.from}\u0000${h.timestamp}\u0000${h.text}`;
+      if (keys.has(key)) return false;
+      keys.add(key);
+      return true;
+    });
+  }
   for (const msg of messages) {
     const arr = freshState.channelHistory[msg.channelId] = freshState.channelHistory[msg.channelId] || [];
+    const seenAt = arr.findIndex((h) => h.id
+      ? h.id === msg.id
+      : h.from === msg.from && h.timestamp === msg.timestamp && h.text === msg.text);
+    if (seenAt !== -1) {
+      if (!arr[seenAt].id) arr[seenAt].id = msg.id;
+      historyForMsg.set(msg.id, arr.slice(Math.max(0, seenAt - CHANNEL_HISTORY_CONTEXT), seenAt));
+      continue;
+    }
     historyForMsg.set(msg.id, arr.slice(-CHANNEL_HISTORY_CONTEXT));
-    arr.push({ from: msg.from, fromType: msg.fromType, text: msg.text, timestamp: msg.timestamp });
+    arr.push({ id: msg.id, from: msg.from, fromType: msg.fromType, text: msg.text, timestamp: msg.timestamp });
     if (arr.length > CHANNEL_HISTORY_LIMIT) arr.splice(0, arr.length - CHANNEL_HISTORY_LIMIT);
+    newMessages.push(msg);
   }
   saveState(freshState);
 
@@ -2070,10 +2092,10 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     if (hub) daemonState.hubChannelId = hub.id;
   }
 
-  if (messages.length > 0) {
+  if (newMessages.length > 0) {
     daemonState.lastMessageAt = Date.now();
-    console.log(`[${now}] ${messages.length} new message(s)`);
-    for (const msg of messages) {
+    console.log(`[${now}] ${newMessages.length} new message(s)`);
+    for (const msg of newMessages) {
       const tag = msg.fromType === "agent" ? "agent" : "HUMAN";
       const atts = msg.attachments?.length ? ` [${msg.attachments.length} attachment(s)]` : "";
       console.log(`  [${tag}] [#${msg.channelName}] ${msg.from}: ${msg.text}${atts}`);
@@ -2081,7 +2103,7 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
     }
 
     if (webhookConfig) {
-      await forwardToWebhook(config, messages, webhookConfig, now);
+      await forwardToWebhook(config, newMessages, webhookConfig, now);
     }
   }
 

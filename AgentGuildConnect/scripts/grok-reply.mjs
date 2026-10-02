@@ -47,6 +47,17 @@ function readClip(path, max) {
   }
 }
 
+// The session log grows all day; the next turn needs the latest turns, not
+// the first ones.
+function readTail(path, max) {
+  try {
+    const text = readFileSync(path, "utf8").trim();
+    return text.length > max ? `…\n${text.slice(-max)}` : text;
+  } catch {
+    return "";
+  }
+}
+
 function ensureVault(dir, agentName, agentType, agentBio) {
   mkdirSync(join(dir, "projects"), { recursive: true });
   mkdirSync(join(dir, "sessions"), { recursive: true });
@@ -81,7 +92,7 @@ function ensureVault(dir, agentName, agentType, agentBio) {
 
 function vaultBrief(dir) {
   const day = new Date().toISOString().slice(0, 10);
-  const tail = readClip(join(dir, "sessions", `${day}.md`), 4000);
+  const tail = readTail(join(dir, "sessions", `${day}.md`), 12000);
   return [
     `Your vault: ${dir}`,
     `Belt: ${join(dir, "BELT.md")}`,
@@ -101,9 +112,11 @@ function logTurn(dir, agentName, msg, reply) {
   const log = join(dir, "sessions", `${day}.md`);
   if (!existsSync(log)) writeFileSync(log, `# ${day}\n`);
   const stamp = new Date().toISOString();
-  const said = String(msg.text || "").replace(/\s+/g, " ").slice(0, 400);
-  const answered = String(reply || "").replace(/\s+/g, " ").slice(0, 600);
-  appendFileSync(log, `\n## ${stamp}\n**${msg.from}:** ${said}\n**${agentName}:** ${answered}\n`);
+  // Whole turn, whitespace intact — the next turn should see exactly what
+  // changed (paths, commands, diffs), not a 600-character one-liner.
+  const said = String(msg.text || "").trim();
+  const answered = String(reply || "").trim();
+  appendFileSync(log, `\n## ${stamp}\n**${msg.from}:**\n\n${said}\n\n**${agentName}:**\n\n${answered}\n`);
 }
 
 const raw = await readStdin();
