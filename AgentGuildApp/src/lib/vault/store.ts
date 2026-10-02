@@ -40,6 +40,29 @@ export interface SecretSummary {
   rotatedAt: number | null;
   lastUsedAt: number | null;
   useCount: number;
+  rotation: RotationSummary | null;
+}
+
+/** Public view of a secret's rotation policy (the webhook signing secret is never included). */
+export interface RotationSummary {
+  intervalDays: number;
+  mode: "remind" | "webhook";
+  webhookUrl: string | null;
+  nextAt: number | null;
+  overdue: boolean;
+  lastError: string | null;
+}
+
+function rotationSummary(r: FirebaseFirestore.DocumentData | undefined): RotationSummary | null {
+  if (!r || !r.intervalDays) return null;
+  return {
+    intervalDays: r.intervalDays,
+    mode: r.mode === "webhook" ? "webhook" : "remind",
+    webhookUrl: r.webhookUrl || null,
+    nextAt: toMillis(r.nextAt),
+    overdue: Boolean(r.overdue),
+    lastError: r.lastError || null,
+  };
 }
 
 function secretAad(orgId: string, secretId: string) {
@@ -80,7 +103,20 @@ export async function rotateSecret(orgId: string, secretId: string, value: strin
   const snap = await ref.get();
   if (!snap.exists || snap.data()!.orgId !== orgId) throw new VaultError("Secret not found", 404);
   const sealed = await seal(value, secretAad(orgId, secretId));
-  await ref.update({ ...sealed, maskedPreview: maskSecret(value), rotatedAt: FieldValue.serverTimestamp() });
+  const policy = snap.data()!.rotation;
+  await ref.update({
+    ...sealed,
+    maskedPreview: maskSecret(value),
+    rotatedAt: FieldValue.serverTimestamp(),
+    // A rotation by any route (manual, webhook) restarts the schedule.
+    ...(policy?.intervalDays
+      ? {
+          "rotation.nextAt": Timestamp.fromMillis(Date.now() + policy.intervalDays * 86_400_000),
+          "rotation.overdue": false,
+          "rotation.lastError": null,
+        }
+      : {}),
+  });
 }
 
 export async function listSecrets(orgId: string): Promise<SecretSummary[]> {
@@ -99,6 +135,7 @@ export async function listSecrets(orgId: string): Promise<SecretSummary[]> {
         rotatedAt: toMillis(x.rotatedAt),
         lastUsedAt: toMillis(x.lastUsedAt),
         useCount: x.useCount || 0,
+        rotation: rotationSummary(x.rotation),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -214,7 +251,8 @@ export interface AuditEntry {
     | "secret.created" | "secret.rotated" | "secret.deleted"
     | "binding.created" | "binding.updated" | "binding.revoked" | "binding.deleted"
     | "binding.executed" | "binding.denied"
-    | "tokens.revoked";
+    | "tokens.revoked"
+    | "secret.rotation_configured" | "secret.rotation_due" | "secret.rotation_failed";
   actorType: "user" | "agent";
   actorId: string;
   target: string;

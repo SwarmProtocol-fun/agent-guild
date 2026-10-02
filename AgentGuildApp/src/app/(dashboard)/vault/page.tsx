@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket } from "lucide-react";
+import { KeyRound, Link2, ScrollText, ShieldCheck, ShieldAlert, Plus, RotateCw, Trash2, Ban, Undo2, Loader2, Ticket, CalendarClock, Webhook } from "lucide-react";
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -34,6 +34,14 @@ interface SecretRow {
   rotatedAt: number | null;
   lastUsedAt: number | null;
   useCount: number;
+  rotation: {
+    intervalDays: number;
+    mode: "remind" | "webhook";
+    webhookUrl: string | null;
+    nextAt: number | null;
+    overdue: boolean;
+    lastError: string | null;
+  } | null;
 }
 
 interface BindingRow {
@@ -91,6 +99,7 @@ export default function VaultPage() {
   const [showSecret, setShowSecret] = useState(false);
   const [rotating, setRotating] = useState<SecretRow | null>(null);
   const [showBinding, setShowBinding] = useState(false);
+  const [scheduling, setScheduling] = useState<SecretRow | null>(null);
 
   const load = useCallback(async () => {
     if (!orgId) return;
@@ -255,6 +264,7 @@ export default function VaultPage() {
                       <th className="text-left font-medium p-3 hidden md:table-cell">Uses</th>
                       <th className="text-left font-medium p-3 hidden md:table-cell">Last used</th>
                       <th className="text-left font-medium p-3 hidden lg:table-cell">Rotated</th>
+                      <th className="text-left font-medium p-3">Rotation</th>
                       <th className="p-3" />
                     </tr>
                   </thead>
@@ -269,10 +279,32 @@ export default function VaultPage() {
                         <td className="p-3 hidden md:table-cell tabular-nums">{s.useCount}</td>
                         <td className="p-3 hidden md:table-cell text-xs">{fmtTime(s.lastUsedAt)}</td>
                         <td className="p-3 hidden lg:table-cell text-xs">{fmtTime(s.rotatedAt)}</td>
+                        <td className="p-3 text-xs">
+                          {!s.rotation ? <span className="text-muted-foreground">Off</span> : (
+                            <div className="space-y-0.5">
+                              <div className="flex items-center gap-1">
+                                {s.rotation.mode === "webhook" ? <Webhook className="h-3 w-3" /> : <CalendarClock className="h-3 w-3" />}
+                                Every {s.rotation.intervalDays}d
+                                {s.rotation.overdue && <Badge variant="destructive" className="ml-1 text-[10px]">Overdue</Badge>}
+                              </div>
+                              {s.rotation.lastError
+                                ? <div className="text-red-500" title={s.rotation.lastError}>Last attempt failed</div>
+                                : <div className="text-muted-foreground">Next {fmtTime(s.rotation.nextAt)}</div>}
+                            </div>
+                          )}
+                        </td>
                         <td className="p-3">
                           {isOwner && (
                             <div className="flex justify-end gap-1">
                               <Button size="sm" variant="outline" onClick={() => setRotating(s)}><RotateCw className="h-3.5 w-3.5 mr-1" />Rotate</Button>
+                              {s.rotation?.mode === "webhook" && (
+                                <Button size="sm" variant="outline" title="Call the rotation webhook now" onClick={() => run(() => api(`/api/vault/secrets/${s.id}/rotate-now`, { method: "POST", body: JSON.stringify({ orgId }) }))}>
+                                  <Webhook className="h-3.5 w-3.5 mr-1" />Rotate now
+                                </Button>
+                              )}
+                              <Button size="sm" variant="ghost" aria-label={`Rotation schedule for ${s.name}`} title="Rotation schedule" onClick={() => setScheduling(s)}>
+                                <CalendarClock className="h-3.5 w-3.5" />
+                              </Button>
                               <Button size="sm" variant="ghost" aria-label={`Delete ${s.name}`} onClick={() => {
                                 if (confirm(`Delete secret ${s.name}? This can't be undone.`)) {
                                   run(() => api(`/api/vault/secrets/${s.id}?orgId=${orgId}`, { method: "DELETE" }));
@@ -382,6 +414,20 @@ export default function VaultPage() {
           ? api(`/api/vault/secrets/${rotating.id}`, { method: "PUT", body: JSON.stringify({ orgId, value }) })
           : api(`/api/vault/secrets`, { method: "POST", body: JSON.stringify({ orgId, name, value, description }) }), { inline: true })}
       />
+      <RotationDialog
+        secret={scheduling}
+        onClose={() => setScheduling(null)}
+        onSave={async (policy) => {
+          let signingSecret: string | null = null;
+          const err = await run(async () => {
+            const res = policy
+              ? await api<{ signingSecret: string | null }>(`/api/vault/secrets/${scheduling!.id}/rotation`, { method: "PUT", body: JSON.stringify({ orgId, ...policy }) })
+              : await api<{ signingSecret: null }>(`/api/vault/secrets/${scheduling!.id}/rotation?orgId=${orgId}`, { method: "DELETE" });
+            signingSecret = res.signingSecret ?? null;
+          }, { inline: true });
+          return { error: err, signingSecret };
+        }}
+      />
       <BindingDialog
         open={showBinding}
         onClose={() => setShowBinding(false)}
@@ -468,6 +514,95 @@ function SecretDialog({ open, rotating, onClose, onSubmit }: {
             </Button>
           </div>
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RotationDialog({ secret, onClose, onSave }: {
+  secret: SecretRow | null;
+  onClose: () => void;
+  onSave: (policy: { intervalDays: number; mode: "remind" | "webhook"; webhookUrl?: string } | null) => Promise<{ error: string | null; signingSecret: string | null }>;
+}) {
+  const [days, setDays] = useState("30");
+  const [mode, setMode] = useState<"remind" | "webhook">("remind");
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [shownSecret, setShownSecret] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!secret) return;
+    setDays(String(secret.rotation?.intervalDays ?? 30));
+    setMode(secret.rotation?.mode ?? "remind");
+    setUrl(secret.rotation?.webhookUrl ?? "");
+    setError(null);
+    setShownSecret(null);
+  }, [secret]);
+
+  const save = async (policy: Parameters<typeof onSave>[0]) => {
+    setBusy(true);
+    const { error: err, signingSecret } = await onSave(policy);
+    setBusy(false);
+    setError(err);
+    if (err) return;
+    if (signingSecret) setShownSecret(signingSecret);
+    else onClose();
+  };
+
+  return (
+    <Dialog open={Boolean(secret)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rotation for {secret?.name}</DialogTitle>
+        </DialogHeader>
+        {shownSecret ? (
+          <div className="space-y-3 text-sm">
+            <p>Saved. Your webhook should check each request&apos;s <code className="text-xs">x-agent-guild-signature</code> header with this signing secret. <span className="font-medium">It won&apos;t be shown again.</span></p>
+            <pre className="bg-muted rounded p-2 text-xs font-mono break-all whitespace-pre-wrap">{shownSecret}</pre>
+            <p className="text-xs text-muted-foreground">
+              Signature = <code>sha256=</code> + hex HMAC-SHA256(secret, <code>{"`${x-agent-guild-timestamp}.${body}`"}</code>). Reply with <code>{'{"value": "<new key>"}'}</code>.
+            </p>
+            <div className="flex justify-end"><Button onClick={onClose}>Done</Button></div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <Label htmlFor="rot-days">Rotate every (days)</Label>
+              <Input id="rot-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label>When it&apos;s due</Label>
+              <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="remind">Flag it as overdue (rotate by hand)</SelectItem>
+                  <SelectItem value="webhook">Call my webhook for a new key</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {mode === "webhook" && (
+              <div className="space-y-1">
+                <Label htmlFor="rot-url">Webhook URL</Label>
+                <Input id="rot-url" placeholder="https://ops.example.com/rotate-stripe" value={url} onChange={(e) => setUrl(e.target.value)} />
+                <p className="text-xs text-muted-foreground">We POST a signed request; your endpoint creates a new key at the provider and replies with it.</p>
+              </div>
+            )}
+            {error && <p className="text-sm text-red-500">{error}</p>}
+            <div className="flex justify-between gap-2">
+              {secret?.rotation
+                ? <Button variant="ghost" disabled={busy} onClick={() => save(null)}>Turn off</Button>
+                : <span />}
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={onClose}>Cancel</Button>
+                <Button disabled={busy || !Number(days) || (mode === "webhook" && !url)}
+                  onClick={() => save({ intervalDays: Number(days), mode, ...(mode === "webhook" ? { webhookUrl: url } : {}) })}>
+                  {busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}Save
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
