@@ -77,7 +77,7 @@ Bumping `numReplicas` in `hub/railway.json` isn't enough by itself: this hub kee
 
 `AgentGuildApp/railway.json` lets the main app run as a second service in the same Railway project, instead of on Netlify:
 
-1. "+ New" → "GitHub Repo" → same repo, then set the service's **Root Directory** to `AgentGuildApp`. Railway reads `AgentGuildApp/railway.json` (Nixpacks build, `next start` on `$PORT`, health check on `/api/health`).
+1. "+ New" → "GitHub Repo" → same repo, then set the service's **Root Directory** to `AgentGuildApp`. Railway reads `AgentGuildApp/railway.json` (default build, health check on `/api/health` — Firestore down fails a deploy; memory pressure alone does not).
 2. Copy the app's env vars from `.env.example` — at minimum Firebase (client + `FIREBASE_CLIENT_EMAIL`/`FIREBASE_PRIVATE_KEY`), Reown project ID and the session secret. Point the hub URL var at the hub service's domain.
 3. Keep `numReplicas: 1` unless `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` are set. Without Upstash, API rate limits (including the org-invite brute-force limit) and the gateway signature replay cache are in-memory — effective on one long-running instance, but split across replicas or serverless invocations. That's the main reason to prefer this over Netlify's serverless functions.
 
