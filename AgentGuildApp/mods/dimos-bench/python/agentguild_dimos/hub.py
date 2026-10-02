@@ -76,3 +76,17 @@ def lineage(
 ) -> dict[str, Any]:
     query = {"patience": str(patience), "minDelta": str(min_delta)}
     return call(identity, "GET", mod_path("lineages", lineage_id), query=query, hub_url=hub_url)
+
+
+def claim_job(identity: Identity, *, hub_url: str | None = None) -> dict[str, Any] | None:
+    """The org's oldest benchmark queued from the panel, now held by this worker; None when idle."""
+    return call(identity, "POST", mod_path("jobs", "claim"), {}, hub_url=hub_url)["job"]
+
+
+def job_progress(identity: Identity, job_id: str, progress: dict[str, Any], *, hub_url: str | None = None) -> bool:
+    """Report a finished case; False means the job was cancelled and the worker should stop."""
+    return bool(call(identity, "POST", mod_path("jobs", job_id, "progress"), progress, hub_url=hub_url)["continue"])
+
+
+def job_failed(identity: Identity, job_id: str, error: str, *, hub_url: str | None = None) -> None:
+    call(identity, "POST", mod_path("jobs", job_id, "fail"), {"error": error[:1000]}, hub_url=hub_url)

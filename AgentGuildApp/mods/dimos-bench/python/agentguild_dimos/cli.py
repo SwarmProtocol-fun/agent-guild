@@ -4,6 +4,7 @@
   agentguild-dimos submit <run_dir> [--parent <runId>] [--improvement notes.md]
   agentguild-dimos feedback <runId> [-o feedback.json]
   agentguild-dimos lineage <lineageId> [--patience K] [--min-delta D]
+  agentguild-dimos worker [--poll S] [--once]
 
 All take ``--as <agentId|name>`` (default: the only identity in ~/.agent-guild)
 and ``--hub <url>`` (default: the identity's hubUrl). ``run``/``submit`` take
@@ -11,14 +12,21 @@ and ``--hub <url>`` (default: the identity's hubUrl). ``run``/``submit`` take
 ``--parent`` files the run as the next generation of that run's lineage,
 ``--lineage`` names a new lineage, ``--improvement`` attaches what changed,
 ``--harness <path>`` / ``--harness-sha`` record which harness code ran.
+
+``worker`` runs the benchmarks queued from the dimOS Benchmarks panel: it
+polls the hub as its identity, claims its org's oldest job, runs it here
+through dimOS, and files the run under the agent the job is for.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 from pathlib import Path
 import sys
+import time
+from typing import Any
 
 from agentguild_dimos import hub, media
 from agentguild_dimos import identity as identities
@@ -28,6 +36,8 @@ from agentguild_dimos.report import build_submission
 
 def _submit(run_dir: Path, args: argparse.Namespace) -> int:
     body = build_submission(run_dir)
+    if getattr(args, "job_id", None):
+        body["jobId"] = args.job_id
     body.update(
         lineage_fields(
             parent=args.parent,
@@ -67,7 +77,15 @@ def _upload_media(who: identities.Identity, run_id: str, run_dir: Path, case_ids
         print(f"uploaded {sent} robot replay{'s' if sent > 1 else ''}")
 
 
-def _run(args: argparse.Namespace) -> int:
+class JobCancelled(Exception):
+    pass
+
+
+def _run(args: argparse.Namespace, on_case: Callable[[Any, int, int], bool] | None = None) -> int:
+    """Run a suite through dimOS's EvalRunner, then submit it.
+
+    ``on_case(result, done, total)`` is called after each case; returning False stops the run.
+    """
     import importlib
 
     try:
@@ -79,19 +97,30 @@ def _run(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         identities.resolve(args.as_)  # fail before a long run, not after
+    tags = frozenset(t for t in args.tags.split(",") if t)
+    suite = importlib.import_module(args.suite).SUITE
+    selected = [c for c in suite if not tags or tags & c.tags]  # EvalRunner.run's own selection
+    total = min(len(selected), args.limit) if args.limit else len(selected)
+    done = 0
+
     class Runner(EvalRunner):
         """dimOS's runner, plus a sample of each case's robot (path, camera, actions) for the panel."""
 
         def run_case(self, case, agent):  # type: ignore[no-untyped-def]
+            nonlocal done
             with media.capture_case(case, self.run_dir / case.id):
-                return super().run_case(case, agent)
+                result = super().run_case(case, agent)
+            done += 1
+            if on_case is not None and not on_case(result, done, total):
+                raise JobCancelled(case.id)
+            return result
 
     kwargs = agent_kwargs(args.set)
     runner = Runner()
     results = runner.run(
-        importlib.import_module(args.suite).SUITE,
+        suite,
         agent_class(args.agent)(**kwargs),
-        tags=frozenset(t for t in args.tags.split(",") if t),
+        tags=tags,
         limit=args.limit,
         provenance=run_provenance({"kind": "suite_module", "value": args.suite}, args.agent, kwargs),
     )
@@ -101,6 +130,75 @@ def _run(args: argparse.Namespace) -> int:
     s = summarize(results)
     print(f"\n{s.n} cases | mean {s.mean_score:.2f} | pass {s.pass_rate:.0%} | errors {s.errors} | {runner.run_dir}")
     return _submit(runner.run_dir, args)
+
+
+def _job_args(job: dict[str, Any], args: argparse.Namespace, who: identities.Identity) -> argparse.Namespace:
+    """A queued job → the same arguments ``agentguild-dimos run`` takes."""
+    settings = dict(job.get("settings") or {})
+    if job["harness"] == "remote":
+        settings.setdefault("as_agent", who.agent_id)  # the worker issues the assignments
+    return argparse.Namespace(
+        suite=job["suite"],
+        agent=job["agentModule"],
+        set=[f"{k}={v}" for k, v in settings.items()],
+        tags=",".join(job.get("tags") or []),
+        limit=int(job.get("limit") or 0),
+        dry_run=False,
+        as_=args.as_,
+        hub=args.hub,
+        parent=None,
+        lineage=None,
+        improvement=None,
+        harness=None,
+        harness_sha=None,
+        job_id=job["id"],
+    )
+
+
+def _run_job(job: dict[str, Any], args: argparse.Namespace, who: identities.Identity) -> None:
+    print(f"job {job['id']}: {job['suite']} with {job['agentModule']} for {job['targetAgentName']}")
+
+    def report(result: Any, done: int, total: int) -> bool:
+        return hub.job_progress(
+            who,
+            job["id"],
+            {
+                "casesDone": done,
+                "casesTotal": total,
+                "lastCase": {"caseId": result.case_id, "passed": result.passed, "score": result.score, "error": result.error},
+            },
+            hub_url=args.hub,
+        )
+
+    try:
+        code = _run(_job_args(job, args, who), on_case=report)
+        if code != 0:
+            hub.job_failed(who, job["id"], "dimOS is not installed on the worker" if code == 2 else f"exit {code}", hub_url=args.hub)
+    except JobCancelled as e:
+        print(f"job {job['id']} cancelled after case {e}")
+    except Exception as e:  # report it on the job, keep the worker alive
+        print(f"job {job['id']} failed: {e!r}", file=sys.stderr)
+        try:
+            hub.job_failed(who, job["id"], repr(e), hub_url=args.hub)
+        except hub.HubError:
+            pass
+
+
+def _worker(args: argparse.Namespace) -> int:
+    who = identities.resolve(args.as_)
+    print(f"worker {who.agent_name} ({who.agent_id}) polling {args.hub or who.hub_url} every {args.poll}s; ctrl-c to stop")
+    while True:
+        try:
+            job = hub.claim_job(who, hub_url=args.hub)
+        except hub.HubError as e:
+            print(f"agentguild-dimos: {e}", file=sys.stderr)
+            job = None
+        if job:
+            _run_job(job, args, who)
+        if args.once:
+            return 0
+        if not job:
+            time.sleep(args.poll)
 
 
 def _feedback(args: argparse.Namespace) -> int:
@@ -161,12 +259,18 @@ def main(argv: list[str] | None = None) -> int:
     lin.add_argument("--patience", type=int, default=3, help="generations without a new best before plateau")
     lin.add_argument("--min-delta", type=float, default=0.0, help="smallest gain that counts as improvement")
 
+    work = sub.add_parser("worker", parents=[common], help="run benchmarks queued from the dimOS Benchmarks panel")
+    work.add_argument("--poll", type=float, default=10.0, help="seconds between polls when idle")
+    work.add_argument("--once", action="store_true", help="handle at most one job, then exit")
+
     args = parser.parse_args(argv)
-    commands = {"run": _run, "feedback": _feedback, "lineage": _lineage}
+    commands = {"run": _run, "feedback": _feedback, "lineage": _lineage, "worker": _worker}
     try:
         if args.command == "submit":
             return _submit(args.run_dir, args)
         return commands[args.command](args)
+    except KeyboardInterrupt:
+        return 130
     except (LookupError, ValueError, OSError, hub.HubError) as e:
         print(f"agentguild-dimos: {e}", file=sys.stderr)
         return 1

@@ -13,7 +13,37 @@ dimOS already ships an eval harness (`dimos evals run <suite> --agent <module>`)
 | `python/…/media.py` | Captures a **robot replay** per case during `agentguild-dimos run`: the odometry path, up to 8 camera keyframes, and the agent's tool calls, sampled from the environment's dimOS recording just before it closes. |
 | `bench.ts` | Validation and ranking logic (pure; tested in `src/lib/mods/__tests__/dimos-bench.test.ts`). |
 
-## Benchmark an agent
+## Benchmark from the panel
+
+Open **dimOS Benchmarks**, then fill in **Run a benchmark**:
+
+1. **Agent.** Pick one of your agents.
+2. **Suite.** Pick a suite that ships with dimOS, or enter a custom suite module.
+3. **Who drives the robot.** Pick a dimOS harness (`pi`, `dimcode` or `question_answer`) and a model. Or pick **your agent answers itself**, which uses the remote adapter below.
+
+Press **▶ Run benchmark** to queue the job. The job list shows it as queued, then running (with a case count and the last result), then done, and **open run** takes you to the run and its robot replays.
+
+The hosted app can't run simulators, so jobs run on a **worker**: any machine with dimOS and an agent identity in the same org.
+
+```sh
+pip install -e AgentGuildApp/mods/dimos-bench/python
+agentguild-dimos worker --as bench-runner      # --once for a single job, --poll 10
+```
+
+How the worker handles a job:
+
+- **Claiming.** It polls `POST /jobs/claim`, signed as its own agent. The poll also serves as its heartbeat; the panel shows a worker as online if it polled in the last minute.
+- **Running.** It claims the org's oldest queued job and runs it exactly like `agentguild-dimos run`, robot replays included.
+- **Progress.** It reports each finished case. Cancelling in the panel stops the worker after the case in progress.
+- **Filing.** The run is filed under the job's agent, not under the worker. The worker is recorded as `ranBy`.
+- **Failure.** If the job fails (dimOS missing, a suite that won't import, a crash), the error appears on the job and the worker keeps polling.
+
+Limits:
+
+- **Same org only.** Only members of the agent's org can queue its jobs, and only a worker in that org can claim them.
+- **Answering itself is text only.** The suites that ship with dimOS give the agent camera or sim data, which an assignment can't carry, so their cases fail under that option.
+
+## Benchmark an agent from the command line
 
 On a machine with dimOS installed and an agent registered via AgentGuildConnect:
 

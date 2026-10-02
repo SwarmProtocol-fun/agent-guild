@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
-import type { BenchRun, GenerationPoint, LeaderboardRow, LineageReport, Pose, ReplayBrief, RobotReplay } from "./bench";
+import type {
+  BenchJob, BenchRun, GenerationPoint, HarnessKey, LeaderboardRow, LineageReport, Pose, ReplayBrief, RobotReplay, SUITE_CATALOG,
+} from "./bench";
 
 type RunBrief = Omit<BenchRun, "results">;
 
@@ -309,7 +311,8 @@ function RobotReplayView({ api, runId, caseId, onClose }: {
                       src={`data:image/jpeg;base64,${f.jpeg}`}
                       alt={`keyframe ${i + 1}`}
                       onClick={() => { setPlaying(false); setNow(f.t); }}
-                      className={`h-10 w-auto rounded cursor-pointer border-2 ${i === frameIdx ? "border-primary" : "border-transparent opacity-70 hover:opacity-100"}`}
+                      className={`h-10 w-auto rounded cursor-pointer border-2 ${i === frameIdx ? "" : "border-transparent opacity-70 hover:opacity-100"}`}
+                      style={i === frameIdx ? { borderColor: token("primary") } : undefined}
                     />
                   ))}
                 </div>
@@ -328,7 +331,7 @@ function RobotReplayView({ api, runId, caseId, onClose }: {
           {duration > 0 && (
             <div className="flex items-center gap-2">
               <button
-                className="border rounded px-2 py-0.5 hover:bg-muted min-w-16"
+                className="border rounded px-2 py-0.5 hover:opacity-80 min-w-16"
                 onClick={() => { if (!playing && now >= duration) setNow(0); setPlaying(!playing); }}
               >
                 {playing ? "❚❚ pause" : "▶ play"}
@@ -354,7 +357,7 @@ function RobotReplayView({ api, runId, caseId, onClose }: {
                       onClick={() => { if (a.t != null) { setPlaying(false); setNow(a.t); } }}
                     >
                       <span className="w-14 shrink-0 text-right tabular-nums">{a.t == null ? "—" : `${a.t.toFixed(1)}s`}</span>
-                      <span className={done ? "text-primary" : ""}>{a.name}</span>
+                      <span style={done ? { color: token("primary") } : undefined}>{a.name}</span>
                       <span className="truncate">{a.args !== "{}" && a.args}</span>
                     </li>
                   );
@@ -462,6 +465,244 @@ function RunDetail({ api, runId, onClose, onOpenLineage }: {
   );
 }
 
+interface BenchOptions {
+  agents: { id: string; name: string; orgId: string }[];
+  workers: { agentId: string; name: string; orgId: string; lastSeen: string; busyJobId: string | null; online: boolean }[];
+  suites: typeof SUITE_CATALOG;
+  harnesses: Record<HarnessKey, string>;
+}
+
+const HARNESS_LABEL: Record<HarnessKey, string> = {
+  pi: "pi — tool-using agent loop",
+  dimcode: "dimcode — coding-agent loop",
+  question_answer: "question_answer — single answer",
+  remote: "Your agent answers itself (assignments)",
+};
+
+const JOB_TONE: Record<BenchJob["status"], string> = {
+  queued: "text-muted-foreground",
+  running: "text-blue-500",
+  done: "text-green-600",
+  failed: "text-red-600",
+  cancelled: "text-muted-foreground",
+};
+
+const ago = (iso: string) => {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+};
+
+/** Queue a benchmark of one of your agents; a worker in its org runs it through dimOS. */
+function RunBenchmark({ api, onQueued }: { api: PanelProps["api"]; onQueued: () => void }) {
+  const [options, setOptions] = useState<BenchOptions | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState("");
+  const [suite, setSuite] = useState("dimos.evals.suites.go2_smoke");
+  const [custom, setCustom] = useState("");
+  const [harness, setHarness] = useState<HarnessKey>("pi");
+  const [model, setModel] = useState("claude-sonnet-5-5");
+  const [limit, setLimit] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const load = () =>
+      api("bench-options")
+        .then((r) => r.json())
+        .then((d) => {
+          if (!d.agents) return setLoadError(d.error ?? "Couldn't load your agents");
+          setOptions(d);
+          setAgentId((cur) => cur || d.agents[0]?.id || "");
+        })
+        .catch(() => setLoadError("Couldn't load your agents"));
+    load();
+    const id = setInterval(load, 20_000); // keep worker presence fresh
+    return () => clearInterval(id);
+  }, [api]);
+
+  const agent = options?.agents.find((a) => a.id === agentId);
+  const workers = options?.workers.filter((w) => w.online && w.orgId === agent?.orgId) ?? [];
+  const chosenSuite = suite === "custom" ? custom.trim() : suite;
+  const catalogEntry = options?.suites.find((x) => x.suite === chosenSuite);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api("jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetAgentId: agentId, suite: chosenSuite, harness, settings: harness === "remote" ? {} : { model }, limit }),
+      });
+      const d = await r.json();
+      if (!r.ok) setError([d.error, ...(d.details ?? [])].filter(Boolean).join(" · "));
+      else onQueued();
+    } catch {
+      setError("Couldn't queue the benchmark");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loadError) return <div className="border rounded-lg p-3 text-sm text-muted-foreground">{loadError}</div>;
+  if (!options) return <div className="border rounded-lg p-3 text-sm text-muted-foreground">Loading…</div>;
+  if (!options.agents.length) {
+    return (
+      <div className="border rounded-lg p-3 text-sm text-muted-foreground">
+        You don&apos;t have any agents yet. Connect one with AgentGuildConnect, then benchmark it here.
+      </div>
+    );
+  }
+
+  const field = "border rounded px-2 py-1 bg-background";
+  return (
+    <div className="border rounded-lg p-3 space-y-3 text-sm">
+      <div className="font-medium">Run a benchmark</div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="space-y-1">
+          <div className="text-muted-foreground">Agent</div>
+          <select className={`${field} w-full`} value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+            {options.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <div className="text-muted-foreground">Suite</div>
+          <select className={`${field} w-full`} value={suite} onChange={(e) => setSuite(e.target.value)}>
+            {options.suites.map((x) => (
+              <option key={x.suite} value={x.suite}>{x.label} · {x.cases} case{x.cases > 1 ? "s" : ""} · {x.needs}</option>
+            ))}
+            <option value="custom">Custom suite module…</option>
+          </select>
+          {suite === "custom" && (
+            <input className={`${field} w-full font-mono text-xs`} placeholder="my_pkg.my_suite" value={custom} onChange={(e) => setCustom(e.target.value)} />
+          )}
+        </label>
+        <label className="space-y-1">
+          <div className="text-muted-foreground">Who drives the robot</div>
+          <select className={`${field} w-full`} value={harness} onChange={(e) => setHarness(e.target.value as HarnessKey)}>
+            {(Object.keys(HARNESS_LABEL) as HarnessKey[]).map((h) => <option key={h} value={h}>{HARNESS_LABEL[h]}</option>)}
+          </select>
+        </label>
+        {harness === "remote" ? (
+          <div className="text-xs text-muted-foreground self-end">
+            Each case is sent to {agent?.name ?? "the agent"} as an assignment, and its completion notes are scored.
+            Text cases only: the shipped dimOS suites hand the agent camera or sim data, which an assignment can&apos;t carry.
+          </div>
+        ) : (
+          <label className="space-y-1">
+            <div className="text-muted-foreground">Model</div>
+            <input className={`${field} w-full`} value={model} onChange={(e) => setModel(e.target.value)} />
+          </label>
+        )}
+        <label className="space-y-1">
+          <div className="text-muted-foreground">Cases (0 = all)</div>
+          <input type="number" min={0} className={`${field} w-24`} value={limit} onChange={(e) => setLimit(Math.max(0, Number(e.target.value) || 0))} />
+        </label>
+      </div>
+      {harness === "remote" && catalogEntry && (
+        <p className="text-xs text-orange-600">{catalogEntry.label} needs {catalogEntry.needs} input, so its cases will error with this option.</p>
+      )}
+      <div className="text-xs">
+        {workers.length ? (
+          <span className="text-green-600">
+            ● {workers.length} worker{workers.length > 1 ? "s" : ""} online: {workers.map((w) => `${w.name}${w.busyJobId ? " (busy)" : ""}`).join(", ")}
+          </span>
+        ) : (
+          <div className="space-y-1 text-muted-foreground">
+            <div><span className="text-orange-600">● No worker online for this org.</span> Jobs wait in the queue until one starts. On a machine with dimOS:</div>
+            <pre className="rounded p-2 overflow-x-auto" style={{ background: token("muted") }}>{`pip install -e AgentGuildApp/mods/dimos-bench/python
+agentguild-dimos worker --as <an agent in this org>`}</pre>
+          </div>
+        )}
+      </div>
+      {error && <p className="text-red-600">{error}</p>}
+      <button
+        className="rounded px-3 py-1.5 font-medium disabled:opacity-50"
+        style={{ background: token("primary"), color: token("primary-foreground") }}
+        disabled={busy || !agentId || !chosenSuite || (harness !== "remote" && !model.trim())}
+        onClick={submit}
+      >
+        {busy ? "Queuing…" : "▶ Run benchmark"}
+      </button>
+    </div>
+  );
+}
+
+function JobList({ api, refresh, onOpenRun, onFinished }: {
+  api: PanelProps["api"]; refresh: number; onOpenRun: (job: BenchJob) => void; onFinished: () => void;
+}) {
+  const [jobs, setJobs] = useState<BenchJob[] | null>(null);
+  const active = useRef(new Set<string>());
+
+  useEffect(() => {
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = () =>
+      api("jobs")
+        .then((r) => r.json())
+        .then((d: { jobs?: BenchJob[] }) => {
+          if (stop) return;
+          const list = d.jobs ?? [];
+          // A job that was running and is now done brings a new run: refresh the boards.
+          if (list.some((j) => active.current.has(j.id) && j.status === "done")) onFinished();
+          active.current = new Set(list.filter((j) => j.status === "queued" || j.status === "running").map((j) => j.id));
+          setJobs(list);
+          timer = setTimeout(load, active.current.size ? 3000 : 15000);
+        })
+        .catch(() => { if (!stop) timer = setTimeout(load, 15000); });
+    load();
+    return () => { stop = true; clearTimeout(timer); };
+  }, [api, refresh, onFinished]);
+
+  const cancel = (id: string) => api(`jobs/${id}/cancel`, { method: "POST" }).then(() => setJobs((js) => js?.map((j) => (j.id === id ? { ...j, status: "cancelled" } : j)) ?? null));
+
+  if (!jobs?.length) return null;
+  return (
+    <div className="border rounded-lg p-3 text-sm space-y-2">
+      <div className="font-medium">Benchmark jobs</div>
+      {jobs.map((j) => {
+        const pctDone = j.casesTotal ? Math.round((j.casesDone / j.casesTotal) * 100) : 0;
+        return (
+          <div key={j.id} className="border-t pt-2 grid grid-cols-[5.5rem_1fr_auto] gap-x-3 items-start">
+            <div className={`font-medium ${JOB_TONE[j.status]}`}>{j.status === "running" ? "● running" : j.status}</div>
+            <div className="space-y-1 min-w-0">
+              <div>
+                {j.targetAgentName} · <span className="font-mono text-xs">{j.suite.split(".").at(-1)}</span> ·{" "}
+                {j.harness === "remote" ? "answers itself" : `${j.harness} + ${j.settings.model}`}
+              </div>
+              {j.status === "running" && (
+                <div className="flex items-center gap-2">
+                  <div className="h-1.5 flex-1 rounded overflow-hidden" style={{ background: token("muted") }}>
+                    <div className="h-full transition-all" style={{ width: `${pctDone}%`, background: token("primary") }} />
+                  </div>
+                  <span className="text-xs tabular-nums text-muted-foreground">{j.casesDone}/{j.casesTotal ?? "?"}</span>
+                </div>
+              )}
+              <div className="text-xs text-muted-foreground truncate">
+                {j.status === "queued" && "waiting for a worker · "}
+                {j.workerName && `worker ${j.workerName} · `}
+                {j.lastCase && j.status === "running" && (
+                  <>last: <span className="font-mono">{j.lastCase.caseId}</span> {j.lastCase.error ? "error" : j.lastCase.passed ? "pass" : "fail"} · </>
+                )}
+                {ago(j.createdAt)}
+              </div>
+              {j.error && <div className="text-xs text-red-600 break-words">{j.error}</div>}
+            </div>
+            <div>
+              {(j.status === "queued" || j.status === "running") && (
+                <button className="text-blue-500 hover:underline" onClick={() => cancel(j.id)}>cancel</button>
+              )}
+              {j.status === "done" && j.runId && (
+                <button className="text-blue-500 hover:underline" onClick={() => onOpenRun(j)}>open run</button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function LeaderboardPanel({ api }: PanelProps) {
   const [suites, setSuites] = useState<{ suite: string; runs: number }[] | null>(null);
   const [suite, setSuite] = useState("");
@@ -469,27 +710,48 @@ function LeaderboardPanel({ api }: PanelProps) {
   const [runs, setRuns] = useState<RunBrief[] | null>(null);
   const [openRun, setOpenRun] = useState<string | null>(null);
   const [openLineage, setOpenLineage] = useState<string | null>(null);
+  const [jobsRefresh, setJobsRefresh] = useState(0);
+  const [boardsRefresh, setBoardsRefresh] = useState(0);
+  // A run to open once its suite's boards have loaded ("open run" on a finished job).
+  const jumpTo = useRef<string | null>(null);
+  const shownSuite = useRef("");
+  const refreshBoards = useCallback(() => setBoardsRefresh((n) => n + 1), []);
 
   useEffect(() => {
     api("suites")
       .then((r) => r.json())
       .then((d) => {
         setSuites(d.suites ?? []);
-        if (d.suites?.length) setSuite(d.suites[0].suite);
+        if (d.suites?.length) setSuite((cur) => cur || d.suites[0].suite);
       })
       .catch(() => setSuites([]));
-  }, [api]);
+  }, [api, boardsRefresh]);
 
   useEffect(() => {
     if (!suite) return;
     setRows(null);
     setRuns(null);
-    setOpenRun(null);
-    setOpenLineage(null);
+    if (jumpTo.current) setOpenRun(jumpTo.current);
+    else if (shownSuite.current !== suite) {
+      // A new suite closes the old one's drill-downs; a refresh of the same suite keeps them open.
+      setOpenRun(null);
+      setOpenLineage(null);
+    }
+    jumpTo.current = null;
+    shownSuite.current = suite;
     const q = `suite=${encodeURIComponent(suite)}`;
     api(`leaderboard?${q}`).then((r) => r.json()).then((d) => setRows(d.rows ?? [])).catch(() => setRows([]));
     api(`runs?${q}`).then((r) => r.json()).then((d) => setRuns(d.runs ?? [])).catch(() => setRuns([]));
-  }, [api, suite]);
+  }, [api, suite, boardsRefresh]);
+
+  const openJobRun = (job: BenchJob) => {
+    if (job.suite === suite) setOpenRun(job.runId);
+    else {
+      jumpTo.current = job.runId;
+      setSuite(job.suite);
+      if (!suites?.some((x) => x.suite === job.suite)) refreshBoards();
+    }
+  };
 
   return (
     <div className="p-6 space-y-4">
@@ -500,11 +762,14 @@ function LeaderboardPanel({ api }: PanelProps) {
         Agents report their own scores, and every run records the dimOS commit it ran on so you can reproduce it.
       </p>
 
+      <RunBenchmark api={api} onQueued={() => setJobsRefresh((n) => n + 1)} />
+      <JobList api={api} refresh={jobsRefresh} onOpenRun={openJobRun} onFinished={refreshBoards} />
+
       {suites == null && <p className="text-sm text-muted-foreground">Loading…</p>}
       {suites?.length === 0 && (
         <div className="border rounded-lg p-3 text-sm space-y-2">
-          <div className="font-medium">No runs yet. Submit one from a machine with dimOS installed:</div>
-          <pre className="bg-muted rounded p-2 overflow-x-auto text-xs">{`pip install -e AgentGuildApp/mods/dimos-bench/python
+          <div className="font-medium">No runs yet. Run a benchmark above, or submit one from a machine with dimOS installed:</div>
+          <pre className="rounded p-2 overflow-x-auto text-xs" style={{ background: token("muted") }}>{`pip install -e AgentGuildApp/mods/dimos-bench/python
 agentguild-dimos run dimos.evals.suites.examples \\
   --agent dimos.evals.agents.question_answer --set model=gpt-5.6-luna`}</pre>
           <div className="text-muted-foreground">

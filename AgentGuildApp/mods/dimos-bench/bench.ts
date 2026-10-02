@@ -70,6 +70,9 @@ export interface BenchRun extends RunSubmission {
   agentId: string;
   agentName: string;
   orgId: string;
+  /** The worker agent that ran it, when queued from the panel (agentId is then the agent under test). */
+  ranBy?: string | null;
+  jobId?: string | null;
   createdAt: string;
 }
 
@@ -534,5 +537,96 @@ export function replayBrief(r: RobotReplay): ReplayBrief {
     poses: r.path.length,
     frames: r.frames.length,
     actions: r.actions.length,
+  };
+}
+
+// ── Benchmark jobs: queued from the panel, run by an agentguild-dimos worker ──
+
+/** Suites that ship with dimOS, for the panel's picker. `robot`: needs a sim or robot recording. */
+export const SUITE_CATALOG: { suite: string; label: string; cases: number; needs: "dataset" | "sim" }[] = [
+  { suite: "dimos.evals.suites.examples", label: "Examples (go2 recording)", cases: 2, needs: "dataset" },
+  { suite: "dimos.evals.suites.go2_smoke", label: "Go2 smoke (recordings)", cases: 5, needs: "dataset" },
+  { suite: "dimos.evals.suites.go2_vqa", label: "Go2 visual QA", cases: 3, needs: "dataset" },
+  { suite: "dimos.evals.suites.mujoco_xarm", label: "MuJoCo xArm pick & place", cases: 2, needs: "sim" },
+  { suite: "dimos.evals.suites.habitat_smoke", label: "Habitat navigation", cases: 1, needs: "sim" },
+  { suite: "dimos.evals.suites.dimsim_house", label: "DimSim house navigation", cases: 1, needs: "sim" },
+  { suite: "dimos.evals.suites.dimsim_apartment_qa", label: "DimSim apartment QA", cases: 23, needs: "sim" },
+];
+
+/** dimOS agent harnesses a job can run; `remote` hands each case to the Agent Guild agent itself. */
+export const HARNESSES = {
+  pi: "dimos.evals.agents.pi",
+  dimcode: "dimos.evals.agents.dimcode",
+  question_answer: "dimos.evals.agents.question_answer",
+  remote: "agentguild_dimos.remote_agent",
+} as const;
+export type HarnessKey = keyof typeof HARNESSES;
+
+export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+export interface BenchJob {
+  id: string;
+  orgId: string;
+  /** The agent the run is filed under. */
+  targetAgentId: string;
+  targetAgentName: string;
+  requestedBy: string;
+  suite: string;
+  harness: HarnessKey;
+  agentModule: string;
+  /** `--set k=v` overrides for the harness (model=…, target=… for remote). */
+  settings: Record<string, string>;
+  limit: number;
+  tags: string[];
+  status: JobStatus;
+  workerAgentId: string | null;
+  workerName: string | null;
+  casesDone: number;
+  casesTotal: number | null;
+  lastCase: { caseId: string; passed: boolean; score: number; error: string } | null;
+  runId: string | null;
+  error: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+const SETTING_KEY_RE = /^[a-z_][a-z0-9_]{0,40}$/;
+const MODULE_RE = /^[A-Za-z_][\w.]{0,199}$/;
+
+/** Validate a POST /jobs body. The caller checks the target agent belongs to the requester's org. */
+export function parseJobRequest(body: unknown):
+  | { ok: true; job: Pick<BenchJob, "targetAgentId" | "suite" | "harness" | "agentModule" | "settings" | "limit" | "tags"> }
+  | { ok: false; errors: string[] } {
+  if (!isObj(body)) return { ok: false, errors: ["body must be a JSON object"] };
+  const errors: string[] = [];
+  const targetAgentId = text(body.targetAgentId, MAX_ID);
+  const suite = text(body.suite, MAX_ID);
+  const harness = body.harness as HarnessKey;
+  if (!targetAgentId) errors.push("pick an agent");
+  if (!MODULE_RE.test(suite)) errors.push("suite must be a dotted python module");
+  if (!(harness in HARNESSES)) errors.push(`harness must be one of ${Object.keys(HARNESSES).join(", ")}`);
+  const settings: Record<string, string> = {};
+  if (isObj(body.settings)) {
+    for (const [k, v] of Object.entries(body.settings)) {
+      if (!SETTING_KEY_RE.test(k)) errors.push(`setting ${k} is not a valid field name`);
+      else if (typeof v === "string" && v.trim()) settings[k] = v.trim().slice(0, 200);
+    }
+  }
+  if (harness !== "remote" && !settings.model) errors.push("a model is required for a dimOS harness");
+  if (errors.length) return { ok: false, errors };
+  // The remote harness evaluates the agent itself: its target is always the job's agent.
+  if (harness === "remote") settings.target = targetAgentId;
+  return {
+    ok: true,
+    job: {
+      targetAgentId,
+      suite,
+      harness,
+      agentModule: HARNESSES[harness],
+      settings,
+      limit: Math.min(MAX_CASES, count(body.limit)),
+      tags: Array.isArray(body.tags) ? body.tags.map((t) => text(t, 64)).filter(Boolean).slice(0, 20) : [],
+    },
   };
 }

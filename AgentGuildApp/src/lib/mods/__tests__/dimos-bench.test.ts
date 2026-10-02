@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildLeaderboard, feedbackContext, lineageReport, parseReplay, parseSubmission, replayBrief, resolveLineage,
+  buildLeaderboard, feedbackContext, lineageReport, parseJobRequest, parseReplay, parseSubmission, replayBrief, resolveLineage,
   MAX_CASES, MAX_FRAMES, type BenchRun,
 } from "../../../../mods/dimos-bench/bench";
 
@@ -180,5 +180,23 @@ describe("parseReplay", () => {
     expect(parseReplay({ frames: [{ t: 0, jpeg: `${jpeg}<script>` }] }, ids).ok).toBe(false);
     const many = Array.from({ length: MAX_FRAMES + 1 }, (_, t) => ({ t, jpeg }));
     expect(parseReplay({ frames: many }, ids).ok).toBe(false);
+  });
+});
+
+describe("parseJobRequest", () => {
+  it("needs a model for a dimOS harness and pins the remote harness to the job's agent", () => {
+    expect(parseJobRequest({ targetAgentId: "a1", suite: "dimos.evals.suites.go2_smoke", harness: "pi" }).ok).toBe(false);
+    const pi = parseJobRequest({
+      targetAgentId: "a1", suite: "dimos.evals.suites.go2_smoke", harness: "pi", settings: { model: " claude-sonnet-5-5 " }, limit: 2,
+    });
+    expect(pi.ok && pi.job).toMatchObject({ agentModule: "dimos.evals.agents.pi", settings: { model: "claude-sonnet-5-5" }, limit: 2 });
+    const remote = parseJobRequest({ targetAgentId: "a1", suite: "my.suite", harness: "remote", settings: { target: "someone-else" } });
+    expect(remote.ok && remote.job.settings.target).toBe("a1");
+  });
+
+  it("rejects unknown harnesses, bad suite modules and bad setting names", () => {
+    expect(parseJobRequest({ targetAgentId: "a1", suite: "x", harness: "bash" }).ok).toBe(false);
+    expect(parseJobRequest({ targetAgentId: "a1", suite: "rm -rf /", harness: "remote" }).ok).toBe(false);
+    expect(parseJobRequest({ targetAgentId: "a1", suite: "s", harness: "pi", settings: { model: "m", "--evil": "1" } }).ok).toBe(false);
   });
 });
