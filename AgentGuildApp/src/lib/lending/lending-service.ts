@@ -24,6 +24,7 @@
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { resolveAgentPolicy } from "@/lib/agent-policy";
+import { adminPolicyLoaders } from "@/lib/credit-policy-settings-admin";
 import { calculateRequiredEscrow } from "@/lib/credit-policy";
 import { CREDIT_SCORE_MIN, CREDIT_SCORE_MAX, TRUST_SCORE_MIN, TRUST_SCORE_MAX } from "@/lib/credit-tiers";
 import { recordCreditAudit } from "@/lib/credit-audit-log";
@@ -518,7 +519,7 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
 // ═══════════════════════════════════════════════════════════════
 
 export async function getEligibility(agentId: string): Promise<EligibilitySummary> {
-    const policyResult = await resolveAgentPolicy(agentId);
+    const policyResult = await resolveAgentPolicy(agentId, adminPolicyLoaders);
     if (!policyResult.ok || !policyResult.policy) {
         throw new Error(policyResult.error || "Could not resolve agent credit policy");
     }
@@ -579,7 +580,7 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         throw new Error(`Loans are capped at $${limits.maxLoanUsd.toLocaleString()} during the lending beta`);
     }
 
-    const policyResult = await resolveAgentPolicy(agentId);
+    const policyResult = await resolveAgentPolicy(agentId, adminPolicyLoaders);
     if (!policyResult.ok || !policyResult.policy) {
         throw new Error(policyResult.error || "Could not resolve agent credit policy");
     }

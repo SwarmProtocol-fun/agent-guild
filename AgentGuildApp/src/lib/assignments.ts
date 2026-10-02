@@ -213,10 +213,10 @@ export async function createAssignment(params: CreateAssignmentParams): Promise<
   // ── Credit Policy: derive capacity ceiling from tier ──
   try {
     const { resolveAgentPolicy } = await import("@/lib/agent-policy");
-    const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
+    const { getCreditPolicyConfig, recordPolicyEvent, adminPolicyLoaders } = await import("@/lib/credit-policy-settings-admin");
     const config = await getCreditPolicyConfig();
     if (config.enforcementEnabled && config.enforceConcurrentLimits) {
-      const policyResult = await resolveAgentPolicy(toAgentId);
+      const policyResult = await resolveAgentPolicy(toAgentId, adminPolicyLoaders);
       if (policyResult.ok && policyResult.policy) {
         const policyCapacity = policyResult.policy.maxConcurrentTasks;
         capacity = Math.min(capacity, policyCapacity);
