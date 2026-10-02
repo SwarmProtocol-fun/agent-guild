@@ -35,6 +35,7 @@
  *   agent-guild wallet       [--json] — list this agent's custodial wallets
  *   agent-guild intent       transfer|call --wallet <id> --network <chain> ... — ask the hub to sign under the wallet's policy
  *   agent-guild intents      [--json] — recent intents
+ *   agent-guild identity     --audience <service> [--nonce <n>] — identity token for an outside service
  *   agent-guild endpoints    [--mcp <url>] [--a2a <url>] [--website <url>] [--clear <kind>] — publish endpoints in the public directory
  *   agent-guild bindings     [--json] — list external APIs this agent may call via the vault
  *   agent-guild call         <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data <json>] — call one; the key is injected server-side
@@ -3189,6 +3190,33 @@ async function cmdIntents() {
   }
 }
 
+/** `agent-guild identity --audience <service>` — a 10-minute token proving to an outside service which agent you are. */
+async function cmdIdentity() {
+  const audience = arg("--audience");
+  if (!audience) {
+    console.error("Usage: agent-guild identity --audience <https://service.example> [--nonce <challenge>] [--json]");
+    process.exit(2);
+  }
+  const payload = { audience, ...(arg("--nonce") ? { nonce: arg("--nonce") } : {}) };
+  const tok = tokenAuth();
+  let resp;
+  if (tok) {
+    resp = await fetch(`${tok.hubUrl}/api/v1/identity/token`, { method: "POST", headers: { ...tok.headers, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  } else {
+    const config = loadConfig();
+    const { privateKey } = ensureKeypair();
+    resp = await signedBodyRequest(config, privateKey, "POST", "POST:/v1/identity/token", `${config.hubUrl}/api/v1/identity/token?agent=${config.agentId}`, payload);
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Identity token failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  if (hasFlag("--json")) { console.log(JSON.stringify(data, null, 2)); return; }
+  console.error(`Valid until ${new Date(data.expiresAt).toISOString()} for ${audience}. Verify with ${data.jwks}`);
+  console.log(data.token);
+}
+
 async function cmdBindings() {
   const tok = tokenAuth();
   let resp;
@@ -3389,6 +3417,12 @@ const MCP_TOOLS = {
       ...Object.entries(a.headers || {}).flatMap(([k, v]) => ["--header", `${k}: ${v}`]),
       ...(a.body !== undefined ? ["--data", typeof a.body === "string" ? a.body : JSON.stringify(a.body)] : []),
     ],
+  },
+  guild_identity_token: {
+    description: "Get a 10-minute token proving to an outside service which Agent Guild agent you are (with your public reputation). Send it to that service; it verifies it against https://agent-guild.com/.well-known/jwks.json.",
+    properties: { audience: str("The service's origin, e.g. https://api.example.com"), nonce: str("Challenge the service gave you, if any") },
+    required: ["audience"],
+    argv: (a) => ["identity", "--audience", a.audience, ...(a.nonce ? ["--nonce", a.nonce] : [])],
   },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
@@ -3665,6 +3699,7 @@ try {
   else if (cmd === "agents") await cmdAgents();
   else if (cmd === "endpoints") await cmdEndpoints();
   else if (cmd === "bindings") await cmdBindings();
+  else if (cmd === "identity") await cmdIdentity();
   else if (cmd === "wallet" || cmd === "wallets") await cmdWallets();
   else if (cmd === "intent") await cmdIntent();
   else if (cmd === "intents") await cmdIntents();
@@ -3713,6 +3748,9 @@ Wallet Intents (the hub signs under your org's spending policy):
   intent      transfer --wallet <id> --network <chain> --to <addr> --amount <n> [--asset native|usdc] [--memo "..."]
   intent      call --wallet <id> --network <chain> --to <contract> --data 0x... [--value <n>]
   intents     [--json]                                   — recent intents and their status
+
+Prove Your Identity to Other Services:
+  identity    --audience <https://service> [--nonce <challenge>]  — 10-minute signed identity token (verify via /.well-known/jwks.json)
 
 Public Directory:
   endpoints   [--mcp <url>] [--a2a <url>] [--website <url>] [--clear mcp|a2a|website]  — show/set the endpoints listed in the public directory
