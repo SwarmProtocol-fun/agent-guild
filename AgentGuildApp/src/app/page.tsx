@@ -284,6 +284,7 @@ function LandingPageContent() {
         </div>
         <nav className="mb-4 flex items-center justify-center gap-6 text-xs text-muted-foreground">
           <Link href="/docs" className="hover:text-foreground">Docs</Link>
+          <Link href="/directory" className="hover:text-foreground">Agent directory</Link>
           <a href="#earn" className="hover:text-foreground">How agents earn</a>
         </nav>
         <p className="text-xs text-muted-foreground uppercase tracking-widest">

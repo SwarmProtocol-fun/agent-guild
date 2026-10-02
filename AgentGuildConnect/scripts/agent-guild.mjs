@@ -32,6 +32,7 @@
  *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
  *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
  *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild endpoints    [--mcp <url>] [--a2a <url>] [--website <url>] [--clear <kind>] — publish endpoints in the public directory
  *   agent-guild bindings     [--json] — list external APIs this agent may call via the vault
  *   agent-guild call         <binding> <METHOD> <path> [--query k=v] [--header "K: V"] [--data <json>] — call one; the key is injected server-side
  *   agent-guild setup        [--client <ids>] [--dry-run] — install the MCP server into detected editors
@@ -3801,6 +3802,40 @@ function argAll(flag) {
   return out;
 }
 
+/** `agent-guild endpoints` — show, set or clear the endpoints this agent publishes in the public directory. */
+async function cmdEndpoints() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const patch = {};
+  for (const kind of ["mcp", "a2a", "website"]) {
+    const v = arg(`--${kind}`);
+    if (v !== null && v !== undefined) patch[kind] = v;
+  }
+  for (const kind of argAll("--clear")) patch[kind] = null;
+
+  let resp;
+  if (Object.keys(patch).length) {
+    resp = await signedBodyRequest(
+      config, privateKey, "PUT", "PUT:/v1/agents/endpoints",
+      `${config.hubUrl}/api/v1/agents/endpoints?agent=${config.agentId}`, patch,
+    );
+  } else {
+    resp = await fetch(`${config.hubUrl}/api/v1/agents/endpoints?${signedQuery(config, privateKey, "/v1/agents/endpoints")}`);
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`Endpoints request failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  const eps = data.endpoints || {};
+  if (!Object.keys(eps).length) {
+    console.log("No endpoints published. Set them with: agent-guild endpoints --mcp <https-url> --a2a <https-url> --website <https-url>");
+  } else {
+    for (const [k, v] of Object.entries(eps)) console.log(`  ${k.padEnd(8)} ${v}`);
+  }
+  console.log(`\nShown in the public directory at ${config.hubUrl}/directory/${config.agentId} when this agent's profile is public.`);
+}
+
 async function cmdBindings() {
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
@@ -4735,6 +4770,7 @@ try {
   else if (cmd === "memory") await cmdMemory();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
+  else if (cmd === "endpoints") await cmdEndpoints();
   else if (cmd === "bindings") await cmdBindings();
   else if (cmd === "call") await cmdCall();
   else if (cmd === "mcp") await cmdMcp();
@@ -4827,6 +4863,9 @@ Self-Improving Harness (SIA-style playbook generations; the org owner approves e
   harness feedback [--json]                                — scores per generation, failures under the live one, plateau/regression flags
   harness propose --file <playbook.md> --note <text|file>  — file your own next generation
   evolve [--dry-run] [--print-prompt] [--force]           — run one improvement step on this agent's own model and propose the result
+
+Public Directory:
+  endpoints   [--mcp <url>] [--a2a <url>] [--website <url>] [--clear mcp|a2a|website]  — show/set the endpoints listed in the public directory
 
 Vault Bindings (call external APIs without holding the key):
   bindings    [--json]                                  — list the APIs this agent may call
