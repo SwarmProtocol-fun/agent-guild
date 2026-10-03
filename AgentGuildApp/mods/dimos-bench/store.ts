@@ -13,13 +13,15 @@
  *   dimosBenchWorkers — one heartbeat document per worker agent.
  *   dimosBenchEpisodes — DimSim training attempts (human demos and agent
  *                    runs), with per-step camera frames in a subcollection.
+ *   dimosBenchDrive  — one relay document per attempt an agent drives with
+ *                    its own model: the latest camera view and its next move.
  *
  * Queries use single-field filters and sort in memory, so no composite
  * index is needed. Server-only (Firebase Admin SDK).
  */
 import type { Query } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
-import type { Episode, EpisodeStep } from "./training";
+import type { DriveRelay, Episode, EpisodeStep } from "./training";
 import { replayBrief, type BenchJob, type BenchRun, type ReplayBrief, type RobotReplay, type RunSubmission } from "./bench";
 
 const RUNS = "dimosBenchRuns";
@@ -238,4 +240,76 @@ export async function listEpisodes(agentId: string, max = 200): Promise<Episode[
     .map((d) => d.data() as Episode)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, max);
+}
+
+// ── Drive relay (an agent driving with its own model) ────────────────────
+// The panel runs the sim and posts what the robot sees; the agent reads it
+// and posts a move; the panel runs the move. Both sides long-poll the one
+// relay document (waitForRelay) instead of polling on a timer.
+
+const DRIVE = "dimosBenchDrive";
+
+export async function setRelay(relay: DriveRelay): Promise<void> {
+  await db().collection(DRIVE).doc(relay.episodeId).set(relay);
+}
+
+export async function getRelay(episodeId: string): Promise<DriveRelay | null> {
+  const snap = await db().collection(DRIVE).doc(episodeId).get();
+  return snap.exists ? (snap.data() as DriveRelay) : null;
+}
+
+export async function updateRelay(episodeId: string, patch: Partial<DriveRelay>): Promise<void> {
+  await db().collection(DRIVE).doc(episodeId).update({ ...patch, updatedAt: new Date().toISOString() });
+}
+
+/**
+ * Atomically set the agent's move, if the relay is still waiting for a move
+ * on observation `seq` (so a retried or stale request can't move twice).
+ */
+export async function claimMove(episodeId: string, move: DriveRelay["move"] & object): Promise<"ok" | "stale" | "ended"> {
+  const ref = db().collection(DRIVE).doc(episodeId);
+  return db().runTransaction(async (tx) => {
+    const r = (await tx.get(ref)).data() as DriveRelay | undefined;
+    if (!r || r.ended) return "ended";
+    if (r.move || r.obs?.seq !== move.seq) return "stale";
+    tx.update(ref, { move, updatedAt: new Date().toISOString() });
+    return "ok";
+  });
+}
+
+/** The running relay an agent is driving, newest first (null when none). */
+export async function activeRelay(agentId: string): Promise<DriveRelay | null> {
+  const snap = await db().collection(DRIVE).where("agentId", "==", agentId).limit(SCAN_LIMIT).get();
+  return (
+    snap.docs
+      .map((d) => d.data() as DriveRelay)
+      .filter((r) => !r.ended)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null
+  );
+}
+
+/** Resolve with the relay as soon as `ready(relay)` holds, or with the latest state after `ms`. */
+export function waitForRelay(episodeId: string, ready: (r: DriveRelay) => boolean, ms: number): Promise<DriveRelay | null> {
+  return new Promise((resolve) => {
+    let last: DriveRelay | null = null;
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(last);
+    };
+    const timer = setTimeout(done, ms);
+    const unsubscribe = db()
+      .collection(DRIVE)
+      .doc(episodeId)
+      .onSnapshot(
+        (snap) => {
+          last = snap.exists ? (snap.data() as DriveRelay) : null;
+          if (!last || ready(last)) done();
+        },
+        () => done(),
+      );
+  });
 }

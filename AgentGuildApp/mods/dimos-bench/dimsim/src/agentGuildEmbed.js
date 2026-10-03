@@ -10,6 +10,8 @@
  *   observe()        { jpeg (base64), width, height, pose: {x, z, yaw} }
  *   act({forward, turn})  turn (degrees, + = left) then move `forward` metres,
  *                    stopping short of walls/furniture; returns { pose, blocked }
+ *   drive({forward, turn})  real-time: hold forward m/s and turn deg/s until
+ *                    changed ({} stops); returns { pose, blocked }
  *   reset(pose)      teleport to {x, z, yaw (degrees)}
  *   score(target, thresholdM)  DimSim's objectDistance rubric, unchanged
  *   objects()        [{ id, title }] of the scene's objects, for task targets
@@ -26,6 +28,8 @@ const STEP_M = 0.05; // collision-checked increments
 const CLEARANCE_M = 0.12; // stop this far from an obstacle
 const RAY_HEIGHTS = [-0.25, -0.1, 0.05]; // relative to the body centre (0.5 m when standing)
 const PLAN_CELL_M = 0.2; // floor plan resolution
+const MAX_DRIVE_MPS = 1.5; // real-time drive() limits
+const MAX_DRIVE_DPS = 180;
 const DEFAULT_START = { x: 1.5, z: 3.1 }; // = APARTMENT_START in training.ts; upstream (0, 3) is under the table
 
 export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, captureRgb, getSceneState, setYaw, getYaw, followAgent }) {
@@ -126,10 +130,8 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
     return { x: round(x), z: round(z), yaw: round((getYaw() * 180) / Math.PI) };
   };
 
-  const applyYaw = (yaw) => {
-    setYaw(yaw);
-    if (agent.group) agent.group.rotation.y = yaw;
-  };
+  // Sets the body's heading only; the visual eases to it each frame (AiAvatar.easeVisual).
+  const applyYaw = (yaw) => setYaw(yaw);
 
   /**
    * Free distance ahead along `dir`. Rays sit at a Go2's body heights (~0.25–0.55 m
@@ -147,6 +149,35 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
     return free;
   };
 
+  /** Move `dist` metres along the heading (negative = back) in collision-checked steps. */
+  const moveAlong = (dist) => {
+    const sign = Math.sign(dist);
+    const yaw = getYaw();
+    const dir = { x: Math.sin(yaw) * sign, z: Math.cos(yaw) * sign };
+    let moved = 0;
+    let blocked = false;
+    while (moved < Math.abs(dist) - 1e-6) {
+      const step = Math.min(STEP_M, Math.abs(dist) - moved);
+      if (clearAhead(dir) < radius + CLEARANCE_M + step) {
+        blocked = true;
+        break;
+      }
+      const [x, y, z] = agent.getPosition();
+      agent.setPosition(x + dir.x * step, y, z + dir.z * step);
+      moved += step;
+    }
+    return { moved: moved * sign, blocked };
+  };
+
+  const drive = { forward: 0, turn: 0, raf: 0, last: 0, blocked: false };
+  const driveTick = (now) => {
+    const dt = Math.min((now - drive.last) / 1000, 0.1);
+    drive.last = now;
+    if (drive.turn) applyYaw(getYaw() + (drive.turn * dt * Math.PI) / 180);
+    drive.blocked = drive.forward ? moveAlong(drive.forward * dt).blocked : false;
+    drive.raf = drive.forward || drive.turn ? requestAnimationFrame(driveTick) : 0;
+  };
+
   const api = {
     observe() {
       const frame = captureRgb();
@@ -160,7 +191,6 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
         return encode(captureRgb());
       });
       applyYaw(yaw0);
-      agent._syncVisual?.();
       return views;
     },
 
@@ -196,30 +226,31 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
 
     act({ forward = 0, turn = 0 } = {}) {
       applyYaw(getYaw() + (clamp(turn, -180, 180) * Math.PI) / 180);
-      const dist = clamp(forward, -1, 2);
-      const sign = Math.sign(dist);
-      const yaw = getYaw();
-      const dir = { x: Math.sin(yaw) * sign, z: Math.cos(yaw) * sign };
-      let moved = 0;
-      let blocked = false;
-      while (moved < Math.abs(dist) - 1e-6) {
-        const step = Math.min(STEP_M, Math.abs(dist) - moved);
-        if (clearAhead(dir) < radius + CLEARANCE_M + step) {
-          blocked = true;
-          break;
-        }
-        const [x, y, z] = agent.getPosition();
-        agent.setPosition(x + dir.x * step, y, z + dir.z * step);
-        moved += step;
+      const { moved, blocked } = moveAlong(clamp(forward, -1, 2));
+      return { pose: pose(), blocked, moved: round(moved) };
+    },
+
+    /**
+     * Real-time driving: hold a velocity (forward m/s, turn deg/s, + = left)
+     * until changed; {0, 0} stops. Integrated every animation frame with the
+     * same collision checks as act(). Returns the latest pose and whether the
+     * robot is currently blocked.
+     */
+    drive({ forward = 0, turn = 0 } = {}) {
+      drive.forward = clamp(forward, -MAX_DRIVE_MPS, MAX_DRIVE_MPS);
+      drive.turn = clamp(turn, -MAX_DRIVE_DPS, MAX_DRIVE_DPS);
+      if ((drive.forward || drive.turn) && !drive.raf) {
+        drive.last = performance.now();
+        drive.raf = requestAnimationFrame(driveTick);
       }
-      agent._syncVisual?.();
-      return { pose: pose(), blocked, moved: round(moved * sign) };
+      return { pose: pose(), blocked: drive.blocked };
     },
 
     reset({ x = DEFAULT_START.x, z = DEFAULT_START.z, yaw = 0 } = {}) {
+      api.drive({});
       agent.setPosition(x, bodyY(), z);
       applyYaw((yaw * Math.PI) / 180);
-      agent._syncVisual?.();
+      agent.snapVisual?.(getYaw()); // a reset teleports — snap the visual, don't glide
       return pose();
     },
 

@@ -2392,10 +2392,12 @@ function updateAgentCameraFollow(dt) {
 
   // Agent Guild embed: a chase camera behind and above the robot, so the panel
   // shows the robot itself (its own camera view is shown separately).
+  // Tracks the eased visual (not the body) so the camera glides with the robot.
   if (embedMode) {
     const back = 1.6, up = 1.1;
-    camera.position.set(ax - Math.sin(yaw) * back, ay + up, az - Math.cos(yaw) * back);
-    camera.lookAt(ax + Math.sin(yaw) * 0.8, ay, az + Math.cos(yaw) * 0.8);
+    const v = agent.group?.position ?? { x: ax, y: ay, z: az };
+    camera.position.set(v.x - Math.sin(yaw) * back, v.y + up, v.z - Math.cos(yaw) * back);
+    camera.lookAt(v.x + Math.sin(yaw) * 0.8, v.y, v.z + Math.cos(yaw) * 0.8);
     if (agent.group) agent.group.visible = true;
     return;
   }
@@ -5608,8 +5610,13 @@ if (dimosMode) {
       let _dimosYaw = 0;
       // Bridge updates _dimosYaw via this setter when server sends pose
       window.__dimosSetYaw = (yaw) => { _dimosYaw = yaw; };
-      agent.update = function(_dt) {
-        this._syncVisual();
+      agent.update = function(dt) {
+        // Embed mode moves the body in discrete jumps; ease the visual toward it.
+        if (embedMode) this.easeVisual(dt, _dimosYaw);
+        else {
+          this._syncVisual();
+          this._animateGait(dt);
+        }
       };
       console.log(`[dimos] Agent spawned: ${agent.id}`);
 
@@ -5680,7 +5687,7 @@ if (dimosMode) {
 
       function _dimosCaptureRgb() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
-        const yaw = agent.group?.rotation?.y ?? 0;
+        const yaw = _dimosYaw; // authoritative heading — the visual may still be easing
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
         const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
@@ -5713,7 +5720,7 @@ if (dimosMode) {
       // Offscreen depth capture from agent POV using a dedicated low-res target.
       function _dimosCaptureDepth() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
-        const yaw = agent.group?.rotation?.y ?? 0;
+        const yaw = _dimosYaw; // authoritative heading — the visual may still be easing
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
         const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));

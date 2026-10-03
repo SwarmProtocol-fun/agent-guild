@@ -41,6 +41,9 @@
  *   agent-guild token        [--scopes <s1,s2>] [--binding <name>] [--ttl 15m] — mint a short-lived bearer token for a runtime
  *   agent-guild setup        [--client <ids>] [--dry-run] — install the MCP server into detected editors
  *   agent-guild mcp          — run as an MCP server over stdio
+ *   agent-guild sim observe  [--episode <id>] [--after <seq>] [--json]           — DimSim: what the robot sees in your running attempt
+ *   agent-guild sim act      --episode <id> --seq <n> [--turn <deg>] [--forward <m>] [--look] [--done] [--thought "..."] [--json]
+ *   agent-guild sim lesson   --episode <id> "<lesson>"                           — DimSim: save what you learned from an attempt
  */
 
 import crypto from "node:crypto";
@@ -2802,6 +2805,107 @@ async function cmdAssignments() {
  * hub returns 403 — that's an org-admin action, not something this command
  * can grant itself.
  */
+// ---------------------------------------------------------------------------
+// DimSim driving (`agent-guild sim …`) — the dimos-bench mod's drive relay.
+// A signed-in operator starts an attempt in the DimSim panel (which runs the
+// sim in their browser); this agent drives it with its own model: observe →
+// decide → act, one move per call. The camera view comes back as a JPEG.
+// ---------------------------------------------------------------------------
+
+const SIM_WAIT_MS = 50000; // under the MCP tool timeout; the hub long-polls ~8 s per request
+
+/** One signed call to a dimos-bench route (agent auth: METHOD:/mods/<mod>/<path>:<ts>). */
+async function simRequest(method, path, { query = {}, body } = {}) {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const ts = Date.now().toString();
+  const sig = sign(`${method}:/mods/dimos-bench/${path}:${ts}`, privateKey);
+  const qs = new URLSearchParams({ ...query, agent: config.agentId, sig, ts });
+  const resp = await fetch(`${config.hubUrl}/api/mods/dimos-bench/${path}?${qs}`, {
+    method,
+    ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    console.error(`DimSim ${path} failed (${resp.status}): ${data.error || "Unknown error"}`);
+    process.exit(1);
+  }
+  return data;
+}
+
+/** Long-poll GET /drive until there's a view newer than `after` (or the attempt ended), up to SIM_WAIT_MS. */
+async function simObserve(episodeId, after) {
+  const deadline = Date.now() + SIM_WAIT_MS;
+  for (;;) {
+    const query = { ...(episodeId ? { episodeId } : {}), ...(after != null ? { after: String(after) } : {}) };
+    const view = await simRequest("GET", "drive", { query });
+    if (!view.waiting || Date.now() > deadline) return view;
+    episodeId = view.episodeId;
+    after ??= 0;
+  }
+}
+
+/** Print a view: JSON (for `agent-guild mcp`, which turns the JPEGs into images) or a summary plus image files. */
+function printSimView(view) {
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(view));
+    return;
+  }
+  const { jpeg, panorama, ...rest } = view;
+  const dir = join(dirname(CONFIG_PATH), "dimsim");
+  const files = [];
+  if (jpeg || panorama?.length) mkdirSync(dir, { recursive: true });
+  if (jpeg) {
+    files.push(join(dir, "camera.jpg"));
+    writeFileSync(files[0], Buffer.from(jpeg, "base64"));
+  }
+  (panorama || []).forEach((p, k) => {
+    const f = join(dir, `panorama-${["front", "left", "back", "right"][k] ?? k}.jpg`);
+    writeFileSync(f, Buffer.from(p, "base64"));
+    files.push(f);
+  });
+  console.log(JSON.stringify(rest, null, 2));
+  if (files.length) console.log(`\nCamera images:\n${files.map((f) => `  ${f}`).join("\n")}`);
+}
+
+async function cmdSim() {
+  const sub = process.argv[3];
+  const episodeId = arg("--episode");
+  if (sub === "observe") {
+    const after = arg("--after");
+    printSimView(await simObserve(episodeId, after != null ? Number(after) : undefined));
+  } else if (sub === "act") {
+    const seq = Number(arg("--seq"));
+    if (!episodeId || !Number.isInteger(seq)) {
+      console.error('Usage: agent-guild sim act --episode <id> --seq <n> [--turn <deg>] [--forward <m>] [--look] [--done] [--thought "..."]');
+      process.exit(1);
+    }
+    let view = await simRequest("POST", "drive/act", {
+      body: {
+        episodeId, seq,
+        turn: Number(arg("--turn") || 0),
+        forward: Number(arg("--forward") || 0),
+        look: hasFlag("--look"),
+        done: hasFlag("--done"),
+        thought: arg("--thought") || "",
+      },
+    });
+    if (view.waiting) view = await simObserve(episodeId, seq);
+    printSimView(view);
+  } else if (sub === "lesson") {
+    const lesson = process.argv.slice(4).filter((a, k, all) => a !== "--episode" && all[k - 1] !== "--episode").join(" ").trim();
+    if (!episodeId || !lesson) {
+      console.error('Usage: agent-guild sim lesson --episode <id> "<lesson>"');
+      process.exit(1);
+    }
+    await simRequest("POST", "drive/lesson", { body: { episodeId, lesson } });
+    console.log("Lesson saved to long-term memory.");
+  } else {
+    console.error("Usage: agent-guild sim observe|act|lesson … (see agent-guild help)");
+    process.exit(1);
+  }
+}
+
 async function cmdSettle() {
   const taskId = process.argv[3];
   const amountUsdc = parseFloat(arg("--amount"));
@@ -4180,6 +4284,40 @@ const MCP_TOOLS = {
     required: ["audience"],
     argv: (a) => ["identity", "--audience", a.audience, ...(a.nonce ? ["--nonce", a.nonce] : [])],
   },
+  guild_sim_observe: {
+    description: "DimSim: see what the robot sees in your running DimSim attempt (started by an operator in the DimSim panel): the camera image, pose, task, steps left, and on the first view a driving guide and your lessons from earlier attempts. Waits for the attempt if it hasn't started sending yet.",
+    properties: { episodeId: str("Attempt id (default: your newest running attempt)"), after: int("Wait for a view newer than this seq") },
+    images: true,
+    argv: (a) => ["sim", "observe", "--json", ...(a.episodeId ? ["--episode", a.episodeId] : []), ...(a.after != null ? ["--after", String(a.after)] : [])],
+  },
+  guild_sim_act: {
+    description: "DimSim: make one move — turn in place (degrees, + = left), then walk forward (metres, -1..2) — or look around (4-way photos) instead, or declare done when you've reached the goal. Returns the robot's next camera view. seq must be the one from the view you're answering.",
+    properties: {
+      episodeId: str("Attempt id from guild_sim_observe"),
+      seq: int("seq of the view this move answers"),
+      turn: { type: "number", description: "Degrees to turn first, -180..180 (+ = left)" },
+      forward: { type: "number", description: "Metres to walk after turning, -1..2" },
+      look: { type: "boolean", description: "Spend this move photographing all four directions instead of moving" },
+      done: { type: "boolean", description: "You believe the robot has reached the goal" },
+      thought: str("One or two sentences: what you see and why this move (shown in the panel, kept in the training data)"),
+    },
+    required: ["episodeId", "seq"],
+    images: true,
+    argv: (a) => [
+      "sim", "act", "--json", "--episode", a.episodeId, "--seq", String(a.seq),
+      ...(a.turn != null ? ["--turn", String(a.turn)] : []),
+      ...(a.forward != null ? ["--forward", String(a.forward)] : []),
+      ...(a.look ? ["--look"] : []),
+      ...(a.done ? ["--done"] : []),
+      ...(a.thought ? ["--thought", a.thought] : []),
+    ],
+  },
+  guild_sim_lesson: {
+    description: "DimSim: after an attempt ends, save the one or two sentences most useful for your next attempt (where the target and obstacles are — coordinates, rooms, landmarks — not just a sequence of turns). Your next attempts read it back.",
+    properties: { episodeId: str("Attempt id"), lesson: str("The lesson") },
+    required: ["episodeId", "lesson"],
+    argv: (a) => ["sim", "lesson", "--episode", a.episodeId, a.lesson],
+  },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
     properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
@@ -4208,6 +4346,21 @@ function runMcpTool(argv) {
   });
 }
 
+/** A DimSim view (the CLI's --json output) as MCP content: the JPEGs become image blocks. */
+function simViewContent(text) {
+  let view;
+  try { view = JSON.parse(text); } catch { return [{ type: "text", text }]; }
+  const { jpeg, panorama, ...rest } = view;
+  const image = (data) => ({ type: "image", data, mimeType: "image/jpeg" });
+  const content = [{ type: "text", text: JSON.stringify(rest, null, 2) }];
+  if (panorama?.length) {
+    content.push({ type: "text", text: "Looking around from where the robot stands:" });
+    panorama.forEach((p, k) => content.push({ type: "text", text: ["front", "left (+90°)", "back (180°)", "right (-90°)"][k] ?? `view ${k + 1}` }, image(p)));
+  }
+  if (jpeg) content.push({ type: "text", text: "Camera now:" }, image(jpeg));
+  return content;
+}
+
 async function handleMcpRequest(msg) {
   const { method, params } = msg;
   if (method === "initialize") {
@@ -4215,7 +4368,7 @@ async function handleMcpRequest(msg) {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-guild", version: "1.1.0" },
-      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory, and call external APIs through vault bindings without seeing their keys. Call guild_status first to confirm the agent is registered.",
+      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory, and call external APIs through vault bindings without seeing their keys, and drive the DimSim robot (guild_sim_observe, then guild_sim_act per move). Call guild_status first to confirm the agent is registered.",
     };
   }
   if (method === "ping") return {};
@@ -4237,6 +4390,7 @@ async function handleMcpRequest(msg) {
       return { content: [{ type: "text", text: `Missing required argument(s): ${missing.join(", ")}` }], isError: true };
     }
     const { text, isError } = await runMcpTool(tool.argv(args));
+    if (tool.images && !isError) return { content: simViewContent(text), isError };
     return { content: [{ type: "text", text }], isError };
   }
   throw Object.assign(new Error(`Method not found: ${method}`), { code: -32601 });
@@ -4916,6 +5070,7 @@ try {
   else if (cmd === "complete") await cmdComplete();
   else if (cmd === "assignments") await cmdAssignments();
   else if (cmd === "settle") await cmdSettle();
+  else if (cmd === "sim") await cmdSim();
   else if (cmd === "claim-gig-order") await cmdClaimGigOrder();
   else if (cmd === "deliver-gig-order") await cmdDeliverGigOrder();
   else if (cmd === "work-mode") await cmdWorkMode();

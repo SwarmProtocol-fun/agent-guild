@@ -10,7 +10,14 @@ import Anthropic from "@anthropic-ai/sdk";
 import { jsonSchemaOutputFormat } from "@anthropic-ai/sdk/helpers/json-schema";
 import { clampAction, describeActions, type EpisodeStep, type SimAction, type SimPose, type SimTask } from "./training";
 
-export const DRIVER_MODEL = "claude-opus-5-5";
+/**
+ * Picks every move, so it's on the critical path of each step: Haiku keeps the
+ * robot moving at game pace (Opus at low effort took seconds per step).
+ * Haiku 4.5 takes neither `effort` nor the server-side refusal fallback.
+ */
+export const DRIVER_MODEL = "claude-haiku-4-5";
+/** Writes the end-of-attempt lesson: once per attempt, off the critical path. */
+const LESSON_MODEL = "claude-opus-5-5";
 
 let client: Anthropic | null = null;
 function anthropic(): Anthropic {
@@ -92,11 +99,9 @@ export async function decideAction(args: {
   try {
     response = await anthropic().beta.messages.parse({
       model: DRIVER_MODEL,
-      max_tokens: 4000,
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
+      max_tokens: 1000,
       system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
-      output_config: { effort: "low", format: jsonSchemaOutputFormat(ACTION_SCHEMA) },
+      output_config: { format: jsonSchemaOutputFormat(ACTION_SCHEMA) },
       messages: [
         {
           role: "user",
@@ -142,7 +147,7 @@ export async function reflect(args: {
     .map((s, k) => `${k + 1}. (${s.pose.x.toFixed(2)}, ${s.pose.z.toFixed(2)}) yaw ${s.pose.yaw}° → ${s.look ? "looked around" : `turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " BLOCKED" : ""}`}${s.thought ? ` — "${s.thought}"` : ""}`)
     .join("\n");
   const response = await anthropic().beta.messages.create({
-    model: DRIVER_MODEL,
+    model: LESSON_MODEL,
     max_tokens: 2000,
     betas: ["server-side-fallback-2026-07-01"],
     fallbacks: "default",

@@ -7,6 +7,7 @@ import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/f
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { Wallet as EvmWallet } from "ethers";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import {
   getRiskConfig,
   setRiskConfig,
@@ -623,7 +624,7 @@ export default defineServerMod({
 
       const [caps, wallet, risk, pending] = await Promise.all([
         getAgentCapabilities(agentId, access.orgId),
-        getAgentWallet(agentId),
+        getTradingWallet(agentId),
         getRiskConfig(agentId),
         getPendingStrategies(agentId),
       ]);
@@ -635,7 +636,7 @@ export default defineServerMod({
         orgId: access.orgId,
         via: ctx.agent ? "agent" : "session",
         capabilities,
-        wallet: { configured: !!wallet, network: wallet?.network ?? null },
+        wallet: { configured: !!wallet, network: wallet?.network ?? null, instant: wallet?.instant ?? false },
         risk: risk ? {
           leverage: risk.leverage,
           maxPositionUsd: risk.maxPositionUsd,
@@ -697,38 +698,95 @@ export default defineServerMod({
      * the operator type org/agent IDs and a wallet address. Session only.
      */
     "GET /my-agents": async (_req, ctx) => {
-      if (!ctx.session) return Response.json({ error: "Sign in to list your agents" }, { status: 401 });
-      const orgs = await getOrganizationsByWalletAdmin(ctx.session.address);
+      const session = ctx.session;
+      if (!session) return Response.json({ error: "Sign in to list your agents" }, { status: 401 });
+      const orgs = await getOrganizationsByWalletAdmin(session.address);
       const perOrg = await Promise.all(orgs.map(async (org) => {
         const agents = await getAgentsByOrg(org.id);
         return Promise.all(agents.map(async (agent) => {
-          const wallet = await getAgentWallet(agent.id);
-          let address = wallet?.address ?? null;
-          if (wallet && !address) {
-            // Wallets generated via /api/v1/agents/:id/wallets record their
-            // address there rather than in this mod's store.
-            const generated = (await listAgentWallets(agent.id)).find((w) => w.chain === "evm" && w.hyperliquidRegistered);
-            address = generated?.publicKey ?? null;
-          }
+          const wallet = await getTradingWallet(agent.id);
           return {
             agentId: agent.id,
             name: agent.name,
             orgId: org.id,
             orgName: org.name || org.id,
             status: agent.status,
-            wallet: wallet ? { network: wallet.network, address } : null,
+            wallet,
+            // Only the org owner can switch an agent to instant trading (POST /instant-trading).
+            isOwner: !!org.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(session.address),
           };
         }));
       }));
       return Response.json({ agents: perOrg.flat() });
     },
 
+    /**
+     * POST /instant-trading — let an agent trade with no passphrase. Org
+     * owner only, from a signed-in session — never an agent signature or
+     * token: an agent can't hand the platform signing authority over its
+     * own funds. Uses the agent's platform-held EVM wallet, creating one if
+     * it has none, and sets default risk limits if it has none so platform
+     * signing is never unbounded.
+     * Body: { agentId, network? }
+     */
+    "POST /instant-trading": async (req, ctx) => {
+      const session = ctx.session;
+      if (!session || ctx.agent) {
+        return Response.json({ error: "Only the org owner, signed in, can turn on instant trading" }, { status: 403 });
+      }
+      const body = await req.json().catch(() => ({}));
+      const agentId: string | undefined = body.agentId;
+      const network: HlNetwork = body.network === "mainnet" ? "mainnet" : "testnet";
+      if (!agentId) return Response.json({ error: "agentId is required" }, { status: 400 });
+
+      const agent = await getAgent(agentId);
+      if (!agent) return Response.json({ error: "Agent not found" }, { status: 404 });
+      const membership = await requireOrgMembershipByAddress(session.address, agent.orgId);
+      if (!membership.ok) return Response.json({ error: membership.error }, { status: membership.status ?? 403 });
+      const ownerAddress = membership.org?.ownerAddress;
+      if (!ownerAddress || canonicalizeWalletAddress(ownerAddress) !== canonicalizeWalletAddress(session.address)) {
+        return Response.json({ error: "Only the org owner can turn on instant trading" }, { status: 403 });
+      }
+
+      let wallet = (await listAgentWallets(agentId)).find((w) => w.chain === "evm");
+      if (!wallet) {
+        wallet = await generateAgentWallet(agentId, agent.orgId, session.address, { chain: "evm", label: "Hyperliquid trading" });
+      }
+      await setInstantTrading(agentId, {
+        orgId: agent.orgId, walletId: wallet.id, address: wallet.publicKey, network, enabledBy: session.address,
+      });
+
+      if (!(await getRiskConfig(agentId))) {
+        await setRiskConfig(agentId, { orgId: agent.orgId, ...INSTANT_DEFAULT_RISK });
+      }
+      ctx.log.info(`instant trading ON for agent ${agentId} (${network}) by ${session.address}`);
+      return Response.json({ ok: true, address: wallet.publicKey, network, risk: await getRiskConfig(agentId) });
+    },
+
+    /**
+     * DELETE /instant-trading/:agentId — back to the passphrase model. Any
+     * org member (or the agent itself) may switch it off — removing
+     * authority needs less trust than granting it.
+     */
+    "DELETE /instant-trading/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      await deleteInstantTrading(ctx.params.agentId);
+      ctx.log.info(`instant trading OFF for agent ${ctx.params.agentId}`);
+      return Response.json({ ok: true });
+    },
+
     /** GET /wallet/:agentId — whether a wallet is configured, and which network. Never returns key material. */
     "GET /wallet/:agentId": async (_req, ctx) => {
       const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
       if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
-      const wallet = await getAgentWallet(ctx.params.agentId);
-      return Response.json({ hasWallet: !!wallet, network: wallet?.network ?? null });
+      const wallet = await getTradingWallet(ctx.params.agentId);
+      return Response.json({
+        hasWallet: !!wallet,
+        network: wallet?.network ?? null,
+        instant: wallet?.instant ?? false,
+        address: wallet?.address ?? null,
+      });
     },
 
     /** DELETE /wallet/:agentId — same org-membership check as POST /wallet above. */
@@ -746,7 +804,7 @@ export default defineServerMod({
      * capability and a wallet already set via POST /wallet.
      * orgId/agentId fall back to the body only for browser-session calls —
      * a verified agent signature (ctx.agent) always takes precedence.
-     * Body: { orgId, agentId, masterSecret, coin, isBuy, sizeUsd, orderType?,
+     * Body: { orgId, agentId, masterSecret?, coin, isBuy, sizeUsd, orderType?,
      *         limitPrice?, leverage?, stopLossPct?, takeProfitPct? }
      * Rejected (400) if it would exceed the agent's configured risk limits.
      */
@@ -756,8 +814,8 @@ export default defineServerMod({
       const orgId = ctx.agent?.orgId ?? body.orgId;
       const { coin, isBuy, sizeUsd, orderType = "market", limitPrice, leverage, stopLossPct, takeProfitPct, masterSecret } = body;
 
-      if (!orgId || !agentId || !coin || isBuy == null || !sizeUsd || !masterSecret) {
-        return Response.json({ error: "orgId, agentId, coin, isBuy, sizeUsd, masterSecret are required" }, { status: 400 });
+      if (!orgId || !agentId || !coin || isBuy == null || !sizeUsd) {
+        return Response.json({ error: "orgId, agentId, coin, isBuy, sizeUsd are required" }, { status: 400 });
       }
       if (orderType === "limit" && !limitPrice) {
         return Response.json({ error: "limitPrice is required for limit orders" }, { status: 400 });
@@ -774,7 +832,7 @@ export default defineServerMod({
 
       let privateKey: string, network: HlNetwork;
       try {
-        ({ privateKey, network } = await resolveAgentWallet(agentId, masterSecret));
+        ({ privateKey, network } = await resolveSigningKey(agentId, masterSecret));
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 400 });
       }
@@ -858,16 +916,17 @@ export default defineServerMod({
      * the calling agent to hold the "hyperliquid-close" capability and a
      * wallet set via POST /wallet. As with /trade, a verified agent
      * signature (ctx.agent) always wins over the body.
-     * Body: { orgId, agentId, masterSecret, coin, wallet? } — wallet defaults
-     * to the address recorded with the agent's key.
+     * Body: { orgId, agentId, masterSecret?, coin, wallet? } — wallet defaults
+     * to the address recorded with the agent's key; masterSecret isn't
+     * needed for an agent on instant trading.
      */
     "POST /close": async (req, ctx) => {
       const body = await req.json();
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
       const { coin, masterSecret } = body;
-      if (!orgId || !agentId || !coin || !masterSecret) {
-        return Response.json({ error: "orgId, agentId, coin, masterSecret are required" }, { status: 400 });
+      if (!orgId || !agentId || !coin) {
+        return Response.json({ error: "orgId, agentId, coin are required" }, { status: 400 });
       }
 
       const denied = await requireOrgAccess(ctx, orgId);
@@ -881,16 +940,14 @@ export default defineServerMod({
 
       let privateKey: string, network: HlNetwork;
       try {
-        ({ privateKey, network } = await resolveAgentWallet(agentId, masterSecret));
+        ({ privateKey, network } = await resolveSigningKey(agentId, masterSecret));
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 400 });
       }
 
       // The wallet whose position gets read: the caller's, else the address
-      // recorded with this agent's key (POST /wallet, or a generated wallet).
-      const wallet: string | undefined = body.wallet
-        ?? (await getAgentWallet(agentId))?.address
-        ?? (await listAgentWallets(agentId)).find((w) => w.chain === "evm" && w.hyperliquidRegistered)?.publicKey;
+      // recorded with this agent's key (instant wallet, POST /wallet, or a generated wallet).
+      const wallet: string | undefined = body.wallet ?? (await getTradingWallet(agentId))?.address ?? undefined;
       if (!wallet) {
         return Response.json({ error: "wallet is required — this agent's wallet address isn't on record" }, { status: 400 });
       }

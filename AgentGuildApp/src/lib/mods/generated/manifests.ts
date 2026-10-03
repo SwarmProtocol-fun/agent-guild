@@ -5,7 +5,7 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "dimos-bench",
     "name": "dimOS Benchmarks",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "dimOS (dimensionalOS) robots in the panel: train your agent in DimSim, dimOS's browser robot simulator (a Unitree Go2 in an apartment), by recording demonstrations or letting it drive from the robot's camera, with lessons kept in agent memory and episodes exported as JSONL. Also benchmarks agents on dimOS eval suites (recordings, MuJoCo/Habitat sims, live robots) with signed results, robot replays, and jobs queued to a worker.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
@@ -46,9 +46,9 @@ export const MOD_MANIFESTS: ModManifest[] = [
   },
   {
     "id": "solana-settlement",
-    "name": "Solana Settlement",
-    "version": "1.0.0",
-    "description": "Settles completed agent jobs on Solana devnet — USDC payment plus an on-chain receipt hash via the Memo program.",
+    "name": "Solana",
+    "version": "2.0.0",
+    "description": "Upgrades agents into Solana developers: read & debug the chain (decoded tx errors, accounts, programs, Anchor IDLs, PDAs, fees), build & simulate transactions from plain JSON, act on devnet with their own wallet, and build/test/deploy Anchor programs in a GatewayAgent sandbox. Also settles completed jobs in USDC on Solana. Includes a dev-tools panel for the operator.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [
@@ -60,9 +60,9 @@ export const MOD_MANIFESTS: ModManifest[] = [
     },
     "panels": [
       {
-        "id": "settlements",
-        "title": "Solana Settlement",
-        "icon": "Coins"
+        "id": "solana",
+        "title": "Solana",
+        "icon": "Wrench"
       }
     ]
   },

@@ -22,6 +22,7 @@
  *   AGENT_GUILD_AGENT_ID + AGENT_GUILD_API_KEY
  *   HL_MASTER_SECRET       the passphrase that decrypts this agent's Hyperliquid
  *                          wallet. Sent only in request bodies, never shown to the model.
+ *                          Not needed when instant trading is on for the agent.
  *   HL_POLL_MS             daemon poll interval, default 30000
  */
 
@@ -73,8 +74,10 @@ export async function connect(env = process.env) {
       return encodeURIComponent(String(value));
     });
     if (tool.method === "GET") return request("GET", path);
-    if (!cfg.masterSecret) throw new Error("HL_MASTER_SECRET is required to place or close trades");
-    return request("POST", path, { ...rest, masterSecret: cfg.masterSecret });
+    if (!cfg.masterSecret && !me.wallet?.instant) {
+      throw new Error("HL_MASTER_SECRET is required to place or close trades (or turn on instant trading for this agent)");
+    }
+    return request("POST", path, cfg.masterSecret ? { ...rest, masterSecret: cfg.masterSecret } : rest);
   }
 
   /** Strategy signals the hub's tick has flagged; each needs the passphrase to fire. */
@@ -109,6 +112,10 @@ async function main(argv) {
     return console.log(JSON.stringify(await hl.call(name, json ? JSON.parse(json) : {}), null, 2));
   }
   if (cmd === "daemon") {
+    if (hl.me.wallet?.instant) {
+      console.log("Instant trading is on for this agent — the hub fires its strategies itself; no daemon needed.");
+      return;
+    }
     if (!process.env.HL_MASTER_SECRET) throw new Error("HL_MASTER_SECRET is required for the daemon");
     if (!hl.me.readyToTrade) console.warn("warning: agent is not ready to trade yet:", JSON.stringify(hl.me));
     const pollMs = Number(process.env.HL_POLL_MS) || 30000;

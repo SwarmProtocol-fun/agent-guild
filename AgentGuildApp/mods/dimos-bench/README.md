@@ -6,10 +6,11 @@ Puts [dimOS](https://github.com/dimensionalOS/dimos) robots in the **dimOS Bench
 
 The panel's first tab embeds **DimSim**, dimOS's Three.js + Rapier robot simulator, running a Unitree Go2 in the furnished apartment scene. The tasks are DimSim's own apartment evals (go to the couch, the kitchen, or the TV), plus **go to any object** in the apartment: pick it from the list or click it on the floor plan. Each one is scored by DimSim's `objectDistance` rubric (1.5 m for objects).
 
-There are two ways to make an attempt:
+Two ways to drive it:
 
-- **Record a demo.** You drive the robot with W/A/S/D, the arrow keys, or the on-screen buttons: forward 0.5 m, back 0.25 m, turn 30°.
-- **Agent drives.** Each step, the server shows Claude (`claude-opus-5-5`, low effort) the robot's camera frame and pose, its frames before the last two moves, the task, and the agent's earlier lessons. At the first step it also gets a four-way panorama to orient itself. Claude picks one move (turn, then walk forward), or spends the step to **look around** and get a fresh panorama. The agent never sees the rubric distance.
+- **Drive it yourself.** Hold W/A/S/D or the arrow keys to drive in real time (1 m/s, 90°/s). This is free play, not recorded.
+- **Your agent drives, with its own model.** Start an attempt and ask the agent to drive. It drives through its `agent-guild mcp` tools: `guild_sim_observe` returns the robot's camera image, pose, task and steps left. The first view also carries a driving guide, the agent's earlier lessons, and a four-way panorama to orient itself. Each `guild_sim_act` call makes one move: turn, then walk forward, or **look around** for a fresh panorama, or declare **done**. The call returns the next camera view once the panel has run the move. After the attempt, `guild_sim_lesson` saves the agent's own lesson. The agent never sees the rubric distance. The same commands work from a shell (`agent-guild sim observe|act|lesson`), which saves the images to files. The sim runs in the panel, so keep the tab open. The robot glides and trots between poses at walking pace; scoring and camera frames use the exact pose.
+- **Claude stand-in.** For agents that can't drive themselves, tick **Claude stand-in** (shown when the server has an Anthropic credential). Claude (`claude-haiku-4-5`, picked for speed) then picks each move on the server, from the same camera view, recent frames, task and lessons, and `claude-opus-5-5` writes the end-of-attempt lesson. Stand-in attempts are labelled with that model, so they're never confused with the agent's own runs.
 - **Train ×N.** Runs N agent attempts back to back and stops early after K passes in a row. Watch the learning curve and the "passed x of its last y" rate move.
 - **Random starts.** With the box ticked, each attempt starts from a random collision-free spot reachable from the default start, at least 1 m outside the pass distance. A remembered route then stops working, so lessons have to describe where things are.
 
@@ -29,22 +30,23 @@ How it's wired:
 | `dimsim/` | DimSim source, vendored from dimOS `misc/DimSim` (Apache-2.0; the commit is in `dimsim/UPSTREAM_COMMIT`). It's patched for an embed mode: `?dimos=1&embed=1` runs without the Deno bridge, and `src/agentGuildEmbed.js` drives the robot with collision-checked moves. Other patches: a chase camera, and serving under `/dimsim/`. |
 | `public/dimsim/` | The built simulator plus the scene and robot models, about 26 MB. These are DimSim's Git LFS files, compressed by `dimsim/scripts/optimize-models.sh`: WebP textures for the scene (geometry untouched, since it becomes the colliders), and a simplified, meshopt-compressed robot. |
 | `training.ts` | Tasks, step validation, lessons, JSONL rows, and the learning curve. It's pure code, tested in `src/lib/mods/__tests__/dimos-training.test.ts`. |
-| `trainer.ts` | The model calls: one action per step, and one reflection per episode. Server-side fallbacks are on. |
+| `trainer.ts` | The Claude stand-in's model calls: one action per step (Haiku 4.5), and one reflection per episode (Opus 5.5, with server-side fallbacks). |
 | `trainer-panel.tsx` | The tab. It shows the sim, the floor plan, the robot's camera view, controls (including Train ×N and random starts), memory, the learning curve, attempt replays, and export. |
 | `sim-map.tsx` | The floor plan: an occupancy grid from the sim's `floorPlan()`, object footprints, the target, the live trail, and the best attempt's ghost. |
 
-Routes: `GET /sim/options`, `POST /episodes` (`taskId` is a built-in task or `obj:<assetId>` with `title`, plus an optional `startPose`), `POST /episodes/:id/steps`, `POST /episodes/:id/act` (an optional `panorama` of up to 4 JPEGs), `POST /episodes/:id/finish` (with `finalPose`), `GET /episodes?agentId=`, `GET /episodes/:id` (`?images=0` returns poses only), `GET /episodes/export?agentId=&images=1`. All of them need a signed-in member of the agent's org.
+Routes: `GET /sim/options`, `POST /episodes` (`taskId` is a built-in task or `obj:<assetId>` with `title`, plus an optional `startPose`), `POST /episodes/:id/steps`, `POST /episodes/:id/act` (the stand-in; an optional `panorama` of up to 4 JPEGs, and the previous `steps`), `POST /episodes/:id/observe` and `GET /episodes/:id/move?seq=` (the panel's side of the drive relay), `POST /episodes/:id/finish` (with `finalPose`), `GET /episodes?agentId=`, `GET /episodes/:id` (`?images=0` returns poses only), `GET /episodes/export?agentId=&images=1`. All of them need a signed-in member of the agent's org. The agent's side of the relay is agent-signed, like `/api/v1/*`: `GET /drive?episodeId=&after=`, `POST /drive/act` and `POST /drive/lesson`. Both sides long-poll the relay document (`dimosBenchDrive/{episodeId}`) for up to 8 s per request, under Netlify's function timeout, and re-ask. So a step costs the agent's own thinking time plus about a round trip.
 
 Setup:
 
-- **Agent driving needs an Anthropic credential on the server.** Set `ANTHROPIC_API_KEY`. Without it, the **Agent drives** button stays disabled. Demos work without it.
+- **Agents drive with their own model, so no server credential is needed.** The agent needs `agent-guild`'s MCP server (`agent-guild setup` installs it) or the CLI, and its org must have this mod installed. Only the Claude stand-in needs `ANTHROPIC_API_KEY` on the server; without it the checkbox is hidden.
 - **Rebuild after changing the sim.** Run `cd mods/dimos-bench/dimsim && npm ci && npm run build`. The output goes to `public/dimsim/`. After adding or replacing models, run `scripts/optimize-models.sh` there too.
 - **The CSP must allow `blob:` in `connect-src`.** Three.js decodes embedded model textures through `blob:` URLs. It's set in `src/middleware.ts` and `netlify.toml`.
 
 Limits:
 
 - **Scores are reported by the browser.** The rubric runs in the browser, so pass/fail is only as trustworthy as the person running it. The same is true of self-reported benchmark scores.
-- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable. DimSim's evals start at (0, 3), under the kitchen table, so the panel starts at (1.5, 3.1) on open floor instead.
+- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation; the trot is only an animation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable. DimSim's evals start at (0, 3), under the kitchen table, so the panel starts at (1.5, 3.1) on open floor instead.
+- **The agent sets the pace.** A step takes as long as the agent's own model takes to choose a move, and the robot waits between moves. A slow model makes a slow robot. The panel can't see the agent's token use or cost.
 - **Looking around costs a step.** A look-around step records the front frame with a zero action (`look: true` in the JSONL) and counts toward the step limit. The panorama at the first step is free.
 - **Some objects are hard to reach.** Wall-mounted or high items (range hood, wall cabinets) may stay out of the 1.5 m pass distance from the floor.
 - **The first load downloads about 26 MB** of models. After that the browser caches them for a week (`Cache-Control` in `next.config.ts` and `netlify.toml`).

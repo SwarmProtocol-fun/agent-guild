@@ -7,12 +7,13 @@ import {
   HARNESSES, SUITE_CATALOG, type BenchJob, type BenchRun,
 } from "./bench";
 import {
-  SIM_TASKS, attemptedTaskIds, exportLine, findTask, learningCurve, parseFrames, parsePoseInput, parseSteps, plainLesson, rankLessons,
-  type Episode, type SimTask,
+  SIM_TASKS, attemptedTaskIds, exportLine, findTask, learningCurve, parseDriveMove, parseFrames, parsePoseInput, parseSteps, plainLesson, rankLessons,
+  type DriveRelay, type Driver, type Episode, type SimTask,
 } from "./training";
 import { canDrive, decideAction, DriverError, DRIVER_MODEL, reflect } from "./trainer";
 import {
   addSteps, createEpisode, getEpisode, getRecentFrames, getSteps, listEpisodes, updateEpisode,
+  activeRelay, claimMove, getRelay, setRelay, updateRelay, waitForRelay,
   claimJob, createJob, getAncestors, getJob, getReplay, getRun, heartbeat, lineageExists, listJobs, listReplays, listRuns,
   listWorkers, newRunId, saveReplay, saveRun, updateJob,
 } from "./store";
@@ -61,6 +62,61 @@ async function lessonsFor(ep: Pick<Episode, "orgId" | "agentId">, task: SimTask,
 
 /** An episode's task — built-in, or an object task rebuilt from the episode's own task text. */
 const episodeTask = (ep: Pick<Episode, "taskId" | "task">) => findTask(ep.taskId, ep.task);
+
+// ── Drive relay: the agent drives with its own model ────────────────────
+
+/**
+ * How long one relay request waits for the other side before returning
+ * "still waiting" — under the host's function timeout (10 s on Netlify);
+ * the CLI re-asks.
+ */
+const RELAY_WAIT_MS = 8000;
+const OWN_MODEL = "own model";
+
+/** Told to the agent with its first view of an attempt. */
+const DRIVE_GUIDE = `You are driving a Unitree Go2 quadruped robot through a simulated apartment (dimOS DimSim), from its front camera.
+Each move: turn (degrees, positive = left, -180..180) in place, then walk forward (metres, -1..2; small near obstacles).
+The robot stops early if something is in the way ("blocked"). look=true spends the move turning in place to photograph
+all four directions instead (front, left, back, right). Set done=true when you believe you have reached the goal.
+Pose: x/z in metres on the floor plan, yaw in degrees. Facing yaw θ, forward moves by (sin θ, cos θ) in (x, z):
+yaw 0 walks toward +z, yaw 90 toward +x. You never see the scoring distance; drive from what the camera shows.`;
+
+/** What the agent sees: the latest camera view of its attempt, or that the attempt ended. */
+async function drivePayload(relay: DriveRelay, ep: Episode, first: boolean) {
+  const task = episodeTask(ep);
+  const base = { episodeId: ep.id, task: ep.task, stepsLeft: Math.max(0, (task?.maxSteps ?? 0) - ep.steps), step: ep.steps };
+  if (relay.ended) {
+    return {
+      ...base, ended: relay.ended,
+      next: relay.ended === "stopped"
+        ? "The attempt was stopped from the panel."
+        : `The attempt ended: ${relay.ended}. Optionally save what you learned for next time with guild_sim_lesson (episodeId ${ep.id}).`,
+    };
+  }
+  const obs = relay.obs;
+  if (!obs) return { ...base, waiting: true, next: "The panel hasn't sent the first camera view yet; call guild_sim_observe again." };
+  return {
+    ...base,
+    seq: obs.seq,
+    pose: obs.pose,
+    blocked: obs.blocked,
+    jpeg: obs.jpeg,
+    panorama: obs.panorama,
+    ...(first && task ? { guide: DRIVE_GUIDE, lessons: await lessonsFor(ep, task) } : {}),
+    next: `Choose a move with guild_sim_act (episodeId ${ep.id}, seq ${obs.seq}).`,
+  };
+}
+
+/** The relay and episode an agent may drive, or an error response. */
+async function agentRelay(agentId: string, episodeId: string | null): Promise<{ relay: DriveRelay; ep: Episode } | Response> {
+  const relay = episodeId ? await getRelay(episodeId) : await activeRelay(agentId);
+  if (!relay || relay.agentId !== agentId) {
+    return Response.json({ error: "No attempt for this agent: start one in the DimSim panel (your agent drives)." }, { status: 404 });
+  }
+  const ep = await getEpisode(relay.episodeId);
+  if (!ep) return Response.json({ error: "Episode not found" }, { status: 404 });
+  return { relay, ep };
+}
 
 /** A run without its per-case rows — what list views need. */
 function brief(run: BenchRun): Omit<BenchRun, "results"> {
@@ -406,14 +462,17 @@ export default defineServerMod({
       return {
         tasks: SIM_TASKS,
         agents: agents.map((a) => ({ id: a.id, name: a.name, orgId: a.orgId })).sort((a, b) => a.name.localeCompare(b.name)),
+        /** Whether the Claude stand-in driver is available (a model credential is set). */
         canDrive: canDrive(),
         model: DRIVER_MODEL,
       };
     },
 
     /**
-     * POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent", startPose?, startDistance? }.
+     * POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent", driver?, startPose?, startDistance? }.
      * taskId is a built-in task or `obj:<assetId>` with the object's `title`.
+     * An agent attempt's driver is "own" (default: the agent drives through the
+     * relay with its own model) or "server" (the Claude stand-in).
      */
     "POST /episodes": async (req, { session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
@@ -423,8 +482,9 @@ export default defineServerMod({
       if (!task || !actor || typeof b.agentId !== "string") {
         return Response.json({ error: "agentId, a known taskId and actor (human|agent) are required" }, { status: 400 });
       }
-      if (actor === "agent" && !canDrive()) {
-        return Response.json({ error: "Set ANTHROPIC_API_KEY on the server to let agents drive" }, { status: 503 });
+      const driver: Driver | undefined = actor === "agent" ? (b.driver === "server" ? "server" : "own") : undefined;
+      if (driver === "server" && !canDrive()) {
+        return Response.json({ error: "Set ANTHROPIC_API_KEY on the server to use the Claude stand-in" }, { status: 503 });
       }
       const agent = await getAgent(b.agentId);
       if (!agent || !(await sessionOrgIds(session.address)).includes(agent.orgId)) {
@@ -433,14 +493,62 @@ export default defineServerMod({
       const episode = await createEpisode({
         orgId: agent.orgId, agentId: agent.id, agentName: agent.name,
         taskId: task.id, task: task.task, scene: task.scene, actor,
-        model: actor === "agent" ? DRIVER_MODEL : null,
+        ...(driver ? { driver } : {}),
+        model: driver === "own" ? OWN_MODEL : driver === "server" ? DRIVER_MODEL : null,
         status: "running", steps: 0,
         startDistance: typeof b.startDistance === "number" && Number.isFinite(b.startDistance) ? b.startDistance : null,
         finalDistance: null, lesson: "",
         startPose: parsePoseInput(b.startPose) ?? task.startPose, finalPose: null,
         createdBy: session.address, createdAt: new Date().toISOString(), finishedAt: null,
       });
+      if (driver === "own") {
+        await setRelay({ episodeId: episode.id, agentId: agent.id, orgId: agent.orgId, obs: null, move: null, ended: null, updatedAt: new Date().toISOString() });
+      }
       return Response.json({ episode, task, lessons: await lessonsFor(episode, task) }, { status: 201 });
+    },
+
+    /**
+     * POST /episodes/:id/observe — { jpeg, pose, panorama?, blocked?, steps? }:
+     * the panel posts what the robot sees now, for the agent driving with its
+     * own model (plus the step that led here, recorded first). Returns the
+     * observation's seq, which the agent's move has to answer.
+     */
+    "POST /episodes/:id/observe": async (req, { params, session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      const relay = await getRelay(ep.id);
+      if (ep.status !== "running" || !relay || relay.ended) return Response.json({ error: "Not a running own-driver episode" }, { status: 409 });
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const pose = parsePoseInput(b.pose);
+      const frames = parseFrames([b.jpeg], 1);
+      const panorama = parseFrames(b.panorama, 4);
+      if (!pose || !frames?.length || !panorama) {
+        return Response.json({ error: "jpeg and pose are required; panorama is up to 4 JPEGs" }, { status: 400 });
+      }
+      if (b.steps !== undefined) {
+        const parsed = parseSteps({ steps: b.steps }, ep.steps);
+        if (!parsed.ok) return Response.json({ error: "Invalid steps", details: parsed.errors }, { status: 400 });
+        await addSteps(ep.id, parsed.steps);
+        await updateEpisode(ep.id, { steps: ep.steps + parsed.steps.length });
+      }
+      const seq = (relay.obs?.seq ?? 0) + 1;
+      await updateRelay(ep.id, { obs: { seq, jpeg: frames[0], pose, panorama, blocked: b.blocked === true }, move: null });
+      return { seq };
+    },
+
+    /**
+     * GET /episodes/:id/move?seq= — the panel waits (up to RELAY_WAIT_MS) for
+     * the agent's move on observation `seq`. { move: null } means ask again.
+     */
+    "GET /episodes/:id/move": async (req, { params, session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      const seq = Number(new URL(req.url).searchParams.get("seq"));
+      const relay = await waitForRelay(ep.id, (r) => r.ended != null || r.move?.seq === seq, RELAY_WAIT_MS);
+      if (!relay) return Response.json({ error: "Not an own-driver episode" }, { status: 409 });
+      return { move: relay.move?.seq === seq ? relay.move : null, ended: relay.ended };
     },
 
     /** POST /episodes/:id/steps — record steps (camera frame, pose, action, distance after). */
@@ -457,10 +565,12 @@ export default defineServerMod({
     },
 
     /**
-     * POST /episodes/:id/act — { jpeg, pose, panorama? }: the agent looks
+     * POST /episodes/:id/act — { jpeg, pose, panorama?, steps? }: the agent looks
      * through the robot's camera (plus its last two frames, and a 4-way
      * panorama at the start or after it chose to look around) and picks the
-     * next move. The panel executes it in the sim, then records the step.
+     * next move. The panel executes it in the sim and sends the recorded step
+     * as `steps` with the next /act (same shape as POST /steps), so each step
+     * costs one round trip; they are stored before the agent decides.
      */
     "POST /episodes/:id/act": async (req, { params, session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
@@ -474,6 +584,13 @@ export default defineServerMod({
       const panorama = parseFrames(b.panorama, 4);
       if (!task || !pose || !frames?.length || !panorama) {
         return Response.json({ error: "jpeg and pose are required; panorama is up to 4 JPEGs" }, { status: 400 });
+      }
+      if (b.steps !== undefined) {
+        const parsed = parseSteps({ steps: b.steps }, ep.steps);
+        if (!parsed.ok) return Response.json({ error: "Invalid steps", details: parsed.errors }, { status: 400 });
+        await addSteps(ep.id, parsed.steps);
+        ep.steps += parsed.steps.length;
+        await updateEpisode(ep.id, { steps: ep.steps });
       }
       try {
         const decision = await decideAction({
@@ -515,7 +632,7 @@ export default defineServerMod({
       if (status !== "stopped" && ep.steps > 0) {
         const steps = await getSteps(ep.id, false);
         let lesson = plainLesson({ ...ep, status, finalDistance, finalPose }, task, steps.map((s) => s.action));
-        if (ep.actor === "agent" && canDrive()) {
+        if (ep.actor === "agent" && ep.driver !== "own" && canDrive()) {
           try {
             lesson = await reflect({ task, succeeded: status === "success", finalDistance, startPose: ep.startPose ?? task.startPose, finalPose, steps });
           } catch (err) {
@@ -535,7 +652,86 @@ export default defineServerMod({
         });
       }
       await updateEpisode(ep.id, done);
+      if (ep.driver === "own") await updateRelay(ep.id, { ended: status, move: null });
       return { episode: { ...ep, ...done } };
+    },
+
+    // ── The agent's side of the drive relay (agent-signed: agent-guild sim …) ──
+
+    /**
+     * GET /drive?episodeId=&after= — what the robot sees in this agent's
+     * running attempt (the newest, without episodeId). With `after`, waits up
+     * to RELAY_WAIT_MS for an observation newer than that seq. The first view
+     * of an attempt carries the driving guide and the agent's lessons.
+     */
+    "GET /drive": async (req, { agent }) => {
+      if (!agent) return Response.json({ error: "Agent authentication required" }, { status: 401 });
+      const url = new URL(req.url);
+      const found = await agentRelay(agent.agentId, url.searchParams.get("episodeId"));
+      if (found instanceof Response) return found;
+      let { relay } = found;
+      const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : null;
+      if (after != null && !relay.ended && (relay.obs?.seq ?? 0) <= after) {
+        relay = (await waitForRelay(relay.episodeId, (r) => r.ended != null || (r.obs?.seq ?? 0) > after, RELAY_WAIT_MS)) ?? relay;
+      }
+      const ep = (await getEpisode(relay.episodeId)) ?? found.ep;
+      return drivePayload(relay, ep, after == null || after === 0);
+    },
+
+    /**
+     * POST /drive/act — { episodeId, seq, turn, forward, look?, done?, thought? }:
+     * the agent's move on observation `seq`. Waits up to RELAY_WAIT_MS for the
+     * panel to run it and returns the next view (or { waiting: true }: ask
+     * GET /drive?after=seq).
+     */
+    "POST /drive/act": async (req, { agent }) => {
+      if (!agent) return Response.json({ error: "Agent authentication required" }, { status: 401 });
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const seq = Number(b.seq);
+      if (typeof b.episodeId !== "string" || !Number.isInteger(seq)) {
+        return Response.json({ error: "episodeId and seq (from guild_sim_observe) are required" }, { status: 400 });
+      }
+      const found = await agentRelay(agent.agentId, b.episodeId);
+      if (found instanceof Response) return found;
+      const claimed = await claimMove(b.episodeId, parseDriveMove(b, seq));
+      if (claimed === "stale") {
+        return Response.json({ error: `seq ${seq} isn't the current view (it's ${found.relay.obs?.seq ?? "not sent yet"}); observe again` }, { status: 409 });
+      }
+      const relay = (await waitForRelay(b.episodeId, (r) => r.ended != null || (r.obs?.seq ?? 0) > seq, RELAY_WAIT_MS)) ?? found.relay;
+      const ep = (await getEpisode(b.episodeId)) ?? found.ep;
+      if (!relay.ended && (relay.obs?.seq ?? 0) <= seq) {
+        return { episodeId: ep.id, waiting: true, next: `The move is queued; the panel hasn't run it yet. Call guild_sim_observe (after ${seq}).` };
+      }
+      return drivePayload(relay, ep, false);
+    },
+
+    /**
+     * POST /drive/lesson — { episodeId, lesson }: after an attempt it drove
+     * ended, the agent saves its own lesson to its memory (next attempts read
+     * it back with their first view).
+     */
+    "POST /drive/lesson": async (req, { agent }) => {
+      if (!agent) return Response.json({ error: "Agent authentication required" }, { status: 401 });
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const lesson = typeof b.lesson === "string" ? b.lesson.trim().slice(0, 600) : "";
+      if (typeof b.episodeId !== "string" || !lesson) return Response.json({ error: "episodeId and lesson are required" }, { status: 400 });
+      const ep = await getEpisode(b.episodeId);
+      if (!ep || ep.agentId !== agent.agentId || ep.driver !== "own") return Response.json({ error: "Not an attempt this agent drove" }, { status: 404 });
+      if (ep.status === "running" || ep.status === "stopped") return Response.json({ error: `The attempt is ${ep.status}` }, { status: 409 });
+      const task = episodeTask(ep);
+      if (!task) return Response.json({ error: "Unknown task" }, { status: 400 });
+      await addMemoryEntry({
+        orgId: ep.orgId,
+        agentId: ep.agentId,
+        agentName: ep.agentName,
+        type: "long_term",
+        title: `DimSim · ${task.label} · ${ep.status} · own lesson`,
+        content: lesson,
+        tags: ["dimsim", task.id, ep.actor, ep.status],
+        structuredData: { episodeId: ep.id, scene: ep.scene },
+      });
+      await updateEpisode(ep.id, { lesson });
+      return { saved: true };
     },
 
     /** GET /episodes?agentId= — an agent's attempts, newest first, plus a learning curve per task. */

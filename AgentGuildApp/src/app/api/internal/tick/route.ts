@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Phase 4: Evaluate autonomous Hyperliquid strategies (DCA / grid / sniper) ────
-  let hyperliquidResult = { evaluated: 0, markedPending: 0, errors: 0 };
+  let hyperliquidResult = { evaluated: 0, markedPending: 0, executed: 0, errors: 0 };
 
   if (Date.now() - startTime < TIME_BUDGET_MS) {
     try {

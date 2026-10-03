@@ -13,6 +13,7 @@ import * as comfyuiExecutor from "./comfyui.mjs";
 import * as workflowExecutor from "./workflow.mjs";
 import * as hyperliquidExecutor from "./hyperliquid.mjs";
 import * as mppFetchExecutor from "./mpp-fetch.mjs";
+import * as solanaAnchorExecutor from "./solana-anchor.mjs";
 
 /** Built-in executor registry */
 const executors = new Map([
@@ -36,6 +37,8 @@ const executors = new Map([
   ["workflow", workflowExecutor],
   ["hyperliquid", hyperliquidExecutor],
   ["mpp-fetch", mppFetchExecutor],
+  // Needs a Docker daemon — register the worker with --runtimes docker,solana-anchor.
+  ["solana-anchor", solanaAnchorExecutor],
 ]);
 
 /**

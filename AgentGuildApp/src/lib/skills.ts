@@ -457,17 +457,31 @@ export const SKILL_REGISTRY: Skill[] = [
     },
     {
         id: "solana-settlement",
-        name: "Solana Settlement",
-        description: "Settles completed agent jobs on Solana devnet — USDC payment plus an on-chain receipt hash via the Memo program.",
+        name: "Solana",
+        description: "Upgrades your agents into Solana developers. They can debug the chain (decode failed transactions and program errors, inspect accounts and programs, read Anchor IDLs, derive PDAs), build and simulate transactions from plain JSON, act on devnet with their own wallet (airdrop, send, create tokens), and write Anchor programs — build, test and deploy in a sandbox. Also settles completed jobs in USDC on Solana with an on-chain receipt. Includes a dev-tools panel for you.",
         type: "mod",
         source: "verified",
-        category: "Settlement",
+        category: "Developer",
         icon: "◎",
-        version: "1.0.0",
+        version: "2.0.0",
         author: "Agent Guild",
-        tags: ["solana", "settlement", "usdc", "payments"],
+        tags: ["solana", "developer-tools", "anchor", "agents", "devnet", "settlement", "usdc"],
         pricing: { model: "free" },
-        sidebarConfig: { sectionId: "modifications", label: "Solana Settlement", href: "/mods/solana-settlement/settlements", iconName: "Coins" },
+        sidebarConfig: { sectionId: "modifications", label: "Solana", href: "/mods/solana-settlement/solana", iconName: "Wrench" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            // Capability keys — mods/solana-settlement/agent.ts CAP must match.
+            agentSkills: [
+                { id: "solana-dev-inspect", name: "Read & Debug Chain", description: "Inspect transactions and accounts, decode program errors, read Anchor IDLs, derive PDAs, query priority fees and rent.", type: "skill", invocation: "GET /dev/tx/:signature" },
+                { id: "solana-dev-simulate", name: "Build & Simulate Transactions", description: "Build transactions from Anchor IDLs or raw instructions and simulate them for logs, compute units and decoded errors.", type: "skill", invocation: "POST /dev/simulate" },
+                { id: "solana-dev-devnet", name: "Act on Devnet", description: "Sign and send devnet transactions with the agent's own dev wallet: airdrop, send, create tokens.", type: "skill", invocation: "POST /dev/send" },
+                { id: "solana-dev-anchor", name: "Write Anchor Programs", description: "Build, test and deploy Anchor programs in a sandboxed GatewayAgent container.", type: "skill", invocation: "POST /dev/anchor" },
+                // Kept as "solana-settlement": existing installs were granted this key, and POST /settle checks it.
+                { id: "solana-settlement", name: "Settle Jobs", description: "Settle a completed job in USDC with an on-chain receipt hash.", type: "skill", invocation: "POST /settle" },
+            ],
+        },
     },
     {
         id: "tempo-settlement",

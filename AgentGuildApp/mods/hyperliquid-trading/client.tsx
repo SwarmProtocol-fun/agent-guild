@@ -54,7 +54,8 @@ interface MyAgent {
   orgId: string;
   orgName: string;
   status: string;
-  wallet: { network: Network; address: string | null } | null;
+  wallet: { network: Network; address: string | null; instant: boolean } | null;
+  isOwner: boolean;
 }
 
 interface OrderLogEntry {
@@ -265,7 +266,9 @@ function TradingPanel({ api }: PanelProps) {
   const selectedAgent = Array.isArray(myAgents) ? myAgents.find((a) => a.agentId === agentId) : undefined;
 
   // ── Wallet setup ───────────────────────────────────────────────────────────
-  const [walletStatus, setWalletStatus] = useState<{ hasWallet: boolean; network: Network | null } | null>(null);
+  const [walletStatus, setWalletStatus] = useState<{
+    hasWallet: boolean; network: Network | null; instant: boolean; address: string | null;
+  } | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletKeyInput, setWalletKeyInput] = useState("");
   const [walletNetwork, setWalletNetwork] = useState<Network>("testnet");
@@ -278,7 +281,10 @@ function TradingPanel({ api }: PanelProps) {
     try {
       const resp = await api(`wallet/${agentId}`);
       const data = await resp.json();
-      setWalletStatus({ hasWallet: !!data.hasWallet, network: data.network ?? null });
+      setWalletStatus({
+        hasWallet: !!data.hasWallet, network: data.network ?? null, instant: !!data.instant, address: data.address ?? null,
+      });
+      if (data.address) setWallet(data.address);
     } finally {
       setWalletLoading(false);
     }
@@ -318,6 +324,75 @@ function TradingPanel({ api }: PanelProps) {
   }, [agentId]);
 
   const network: Network = walletStatus?.network ?? "testnet";
+
+  // ── Instant trading ────────────────────────────────────────────────────────
+  // On: the platform signs with the agent's own platform-held wallet, so no
+  // passphrase is needed anywhere below. The org owner is already signed in,
+  // so their first trade switches it on silently (ensureSigner); anyone in the
+  // org can turn it off.
+  const instant = !!walletStatus?.instant;
+  const isOwner = !!selectedAgent?.isOwner;
+  const [usePassphrase, setUsePassphrase] = useState(false);
+  useEffect(() => { setUsePassphrase(false); setInstantStatus(null); }, [agentId]);
+  // Owners can always act — ensureSigner turns instant trading on as needed.
+  const canSign = instant || !!masterSecret || (isOwner && !usePassphrase);
+  const [instantNetwork, setInstantNetwork] = useState<Network>("testnet");
+  const [instantBusy, setInstantBusy] = useState(false);
+  const [instantStatus, setInstantStatus] = useState<string | null>(null);
+
+  async function enableInstant(net: Network = instantNetwork): Promise<boolean> {
+    if (!agentId) return false;
+    if (net === "mainnet" && !confirm(
+      "Trade on MAINNET? Your agent will sign real-money trades from its own wallet, within its risk limits.",
+    )) return false;
+    setInstantBusy(true);
+    setInstantStatus(null);
+    try {
+      const resp = await api("instant-trading", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId, network: net }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setInstantStatus(`error: ${data.error}`);
+        return false;
+      }
+      setWalletStatus({ hasWallet: true, network: data.network, instant: true, address: data.address });
+      setWallet(data.address);
+      setInstantStatus(`Your agent trades from ${data.address} on Hyperliquid ${data.network} — fund it there if it's empty.`);
+      loadMyAgents();
+      return true;
+    } finally {
+      setInstantBusy(false);
+    }
+  }
+
+  /**
+   * Called before any trade, close or strategy fire. Already signing (instant
+   * or passphrase) → go. Owner without instant → switch it on now, on the
+   * network picked in the agent section. No prompt on testnet.
+   */
+  async function ensureSigner(): Promise<boolean> {
+    if (instant || masterSecret) return true;
+    if (!isOwner || usePassphrase) return false;
+    return enableInstant(instantNetwork);
+  }
+
+  async function disableInstant() {
+    if (!agentId) return;
+    setInstantBusy(true);
+    try {
+      const resp = await api(`instant-trading/${agentId}`, { method: "DELETE" });
+      const data = await resp.json();
+      setInstantStatus(data.error ? `error: ${data.error}` : "Off — trades need the passphrase again.");
+      if (!data.error) setUsePassphrase(true);
+      loadAgentData();
+      loadMyAgents();
+    } finally {
+      setInstantBusy(false);
+    }
+  }
 
   // ── Market overview ────────────────────────────────────────────────────────
   const [marketCoins, setMarketCoins] = useState<MarketCoin[] | "loading" | "error" | null>(null);
@@ -398,6 +473,7 @@ function TradingPanel({ api }: PanelProps) {
 
   async function submitTrade(e: FormEvent) {
     e.preventDefault();
+    if (!(await ensureSigner())) return;
     setTradeSubmitting(true);
     setTradeStatus("submitting…");
     try {
@@ -458,6 +534,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   async function closePosition(positionCoin: string) {
+    if (!(await ensureSigner())) return;
     setClosingCoin(positionCoin);
     const resp = await api("close", {
       method: "POST",
@@ -625,6 +702,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   async function fireSignal(id: string) {
+    if (!(await ensureSigner())) return;
     setStrategyStatus(`firing ${id}…`);
     const resp = await api(`strategy/${id}/signal`, {
       method: "POST",
@@ -670,6 +748,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   async function executePending(id: string) {
+    if (!(await ensureSigner())) return;
     setExecutingId(id);
     setStrategyStatus(null);
     try {
@@ -741,7 +820,8 @@ function TradingPanel({ api }: PanelProps) {
 
   async function sendOrder(e: FormEvent) {
     e.preventDefault();
-    if (!parsedOrder || "error" in parsedOrder || !agentId || !masterSecret) return;
+    if (!parsedOrder || "error" in parsedOrder || !agentId || !canSign) return;
+    if (!(await ensureSigner())) return;
     const entry: OrderLogEntry = {
       id: Date.now(),
       text: orderText.trim(),
@@ -860,17 +940,61 @@ function TradingPanel({ api }: PanelProps) {
             <p className={`text-xs text-[hsl(var(--muted-foreground))] mt-1 ${monoClass}`}>{selectedAgent.wallet.address}</p>
           )}
         </div>
-        <div>
-          <label htmlFor="masterSecret" className={labelClass}>Passphrase</label>
-          <input
-            id="masterSecret" name="masterSecret" type="password" className={inputClass}
-            placeholder="Decrypts this agent's wallet — never stored" value={masterSecret}
-            onChange={(e) => setMasterSecret(e.target.value)} autoComplete="off"
-          />
-          <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
-            Held only in this tab while it&apos;s open. Required for every trade, close, or strategy execution below.
-          </p>
-        </div>
+        {agentId && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[hsl(var(--border))] pt-2">
+            <div className="text-xs">
+              {instant ? (
+                <span className="flex items-center gap-2">
+                  <Badge tone={network === "mainnet" ? "danger" : "success"}>Ready to trade · {network}</Badge>
+                  <span className="text-[hsl(var(--muted-foreground))]">Your agent signs from its own wallet — no passphrase.</span>
+                </span>
+              ) : isOwner ? (
+                <span className="text-[hsl(var(--muted-foreground))]">
+                  Just place an order — your agent fills it from its own wallet.
+                </span>
+              ) : (
+                <span className="text-[hsl(var(--muted-foreground))]">
+                  Trades need the passphrase until the org owner places an order with this agent.
+                </span>
+              )}
+            </div>
+            {instant ? (
+              <button type="button" className={secondaryButtonClass()} onClick={disableInstant} disabled={instantBusy}>
+                Require passphrase
+              </button>
+            ) : isOwner ? (
+              <select
+                aria-label="Network your agent trades on" className={`${inputClass} w-auto`}
+                value={instantNetwork} onChange={(e) => setInstantNetwork(e.target.value as Network)}
+              >
+                <option value="testnet">Testnet</option>
+                <option value="mainnet">Mainnet</option>
+              </select>
+            ) : null}
+          </div>
+        )}
+        {instantStatus && <p className="text-xs text-[hsl(var(--muted-foreground))]">{instantStatus}</p>}
+        {!instant && isOwner && !usePassphrase && (
+          <button
+            type="button" className="text-xs underline text-[hsl(var(--muted-foreground))] self-start"
+            onClick={() => setUsePassphrase(true)}
+          >
+            Use a passphrase-protected wallet instead
+          </button>
+        )}
+        {!instant && (!isOwner || usePassphrase) && (
+          <div>
+            <label htmlFor="masterSecret" className={labelClass}>Passphrase</label>
+            <input
+              id="masterSecret" name="masterSecret" type="password" className={inputClass}
+              placeholder="Decrypts this agent's wallet — never stored" value={masterSecret}
+              onChange={(e) => setMasterSecret(e.target.value)} autoComplete="off"
+            />
+            <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
+              Held only in this tab while it&apos;s open. Required for every trade, close, or strategy execution below.
+            </p>
+          </div>
+        )}
       </Section>
 
       {agentId && (
@@ -884,15 +1008,15 @@ function TradingPanel({ api }: PanelProps) {
             />
             <button
               type="submit" className={primaryButtonClass()}
-              disabled={orderSending || !parsedOrder || "error" in parsedOrder || !masterSecret || !walletStatus?.hasWallet}
+              disabled={orderSending || !parsedOrder || "error" in parsedOrder || !canSign || (!walletStatus?.hasWallet && !isOwner)}
             >
               {orderSending ? "Sending…" : "Send"}
             </button>
           </form>
           <p id="orderPreview" className="text-xs min-h-4" aria-live="polite">
-            {!walletStatus?.hasWallet && walletStatus ? (
+            {!walletStatus?.hasWallet && walletStatus && !isOwner ? (
               <span className="text-amber-700 dark:text-amber-400">This agent needs a wallet before it can trade — set one below.</span>
-            ) : !masterSecret ? (
+            ) : !canSign ? (
               <span className="text-[hsl(var(--muted-foreground))]">Enter the passphrase above to send orders.</span>
             ) : parsedOrder && "error" in parsedOrder ? (
               <span className="text-[hsl(var(--muted-foreground))]">{parsedOrder.error}</span>
@@ -1065,7 +1189,7 @@ function TradingPanel({ api }: PanelProps) {
                   type="button"
                   className={primaryButtonClass()}
                   onClick={() => executePending(s.id)}
-                  disabled={!masterSecret || executingId === s.id}
+                  disabled={!canSign || executingId === s.id}
                 >
                   {executingId === s.id ? "Executing…" : "Execute"}
                 </button>
@@ -1236,7 +1360,7 @@ function TradingPanel({ api }: PanelProps) {
               <label htmlFor="isBuy" className="text-sm">Buy (unchecked = sell)</label>
             </div>
             <div className="flex gap-2">
-              <button type="submit" className={primaryButtonClass()} disabled={tradeSubmitting || !masterSecret || !walletStatus?.hasWallet}>
+              <button type="submit" className={primaryButtonClass()} disabled={tradeSubmitting || !canSign || (!walletStatus?.hasWallet && !isOwner)}>
                 {tradeSubmitting ? "Placing…" : "Place trade"}
               </button>
               <button type="button" className={secondaryButtonClass()} onClick={checkStatus} disabled={!taskId}>
@@ -1297,7 +1421,7 @@ function TradingPanel({ api }: PanelProps) {
                         type="button"
                         className={secondaryButtonClass()}
                         onClick={() => closePosition(p.coin)}
-                        disabled={closingCoin === p.coin || !masterSecret}
+                        disabled={closingCoin === p.coin || !canSign}
                       >
                         {closingCoin === p.coin ? "Closing…" : "Close"}
                       </button>
@@ -1333,7 +1457,7 @@ function TradingPanel({ api }: PanelProps) {
                     </span>
                     <div className="flex gap-2">
                       {s.type === "signal" && (
-                        <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!masterSecret}>
+                        <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!canSign}>
                           Fire
                         </button>
                       )}

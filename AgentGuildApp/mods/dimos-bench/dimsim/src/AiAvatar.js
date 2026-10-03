@@ -124,6 +124,7 @@ export class AiAvatar {
   update(dt) {
     if (this.mixer) this.mixer.update(dt);
     this._syncVisual();
+    this._animateGait(dt);
   }
 
   _syncVisual() {
@@ -131,6 +132,139 @@ export class AiAvatar {
     const p = this.body.translation();
     this.group.position.set(p.x, p.y, p.z);
     this._syncSpineCollider();
+  }
+
+  /**
+   * Agent Guild embed: glide the visual toward the body pose instead of snapping.
+   * The embed's act() moves the body up to 2 m and turns up to 180° in one call,
+   * so snapping reads as teleporting. The visual follows the body's poses in
+   * order (so a move that lands mid-glide doesn't cut a corner through the
+   * furniture), turning first and then walking, like the action, at roughly
+   * walking pace (a 2 m move takes ~1.7 s).
+   * Only the visual lags; the body (physics, captures, scoring) stays exact.
+   */
+  easeVisual(dt, yaw) {
+    if (!this.body) return;
+    const p = this.body.translation();
+    const g = this.group.position;
+    const path = (this._path ??= []);
+    const tail = path.at(-1) ?? { x: g.x, z: g.z, yaw: this.group.rotation.y };
+    const jump = Math.hypot(p.x - tail.x, p.z - tail.z);
+    if (jump > 3) {
+      // A teleport (reset) — don't animate it.
+      this.snapVisual(yaw);
+      return;
+    }
+    if (jump > 0.02 || Math.abs(Math.atan2(Math.sin(yaw - tail.yaw), Math.cos(yaw - tail.yaw))) > 0.03) {
+      path.push({ x: p.x, z: p.z, yaw });
+    }
+    // Total distance still to walk, for catching up when far behind.
+    let behind = 0;
+    for (let k = 0, from = g; k < path.length; from = path[k++]) behind += Math.hypot(path[k].x - from.x, path[k].z - from.z);
+
+    let step = Math.min(dt, 0.1);
+    while (path.length && step > 1e-6) {
+      const wp = path[0];
+      // Walking pace, so a move fills the time the agent spends choosing the
+      // next one instead of zipping there and standing still. It still speeds
+      // up when far behind, and outpaces keyboard driving (1 m/s, 90°/s).
+      let dyaw = Math.atan2(Math.sin(wp.yaw - this.group.rotation.y), Math.cos(wp.yaw - this.group.rotation.y));
+      const turnRate = Math.max(2.2, Math.abs(dyaw) * 1.2);
+      const turn = Math.min(Math.abs(dyaw), turnRate * step);
+      this.group.rotation.y += Math.sign(dyaw) * turn;
+      dyaw -= Math.sign(dyaw) * turn;
+      step -= turn / turnRate;
+      if (Math.abs(dyaw) > 0.05) break;
+      const dx = wp.x - g.x, dz = wp.z - g.z;
+      const dist = Math.hypot(dx, dz);
+      const moveRate = Math.max(1.1, behind * 0.9);
+      const move = Math.min(dist, moveRate * step);
+      if (dist > 1e-6) g.set(g.x + (dx * move) / dist, p.y, g.z + (dz * move) / dist);
+      step -= move / moveRate;
+      if (dist - move < 1e-4 && Math.abs(dyaw) < 0.01) {
+        g.set(wp.x, p.y, wp.z);
+        this.group.rotation.y = wp.yaw;
+        path.shift();
+      } else break;
+    }
+    if (!path.length) g.y = p.y;
+    if (this.mixer) this.mixer.update(dt);
+    this._syncSpineCollider();
+    this._animateGait(dt);
+  }
+
+  /** Put the visual on the body now (a reset or teleport), dropping any pending glide. */
+  snapVisual(yaw) {
+    this._path = [];
+    this._syncVisual();
+    this.group.rotation.y = yaw;
+    if (this._gait) this._gait.last = null;
+  }
+
+  /**
+   * The Go2 GLB has no animation clips, but its legs are separate parts placed
+   * at their joints (a flat list: FL_thigh, FL_calf, FL_foot, … in the body
+   * frame, x forward, y up, legs straight down at rest). Find them so
+   * _animateGait can pose a trot.
+   */
+  _setupGait() {
+    this._legs = [];
+    const find = (leg, part) => {
+      let hit = null;
+      this.model.traverse((o) => {
+        if (!hit && new RegExp(`^${leg}_${part}_\\d+$`).test(o.name)) hit = o;
+      });
+      return hit;
+    };
+    for (const [leg, phase] of [["FL", 0], ["RR", 0], ["FR", Math.PI], ["RL", Math.PI]]) {
+      const thigh = find(leg, "thigh"), calf = find(leg, "calf"), foot = find(leg, "foot");
+      if (!thigh || !calf || !foot) continue;
+      this._legs.push({
+        phase,
+        thigh, calf, foot,
+        thighGuard: find(leg, "thigh_protector"),
+        hip: thigh.position.clone(),
+        upper: thigh.position.distanceTo(calf.position),
+        lower: calf.position.distanceTo(foot.position),
+      });
+    }
+    this._gait = { phase: 0, amp: 0, last: null };
+  }
+
+  /**
+   * Procedural trot: diagonal leg pairs swing in antiphase, knees bend to lift
+   * each foot on its forward swing. Driven by how fast the visual is moving or
+   * turning, so it fades to standing when the robot stops.
+   */
+  _animateGait(dt) {
+    if (!this._legs?.length || !(dt > 0)) return;
+    const g = this._gait;
+    const pos = this.group.position, yaw = this.group.rotation.y;
+    let speed = 0;
+    if (g.last) {
+      const turn = Math.abs(Math.atan2(Math.sin(yaw - g.last.yaw), Math.cos(yaw - g.last.yaw)));
+      // A turn in place steps too; ~0.25 m/s-equivalent per rad/s.
+      speed = (Math.hypot(pos.x - g.last.x, pos.z - g.last.z) + turn * 0.25) / dt;
+    }
+    g.last = { x: pos.x, z: pos.z, yaw };
+    if (speed > 5) speed = 0; // a teleport, not a walk
+    const target = Math.min(1, speed / 0.6);
+    g.amp += (target - g.amp) * Math.min(1, dt * 8);
+    g.phase += dt * Math.PI * 2 * (1.6 + 1.4 * Math.min(1, speed / 1.2)); // ~1.6–3 strides/s
+
+    for (const leg of this._legs) {
+      const p = g.phase + leg.phase;
+      const swing = g.amp * 0.32 * Math.sin(p);
+      // Foot moves forward while cos(p) > 0: bend the knee then to lift it.
+      const lift = g.amp * 0.32 * Math.max(0, Math.cos(p));
+      const a = swing - lift, b = 2 * lift;
+      leg.thigh.rotation.z = a;
+      if (leg.thighGuard) leg.thighGuard.rotation.z = a;
+      leg.calf.position.set(leg.hip.x + leg.upper * Math.sin(a), leg.hip.y - leg.upper * Math.cos(a), leg.hip.z);
+      leg.calf.rotation.z = a + b;
+      leg.foot.position.set(leg.calf.position.x + leg.lower * Math.sin(a + b), leg.calf.position.y - leg.lower * Math.cos(a + b), leg.hip.z);
+      leg.foot.rotation.z = a + b;
+    }
   }
 
   _syncSpineCollider() {
@@ -233,6 +367,7 @@ export class AiAvatar {
       }
     });
     this.group.add(this.model);
+    this._setupGait();
 
     if (gltf.animations?.length) {
       this.mixer = new THREE.AnimationMixer(this.model);

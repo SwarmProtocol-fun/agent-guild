@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   attemptedTaskIds, clampAction, cleanTitle, describeActions, exportLine, findTask, learningCurve, objectTask, parseFrames,
-  parseSteps, plainLesson, rankLessons, recentPassRate, SIM_TASKS, MAX_EPISODE_STEPS,
+  parseDriveMove, parseSteps, plainLesson, rankLessons, recentPassRate, SIM_TASKS, MAX_EPISODE_STEPS,
   type Episode, type EpisodeStep,
 } from "../../../../mods/dimos-bench/training";
 
@@ -105,5 +105,23 @@ describe("DimSim training", () => {
       ep({ id: "t", taskId: "go-to-tv" }),
     ], "go-to-couch");
     expect(curve.map((p) => [p.attempt, p.episodeId, p.actor])).toEqual([[1, "a", "human"], [2, "b", "agent"]]);
+  });
+});
+
+describe("parseDriveMove (an agent driving with its own model)", () => {
+  it("clamps the move like the stand-in's and keeps the seq it answers", () => {
+    expect(parseDriveMove({ turn: 400, forward: 5, thought: "couch ahead" }, 3)).toEqual({
+      seq: 3, action: { turn: 180, forward: 2 }, look: false, done: false, thought: "couch ahead",
+    });
+  });
+
+  it("a look-around doesn't move, and done wins over look", () => {
+    expect(parseDriveMove({ turn: 30, forward: 1, look: true }, 1)).toMatchObject({ action: { turn: 0, forward: 0 }, look: true });
+    expect(parseDriveMove({ look: true, done: true }, 1)).toMatchObject({ look: false, done: true });
+  });
+
+  it("tolerates junk", () => {
+    expect(parseDriveMove(null, 2)).toEqual({ seq: 2, action: { turn: 0, forward: 0 }, look: false, done: false, thought: "" });
+    expect(parseDriveMove({ thought: "x".repeat(900) }, 2).thought).toHaveLength(500);
   });
 });

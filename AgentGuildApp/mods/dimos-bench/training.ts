@@ -44,6 +44,56 @@ export const SIM_TASKS: SimTask[] = [
 
 export type Actor = "human" | "agent";
 export type EpisodeStatus = "running" | "success" | "failed" | "stopped";
+export type Driver = "own" | "server";
+
+/** What the robot sees after a move, as the panel posts it to the drive relay. */
+export interface DriveObservation {
+  /** Increments with every observation; the agent's move must name the one it answers. */
+  seq: number;
+  jpeg: string;
+  pose: SimPose;
+  /** Front/left/back/right views: at the start, and after a look-around. */
+  panorama: string[];
+  /** Whether the last move stopped short of an obstacle. */
+  blocked: boolean;
+}
+
+/** The agent's move, waiting for the panel to run it. */
+export interface DriveMove {
+  seq: number;
+  action: SimAction;
+  look: boolean;
+  done: boolean;
+  thought: string;
+}
+
+/**
+ * The relay between an open panel (which runs the sim) and the agent driving
+ * it with its own model: one document per own-driver attempt.
+ */
+export interface DriveRelay {
+  episodeId: string;
+  agentId: string;
+  orgId: string;
+  obs: DriveObservation | null;
+  move: DriveMove | null;
+  /** Set when the attempt ends. */
+  ended: EpisodeStatus | null;
+  updatedAt: string;
+}
+
+/** The agent's move from a request body: the same limits as the stand-in's. */
+export function parseDriveMove(b: unknown, seq: number): DriveMove {
+  const o = isObj(b) ? b : {};
+  const look = o.look === true && o.done !== true;
+  return {
+    seq,
+    action: look ? { forward: 0, turn: 0 } : clampAction(o),
+    look,
+    done: o.done === true,
+    thought: typeof o.thought === "string" ? o.thought.slice(0, 500) : "",
+  };
+}
 
 export interface SimPose {
   x: number;
@@ -83,6 +133,12 @@ export interface Episode {
   task: string;
   scene: string;
   actor: Actor;
+  /**
+   * Who picks an agent attempt's moves: "own" — the agent itself, with its own
+   * model, through the drive relay (agent-guild sim tools); "server" — a Claude
+   * stand-in on the server. Absent on older episodes, which were all "server".
+   */
+  driver?: Driver;
   model: string | null;
   status: EpisodeStatus;
   steps: number;
