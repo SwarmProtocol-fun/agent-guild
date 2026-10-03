@@ -29,11 +29,17 @@ export interface SimTask {
   maxSteps: number;
 }
 
+/**
+ * Open floor in the main room. DimSim's evals start at (0, 3), which is under
+ * the kitchen table. Keep in sync with DEFAULT_START in dimsim/src/agentGuildEmbed.js.
+ */
+const APARTMENT_START = { x: 1.5, z: 3.1, yaw: 0 };
+
 /** DimSim's apartment eval workflows (scenes/apartment/evals/*.js), as panel tasks. */
 export const SIM_TASKS: SimTask[] = [
-  { id: "go-to-couch", scene: "apartment", label: "Go to the couch", task: "Go to the couch", target: "sectional", thresholdM: 2.0, startPose: { x: 0, z: 3, yaw: 0 }, maxSteps: 25 },
-  { id: "go-to-kitchen", scene: "apartment", label: "Go to the kitchen", task: "Go to the kitchen", target: "refrigerator", thresholdM: 3.0, startPose: { x: 0, z: 3, yaw: 0 }, maxSteps: 25 },
-  { id: "go-to-tv", scene: "apartment", label: "Go to the TV", task: "Go to the TV", target: "television", thresholdM: 2.0, startPose: { x: 0, z: 3, yaw: 0 }, maxSteps: 25 },
+  { id: "go-to-couch", scene: "apartment", label: "Go to the couch", task: "Go to the couch", target: "sectional", thresholdM: 2.0, startPose: APARTMENT_START, maxSteps: 25 },
+  { id: "go-to-kitchen", scene: "apartment", label: "Go to the kitchen", task: "Go to the kitchen", target: "refrigerator", thresholdM: 3.0, startPose: APARTMENT_START, maxSteps: 25 },
+  { id: "go-to-tv", scene: "apartment", label: "Go to the TV", task: "Go to the TV", target: "television", thresholdM: 2.0, startPose: APARTMENT_START, maxSteps: 25 },
 ];
 
 export type Actor = "human" | "agent";

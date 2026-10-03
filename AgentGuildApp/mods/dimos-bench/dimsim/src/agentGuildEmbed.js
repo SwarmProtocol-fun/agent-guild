@@ -26,7 +26,7 @@ const STEP_M = 0.05; // collision-checked increments
 const CLEARANCE_M = 0.12; // stop this far from an obstacle
 const RAY_HEIGHTS = [-0.25, -0.1, 0.05]; // relative to the body centre (0.5 m when standing)
 const PLAN_CELL_M = 0.2; // floor plan resolution
-const DEFAULT_START = { x: 0, z: 3 };
+const DEFAULT_START = { x: 1.5, z: 3.1 }; // = APARTMENT_START in training.ts; upstream (0, 3) is under the table
 
 export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, captureRgb, getSceneState, setYaw, getYaw, followAgent }) {
   const canvas = document.createElement("canvas");
@@ -216,7 +216,7 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
       return { pose: pose(), blocked, moved: round(moved * sign) };
     },
 
-    reset({ x = 0, z = 3, yaw = 0 } = {}) {
+    reset({ x = DEFAULT_START.x, z = DEFAULT_START.z, yaw = 0 } = {}) {
       agent.setPosition(x, bodyY(), z);
       applyYaw((yaw * Math.PI) / 180);
       agent._syncVisual?.();

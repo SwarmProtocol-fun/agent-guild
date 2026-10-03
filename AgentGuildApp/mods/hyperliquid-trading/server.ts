@@ -3,7 +3,9 @@ import { enqueueTask, getTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
 import { enforceCapability, getAgentCapabilities } from "@/lib/skills";
 import { encryptValue, decryptValue } from "@/lib/secrets";
-import { getAgent } from "@/lib/firestore-admin";
+import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
+import { Wallet as EvmWallet } from "ethers";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import {
   getRiskConfig,
@@ -31,6 +33,9 @@ import {
   ensureReferral,
   applyReferralCode,
   accrueReferralReward,
+  getInstantTrading,
+  setInstantTrading,
+  deleteInstantTrading,
   type DcaParams,
   type GridParams,
   type SniperParams,
@@ -135,6 +140,40 @@ async function resolveAgentWallet(agentId: string, masterSecret: string): Promis
   }
   return { privateKey, network: wallet.network };
 }
+
+/**
+ * The key a trade is signed with. An agent on instant trading signs with its
+ * platform-held wallet and needs no passphrase; every other agent needs its
+ * passphrase to decrypt its own key (resolveAgentWallet).
+ */
+async function resolveSigningKey(agentId: string, masterSecret?: string): Promise<{ privateKey: string; network: HlNetwork }> {
+  const instant = await getInstantTrading(agentId);
+  if (instant) {
+    const privateKey = await getAgentWalletEvmPrivateKey(instant.walletId, instant.orgId, agentId);
+    return { privateKey, network: instant.network };
+  }
+  if (!masterSecret) throw new Error("masterSecret is required (or turn on instant trading for this agent)");
+  return resolveAgentWallet(agentId, masterSecret);
+}
+
+/** Where an agent trades from — instant-trading wallet first, else its passphrase wallet. Null if neither is set. */
+async function getTradingWallet(agentId: string): Promise<{ network: HlNetwork; address: string | null; instant: boolean } | null> {
+  const instant = await getInstantTrading(agentId);
+  if (instant) return { network: instant.network, address: instant.address, instant: true };
+  const wallet = await getAgentWallet(agentId);
+  if (!wallet) return null;
+  let address = wallet.address ?? null;
+  if (!address) {
+    // Wallets generated via /api/v1/agents/:id/wallets record their address
+    // there rather than in this mod's store.
+    const generated = (await listAgentWallets(agentId)).find((w) => w.chain === "evm" && w.hyperliquidRegistered);
+    address = generated?.publicKey ?? null;
+  }
+  return { network: wallet.network, address, instant: false };
+}
+
+/** Applied when instant trading is switched on for an agent with no risk limits — the platform signing alone must never be unbounded. */
+const INSTANT_DEFAULT_RISK = { leverage: 3, maxPositionUsd: 100, maxDailyLossUsd: 50 };
 
 interface AssetPosition {
   position: { coin: string; szi: string; positionValue: string; unrealizedPnl: string; entryPx: string };
@@ -262,13 +301,9 @@ async function fireSignalStrategy(
   if (strategy.type !== "signal") {
     return { status: 400, body: { error: "Only signal strategies can be fired this way" } };
   }
-  if (!body.masterSecret) {
-    return { status: 400, body: { error: "masterSecret is required" } };
-  }
-
   let privateKey: string, network: HlNetwork;
   try {
-    ({ privateKey, network } = await resolveAgentWallet(strategy.agentId, body.masterSecret));
+    ({ privateKey, network } = await resolveSigningKey(strategy.agentId, body.masterSecret));
   } catch (err) {
     return { status: 400, body: { error: (err as Error).message } };
   }
@@ -285,6 +320,62 @@ async function fireSignalStrategy(
 }
 
 /**
+ * Places the trade a dca/grid/sniper strategy was flagged for, then clears
+ * (or, for a one-shot sniper, disarms) it. Shared by POST
+ * /strategy/:id/execute-pending (the agent showing up with its passphrase)
+ * and the tick itself, which calls it straight away for an agent on instant
+ * trading. Uses the price level/context captured at trigger time
+ * (strategy.pendingContext), not a fresh read.
+ */
+async function executePendingStrategy(strategy: Strategy, masterSecret?: string): Promise<{ taskId: string } | RouteError> {
+  // Same gate as POST /trade — uninstalling the mod (or turning off this
+  // capability) must stop a daemon that still holds the passphrase, and the
+  // tick on an instant-trading agent. Checked before anything clears
+  // pendingSignal, so the signal stays set.
+  try {
+    await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+  } catch (err) {
+    return { status: 403, body: { error: (err as Error).message } };
+  }
+  if (!strategy.pendingSignal) {
+    return { status: 400, body: { error: "Strategy has no pending signal" } };
+  }
+
+  let privateKey: string, network: HlNetwork;
+  try {
+    ({ privateKey, network } = await resolveSigningKey(strategy.agentId, masterSecret));
+  } catch (err) {
+    return { status: 400, body: { error: (err as Error).message } };
+  }
+
+  // A "new-listing ANY" sniper doesn't know its target coin until the
+  // tick evaluator catches one — that's what pendingContext.detectedCoin
+  // is for. Every other strategy type just trades its own `coin`.
+  const detectedCoin = (strategy.pendingContext as { detectedCoin?: string } | null)?.detectedCoin;
+  const coin = strategy.type === "sniper" && detectedCoin ? detectedCoin : strategy.coin;
+
+  const result = await enforceRiskAndEnqueue({
+    orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy: true, sizeUsd: strategy.sizeUsd, privateKey, network,
+  });
+  if ("error" in result) return { status: 400, body: result };
+
+  if (strategy.type === "grid") {
+    const params_ = strategy.params as GridParams;
+    const level = (strategy.pendingContext as { level?: number } | null)?.level;
+    const visited = params_.visitedLevels ?? [];
+    await clearStrategyPending(strategy.id, level != null ? { ...params_, visitedLevels: [...visited, level] } : undefined);
+  } else if (strategy.type === "sniper") {
+    // One-shot: a sniper disarms after firing rather than re-arming for
+    // the next listing/price break, same UX as UniDexBot's sniper.
+    await clearStrategyPending(strategy.id);
+    await toggleStrategy(strategy.id, false);
+  } else {
+    await clearStrategyPending(strategy.id);
+  }
+  return result;
+}
+
+/**
  * Evaluated once per Hub tick (see the mod's added phase in
  * `/api/internal/tick/route.ts`). DCA fires on a fixed interval; grid fires
  * when the mid price crosses a level it hasn't visited yet; sniper fires
@@ -294,11 +385,13 @@ async function fireSignalStrategy(
  * hyperliquid-store.ts) — so this only flips the strategy to `pendingSignal`.
  * The agent's own process is expected to poll GET /strategy/:agentId/pending
  * and call POST /strategy/:id/execute-pending with its passphrase to
- * actually fire it.
+ * actually fire it — except for an agent on instant trading, whose trade
+ * the tick places itself right after flagging it.
  */
-export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number; markedPending: number; errors: number }> {
+export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number; markedPending: number; executed: number; errors: number }> {
   const strategies = await getEnabledStrategies();
   let markedPending = 0;
+  let executed = 0;
   let errors = 0;
 
   for (const strategy of strategies) {
@@ -313,7 +406,7 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
         markedPending++;
       } else if (strategy.type === "grid") {
         const params = strategy.params as GridParams;
-        const wallet = await getAgentWallet(strategy.agentId);
+        const wallet = await getTradingWallet(strategy.agentId);
         if (!wallet) continue; // nothing to trade with yet — agent hasn't set a wallet
         const price = await getMidPrice(strategy.coin, wallet.network);
         if (price < params.lowerPrice || price > params.upperPrice) continue;
@@ -327,7 +420,7 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
         markedPending++;
       } else if (strategy.type === "sniper") {
         const params = strategy.params as SniperParams;
-        const wallet = await getAgentWallet(strategy.agentId);
+        const wallet = await getTradingWallet(strategy.agentId);
         if (!wallet) continue; // nothing to trade with yet — agent hasn't set a wallet
 
         if (params.mode === "new-listing") {
@@ -356,13 +449,27 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
         markedPending++;
       }
       // "signal" strategies never fire from the tick — only via POST /strategy/:id/signal or the public webhook.
+      // Reaching here means a dca/grid/sniper strategy was just flagged (every
+      // non-trigger path above `continue`s).
+      if (strategy.type !== "signal" && (await getInstantTrading(strategy.agentId))) {
+        const flagged = await getStrategy(strategy.id); // re-read for the pendingContext just written
+        if (flagged) {
+          const fired = await executePendingStrategy(flagged);
+          if ("status" in fired) {
+            // Left pending — the signal stays visible in the panel instead of vanishing.
+            console.warn(`[hyperliquid-strategy] ${strategy.id} instant execution refused: ${fired.body.error}`);
+          } else {
+            executed++;
+          }
+        }
+      }
     } catch (err) {
       console.error(`[hyperliquid-strategy] ${strategy.id} failed:`, err);
       errors++;
     }
   }
 
-  return { evaluated: strategies.length, markedPending, errors };
+  return { evaluated: strategies.length, markedPending, executed, errors };
 }
 
 const TRADING_CAPABILITIES = [
@@ -448,10 +555,9 @@ const AGENT_TOOLS: AgentTool[] = [
     input_schema: {
       type: "object",
       properties: {
-        wallet: { type: "string", description: "0x address of the trading wallet" },
         coin: { type: "string" },
       },
-      required: ["wallet", "coin"],
+      required: ["coin"],
     },
   },
   {
@@ -572,9 +678,49 @@ export default defineServerMod({
       const denied = await requireOrgAccess(ctx, orgId);
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
 
+      let address: string;
+      try {
+        address = new EvmWallet(privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`).address;
+      } catch {
+        return Response.json({ error: "privateKey is not a valid EVM private key" }, { status: 400 });
+      }
+
       const { encryptedValue, iv } = encryptValue(privateKey, agentId, masterSecret);
-      await setAgentWallet(agentId, { orgId, encryptedValue, iv, network });
+      await setAgentWallet(agentId, { orgId, encryptedValue, iv, network, address });
       return Response.json({ ok: true });
+    },
+
+    /**
+     * GET /my-agents — every agent in every org the signed-in operator
+     * belongs to, with its trading wallet (address + network) when one is
+     * set, so the panel can offer a pick-an-agent list instead of making
+     * the operator type org/agent IDs and a wallet address. Session only.
+     */
+    "GET /my-agents": async (_req, ctx) => {
+      if (!ctx.session) return Response.json({ error: "Sign in to list your agents" }, { status: 401 });
+      const orgs = await getOrganizationsByWalletAdmin(ctx.session.address);
+      const perOrg = await Promise.all(orgs.map(async (org) => {
+        const agents = await getAgentsByOrg(org.id);
+        return Promise.all(agents.map(async (agent) => {
+          const wallet = await getAgentWallet(agent.id);
+          let address = wallet?.address ?? null;
+          if (wallet && !address) {
+            // Wallets generated via /api/v1/agents/:id/wallets record their
+            // address there rather than in this mod's store.
+            const generated = (await listAgentWallets(agent.id)).find((w) => w.chain === "evm" && w.hyperliquidRegistered);
+            address = generated?.publicKey ?? null;
+          }
+          return {
+            agentId: agent.id,
+            name: agent.name,
+            orgId: org.id,
+            orgName: org.name || org.id,
+            status: agent.status,
+            wallet: wallet ? { network: wallet.network, address } : null,
+          };
+        }));
+      }));
+      return Response.json({ agents: perOrg.flat() });
     },
 
     /** GET /wallet/:agentId — whether a wallet is configured, and which network. Never returns key material. */
@@ -712,15 +858,16 @@ export default defineServerMod({
      * the calling agent to hold the "hyperliquid-close" capability and a
      * wallet set via POST /wallet. As with /trade, a verified agent
      * signature (ctx.agent) always wins over the body.
-     * Body: { orgId, agentId, masterSecret, wallet, coin }
+     * Body: { orgId, agentId, masterSecret, coin, wallet? } — wallet defaults
+     * to the address recorded with the agent's key.
      */
     "POST /close": async (req, ctx) => {
       const body = await req.json();
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { wallet, coin, masterSecret } = body;
-      if (!orgId || !agentId || !wallet || !coin || !masterSecret) {
-        return Response.json({ error: "orgId, agentId, wallet, coin, masterSecret are required" }, { status: 400 });
+      const { coin, masterSecret } = body;
+      if (!orgId || !agentId || !coin || !masterSecret) {
+        return Response.json({ error: "orgId, agentId, coin, masterSecret are required" }, { status: 400 });
       }
 
       const denied = await requireOrgAccess(ctx, orgId);
@@ -737,6 +884,15 @@ export default defineServerMod({
         ({ privateKey, network } = await resolveAgentWallet(agentId, masterSecret));
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 400 });
+      }
+
+      // The wallet whose position gets read: the caller's, else the address
+      // recorded with this agent's key (POST /wallet, or a generated wallet).
+      const wallet: string | undefined = body.wallet
+        ?? (await getAgentWallet(agentId))?.address
+        ?? (await listAgentWallets(agentId)).find((w) => w.chain === "evm" && w.hyperliquidRegistered)?.publicKey;
+      if (!wallet) {
+        return Response.json({ error: "wallet is required — this agent's wallet address isn't on record" }, { status: 400 });
       }
 
       const state = await hlInfo<ClearinghouseState>({ type: "clearinghouseState", user: wallet }, network);
@@ -1061,64 +1217,16 @@ export default defineServerMod({
      * actually place the trade the tick evaluator flagged. Uses the price
      * level/context captured at trigger time (strategy.pendingContext), not
      * a fresh read, since price may have moved since the tick ran.
-     * Body: { masterSecret }
+     * Body: { masterSecret? } — not needed for an agent on instant trading.
      */
     "POST /strategy/:id/execute-pending": async (req, ctx) => {
       const body = await req.json().catch(() => ({}));
-      const { masterSecret } = body;
       const strategy = await getStrategy(ctx.params.id);
       if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
       const denied = await requireOrgAccess(ctx, strategy.orgId);
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
-
-      // Same gate as POST /trade — uninstalling the mod (or turning off this
-      // capability) must stop a daemon that still holds the passphrase.
-      // Checked before anything clears pendingSignal, so the signal stays set.
-      try {
-        await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
-
-      if (!strategy.pendingSignal) {
-        return Response.json({ error: "Strategy has no pending signal" }, { status: 400 });
-      }
-      if (!masterSecret) {
-        return Response.json({ error: "masterSecret is required" }, { status: 400 });
-      }
-
-      let privateKey: string, network: HlNetwork;
-      try {
-        ({ privateKey, network } = await resolveAgentWallet(strategy.agentId, masterSecret));
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 400 });
-      }
-
-      // A "new-listing ANY" sniper doesn't know its target coin until the
-      // tick evaluator catches one — that's what pendingContext.detectedCoin
-      // is for. Every other strategy type just trades its own `coin`.
-      const detectedCoin = (strategy.pendingContext as { detectedCoin?: string } | null)?.detectedCoin;
-      const coin = strategy.type === "sniper" && detectedCoin ? detectedCoin : strategy.coin;
-
-      const result = await enforceRiskAndEnqueue({
-        orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy: true, sizeUsd: strategy.sizeUsd, privateKey, network,
-      });
-      if ("error" in result) return Response.json(result, { status: 400 });
-
-      if (strategy.type === "grid") {
-        const params_ = strategy.params as GridParams;
-        const level = (strategy.pendingContext as { level?: number } | null)?.level;
-        const visited = params_.visitedLevels ?? [];
-        await clearStrategyPending(strategy.id, level != null ? { ...params_, visitedLevels: [...visited, level] } : undefined);
-      } else if (strategy.type === "sniper") {
-        // One-shot: a sniper disarms after firing rather than re-arming for
-        // the next listing/price break, same UX as UniDexBot's sniper.
-        await clearStrategyPending(strategy.id);
-        await toggleStrategy(strategy.id, false);
-      } else {
-        await clearStrategyPending(strategy.id);
-      }
-
+      const result = await executePendingStrategy(strategy, body.masterSecret);
+      if ("status" in result) return Response.json(result.body, { status: result.status });
       return Response.json(result);
     },
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
+import { parseOrder, describeOrder, type ParsedOrder } from "./orders";
 
 type Network = "testnet" | "mainnet";
 
@@ -45,6 +46,24 @@ interface ReferralStats {
   referredCount: number;
   totalVolumeUsd: number;
   rewardUsd: number;
+}
+
+interface MyAgent {
+  agentId: string;
+  name: string;
+  orgId: string;
+  orgName: string;
+  status: string;
+  wallet: { network: Network; address: string | null } | null;
+}
+
+interface OrderLogEntry {
+  id: number;
+  text: string;
+  summary: string;
+  agentName: string;
+  taskId?: string;
+  status: string;
 }
 
 interface AgentConnection {
@@ -213,6 +232,38 @@ function TradingPanel({ api }: PanelProps) {
   // platform never retains it (see server.ts's resolveAgentWallet).
   const [masterSecret, setMasterSecret] = useState("");
 
+  // ── Agent picker ───────────────────────────────────────────────────────────
+  const [myAgents, setMyAgents] = useState<MyAgent[] | "loading" | "error">("loading");
+
+  async function loadMyAgents() {
+    setMyAgents("loading");
+    try {
+      const resp = await api("my-agents");
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      const agents: MyAgent[] = data.agents ?? [];
+      setMyAgents(agents);
+      // Pre-select when there's an obvious choice: the only agent, or the only one that can trade.
+      const ready = agents.filter((a) => a.wallet);
+      const only = agents.length === 1 ? agents[0] : ready.length === 1 ? ready[0] : null;
+      if (only && !agentId) selectAgent(only);
+    } catch {
+      setMyAgents("error");
+    }
+  }
+
+  function selectAgent(a: MyAgent | undefined) {
+    setAgentId(a?.agentId ?? "");
+    setOrgId(a?.orgId ?? "");
+    setWallet(a?.wallet?.address ?? "");
+  }
+
+  useEffect(() => {
+    loadMyAgents();
+  }, []);
+
+  const selectedAgent = Array.isArray(myAgents) ? myAgents.find((a) => a.agentId === agentId) : undefined;
+
   // ── Wallet setup ───────────────────────────────────────────────────────────
   const [walletStatus, setWalletStatus] = useState<{ hasWallet: boolean; network: Network | null } | null>(null);
   const [walletLoading, setWalletLoading] = useState(false);
@@ -263,7 +314,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   useEffect(() => {
-    if (agentId) loadWalletStatus();
+    if (agentId) loadAgentData();
   }, [agentId]);
 
   const network: Network = walletStatus?.network ?? "testnet";
@@ -678,6 +729,71 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  // --- Give orders ----------------------------------------------------------
+  const [orderText, setOrderText] = useState("");
+  const [orderLog, setOrderLog] = useState<OrderLogEntry[]>([]);
+  const [orderSending, setOrderSending] = useState(false);
+  const parsedOrder: ParsedOrder | { error: string } | null = orderText.trim() ? parseOrder(orderText) : null;
+
+  function updateOrder(id: number, patch: Partial<OrderLogEntry>) {
+    setOrderLog((log) => log.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+  }
+
+  async function sendOrder(e: FormEvent) {
+    e.preventDefault();
+    if (!parsedOrder || "error" in parsedOrder || !agentId || !masterSecret) return;
+    const entry: OrderLogEntry = {
+      id: Date.now(),
+      text: orderText.trim(),
+      summary: describeOrder(parsedOrder),
+      agentName: selectedAgent?.name ?? agentId,
+      status: "sending…",
+    };
+    setOrderLog((log) => [entry, ...log].slice(0, 20));
+    setOrderSending(true);
+    try {
+      const body = parsedOrder.kind === "close"
+        ? { orgId, agentId, coin: parsedOrder.coin, masterSecret, ...(wallet ? { wallet } : {}) }
+        : { orgId, agentId, masterSecret, ...parsedOrder };
+      const resp = await api(parsedOrder.kind === "close" ? "close" : "trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        updateOrder(entry.id, { status: `rejected: ${data.error}` });
+        return;
+      }
+      updateOrder(entry.id, { taskId: data.taskId, status: "queued" });
+      setOrderText("");
+      pollOrder(entry.id, data.taskId);
+    } catch {
+      updateOrder(entry.id, { status: "failed to send" });
+    } finally {
+      setOrderSending(false);
+    }
+  }
+
+  /** Follows one order's task until the worker finishes it (or ~2 minutes pass). */
+  async function pollOrder(id: number, orderTaskId: string) {
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const resp = await api(`status/${orderTaskId}`);
+        const data = await resp.json();
+        const status: string = data.status ?? data.error ?? "unknown";
+        updateOrder(id, { status: status === "failed" && data.error ? `failed: ${data.error}` : status });
+        if (["completed", "failed", "cancelled", "timeout"].includes(status)) {
+          if (status === "completed") refreshAccount();
+          return;
+        }
+      } catch {
+        // transient — keep polling
+      }
+    }
+  }
+
   function loadAgentData() {
     loadConnection();
     loadWalletStatus();
@@ -717,27 +833,32 @@ function TradingPanel({ api }: PanelProps) {
       </p>
 
       <Section title="Agent" dense>
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label htmlFor="orgId" className={labelClass}>Org ID</label>
-            <input id="orgId" name="orgId" className={inputClass} value={orgId} onChange={(e) => setOrgId(e.target.value)} autoComplete="off" />
-          </div>
-          <div>
-            <label htmlFor="agentId" className={labelClass}>Agent ID</label>
-            <input
-              id="agentId" name="agentId" className={inputClass} value={agentId}
-              onChange={(e) => setAgentId(e.target.value)}
-              onBlur={loadAgentData}
-              autoComplete="off"
-            />
-          </div>
-          <div>
-            <label htmlFor="wallet" className={labelClass}>Wallet address</label>
-            <input
-              id="wallet" name="wallet" className={`${inputClass} ${monoClass}`} placeholder="0x…" value={wallet}
-              onChange={(e) => setWallet(e.target.value)} autoComplete="off"
-            />
-          </div>
+        <div>
+          <label htmlFor="agentPick" className={labelClass}>Trade as</label>
+          {myAgents === "loading" ? (
+            <Spinner label="Loading your agents…" />
+          ) : myAgents === "error" ? (
+            <ErrorNote message="Couldn't load your agents." onRetry={loadMyAgents} />
+          ) : myAgents.length === 0 ? (
+            <p className="text-xs text-[hsl(var(--muted-foreground))]">You don&apos;t have any agents yet — create one first.</p>
+          ) : (
+            <select
+              id="agentPick" name="agentPick" className={inputClass} value={agentId}
+              onChange={(e) => selectAgent(myAgents.find((a) => a.agentId === e.target.value))}
+            >
+              <option value="">Pick an agent…</option>
+              {myAgents.map((a) => (
+                <option key={a.agentId} value={a.agentId}>
+                  {a.name}
+                  {new Set(myAgents.map((x) => x.orgId)).size > 1 ? ` — ${a.orgName}` : ""}
+                  {a.wallet ? ` · ${a.wallet.network}` : " · no wallet yet"}
+                </option>
+              ))}
+            </select>
+          )}
+          {selectedAgent?.wallet?.address && (
+            <p className={`text-xs text-[hsl(var(--muted-foreground))] mt-1 ${monoClass}`}>{selectedAgent.wallet.address}</p>
+          )}
         </div>
         <div>
           <label htmlFor="masterSecret" className={labelClass}>Passphrase</label>
@@ -751,6 +872,50 @@ function TradingPanel({ api }: PanelProps) {
           </p>
         </div>
       </Section>
+
+      {agentId && (
+        <Section title="Give orders" description={`Tell ${selectedAgent?.name ?? "this agent"} what to trade, in plain words.`} dense>
+          <form className="flex gap-2" onSubmit={sendOrder}>
+            <input
+              id="orderText" name="orderText" className={`${inputClass} flex-1`} autoComplete="off"
+              placeholder="long ETH $25 5x sl 3 tp 8 · short SOL 50 @ 140 · close BTC"
+              value={orderText} onChange={(e) => setOrderText(e.target.value)}
+              aria-describedby="orderPreview"
+            />
+            <button
+              type="submit" className={primaryButtonClass()}
+              disabled={orderSending || !parsedOrder || "error" in parsedOrder || !masterSecret || !walletStatus?.hasWallet}
+            >
+              {orderSending ? "Sending…" : "Send"}
+            </button>
+          </form>
+          <p id="orderPreview" className="text-xs min-h-4" aria-live="polite">
+            {!walletStatus?.hasWallet && walletStatus ? (
+              <span className="text-amber-700 dark:text-amber-400">This agent needs a wallet before it can trade — set one below.</span>
+            ) : !masterSecret ? (
+              <span className="text-[hsl(var(--muted-foreground))]">Enter the passphrase above to send orders.</span>
+            ) : parsedOrder && "error" in parsedOrder ? (
+              <span className="text-[hsl(var(--muted-foreground))]">{parsedOrder.error}</span>
+            ) : parsedOrder ? (
+              <span className="text-[hsl(var(--foreground))]">{describeOrder(parsedOrder)} on {network}</span>
+            ) : null}
+          </p>
+          {orderLog.length > 0 && (
+            <ul className="divide-y divide-[hsl(var(--border))] border-t border-[hsl(var(--border))]">
+              {orderLog.map((o) => (
+                <li key={o.id} className="flex items-center justify-between gap-3 py-1.5 text-xs">
+                  <span>
+                    <span className="text-[hsl(var(--muted-foreground))]">{o.agentName}:</span> {o.summary}
+                  </span>
+                  <Badge tone={o.status === "completed" ? "success" : /^(rejected|failed|cancelled|timeout)/.test(o.status) ? "danger" : "neutral"}>
+                    {o.status.length > 40 ? `${o.status.slice(0, 40)}…` : o.status}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Section>
+      )}
 
       <Section
         title="Wallet"
@@ -828,7 +993,7 @@ function TradingPanel({ api }: PanelProps) {
         }
       >
         {!agentId ? (
-          <p className="text-xs text-[hsl(var(--muted-foreground))]">Enter an Agent ID above to check its connection.</p>
+          <p className="text-xs text-[hsl(var(--muted-foreground))]">Pick an agent above to check its connection.</p>
         ) : connection === "loading" ? (
           <Spinner label="Checking agent…" />
         ) : connection === "error" ? (

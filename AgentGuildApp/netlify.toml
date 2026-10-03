@@ -23,6 +23,20 @@
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.thirdweb.com https://*.thirdwebcdn.com https://*.google.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: http:; media-src 'self' data: blob:; connect-src 'self' blob: https: wss:; frame-src 'self' https://*.thirdweb.com https://accounts.google.com https://embedded-wallet.thirdweb.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
 
+# ── dimos-bench DimSim models + bundles (mirrors next.config.ts headers()) ──
+[[headers]]
+  for = "/dimsim/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, stale-while-revalidate=2592000"
+[[headers]]
+  for = "/dimsim/scenes/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, stale-while-revalidate=2592000"
+[[headers]]
+  for = "/dimsim/embodiment/*"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, stale-while-revalidate=2592000"
+
 # ── Canonical domain: redirect www → apex ──
 [[redirects]]
   from = "https://www.agent-guild.com/*"

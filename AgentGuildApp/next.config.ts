@@ -73,6 +73,15 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "public, max-age=300" },
         ],
       },
+      // dimos-bench DimSim: scene/robot models and sim bundles (~16 MB). Not
+      // `immutable` because the GLBs and dimsim-eval.js have unhashed names.
+      // Mirrored in netlify.toml.
+      ...["assets", "scenes", "embodiment"].map((dir) => ({
+        source: `/dimsim/${dir}/:path*`,
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=604800, stale-while-revalidate=2592000" },
+        ],
+      })),
     ];
   },
 };

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 
 /**
  * AiAvatar — visual + physics container for a single agent.
@@ -159,7 +160,7 @@ export class AiAvatar {
 
   _loadGLB() {
     if (!this.avatarUrl) return;
-    const loader = new GLTFLoader();
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
     const urls = Array.isArray(this.avatarUrl) ? this.avatarUrl : [this.avatarUrl];
     const tryLoad = (index) => {
       if (index >= urls.length) {

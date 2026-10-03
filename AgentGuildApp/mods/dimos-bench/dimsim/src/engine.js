@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 import { AiAvatar } from "./AiAvatar.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
@@ -175,6 +176,8 @@ let assets = []; // [{id,title,notes,states:[{id,name,glbName,dataBase64,interac
 const assetsGroup = new THREE.Group();
 assetsGroup.name = "assetsGroup";
 const gltfLoader = new GLTFLoader();
+// Agent Guild: the shipped GLBs are meshopt-compressed (scripts/optimize-models.sh).
+gltfLoader.setMeshoptDecoder(MeshoptDecoder);
 
 // =============================================================================
 // BLOB SHADOW – lightweight planar shadow for GLB assets (no shadow maps needed)

@@ -39,7 +39,7 @@ describe("DimSim training", () => {
   it("writes a lesson from the route without a model", () => {
     const actions = [{ turn: 90, forward: 0.75 }, { turn: 45, forward: 0.75 }];
     expect(plainLesson(ep({ actor: "human" }), couch, actions)).toBe(
-      'Demonstration — "Go to the couch": From x 0, z 3, facing 0°: turn 90° left, forward 0.75 m, turn 45° left, forward 0.75 m, ending 1.82 m from the sectional.',
+      'Demonstration — "Go to the couch": From x 1.5, z 3.1, facing 0°: turn 90° left, forward 0.75 m, turn 45° left, forward 0.75 m, ending 1.82 m from the sectional.',
     );
     // A random start and where it ended: what carries over to the next start.
     expect(plainLesson(ep({ startPose: { x: -2, z: 1.5, yaw: 90 }, finalPose: { x: 3.1, z: 2.04, yaw: 45 } }), couch, actions)).toBe(

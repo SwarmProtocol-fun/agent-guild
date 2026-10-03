@@ -8,6 +8,7 @@
  *   hyperliquidWallets     — per-agent encrypted Hyperliquid private key
  *   hyperliquidSniperState — per-network "known coins" baseline for new-listing sniping
  *   hyperliquidReferrals   — per-agent referral attribution + accrued reward
+ *   hyperliquidInstant     — per-agent opt-in to passphrase-free (custodial) trading
  *
  * Server-only (Firebase Admin SDK) — mirrors the pattern in
  * `@/lib/gateway/store.ts`. Only import from the mod's server.ts / API routes.
@@ -22,6 +23,7 @@ const STRATEGIES = "hyperliquidStrategies";
 const WALLETS = "hyperliquidWallets";
 const SNIPER_STATE = "hyperliquidSniperState";
 const REFERRALS = "hyperliquidReferrals";
+const INSTANT = "hyperliquidInstant";
 
 function db() {
   return adminDb();
@@ -39,6 +41,8 @@ function db() {
 // it, which is also why DCA/grid strategies can only ever reach a "pending"
 // state automatically (see Strategy.pendingSignal below) — actually placing
 // that trade still needs the agent to show up with its passphrase.
+// The one exception is an agent its org owner has switched to instant
+// trading (see InstantTrading below).
 
 export interface AgentWallet {
   agentId: string;
@@ -46,6 +50,8 @@ export interface AgentWallet {
   encryptedValue: string;
   iv: string;
   network: "testnet" | "mainnet";
+  /** The wallet's 0x address, when known — never key material. Absent on wallets saved before it was recorded. */
+  address?: string;
   updatedAt: Date | null;
 }
 
@@ -59,13 +65,14 @@ export async function getAgentWallet(agentId: string): Promise<AgentWallet | nul
     encryptedValue: data.encryptedValue,
     iv: data.iv,
     network: data.network ?? "testnet",
+    ...(data.address ? { address: data.address } : {}),
     updatedAt: data.updatedAt?.toDate() ?? null,
   };
 }
 
 export async function setAgentWallet(
   agentId: string,
-  data: { orgId: string; encryptedValue: string; iv: string; network: "testnet" | "mainnet" },
+  data: { orgId: string; encryptedValue: string; iv: string; network: "testnet" | "mainnet"; address?: string },
 ): Promise<void> {
   await db().collection(WALLETS).doc(agentId).set({
     ...data,
@@ -75,6 +82,52 @@ export async function setAgentWallet(
 
 export async function deleteAgentWallet(agentId: string): Promise<void> {
   await db().collection(WALLETS).doc(agentId).delete();
+}
+
+// ── Instant trading (opt-in, custodial) ─────────────────────────────────────
+//
+// An org owner can opt an agent out of the passphrase model: trades are then
+// signed with one of the agent's platform-held EVM wallets (lib/agent-wallets,
+// encrypted under AGENT_WALLET_ENCRYPTION_KEY), so orders, the agent's own API
+// calls, and DCA/grid/sniper strategies fire with no passphrase in the loop.
+// This record holds only which wallet to use — never key material. Deleting
+// it puts the agent straight back on the passphrase model.
+
+export interface InstantTrading {
+  agentId: string;
+  orgId: string;
+  /** agentWallets doc id of the EVM wallet trades are signed with. */
+  walletId: string;
+  address: string;
+  network: "testnet" | "mainnet";
+  enabledBy: string;
+  enabledAt: Date | null;
+}
+
+export async function getInstantTrading(agentId: string): Promise<InstantTrading | null> {
+  const snap = await db().collection(INSTANT).doc(agentId).get();
+  if (!snap.exists) return null;
+  const data = snap.data()!;
+  return {
+    agentId,
+    orgId: data.orgId,
+    walletId: data.walletId,
+    address: data.address,
+    network: data.network ?? "testnet",
+    enabledBy: data.enabledBy,
+    enabledAt: data.enabledAt?.toDate() ?? null,
+  };
+}
+
+export async function setInstantTrading(
+  agentId: string,
+  data: { orgId: string; walletId: string; address: string; network: "testnet" | "mainnet"; enabledBy: string },
+): Promise<void> {
+  await db().collection(INSTANT).doc(agentId).set({ ...data, enabledAt: FieldValue.serverTimestamp() });
+}
+
+export async function deleteInstantTrading(agentId: string): Promise<void> {
+  await db().collection(INSTANT).doc(agentId).delete();
 }
 
 // ── Risk config ──────────────────────────────────────────────────────────────

@@ -27,7 +27,7 @@ How it's wired:
 | Part | What it does |
 |------|--------------|
 | `dimsim/` | DimSim source, vendored from dimOS `misc/DimSim` (Apache-2.0; the commit is in `dimsim/UPSTREAM_COMMIT`). It's patched for an embed mode: `?dimos=1&embed=1` runs without the Deno bridge, and `src/agentGuildEmbed.js` drives the robot with collision-checked moves. Other patches: a chase camera, and serving under `/dimsim/`. |
-| `public/dimsim/` | The built simulator plus the scene and robot models, about 200 MB. These are DimSim's Git LFS files. |
+| `public/dimsim/` | The built simulator plus the scene and robot models, about 26 MB. These are DimSim's Git LFS files, compressed by `dimsim/scripts/optimize-models.sh`: WebP textures for the scene (geometry untouched, since it becomes the colliders), and a simplified, meshopt-compressed robot. |
 | `training.ts` | Tasks, step validation, lessons, JSONL rows, and the learning curve. It's pure code, tested in `src/lib/mods/__tests__/dimos-training.test.ts`. |
 | `trainer.ts` | The model calls: one action per step, and one reflection per episode. Server-side fallbacks are on. |
 | `trainer-panel.tsx` | The tab. It shows the sim, the floor plan, the robot's camera view, controls (including Train ×N and random starts), memory, the learning curve, attempt replays, and export. |
@@ -38,16 +38,16 @@ Routes: `GET /sim/options`, `POST /episodes` (`taskId` is a built-in task or `ob
 Setup:
 
 - **Agent driving needs an Anthropic credential on the server.** Set `ANTHROPIC_API_KEY`. Without it, the **Agent drives** button stays disabled. Demos work without it.
-- **Rebuild after changing the sim.** Run `cd mods/dimos-bench/dimsim && npm ci && npm run build`. The output goes to `public/dimsim/`.
+- **Rebuild after changing the sim.** Run `cd mods/dimos-bench/dimsim && npm ci && npm run build`. The output goes to `public/dimsim/`. After adding or replacing models, run `scripts/optimize-models.sh` there too.
 - **The CSP must allow `blob:` in `connect-src`.** Three.js decodes embedded model textures through `blob:` URLs. It's set in `src/middleware.ts` and `netlify.toml`.
 
 Limits:
 
 - **Scores are reported by the browser.** The rubric runs in the browser, so pass/fail is only as trustworthy as the person running it. The same is true of self-reported benchmark scores.
-- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable, and the default eval start (0, 3) is under one.
+- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable. DimSim's evals start at (0, 3), under the kitchen table, so the panel starts at (1.5, 3.1) on open floor instead.
 - **Looking around costs a step.** A look-around step records the front frame with a zero action (`look: true` in the JSONL) and counts toward the step limit. The panorama at the first step is free.
 - **Some objects are hard to reach.** Wall-mounted or high items (range hood, wall cabinets) may stay out of the 1.5 m pass distance from the floor.
-- **The first load is heavy.** The page downloads about 200 MB of models the first time, and the robot model alone is 55 MB. After that the browser caches them.
+- **The first load downloads about 26 MB** of models. After that the browser caches them for a week (`Cache-Control` in `next.config.ts` and `netlify.toml`).
 
 ## Benchmarks
 
