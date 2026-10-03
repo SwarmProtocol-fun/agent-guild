@@ -1,7 +1,7 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { enqueueTask, getTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
-import { enforceCapability } from "@/lib/skills";
+import { enforceCapability, getAgentCapabilities } from "@/lib/skills";
 import { encryptValue, decryptValue } from "@/lib/secrets";
 import { getAgent } from "@/lib/firestore-admin";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
@@ -365,6 +365,111 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
   return { evaluated: strategies.length, markedPending, errors };
 }
 
+const TRADING_CAPABILITIES = [
+  "hyperliquid-trade",
+  "hyperliquid-close",
+  "hyperliquid-configure-risk",
+  "hyperliquid-run-strategy",
+  "hyperliquid-webhook",
+] as const;
+
+interface AgentTool {
+  name: string;
+  description: string;
+  method: "GET" | "POST";
+  /** Relative to /api/mods/hyperliquid-trading/. `{x}` segments come from the input of the same name. */
+  path: string;
+  input_schema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
+}
+
+/**
+ * The agent-facing surface of this mod, as tool definitions an LLM agent can
+ * load directly (`input_schema` is the Anthropic tool shape; OpenAI takes it
+ * as `parameters`). `method`/`path` tell the agent's runtime which route to
+ * call. masterSecret is deliberately absent from every schema: the runtime
+ * injects it from its own environment so the passphrase never passes
+ * through the model's context. orgId/agentId are absent too — the agent's
+ * signature or token supplies them.
+ */
+const AGENT_TOOLS: AgentTool[] = [
+  {
+    name: "hyperliquid_market",
+    description: "Whole-market snapshot of every tradeable Hyperliquid perp: mark price, 24h change, 24h volume, open interest, funding rate, max leverage. Sorted by volume.",
+    method: "GET",
+    path: "market",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "hyperliquid_price",
+    description: "Current mid price for one coin.",
+    method: "GET",
+    path: "price/{coin}",
+    input_schema: { type: "object", properties: { coin: { type: "string", description: "Perp symbol, e.g. ETH, BTC, SOL" } }, required: ["coin"] },
+  },
+  {
+    name: "hyperliquid_account",
+    description: "Account value and margin used for a Hyperliquid wallet address.",
+    method: "GET",
+    path: "account/{wallet}",
+    input_schema: { type: "object", properties: { wallet: { type: "string", description: "0x address of the trading wallet" } }, required: ["wallet"] },
+  },
+  {
+    name: "hyperliquid_positions",
+    description: "Open positions (size, notional, entry price, unrealized PnL) for a Hyperliquid wallet address.",
+    method: "GET",
+    path: "positions/{wallet}",
+    input_schema: { type: "object", properties: { wallet: { type: "string", description: "0x address of the trading wallet" } }, required: ["wallet"] },
+  },
+  {
+    name: "hyperliquid_trade",
+    description: "Place an order with this agent's own wallet. Rejected if it breaks the agent's risk limits (max position, daily loss). Returns a taskId; poll hyperliquid_trade_status for the fill.",
+    method: "POST",
+    path: "trade",
+    input_schema: {
+      type: "object",
+      properties: {
+        coin: { type: "string", description: "Perp symbol, e.g. ETH" },
+        isBuy: { type: "boolean", description: "true = long/buy, false = short/sell" },
+        sizeUsd: { type: "number", description: "Order size in USD notional" },
+        orderType: { type: "string", enum: ["market", "limit"] },
+        limitPrice: { type: "number", description: "Required when orderType is limit" },
+        leverage: { type: "number" },
+        stopLossPct: { type: "number", description: "Stop-loss distance from entry, in percent" },
+        takeProfitPct: { type: "number", description: "Take-profit distance from entry, in percent" },
+      },
+      required: ["coin", "isBuy", "sizeUsd"],
+    },
+  },
+  {
+    name: "hyperliquid_close",
+    description: "Close this agent's entire open position in one coin with a reduce-only market order.",
+    method: "POST",
+    path: "close",
+    input_schema: {
+      type: "object",
+      properties: {
+        wallet: { type: "string", description: "0x address of the trading wallet" },
+        coin: { type: "string" },
+      },
+      required: ["wallet", "coin"],
+    },
+  },
+  {
+    name: "hyperliquid_trade_status",
+    description: "Execution state of a trade task returned by hyperliquid_trade or hyperliquid_close.",
+    method: "GET",
+    path: "status/{taskId}",
+    input_schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
+  },
+  {
+    name: "hyperliquid_history",
+    description: "This agent's settled trade log plus total PnL and win rate.",
+    method: "GET",
+    path: "history/{agentId}",
+    input_schema: { type: "object", properties: {} },
+  },
+];
+
 /**
  * Trading runs as a GatewayAgent job (taskType "hyperliquid", see
  * GatewayAgent/scripts/executors/hyperliquid.mjs) rather than inline in the
@@ -380,6 +485,61 @@ export default defineServerMod({
   },
 
   routes: {
+    /**
+     * GET /agent/tools — the tool manifest above, for an agent runtime to
+     * load at startup. Public: it describes routes, it grants nothing.
+     */
+    "GET /agent/tools": {
+      public: true,
+      handler: async () => Response.json({
+        mod: "hyperliquid-trading",
+        basePath: "/api/mods/hyperliquid-trading",
+        auth: "Authorization: Bearer agt_… (mods:call scope), Ed25519 agent/sig/ts, or agentId/apiKey",
+        injected: {
+          masterSecret: "Added to every POST body by the runtime, from its own environment",
+          agentId: "Filled into {agentId} path segments from GET /me",
+        },
+        tools: AGENT_TOOLS,
+      }),
+    },
+
+    /**
+     * GET /me — the "is my agent plugged in?" check. An agent calls it with
+     * its own signature/token; a signed-in operator passes ?agentId=. Reports
+     * which trading capabilities are granted, whether a wallet is set, the
+     * risk limits, and how many strategy signals are waiting on the agent.
+     */
+    "GET /me": async (req, ctx) => {
+      const agentId = ctx.agent?.agentId ?? new URL(req.url).searchParams.get("agentId");
+      if (!agentId) return Response.json({ error: "agentId query param is required for a browser session" }, { status: 400 });
+      const access = await requireAgentOrgAccess(ctx, agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+
+      const [caps, wallet, risk, pending] = await Promise.all([
+        getAgentCapabilities(agentId, access.orgId),
+        getAgentWallet(agentId),
+        getRiskConfig(agentId),
+        getPendingStrategies(agentId),
+      ]);
+      const granted = new Set(caps.map((c) => c.key));
+      const capabilities = Object.fromEntries(TRADING_CAPABILITIES.map((k) => [k, granted.has(k)]));
+
+      return Response.json({
+        agentId,
+        orgId: access.orgId,
+        via: ctx.agent ? "agent" : "session",
+        capabilities,
+        wallet: { configured: !!wallet, network: wallet?.network ?? null },
+        risk: risk ? {
+          leverage: risk.leverage,
+          maxPositionUsd: risk.maxPositionUsd,
+          maxDailyLossUsd: risk.maxDailyLossUsd,
+        } : null,
+        pendingStrategies: pending.length,
+        readyToTrade: !!wallet && capabilities["hyperliquid-trade"],
+      });
+    },
+
     /**
      * POST /wallet — set or rotate an agent's own Hyperliquid key. Each
      * agent has its own distinct, separately-keyed wallet — never a shared

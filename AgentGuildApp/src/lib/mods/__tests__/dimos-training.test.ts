@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  clampAction, describeActions, exportLine, learningCurve, parseSteps, plainLesson, SIM_TASKS, MAX_EPISODE_STEPS,
+  attemptedTaskIds, clampAction, cleanTitle, describeActions, exportLine, findTask, learningCurve, objectTask, parseFrames,
+  parseSteps, plainLesson, rankLessons, recentPassRate, SIM_TASKS, MAX_EPISODE_STEPS,
   type Episode, type EpisodeStep,
 } from "../../../../mods/dimos-bench/training";
 
@@ -38,7 +39,11 @@ describe("DimSim training", () => {
   it("writes a lesson from the route without a model", () => {
     const actions = [{ turn: 90, forward: 0.75 }, { turn: 45, forward: 0.75 }];
     expect(plainLesson(ep({ actor: "human" }), couch, actions)).toBe(
-      'Demonstration — "Go to the couch": From the start pose (x 0, z 3, facing 0°): turn 90° left, forward 0.75 m, turn 45° left, forward 0.75 m, ending 1.82 m from the sectional.',
+      'Demonstration — "Go to the couch": From x 0, z 3, facing 0°: turn 90° left, forward 0.75 m, turn 45° left, forward 0.75 m, ending 1.82 m from the sectional.',
+    );
+    // A random start and where it ended: what carries over to the next start.
+    expect(plainLesson(ep({ startPose: { x: -2, z: 1.5, yaw: 90 }, finalPose: { x: 3.1, z: 2.04, yaw: 45 } }), couch, actions)).toBe(
+      'Worked — "Go to the couch": From x -2, z 1.5, facing 90°: turn 90° left, forward 0.75 m, turn 45° left, forward 0.75 m, ending 1.82 m from the sectional. It ended at x 3.1, z 2.04.',
     );
     expect(plainLesson(ep({ status: "failed", finalDistance: 4 }), couch, actions)).toMatch(/^Did not work.*Try a different route\.$/);
   });
@@ -49,6 +54,47 @@ describe("DimSim training", () => {
     expect(line).toMatchObject({ instruction: "Go to the couch", outcome: "success", action: { forward: 0.75, turn: 90 }, thought: "left is open" });
     expect(line.image_jpeg_base64).toBeUndefined();
     expect(JSON.parse(exportLine(ep(), step, true)).image_jpeg_base64).toBe(jpeg);
+  });
+
+  it("builds object tasks from the sim's id and (truncated) title, and finds them again", () => {
+    expect(cleanTitle("Two-slice chrome toaster with browning control d...")).toBe("Two-slice chrome toaster with browning control d");
+    expect(cleanTitle("Wall-mounted range hood\n...")).toBe("Wall-mounted range hood");
+    const t = objectTask("59a525468c75d8-19c73105016", "Modern L-shaped sectional")!;
+    expect(t).toMatchObject({ id: "obj:59a525468c75d8-19c73105016", task: "Go to the modern l-shaped sectional", target: "59a525468c75d8-19c73105016" });
+    expect(findTask(t.id, t.task)).toEqual(t);
+    expect(findTask("obj:../../x", "Go to the x")).toBeNull();
+    expect(findTask("go-to-tv")?.target).toBe("television");
+  });
+
+  it("marks look-around steps as standing still", () => {
+    const r = parseSteps({ steps: [{ pose: { x: 0, z: 3, yaw: 0 }, action: { forward: 1, turn: 30 }, look: true }] }, 0);
+    expect(r.ok && r.steps[0]).toMatchObject({ look: true, action: { forward: 0, turn: 0 } });
+  });
+
+  it("accepts up to N JPEG frames", () => {
+    expect(parseFrames(undefined, 4)).toEqual([]);
+    expect(parseFrames([jpeg, jpeg], 4)).toEqual([jpeg, jpeg]);
+    expect(parseFrames([jpeg, jpeg], 1)).toBeNull();
+    expect(parseFrames(["iVBORw0KGgo="], 4)).toBeNull();
+  });
+
+  it("ranks this task's successes first, then its failures, then what worked elsewhere", () => {
+    const e = (content: string, ...tags: string[]) => ({ content, tags: ["dimsim", ...tags] });
+    expect(rankLessons([
+      e("tv ok", "go-to-tv", "success"),
+      e("couch failed", "go-to-couch", "failed"),
+      { content: "not dimsim", tags: ["go-to-couch", "success"] },
+      e("couch ok new", "go-to-couch", "success"),
+      e("tv failed", "go-to-tv", "failed"),
+      e("couch ok old", "go-to-couch", "success"),
+    ], "go-to-couch")).toEqual(["couch ok new", "couch ok old", "couch failed", "tv ok", "tv failed"]);
+    expect(rankLessons([e("a", "x"), e("b", "x")], "x", 1)).toEqual(["a"]);
+  });
+
+  it("lists attempted tasks after the built-ins and counts recent agent passes", () => {
+    expect(attemptedTaskIds([ep({ taskId: "obj:abc" }), ep()])).toEqual([...SIM_TASKS.map((t) => t.id), "obj:abc"]);
+    const pt = (status: Episode["status"], actor: Episode["actor"] = "agent") => ({ attempt: 0, episodeId: "", actor, status, steps: 1, finalDistance: 1 });
+    expect(recentPassRate([pt("success", "human"), pt("failed"), pt("success"), pt("stopped"), pt("success")], 3)).toEqual({ passed: 2, of: 3 });
   });
 
   it("orders a task's finished attempts oldest first for the learning curve", () => {

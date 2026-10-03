@@ -1,7 +1,7 @@
 {
   "id": "dimos-bench",
   "name": "dimOS Benchmarks",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "dimOS (dimensionalOS) robots in the panel: train your agent in DimSim, dimOS's browser robot simulator (a Unitree Go2 in an apartment), by recording demonstrations or letting it drive from the robot's camera, with lessons kept in agent memory and episodes exported as JSONL. Also benchmarks agents on dimOS eval suites (recordings, MuJoCo/Habitat sims, live robots) with signed results, robot replays, and jobs queued to a worker.",
   "author": "Agent Guild",
   "agentGuildApi": 1,

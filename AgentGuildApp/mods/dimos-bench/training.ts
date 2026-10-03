@@ -64,6 +64,8 @@ export interface EpisodeStep {
   blocked: boolean;
   /** The agent's reasoning for this action (agent episodes). */
   thought: string;
+  /** The agent spent this step looking around (4-way panorama) instead of moving. */
+  look?: boolean;
 }
 
 export interface Episode {
@@ -82,12 +84,46 @@ export interface Episode {
   finalDistance: number | null;
   /** What was written to the agent's memory when it finished. */
   lesson: string;
+  /** Where the attempt started (random starts) and ended; absent on older episodes. */
+  startPose?: SimPose | null;
+  finalPose?: SimPose | null;
   createdBy: string;
   createdAt: string;
   finishedAt: string | null;
 }
 
-export function findTask(id: unknown): SimTask | null {
+/** A scene object as a target: task id `obj:<assetId>`; the rubric matches the asset by id. */
+export const OBJECT_TASK_PREFIX = "obj:";
+const ASSET_ID_RE = /^[\w-]{1,64}$/;
+const OBJECT_THRESHOLD_M = 1.5;
+
+/** DimSim titles are often truncated captions ("Two-slice chrome toaster with browning control d..."). */
+export function cleanTitle(title: string): string {
+  return title.split("\n")[0].replace(/\.{3}$/, "").trim().slice(0, 80);
+}
+
+/** A "go to this object" task, from the asset's id and title as the sim reports them. */
+export function objectTask(assetId: string, title: string): SimTask | null {
+  const name = cleanTitle(title);
+  if (!ASSET_ID_RE.test(assetId) || !name) return null;
+  return {
+    id: `${OBJECT_TASK_PREFIX}${assetId}`,
+    scene: "apartment",
+    label: `Go to the ${name.toLowerCase()}`,
+    task: `Go to the ${name.toLowerCase()}`,
+    target: assetId,
+    thresholdM: OBJECT_THRESHOLD_M,
+    startPose: SIM_TASKS[0].startPose,
+    maxSteps: 30,
+  };
+}
+
+/** A built-in task, or an object task when `title` is given (episodes keep it as their `task` text). */
+export function findTask(id: unknown, title?: string): SimTask | null {
+  if (typeof id === "string" && id.startsWith(OBJECT_TASK_PREFIX)) {
+    const name = title?.replace(/^Go to the /i, "") ?? "";
+    return objectTask(id.slice(OBJECT_TASK_PREFIX.length), name);
+  }
   return SIM_TASKS.find((t) => t.id === id) ?? null;
 }
 
@@ -126,6 +162,7 @@ export function parseSteps(body: unknown, from: number):
       distance: finite(s.distance) ? s.distance : null,
       blocked: s.blocked === true,
       thought: typeof s.thought === "string" ? s.thought.slice(0, 500) : "",
+      ...(s.look === true ? { look: true, action: { forward: 0, turn: 0 } } : {}),
     });
   });
   return errors.length ? { ok: false, errors } : { ok: true, steps };
@@ -134,6 +171,39 @@ export function parseSteps(body: unknown, from: number):
 export function parsePoseInput(v: unknown): SimPose | null {
   return parsePose(v);
 }
+
+/** Up to `max` base64 JPEG frames (panorama views, recent frames), or null if any is malformed. */
+export function parseFrames(v: unknown, max: number): string[] | null {
+  if (v == null) return [];
+  if (!Array.isArray(v) || v.length > max) return null;
+  return v.every((f) => typeof f === "string" && f.length <= MAX_STEP_JPEG_B64 && JPEG_B64_RE.test(f)) ? (v as string[]) : null;
+}
+
+export interface LessonEntry {
+  content: string;
+  tags?: string[];
+}
+
+/**
+ * Which lessons the driver reads, newest-first input: this task's successes,
+ * then its failures, then what worked on other tasks (where things are in the
+ * apartment carries over), then the rest.
+ */
+export function rankLessons(entries: LessonEntry[], taskId: string, max = 8): string[] {
+  const rank = (e: LessonEntry) => {
+    const mine = e.tags?.includes(taskId) ?? false;
+    const ok = e.tags?.includes("success") ?? false;
+    return mine ? (ok ? 0 : 1) : ok ? 2 : 3;
+  };
+  return entries
+    .filter((e) => e.tags?.includes("dimsim"))
+    .map((e, k) => ({ e, k, r: rank(e) }))
+    .sort((a, b) => a.r - b.r || a.k - b.k)
+    .slice(0, max)
+    .map(({ e }) => e.content);
+}
+
+const fmtPose = (p: SimPose) => `x ${+p.x.toFixed(2)}, z ${+p.z.toFixed(2)}, facing ${Math.round(p.yaw)}°`;
 
 /** "turn 90° left, forward 1.5 m, …" — consecutive moves merged, for memory and prompts. */
 export function describeActions(actions: SimAction[]): string {
@@ -155,14 +225,21 @@ export function describeActions(actions: SimAction[]): string {
 }
 
 /** The memory entry a finished episode leaves, without a model call (demos, or no API key). */
-export function plainLesson(ep: Pick<Episode, "task" | "actor" | "status" | "finalDistance">, task: SimTask, actions: SimAction[]): string {
-  const route = describeActions(actions);
-  const start = `From the start pose (x ${task.startPose.x}, z ${task.startPose.z}, facing ${task.startPose.yaw}°)`;
-  const dist = ep.finalDistance == null ? "" : `, ending ${ep.finalDistance.toFixed(2)} m from the ${task.target}`;
+export function plainLesson(
+  ep: Pick<Episode, "task" | "actor" | "status" | "finalDistance" | "startPose" | "finalPose">,
+  task: SimTask,
+  actions: SimAction[],
+): string {
+  const route = describeActions(actions.filter((a) => a.forward || a.turn));
+  const start = `From ${fmtPose(ep.startPose ?? task.startPose)}`;
+  const target = task.id.startsWith(OBJECT_TASK_PREFIX) ? "target" : task.target;
+  const dist = ep.finalDistance == null ? "" : `, ending ${ep.finalDistance.toFixed(2)} m from the ${target}`;
+  // Where it ended is what transfers to a different start.
+  const end = ep.finalPose ? ` It ended at x ${+ep.finalPose.x.toFixed(2)}, z ${+ep.finalPose.z.toFixed(2)}.` : "";
   if (ep.status === "success") {
-    return `${ep.actor === "human" ? "Demonstration" : "Worked"} — "${ep.task}": ${start}: ${route}${dist}.`;
+    return `${ep.actor === "human" ? "Demonstration" : "Worked"} — "${ep.task}": ${start}: ${route}${dist}.${end}`;
   }
-  return `Did not work — "${ep.task}": ${start}: ${route}${dist}. Try a different route.`;
+  return `Did not work — "${ep.task}": ${start}: ${route}${dist}.${end} Try a different route.`;
 }
 
 /** One JSONL line per step: what a fine-tuning or imitation pipeline needs. */
@@ -180,6 +257,8 @@ export function exportLine(ep: Episode, step: EpisodeStep, withImages: boolean):
     pose: step.pose,
     action: step.action,
     thought: step.thought || undefined,
+    look: step.look || undefined,
+    start_pose: ep.startPose ?? undefined,
     distance_to_target: step.distance,
     blocked: step.blocked,
     image_jpeg_base64: withImages && step.jpeg ? step.jpeg : undefined,
@@ -193,6 +272,19 @@ export interface LearningPoint {
   status: EpisodeStatus;
   steps: number;
   finalDistance: number | null;
+}
+
+/** Every task an agent has attempted, built-in tasks first. */
+export function attemptedTaskIds(episodes: Episode[]): string[] {
+  const ids = new Set(SIM_TASKS.map((t) => t.id));
+  for (const e of episodes) ids.add(e.taskId);
+  return [...ids];
+}
+
+/** Agent passes among its last `n` finished attempts at a task. */
+export function recentPassRate(points: LearningPoint[], n = 10): { passed: number; of: number } {
+  const recent = points.filter((p) => p.actor === "agent" && p.status !== "stopped").slice(-n);
+  return { passed: recent.filter((p) => p.status === "success").length, of: recent.length };
 }
 
 /** An agent's attempts at one task in order, for the learning curve. */

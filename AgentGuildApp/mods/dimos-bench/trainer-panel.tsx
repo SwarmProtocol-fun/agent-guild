@@ -12,7 +12,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PanelProps } from "@agent-guild/sdk";
 import type { Pose, RobotReplay } from "./bench";
 import { RobotReplayView, token } from "./replay-view";
-import type { Episode, EpisodeStep, LearningPoint, SimAction, SimPose, SimTask } from "./training";
+import { SimMap, type FloorPlan } from "./sim-map";
+import {
+  objectTask, recentPassRate,
+  type Episode, type EpisodeStatus, type EpisodeStep, type LearningPoint, type SimAction, type SimPose, type SimTask,
+} from "./training";
 
 /** window.__agentGuild inside the sim iframe (mods/dimos-bench/dimsim/src/agentGuildEmbed.js). */
 interface SimApi {
@@ -21,6 +25,10 @@ interface SimApi {
   act(a: Partial<SimAction>): { pose: SimPose; blocked: boolean; moved: number };
   reset(p: SimPose): SimPose;
   score(target: string, thresholdM: number): { passed: boolean; score: number; reason?: string };
+  objects(): { id: string; title: string }[];
+  panorama(): string[];
+  floorPlan(): FloorPlan;
+  randomStart(target: string, thresholdM: number): SimPose | null;
 }
 
 interface SimOptions {
@@ -31,6 +39,7 @@ interface SimOptions {
 }
 
 type Mode = "idle" | "human" | "agent";
+type Outcome = Exclude<EpisodeStatus, "running">;
 
 const SIM_URL = "/dimsim/index.html?dimos=1&embed=1&scene=apartment";
 const HUMAN_MAX_STEPS = 60;
@@ -42,6 +51,15 @@ const KEYS: Record<string, Partial<SimAction>> = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const poseOf = (s: Pick<EpisodeStep, "pose">) => s.pose;
+
+/** The attempt worth beating: a pass in the fewest steps, else the closest finish. */
+function bestEpisode(episodes: Episode[], taskId: string): Episode | null {
+  const done = episodes.filter((e) => e.taskId === taskId && e.status !== "running" && e.status !== "stopped" && e.steps > 0);
+  const wins = done.filter((e) => e.status === "success").sort((a, b) => a.steps - b.steps);
+  if (wins.length) return wins[0];
+  return done.filter((e) => e.finalDistance != null).sort((a, b) => a.finalDistance! - b.finalDistance!)[0] ?? null;
+}
 
 async function json<T>(r: Response): Promise<T> {
   const d = await r.json().catch(() => ({}));
@@ -64,7 +82,7 @@ function episodeReplay(ep: Episode, steps: EpisodeStep[]): RobotReplay {
     frames: steps.filter((s) => s.jpeg).map((s) => ({ t: s.i, w: 640, h: 288, jpeg: s.jpeg })),
     actions: steps.map((s) => ({
       t: s.i,
-      name: `turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " (blocked)" : ""}`,
+      name: s.look ? "looked around" : `turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " (blocked)" : ""}`,
       args: s.thought ? JSON.stringify(s.thought) : "{}",
     })),
     streams: [],
@@ -122,10 +140,32 @@ export function TrainerPanel({ api }: PanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<{ episodes: Episode[]; curves: Record<string, LearningPoint[]> } | null>(null);
   const [openEpisode, setOpenEpisode] = useState<string | null>(null);
+  const [objects, setObjects] = useState<{ id: string; title: string }[]>([]);
+  const [plan, setPlan] = useState<FloorPlan | null>(null);
+  const [randomStarts, setRandomStarts] = useState(false);
+  const [trail, setTrail] = useState<SimPose[]>([]);
+  const [ghost, setGhost] = useState<SimPose[]>([]);
+  const [trainN, setTrainN] = useState(5);
+  const [stopAfter, setStopAfter] = useState(3);
+  const [training, setTraining] = useState<{ k: number; n: number; streak: number; passes: number } | null>(null);
   const stopRef = useRef(false);
   const busy = useRef(false);
 
-  const task = options?.tasks.find((t) => t.id === taskId) ?? null;
+  /** Built-in tasks, then "go to <object>" for every object in the scene. */
+  const objectTasks = useMemo(() => {
+    const seen = new Map<string, number>();
+    return objects
+      .map((o) => {
+        const t = objectTask(o.id, o.title);
+        if (!t) return null;
+        const n = (seen.get(t.label) ?? 0) + 1;
+        seen.set(t.label, n);
+        return n > 1 ? { ...t, label: `${t.label} (${n})` } : t;
+      })
+      .filter((t): t is SimTask => t !== null)
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [objects]);
+  const task = options?.tasks.find((t) => t.id === taskId) ?? objectTasks.find((t) => t.id === taskId) ?? null;
   const agent = options?.agents.find((a) => a.id === agentId) ?? null;
 
   useEffect(() => {
@@ -146,6 +186,13 @@ export function TrainerPanel({ api }: PanelProps) {
     try {
       await win!.__agentGuild!.ready;
       sim.current = win!.__agentGuild!;
+      setObjects(sim.current.objects());
+      try {
+        const p = sim.current.floorPlan();
+        setPlan(p.cells ? p : null);
+      } catch {
+        setPlan(null); // the minimap and random starts are extras; the sim still works
+      }
       setSimState("ready");
     } catch {
       setSimState("error");
@@ -161,12 +208,15 @@ export function TrainerPanel({ api }: PanelProps) {
   }, [api, agentId]);
   useEffect(loadHistory, [loadHistory]);
 
-  const resetRobot = useCallback(() => {
-    if (!sim.current || !task) return;
-    sim.current.reset(task.startPose);
+  /** Put the robot at `pose` (default: the task's start) and show what it sees. */
+  const resetRobot = useCallback((pose?: SimPose) => {
+    if (!sim.current || !task) return null;
+    const at = sim.current.reset(pose ?? task.startPose);
     const o = sim.current.observe();
     setCamera(o.jpeg);
+    setTrail([at]);
     setStatus({ step: 0, distance: sim.current.score(task.target, task.thresholdM).score, thought: "", blocked: false });
+    return at;
   }, [task]);
   // Back to the start when the sim comes up or the task changes — not when an
   // attempt ends, so you can see where the robot finished.
@@ -174,60 +224,112 @@ export function TrainerPanel({ api }: PanelProps) {
     if (simState === "ready") resetRobot();
   }, [simState, resetRobot]);
 
-  const start = async (actor: "human" | "agent") => {
-    if (!sim.current || !task || !agentId) return;
+  // The best earlier attempt at this task, drawn on the minimap as a ghost trail.
+  const best = useMemo(() => (history ? bestEpisode(history.episodes, taskId) : null), [history, taskId]);
+  useEffect(() => {
+    setGhost([]);
+    if (!best) return;
+    let live = true;
+    api(`episodes/${best.id}?images=0`)
+      .then((r) => json<{ episode: Episode; steps: EpisodeStep[] }>(r))
+      .then((d) => live && setGhost([...d.steps.map(poseOf), ...(d.episode.finalPose ? [d.episode.finalPose] : [])]))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [api, best]);
+
+  /**
+   * Start an attempt (from a random reachable pose when that's on). An agent
+   * attempt resolves when it ends; a demo resolves once it has started.
+   */
+  const runAttempt = async (actor: "human" | "agent"): Promise<Outcome | null> => {
+    if (!sim.current || !task || !agentId) return null;
     setError(null);
     setNewLesson(null);
-    resetRobot();
-    stopRef.current = false;
+    const from = randomStarts ? sim.current.randomStart(task.target, task.thresholdM) : null;
+    if (randomStarts && !from) setError("No reachable random start for this target; starting from the default pose.");
+    const startPose = resetRobot(from ?? undefined);
     try {
       const d = await json<{ episode: Episode; lessons: string[] }>(
         await api("episodes", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agentId, taskId, actor, startDistance: sim.current.score(task.target, task.thresholdM).score }),
+          body: JSON.stringify({
+            agentId, taskId, actor, startPose,
+            title: task.id.startsWith("obj:") ? task.task : undefined,
+            startDistance: sim.current.score(task.target, task.thresholdM).score,
+          }),
         }),
       );
       setEpisode(d.episode);
       setLessons(d.lessons);
       setMode(actor);
-      if (actor === "agent") void agentLoop(d.episode);
+      return actor === "agent" ? await agentLoop(d.episode) : null;
     } catch (e) {
       setError((e as Error).message);
+      return null;
     }
   };
 
-  /** Observe → act → score → record. Shared by your demo and the agent. */
-  const step = async (ep: Episode, i: number, action: Partial<SimAction>, thought = "") => {
+  const start = (actor: "human" | "agent") => {
+    stopRef.current = false;
+    void runAttempt(actor);
+  };
+
+  /** Run up to n agent attempts back to back; stop early after `stopAfter` passes in a row. */
+  const train = async () => {
+    stopRef.current = false;
+    let streak = 0, passes = 0;
+    for (let k = 0; k < trainN && !stopRef.current; k++) {
+      setTraining({ k: k + 1, n: trainN, streak, passes });
+      const outcome = await runAttempt("agent");
+      if (outcome == null || outcome === "stopped") break;
+      streak = outcome === "success" ? streak + 1 : 0;
+      passes += outcome === "success" ? 1 : 0;
+      if (streak >= stopAfter) break;
+      await sleep(800); // a beat to see where it ended
+    }
+    setTraining(null);
+  };
+
+  /**
+   * Observe → act → score → record. Shared by your demo and the agent. A look
+   * step turns in place for a panorama instead of moving.
+   */
+  const step = async (ep: Episode, i: number, action: Partial<SimAction>, thought = "", look = false) => {
     const s = sim.current!;
     const before = s.observe();
-    const result = s.act(action);
+    const panorama = look ? s.panorama() : [];
+    const result = look ? { pose: before.pose, blocked: false } : s.act(action);
     const score = s.score(task!.target, task!.thresholdM);
     const after = s.observe();
     setCamera(after.jpeg);
-    setStatus({ step: i + 1, distance: score.score, thought, blocked: result.blocked });
+    setTrail((t) => [...t, result.pose]);
+    setStatus({ step: i + 1, distance: score.score, thought: look ? `${thought} (looking around)` : thought, blocked: result.blocked });
     await json(
       await api(`episodes/${ep.id}/steps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          steps: [{ jpeg: before.jpeg, pose: before.pose, action: { forward: action.forward ?? 0, turn: action.turn ?? 0 }, distance: score.score, blocked: result.blocked, thought }],
+          steps: [{ jpeg: before.jpeg, pose: before.pose, action: { forward: action.forward ?? 0, turn: action.turn ?? 0 }, distance: score.score, blocked: result.blocked, thought, look }],
         }),
       }),
     );
-    return score;
+    return { score, panorama };
   };
 
-  const finish = async (ep: Episode, outcome: "success" | "failed" | "stopped") => {
+  const finish = async (ep: Episode, outcome: Outcome): Promise<Outcome> => {
     const s = sim.current!;
     const finalDistance = s.score(task!.target, task!.thresholdM).score;
+    const finalPose = s.observe().pose;
     setMode("idle");
     try {
       const d = await json<{ episode: Episode }>(
         await api(`episodes/${ep.id}/finish`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: outcome, finalDistance: Number.isFinite(finalDistance) ? finalDistance : null }),
+          body: JSON.stringify({ status: outcome, finalDistance: Number.isFinite(finalDistance) ? finalDistance : null, finalPose }),
         }),
       );
       setEpisode(d.episode);
@@ -239,20 +341,22 @@ export function TrainerPanel({ api }: PanelProps) {
       setError((e as Error).message);
     }
     loadHistory();
+    return outcome;
   };
 
-  const agentLoop = async (ep: Episode) => {
+  const agentLoop = async (ep: Episode): Promise<Outcome> => {
     const s = sim.current!;
+    let panorama = s.panorama(); // orient at the start: it may be anywhere in the apartment
     for (let i = 0; i < task!.maxSteps; i++) {
       if (stopRef.current) return finish(ep, "stopped");
       const o = s.observe();
-      let decision: { thought: string; action: SimAction; done: boolean };
+      let decision: { thought: string; action: SimAction; look: boolean; done: boolean };
       try {
         decision = await json(
           await api(`episodes/${ep.id}/act`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jpeg: o.jpeg, pose: o.pose }),
+            body: JSON.stringify({ jpeg: o.jpeg, pose: o.pose, panorama }),
           }),
         );
       } catch (e) {
@@ -260,8 +364,9 @@ export function TrainerPanel({ api }: PanelProps) {
         return finish(ep, "stopped");
       }
       if (stopRef.current) return finish(ep, "stopped");
-      const score = await step(ep, i, decision.action, decision.thought);
-      if (score.passed) return finish(ep, "success");
+      const r = await step(ep, i, decision.action, decision.thought, decision.look);
+      panorama = r.panorama;
+      if (r.score.passed) return finish(ep, "success");
       if (decision.done) return finish(ep, "failed"); // it thought it had arrived; the rubric disagrees
     }
     return finish(ep, "failed");
@@ -273,7 +378,7 @@ export function TrainerPanel({ api }: PanelProps) {
       busy.current = true;
       try {
         const i = status?.step ?? 0;
-        const score = await step(episode, i, action);
+        const { score } = await step(episode, i, action);
         if (score.passed) await finish(episode, "success");
         else if (i + 1 >= HUMAN_MAX_STEPS) await finish(episode, "failed");
       } catch (e) {
@@ -320,6 +425,8 @@ export function TrainerPanel({ api }: PanelProps) {
   const field = "border rounded px-2 py-1 bg-background";
   const curve = history?.curves[taskId] ?? [];
   const reached = status?.distance != null && task ? status.distance <= task.thresholdM : false;
+  const rate = recentPassRate(curve);
+  const idle = mode === "idle" && !training;
 
   return (
     <div className="space-y-4 text-sm">
@@ -334,17 +441,28 @@ export function TrainerPanel({ api }: PanelProps) {
       <div className="flex flex-wrap gap-2 items-end">
         <label className="space-y-1">
           <div className="text-muted-foreground">Agent</div>
-          <select className={field} value={agentId} disabled={mode !== "idle"} onChange={(e) => setAgentId(e.target.value)}>
+          <select className={field} value={agentId} disabled={!idle} onChange={(e) => setAgentId(e.target.value)}>
             {options?.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select>
         </label>
         <label className="space-y-1">
           <div className="text-muted-foreground">Task</div>
-          <select className={field} value={taskId} disabled={mode !== "idle"} onChange={(e) => setTaskId(e.target.value)}>
-            {options?.tasks.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          <select className={`${field} max-w-64`} value={taskId} disabled={!idle} onChange={(e) => setTaskId(e.target.value)}>
+            <optgroup label="DimSim evals">
+              {options?.tasks.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </optgroup>
+            {objectTasks.length > 0 && (
+              <optgroup label="Any object in the apartment">
+                {objectTasks.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </optgroup>
+            )}
           </select>
         </label>
-        {mode === "idle" ? (
+        <label className="flex items-center gap-1.5 py-1.5" title={plan ? "Start each attempt from a random reachable spot, so lessons have to transfer" : "Needs the sim's floor plan"}>
+          <input type="checkbox" checked={randomStarts} disabled={!idle || !plan} onChange={(e) => setRandomStarts(e.target.checked)} />
+          Random starts
+        </label>
+        {idle ? (
           <>
             <button
               className="rounded px-3 py-1.5 font-medium disabled:opacity-50"
@@ -358,11 +476,25 @@ export function TrainerPanel({ api }: PanelProps) {
             <button className="border rounded px-3 py-1.5 disabled:opacity-50" disabled={simState !== "ready" || !agentId} onClick={() => start("human")}>
               🎮 Record a demo
             </button>
+            <span className="flex items-center gap-1 border rounded px-2 py-1">
+              <button className="font-medium disabled:opacity-50" disabled={simState !== "ready" || !agentId || !options?.canDrive} onClick={() => void train()}>
+                ⟳ Train ×
+              </button>
+              <input type="number" min={1} max={20} value={trainN} aria-label="Attempts" className="w-12 bg-transparent tabular-nums" onChange={(e) => setTrainN(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} />
+              <span className="text-xs text-muted-foreground">stop after</span>
+              <input type="number" min={1} max={20} value={stopAfter} aria-label="Passes in a row to stop after" className="w-10 bg-transparent tabular-nums" onChange={(e) => setStopAfter(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} />
+              <span className="text-xs text-muted-foreground">passes in a row</span>
+            </span>
           </>
         ) : (
-          <button className="border rounded px-3 py-1.5" onClick={() => (mode === "agent" ? (stopRef.current = true) : episode && finish(episode, "stopped"))}>
-            ■ Stop
+          <button className="border rounded px-3 py-1.5" onClick={() => (mode === "human" && episode ? finish(episode, "stopped") : (stopRef.current = true))}>
+            ■ Stop{training ? " training" : ""}
           </button>
+        )}
+        {training && (
+          <span className="py-1.5 text-xs text-muted-foreground tabular-nums">
+            attempt {training.k}/{training.n} · {training.passes} passed · {training.streak} in a row
+          </span>
         )}
         {mode === "human" && episode && (
           <button className="border rounded px-3 py-1.5" onClick={() => finish(episode, "failed")}>Give up</button>
@@ -405,6 +537,15 @@ export function TrainerPanel({ api }: PanelProps) {
         </div>
 
         <div className="space-y-3">
+          {plan && task && (
+            <figure className="space-y-1">
+              <SimMap plan={plan} target={task.target} thresholdM={task.thresholdM} trail={trail} ghost={ghost} onPick={idle ? (id) => setTaskId(`obj:${id}`) : undefined} />
+              <figcaption className="text-xs text-muted-foreground">
+                Floor plan: <span style={{ color: token("primary") }}>━</span> this attempt · ┄ best attempt so far · shaded = within {task.thresholdM} m of the target.
+                {idle ? " Click any object to make it the target." : ""}
+              </figcaption>
+            </figure>
+          )}
           <figure className="space-y-1">
             {camera ? (
               <img src={`data:image/jpeg;base64,${camera}`} alt="Robot camera" className="w-full h-auto rounded border bg-black" />
@@ -438,7 +579,12 @@ export function TrainerPanel({ api }: PanelProps) {
 
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="rounded border p-3 space-y-2">
-          <div className="font-medium">Learning curve · {task?.label}</div>
+          <div className="flex justify-between items-baseline gap-2">
+            <div className="font-medium">Learning curve · {task?.label}</div>
+            {rate.of > 0 && (
+              <div className="text-xs text-muted-foreground tabular-nums">agent passed {rate.passed} of its last {rate.of}</div>
+            )}
+          </div>
           {curve.length ? (
             task && <LearningCurve points={curve} threshold={task.thresholdM} />
           ) : (

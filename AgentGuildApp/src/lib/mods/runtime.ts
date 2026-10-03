@@ -10,6 +10,7 @@ import type {
 } from "@agent-guild/sdk";
 import type { NextRequest } from "next/server";
 import { requireAgentAuth } from "@/lib/auth-guard";
+import { bearerToken, verifyAgentToken } from "@/lib/agent-tokens";
 import { MOD_MANIFESTS } from "./generated/manifests";
 import { serverMods } from "./generated/server";
 import { matchRoute } from "./router";
@@ -112,18 +113,27 @@ export async function handleModRequest(
   const match = matchRoute(loaded.mod.routes ?? {}, req.method, path);
   if (!match) return Response.json({ error: "Not found" }, { status: 404 });
 
-  // An agent (not a human operator) can authenticate itself the same
-  // Ed25519 way it already does against /api/v1/* — agent/sig/ts query
-  // params, message "METHOD:/mods/<modId>/<path>:<ts>" — instead of a
-  // signed-in session. Only attempted when those params are actually
-  // present, so a plain session-based call never pays for the extra
-  // Firestore round trip. A bad/missing signature just leaves ctx.agent
-  // null (falls through to the session check below) rather than failing
-  // the request outright — a session and a signature are alternatives, not
-  // both required.
+  // An agent (not a human operator) can authenticate itself the same ways
+  // it already does against /api/v1/*, instead of a signed-in session:
+  //   - Ed25519: agent/sig/ts query params, message "METHOD:/mods/<modId>/<path>:<ts>"
+  //   - API key: agentId/apiKey query params
+  //   - `Authorization: Bearer agt_…` carrying the mods:call scope — what a
+  //     hosted runtime or sidecar holds instead of the agent's private key
+  // Only attempted when those credentials are actually present, so a plain
+  // session-based call never pays for the extra Firestore round trip. A bad
+  // credential just leaves ctx.agent null (falls through to the session
+  // check below) rather than failing the request outright — a session and
+  // agent auth are alternatives, not both required.
   let agent: RouteContext["agent"] = null;
   const url = new URL(req.url);
-  if (url.searchParams.get("agent") && url.searchParams.get("sig") && url.searchParams.get("ts")) {
+  const token = bearerToken(req.headers);
+  if (token) {
+    const claims = await verifyAgentToken(token);
+    if (claims?.scopes.includes("mods:call")) agent = { agentId: claims.agentId, orgId: claims.orgId };
+  } else if (
+    (url.searchParams.get("agent") && url.searchParams.get("sig") && url.searchParams.get("ts")) ||
+    (url.searchParams.get("agentId") && url.searchParams.get("apiKey"))
+  ) {
     const prefix = `${req.method}:/mods/${modId}/${path.join("/")}`;
     const authResult = await requireAgentAuth(req as NextRequest, prefix);
     if (authResult.ok && authResult.agent) {

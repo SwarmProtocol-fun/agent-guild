@@ -27,9 +27,15 @@ const SYSTEM = `You drive a Unitree Go2 quadruped robot through a simulated apar
 Each turn you get the robot's front camera image and its pose, and you choose ONE action:
 - turn: degrees to rotate in place before moving (positive = left, negative = right, -180..180)
 - forward: metres to walk after turning (-1..2; small values near obstacles)
-The robot stops early if something is in the way ("blocked"). Pose: x/z in metres on the floor plan, yaw in degrees.
+- look_around: true to spend this step turning in place and photographing all four directions instead of moving
+  (turn/forward are ignored); you get the four views next turn. Use it when you are lost or boxed in, not every step.
+The robot stops early if something is in the way ("blocked").
+Pose: x/z in metres on the apartment floor plan, yaw in degrees. Facing yaw θ, walking forward moves the robot
+by (sin θ, cos θ) in (x, z): yaw 0 walks toward +z, yaw 90 toward +x, yaw -90 toward -x, yaw 180 toward -z.
+At the first step you also get a four-way panorama (front, left, back, right) to orient yourself.
 Set done=true only when you believe the robot has reached the goal. Be decisive: you have a limited number of steps.
-Use the lessons from earlier attempts — they come from this exact apartment and start position.`;
+Use the lessons from earlier attempts — they come from this apartment, but the start position may differ from theirs,
+so rely on where things are (coordinates, rooms, landmarks) more than on a fixed sequence of moves.`;
 
 const ACTION_SCHEMA = {
   type: "object",
@@ -37,17 +43,24 @@ const ACTION_SCHEMA = {
     thought: { type: "string", description: "One or two sentences: what you see and why this action." },
     turn: { type: "number" },
     forward: { type: "number" },
+    look_around: { type: "boolean" },
     done: { type: "boolean" },
   },
-  required: ["thought", "turn", "forward", "done"],
+  required: ["thought", "turn", "forward", "look_around", "done"],
   additionalProperties: false,
 } as const;
 
 export interface Decision {
   thought: string;
   action: SimAction;
+  /** Spend this step on a 4-way panorama instead of moving. */
+  look: boolean;
   done: boolean;
 }
+
+const PANORAMA_LABELS = ["front", "left (+90°)", "back (180°)", "right (-90°)"];
+type ImageBlock = { type: "image"; source: { type: "base64"; media_type: "image/jpeg"; data: string } };
+const image = (data: string): ImageBlock => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data } });
 
 export class DriverError extends Error {}
 
@@ -55,19 +68,23 @@ export async function decideAction(args: {
   agentName: string;
   task: SimTask;
   lessons: string[];
-  history: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought">[];
+  history: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought" | "look">[];
   jpeg: string;
   pose: SimPose;
   stepsLeft: number;
+  /** Front/left/back/right views, when the agent looked around (or at the first step). */
+  panorama?: string[];
+  /** The camera frames before the last moves, oldest first. */
+  recent?: string[];
 }): Promise<Decision> {
-  const { agentName, task, lessons, history, jpeg, pose, stepsLeft } = args;
+  const { agentName, task, lessons, history, jpeg, pose, stepsLeft, panorama = [], recent = [] } = args;
   const memory = lessons.length
     ? `What ${agentName} learned in earlier attempts (newest first):\n${lessons.map((l) => `- ${l}`).join("\n")}`
     : `${agentName} has no earlier attempts at this yet.`;
   const past = history.length
     ? history
         .slice(-12)
-        .map((h, k) => `${k + 1}. at (${h.pose.x.toFixed(2)}, ${h.pose.z.toFixed(2)}) yaw ${h.pose.yaw}° → turn ${h.action.turn}°, forward ${h.action.forward} m${h.blocked ? " (blocked)" : ""}`)
+        .map((h, k) => `${k + 1}. at (${h.pose.x.toFixed(2)}, ${h.pose.z.toFixed(2)}) yaw ${h.pose.yaw}° → ${h.look ? "looked around" : `turn ${h.action.turn}°, forward ${h.action.forward} m${h.blocked ? " (blocked)" : ""}`}`)
         .join("\n")
     : "none yet";
 
@@ -85,7 +102,14 @@ export async function decideAction(args: {
           role: "user",
           content: [
             { type: "text", text: `You are ${agentName}. Task: ${task.task}.\n\n${memory}\n\nYour moves so far this attempt:\n${past}` },
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpeg } },
+            ...(recent.length
+              ? [{ type: "text" as const, text: `Your camera before your last ${recent.length === 1 ? "move" : `${recent.length} moves`} (oldest first):` }, ...recent.map(image)]
+              : []),
+            ...(panorama.length
+              ? [{ type: "text" as const, text: "Looking around from where you stand now:" }, ...panorama.flatMap((f, k) => [{ type: "text" as const, text: PANORAMA_LABELS[k] ?? `view ${k + 1}` }, image(f)])]
+              : []),
+            { type: "text", text: "Your camera now:" },
+            image(jpeg),
             { type: "text", text: `Current pose: x ${pose.x.toFixed(2)}, z ${pose.z.toFixed(2)}, yaw ${pose.yaw}°. Steps left: ${stepsLeft}. Choose the next action.` },
           ],
         },
@@ -100,7 +124,8 @@ export async function decideAction(args: {
   if (response.stop_reason === "refusal") throw new DriverError("The model declined this step.");
   const out = response.parsed_output;
   if (!out) throw new DriverError("The model returned no action.");
-  return { thought: out.thought.slice(0, 500), action: clampAction(out), done: out.done };
+  const look = out.look_around === true && !out.done;
+  return { thought: out.thought.slice(0, 500), action: look ? { forward: 0, turn: 0 } : clampAction(out), look, done: out.done };
 }
 
 /** A finished episode → one or two sentences the agent should remember next time. */
@@ -108,11 +133,13 @@ export async function reflect(args: {
   task: SimTask;
   succeeded: boolean;
   finalDistance: number | null;
-  steps: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought">[];
+  startPose: SimPose;
+  finalPose: SimPose | null;
+  steps: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought" | "look">[];
 }): Promise<string> {
-  const { task, succeeded, finalDistance, steps } = args;
+  const { task, succeeded, finalDistance, startPose, finalPose, steps } = args;
   const trace = steps
-    .map((s, k) => `${k + 1}. (${s.pose.x.toFixed(2)}, ${s.pose.z.toFixed(2)}) yaw ${s.pose.yaw}° → turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " BLOCKED" : ""}${s.thought ? ` — "${s.thought}"` : ""}`)
+    .map((s, k) => `${k + 1}. (${s.pose.x.toFixed(2)}, ${s.pose.z.toFixed(2)}) yaw ${s.pose.yaw}° → ${s.look ? "looked around" : `turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " BLOCKED" : ""}`}${s.thought ? ` — "${s.thought}"` : ""}`)
     .join("\n");
   const response = await anthropic().beta.messages.create({
     model: DRIVER_MODEL,
@@ -123,13 +150,15 @@ export async function reflect(args: {
     messages: [
       {
         role: "user",
-        content: `A robot attempted "${task.task}" in a simulated apartment, starting at x ${task.startPose.x}, z ${task.startPose.z}, facing ${task.startPose.yaw}°.
-Outcome: ${succeeded ? "SUCCESS" : "FAILED"}${finalDistance == null ? "" : `, ended ${finalDistance.toFixed(2)} m from the ${task.target}`}.
+        content: `A robot attempted "${task.task}" in a simulated apartment, starting at x ${startPose.x}, z ${startPose.z}, facing ${startPose.yaw}°.
+Outcome: ${succeeded ? "SUCCESS" : "FAILED"}${finalDistance == null ? "" : `, ended ${finalDistance.toFixed(2)} m from the target`}${finalPose ? ` at x ${finalPose.x.toFixed(2)}, z ${finalPose.z.toFixed(2)}` : ""}.
 Route taken: ${describeActions(steps.map((s) => s.action))}
 Steps:
 ${trace}
 
-Write the single most useful lesson for the next attempt at this task, in at most two sentences, concrete enough to act on (headings, distances, obstacles). No preamble.`,
+Coordinates: facing yaw θ, forward moves by (sin θ, cos θ) in (x, z).
+Write the single most useful lesson for the next attempt at this task, in at most two sentences, concrete enough to act on.
+The next attempt may start somewhere else, so state where the target and obstacles are (x/z coordinates, which room, landmarks you saw) rather than only a sequence of turns. No preamble.`,
       },
     ],
   });

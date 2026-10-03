@@ -47,6 +47,15 @@ interface ReferralStats {
   rewardUsd: number;
 }
 
+interface AgentConnection {
+  agentId: string;
+  capabilities: Record<string, boolean>;
+  wallet: { configured: boolean; network: Network | null };
+  risk: RiskConfig | null;
+  pendingStrategies: number;
+  readyToTrade: boolean;
+}
+
 interface MarketCoin {
   coin: string;
   markPx: number;
@@ -626,7 +635,51 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  // --- Connect your agent ---------------------------------------------------
+  const [connection, setConnection] = useState<AgentConnection | "loading" | "error" | null>(null);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function loadConnection() {
+    if (!agentId) return;
+    setConnection("loading");
+    try {
+      const resp = await api(`me?agentId=${encodeURIComponent(agentId)}`);
+      if (!resp.ok) throw new Error();
+      setConnection(await resp.json());
+    } catch {
+      setConnection("error");
+    }
+  }
+
+  const connectSnippet = [
+    `# 1. Mint a token for the agent (signed with its Ed25519 key or API key):`,
+    `#    POST /api/v1/tokens  body: {"scopes":["mods:call"],"ttlSeconds":86400}`,
+    `export AGENT_GUILD_URL=${typeof window !== "undefined" ? window.location.origin : "https://agent-guild.com"}`,
+    `export AGENT_GUILD_TOKEN=agt_...        # or AGENT_GUILD_AGENT_ID=${agentId || "<agentId>"} + AGENT_GUILD_API_KEY=...`,
+    `export HL_MASTER_SECRET=...            # the wallet passphrase you set above`,
+    ``,
+    `# 2. Check it's plugged in, then let it trade:`,
+    `node mods/hyperliquid-trading/agent/hl-agent.mjs me`,
+    `node mods/hyperliquid-trading/agent/hl-agent.mjs call hyperliquid_trade '{"coin":"ETH","isBuy":true,"sizeUsd":10}'`,
+    `node mods/hyperliquid-trading/agent/hl-agent.mjs daemon   # fires DCA/grid/sniper signals`,
+    ``,
+    `# Or inside your agent: import { connect } from ".../hl-agent.mjs"`,
+    `#   const hl = await connect(); llm tools = hl.tools; run picks with hl.call(name, input)`,
+  ].join("\n");
+
+  async function copySnippet() {
+    try {
+      await navigator.clipboard.writeText(connectSnippet);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard blocked — the snippet is still selectable.
+    }
+  }
+
   function loadAgentData() {
+    loadConnection();
     loadWalletStatus();
     loadRiskConfig();
     loadHistory();
@@ -757,6 +810,75 @@ function TradingPanel({ api }: PanelProps) {
           </form>
         )}
         {walletActionStatus && <p className="text-xs text-[hsl(var(--muted-foreground))]">{walletActionStatus}</p>}
+      </Section>
+
+      <Section
+        title="Connect your agent"
+        description="Let the agent trade on its own through this mod's API — same wallet, capabilities, and risk limits."
+        dense
+        right={
+          <div className="flex gap-2">
+            <button type="button" className={secondaryButtonClass()} onClick={loadConnection} disabled={!agentId}>
+              Check
+            </button>
+            <button type="button" className={secondaryButtonClass()} onClick={() => setConnectOpen((v) => !v)}>
+              {connectOpen ? "Hide setup" : "Setup"}
+            </button>
+          </div>
+        }
+      >
+        {!agentId ? (
+          <p className="text-xs text-[hsl(var(--muted-foreground))]">Enter an Agent ID above to check its connection.</p>
+        ) : connection === "loading" ? (
+          <Spinner label="Checking agent…" />
+        ) : connection === "error" ? (
+          <ErrorNote message="Couldn't check this agent." onRetry={loadConnection} />
+        ) : connection ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              {connection.readyToTrade
+                ? <Badge tone="success">Ready to trade</Badge>
+                : <Badge tone="warning">Not ready yet</Badge>}
+              {connection.pendingStrategies > 0 && (
+                <Badge tone="warning">{connection.pendingStrategies} pending signal{connection.pendingStrategies === 1 ? "" : "s"}</Badge>
+              )}
+            </div>
+            <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <li className="flex items-center gap-1.5">
+                <span aria-hidden="true">{connection.wallet.configured ? "✓" : "✗"}</span>
+                Wallet {connection.wallet.configured ? `(${connection.wallet.network})` : "not set"}
+              </li>
+              <li className="flex items-center gap-1.5">
+                <span aria-hidden="true">{connection.risk ? "✓" : "–"}</span>
+                {connection.risk ? `Risk limits: max $${connection.risk.maxPositionUsd}/trade` : "No risk limits (recommended)"}
+              </li>
+              {Object.entries(connection.capabilities).map(([key, granted]) => (
+                <li key={key} className={`flex items-center gap-1.5 ${granted ? "" : "text-[hsl(var(--muted-foreground))]"}`}>
+                  <span aria-hidden="true">{granted ? "✓" : "✗"}</span>
+                  <span className={monoClass}>{key}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {connectOpen && (
+          <div className="space-y-2 border-t border-[hsl(var(--border))] pt-2">
+            <div className="flex items-center justify-between">
+              <span className={labelClass}>Run from your agent&apos;s machine</span>
+              <button type="button" className={secondaryButtonClass()} onClick={copySnippet}>
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <pre className={`${monoClass} overflow-x-auto whitespace-pre rounded-sm bg-[hsl(var(--muted))] p-2 text-[11px] leading-relaxed`}>
+              {connectSnippet}
+            </pre>
+            <p className="text-xs text-[hsl(var(--muted-foreground))]">
+              The tool manifest at <span className={monoClass}>/api/mods/hyperliquid-trading/agent/tools</span> works as LLM tool
+              definitions. The passphrase stays in the agent&apos;s environment and is never part of the model&apos;s context.
+            </p>
+          </div>
+        )}
       </Section>
 
       {pendingStrategies.length > 0 && (

@@ -7,11 +7,12 @@ import {
   HARNESSES, SUITE_CATALOG, type BenchJob, type BenchRun,
 } from "./bench";
 import {
-  SIM_TASKS, exportLine, findTask, learningCurve, parsePoseInput, parseSteps, plainLesson, type Episode, type SimTask,
+  SIM_TASKS, attemptedTaskIds, exportLine, findTask, learningCurve, parseFrames, parsePoseInput, parseSteps, plainLesson, rankLessons,
+  type Episode, type SimTask,
 } from "./training";
 import { canDrive, decideAction, DriverError, DRIVER_MODEL, reflect } from "./trainer";
 import {
-  addSteps, createEpisode, getEpisode, getSteps, listEpisodes, updateEpisode,
+  addSteps, createEpisode, getEpisode, getRecentFrames, getSteps, listEpisodes, updateEpisode,
   claimJob, createJob, getAncestors, getJob, getReplay, getRun, heartbeat, lineageExists, listJobs, listReplays, listRuns,
   listWorkers, newRunId, saveReplay, saveRun, updateJob,
 } from "./store";
@@ -49,17 +50,17 @@ async function sessionEpisode(id: string, address: string): Promise<Episode | Re
   return ep;
 }
 
-/** The agent's DimSim lessons, this task's first, newest first. Memory is best-effort. */
+/** The agent's DimSim lessons, ranked by rankLessons (this task's successes first). Memory is best-effort. */
 async function lessonsFor(ep: Pick<Episode, "orgId" | "agentId">, task: SimTask, max = 8): Promise<string[]> {
   try {
-    const entries = (await getMemoryEntries(ep.orgId, ep.agentId, "long_term")).filter((m) => m.tags?.includes("dimsim"));
-    const mine = entries.filter((m) => m.tags?.includes(task.id));
-    const rest = entries.filter((m) => !m.tags?.includes(task.id));
-    return [...mine, ...rest].slice(0, max).map((m) => m.content);
+    return rankLessons(await getMemoryEntries(ep.orgId, ep.agentId, "long_term"), task.id, max);
   } catch {
     return [];
   }
 }
+
+/** An episode's task — built-in, or an object task rebuilt from the episode's own task text. */
+const episodeTask = (ep: Pick<Episode, "taskId" | "task">) => findTask(ep.taskId, ep.task);
 
 /** A run without its per-case rows — what list views need. */
 function brief(run: BenchRun): Omit<BenchRun, "results"> {
@@ -410,11 +411,14 @@ export default defineServerMod({
       };
     },
 
-    /** POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent" }. */
+    /**
+     * POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent", startPose?, startDistance? }.
+     * taskId is a built-in task or `obj:<assetId>` with the object's `title`.
+     */
     "POST /episodes": async (req, { session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
       const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
-      const task = findTask(b.taskId);
+      const task = findTask(b.taskId, typeof b.title === "string" ? b.title : undefined);
       const actor = b.actor === "agent" ? "agent" : b.actor === "human" ? "human" : null;
       if (!task || !actor || typeof b.agentId !== "string") {
         return Response.json({ error: "agentId, a known taskId and actor (human|agent) are required" }, { status: 400 });
@@ -431,8 +435,9 @@ export default defineServerMod({
         taskId: task.id, task: task.task, scene: task.scene, actor,
         model: actor === "agent" ? DRIVER_MODEL : null,
         status: "running", steps: 0,
-        startDistance: typeof b.startDistance === "number" ? b.startDistance : null,
+        startDistance: typeof b.startDistance === "number" && Number.isFinite(b.startDistance) ? b.startDistance : null,
         finalDistance: null, lesson: "",
+        startPose: parsePoseInput(b.startPose) ?? task.startPose, finalPose: null,
         createdBy: session.address, createdAt: new Date().toISOString(), finishedAt: null,
       });
       return Response.json({ episode, task, lessons: await lessonsFor(episode, task) }, { status: 201 });
@@ -452,20 +457,23 @@ export default defineServerMod({
     },
 
     /**
-     * POST /episodes/:id/act — { jpeg, pose }: the agent looks through the
-     * robot's camera and picks the next move. The panel executes it in the
-     * sim, then records the step.
+     * POST /episodes/:id/act — { jpeg, pose, panorama? }: the agent looks
+     * through the robot's camera (plus its last two frames, and a 4-way
+     * panorama at the start or after it chose to look around) and picks the
+     * next move. The panel executes it in the sim, then records the step.
      */
     "POST /episodes/:id/act": async (req, { params, session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
       const ep = await sessionEpisode(params.id, session.address);
       if (ep instanceof Response) return ep;
       if (ep.actor !== "agent" || ep.status !== "running") return Response.json({ error: "Not a running agent episode" }, { status: 409 });
-      const task = findTask(ep.taskId);
+      const task = episodeTask(ep);
       const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       const pose = parsePoseInput(b.pose);
-      if (!task || !pose || typeof b.jpeg !== "string" || !b.jpeg) {
-        return Response.json({ error: "jpeg and pose are required" }, { status: 400 });
+      const frames = parseFrames([b.jpeg], 1);
+      const panorama = parseFrames(b.panorama, 4);
+      if (!task || !pose || !frames?.length || !panorama) {
+        return Response.json({ error: "jpeg and pose are required; panorama is up to 4 JPEGs" }, { status: 400 });
       }
       try {
         const decision = await decideAction({
@@ -473,9 +481,11 @@ export default defineServerMod({
           task,
           lessons: await lessonsFor(ep, task),
           history: await getSteps(ep.id, false),
-          jpeg: b.jpeg,
+          jpeg: frames[0],
           pose,
           stepsLeft: Math.max(0, task.maxSteps - ep.steps),
+          panorama,
+          recent: await getRecentFrames(ep.id, 2),
         });
         return decision;
       } catch (err) {
@@ -485,7 +495,7 @@ export default defineServerMod({
     },
 
     /**
-     * POST /episodes/:id/finish — { status: "success" | "failed" | "stopped", finalDistance }.
+     * POST /episodes/:id/finish — { status: "success" | "failed" | "stopped", finalDistance, finalPose }.
      * A finished (not stopped) attempt leaves a lesson in the agent's memory:
      * the route for a demonstration, the model's reflection for an agent run.
      */
@@ -494,19 +504,20 @@ export default defineServerMod({
       const ep = await sessionEpisode(params.id, session.address);
       if (ep instanceof Response) return ep;
       if (ep.status !== "running") return Response.json({ error: `Episode is already ${ep.status}` }, { status: 409 });
-      const task = findTask(ep.taskId);
+      const task = episodeTask(ep);
       const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
       const status = b.status === "success" || b.status === "failed" || b.status === "stopped" ? b.status : null;
       if (!task || !status) return Response.json({ error: "status must be success, failed or stopped" }, { status: 400 });
       const finalDistance = typeof b.finalDistance === "number" && Number.isFinite(b.finalDistance) ? b.finalDistance : null;
-      const done: Partial<Episode> = { status, finalDistance, finishedAt: new Date().toISOString() };
+      const finalPose = parsePoseInput(b.finalPose);
+      const done: Partial<Episode> = { status, finalDistance, finalPose, finishedAt: new Date().toISOString() };
 
       if (status !== "stopped" && ep.steps > 0) {
         const steps = await getSteps(ep.id, false);
-        let lesson = plainLesson({ ...ep, status, finalDistance }, task, steps.map((s) => s.action));
+        let lesson = plainLesson({ ...ep, status, finalDistance, finalPose }, task, steps.map((s) => s.action));
         if (ep.actor === "agent" && canDrive()) {
           try {
-            lesson = await reflect({ task, succeeded: status === "success", finalDistance, steps });
+            lesson = await reflect({ task, succeeded: status === "success", finalDistance, startPose: ep.startPose ?? task.startPose, finalPose, steps });
           } catch (err) {
             log.warn("reflection failed, keeping the plain lesson:", err);
           }
@@ -538,7 +549,7 @@ export default defineServerMod({
       const episodes = await listEpisodes(agent.id);
       return {
         episodes,
-        curves: Object.fromEntries(SIM_TASKS.map((t) => [t.id, learningCurve(episodes, t.id)])),
+        curves: Object.fromEntries(attemptedTaskIds(episodes).map((id) => [id, learningCurve(episodes, id)])),
       };
     },
 
@@ -566,12 +577,12 @@ export default defineServerMod({
       });
     },
 
-    /** GET /episodes/:id — one attempt with its steps and camera frames, for replay. */
-    "GET /episodes/:id": async (_req, { params, session }) => {
+    /** GET /episodes/:id — one attempt with its steps and camera frames, for replay (?images=0: poses only, for the minimap). */
+    "GET /episodes/:id": async (req, { params, session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
       const ep = await sessionEpisode(params.id, session.address);
       if (ep instanceof Response) return ep;
-      return { episode: ep, steps: await getSteps(ep.id) };
+      return { episode: ep, steps: await getSteps(ep.id, new URL(req.url).searchParams.get("images") !== "0") };
     },
 
     /** GET /suites — suites that have runs, most-run first. */

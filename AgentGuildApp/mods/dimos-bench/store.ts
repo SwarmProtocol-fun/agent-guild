@@ -212,12 +212,23 @@ export async function addSteps(episodeId: string, steps: EpisodeStep[]): Promise
 
 export async function getSteps(episodeId: string, withImages = true): Promise<EpisodeStep[]> {
   let q: Query = db().collection(EPISODES).doc(episodeId).collection("steps").orderBy("i");
-  if (!withImages) q = q.select("i", "pose", "action", "distance", "blocked", "thought");
+  if (!withImages) q = q.select("i", "pose", "action", "distance", "blocked", "thought", "look");
   const snap = await q.get();
   return snap.docs.map((d) => {
     const step = d.data() as Partial<EpisodeStep>;
     return { ...step, jpeg: step.jpeg ?? "" } as EpisodeStep;
   });
+}
+
+/** The camera frames before the last `n` moves (look-around steps skipped), oldest first. */
+export async function getRecentFrames(episodeId: string, n: number): Promise<string[]> {
+  const snap = await db().collection(EPISODES).doc(episodeId).collection("steps").orderBy("i", "desc").limit(n + 4).get();
+  return snap.docs
+    .map((d) => d.data() as Partial<EpisodeStep>)
+    .filter((s) => !s.look && s.jpeg)
+    .slice(0, n)
+    .map((s) => s.jpeg!)
+    .reverse();
 }
 
 /** An agent's episodes, newest first. */

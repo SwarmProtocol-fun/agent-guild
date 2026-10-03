@@ -81,6 +81,19 @@ describe("runtime isolation", () => {
     expect((await get("nope", { address: "0x1", role: "operator" })).status).toBe(404);
   });
 
+  it("accepts an agt_ bearer token only when it carries mods:call", async () => {
+    vi.doMock("@/lib/agent-tokens", () => ({
+      bearerToken: (h: Headers) => h.get("authorization")?.replace(/^Bearer\s+/, "") || null,
+      verifyAgentToken: async (t: string) => ({
+        agentId: "a1", orgId: "o1", scopes: t === "agt_good" ? ["mods:call"] : ["bindings:list"],
+      }),
+    }));
+    const rt = await runtimeWith({ m: { routes: { "GET /who": (_req: Request, ctx: { agent: unknown }) => ({ agent: ctx.agent }) } } });
+    const get = (token: string) => rt.handleModRequest("m", new Request("http://x/who", { headers: { authorization: `Bearer ${token}` } }), ["who"], null);
+    expect(await (await get("agt_good")).json()).toEqual({ agent: { agentId: "a1", orgId: "o1" } });
+    expect((await get("agt_noscope")).status).toBe(401);
+  });
+
   it("a mod whose setup throws reports 503 and doesn't crash", async () => {
     const rt = await runtimeWith({ m: { setup: () => { throw new Error("nope"); }, routes: { "GET /a": () => 1 } } });
     vi.spyOn(console, "error").mockImplementation(() => {});

@@ -4,18 +4,21 @@ Puts [dimOS](https://github.com/dimensionalOS/dimos) robots in the **dimOS Bench
 
 ## Train on DimSim
 
-The panel's first tab embeds **DimSim**, dimOS's Three.js + Rapier robot simulator, running a Unitree Go2 in the furnished apartment scene. The tasks are DimSim's own apartment evals: go to the couch, the kitchen, or the TV. Each one is scored by DimSim's `objectDistance` rubric.
+The panel's first tab embeds **DimSim**, dimOS's Three.js + Rapier robot simulator, running a Unitree Go2 in the furnished apartment scene. The tasks are DimSim's own apartment evals (go to the couch, the kitchen, or the TV), plus **go to any object** in the apartment: pick it from the list or click it on the floor plan. Each one is scored by DimSim's `objectDistance` rubric (1.5 m for objects).
 
 There are two ways to make an attempt:
 
 - **Record a demo.** You drive the robot with W/A/S/D, the arrow keys, or the on-screen buttons: forward 0.5 m, back 0.25 m, turn 30°.
-- **Agent drives.** Each step, the server shows the robot's camera frame and pose to Claude (`claude-opus-5-5`, low effort), along with the task and the agent's earlier lessons. Claude picks one move: turn, then walk forward. The agent never sees the rubric distance.
+- **Agent drives.** Each step, the server shows Claude (`claude-opus-5-5`, low effort) the robot's camera frame and pose, its frames before the last two moves, the task, and the agent's earlier lessons. At the first step it also gets a four-way panorama to orient itself. Claude picks one move (turn, then walk forward), or spends the step to **look around** and get a fresh panorama. The agent never sees the rubric distance.
+- **Train ×N.** Runs N agent attempts back to back and stops early after K passes in a row. Watch the learning curve and the "passed x of its last y" rate move.
+- **Random starts.** With the box ticked, each attempt starts from a random collision-free spot reachable from the default start, at least 1 m outside the pass distance. A remembered route then stops working, so lessons have to describe where things are.
 
 Every attempt is recorded the same way, step by step, as camera frame, pose, action, and distance to the target afterwards.
 
 What a finished attempt produces:
 
-- **A lesson in memory.** Each finished attempt writes a long-term entry to the agent's memory, tagged `dimsim` and the task id. For a demo, the lesson is the route taken. For an agent run, it's the model's own reflection. The next attempt reads these lessons back.
+- **A lesson in memory.** Each finished attempt writes a long-term entry to the agent's memory, tagged `dimsim` and the task id. For a demo, the lesson is the start pose, the route, and where it ended. For an agent run, it's the model's own reflection, asked to name coordinates and landmarks rather than a fixed sequence of turns. The next attempt reads up to 8 lessons back: this task's successes first, then its failures, then what worked on other tasks.
+- **A live floor plan.** Next to the camera view, a top-down map shows walls, furniture, the target and its pass zone, this attempt's trail, and the best earlier attempt as a dashed ghost. The sim builds the plan once by raycasting its colliders on a 0.2 m grid, in about 50 ms.
 - **A learning curve.** The panel plots the distance left to the target after each attempt, so you can see whether the agent is getting better.
 - **Training data.** **Export JSONL** writes one line per step: instruction, pose, action, thought, outcome. Choose **with camera frames** to include the images. The output works for fine-tuning or imitation learning.
 
@@ -27,9 +30,10 @@ How it's wired:
 | `public/dimsim/` | The built simulator plus the scene and robot models, about 200 MB. These are DimSim's Git LFS files. |
 | `training.ts` | Tasks, step validation, lessons, JSONL rows, and the learning curve. It's pure code, tested in `src/lib/mods/__tests__/dimos-training.test.ts`. |
 | `trainer.ts` | The model calls: one action per step, and one reflection per episode. Server-side fallbacks are on. |
-| `trainer-panel.tsx` | The tab. It shows the sim, the robot's camera view, controls, memory, the learning curve, attempt replays, and export. |
+| `trainer-panel.tsx` | The tab. It shows the sim, the floor plan, the robot's camera view, controls (including Train ×N and random starts), memory, the learning curve, attempt replays, and export. |
+| `sim-map.tsx` | The floor plan: an occupancy grid from the sim's `floorPlan()`, object footprints, the target, the live trail, and the best attempt's ghost. |
 
-Routes: `GET /sim/options`, `POST /episodes`, `POST /episodes/:id/steps`, `POST /episodes/:id/act`, `POST /episodes/:id/finish`, `GET /episodes?agentId=`, `GET /episodes/:id`, `GET /episodes/export?agentId=&images=1`. All of them need a signed-in member of the agent's org.
+Routes: `GET /sim/options`, `POST /episodes` (`taskId` is a built-in task or `obj:<assetId>` with `title`, plus an optional `startPose`), `POST /episodes/:id/steps`, `POST /episodes/:id/act` (an optional `panorama` of up to 4 JPEGs), `POST /episodes/:id/finish` (with `finalPose`), `GET /episodes?agentId=`, `GET /episodes/:id` (`?images=0` returns poses only), `GET /episodes/export?agentId=&images=1`. All of them need a signed-in member of the agent's org.
 
 Setup:
 
@@ -40,7 +44,9 @@ Setup:
 Limits:
 
 - **Scores are reported by the browser.** The rubric runs in the browser, so pass/fail is only as trustworthy as the person running it. The same is true of self-reported benchmark scores.
-- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops.
+- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable, and the default eval start (0, 3) is under one.
+- **Looking around costs a step.** A look-around step records the front frame with a zero action (`look: true` in the JSONL) and counts toward the step limit. The panorama at the first step is free.
+- **Some objects are hard to reach.** Wall-mounted or high items (range hood, wall cabinets) may stay out of the 1.5 m pass distance from the floor.
 - **The first load is heavy.** The page downloads about 200 MB of models the first time, and the robot model alone is 55 MB. After that the browser caches them.
 
 ## Benchmarks
