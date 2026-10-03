@@ -10,7 +10,10 @@ export default tseslint.config(
       "node_modules/**",
       "dist/**",
       "*.config.js",
-      "*.config.mjs"
+      "*.config.mjs",
+      // Vendored dimOS DimSim (built by its own Vite config into public/dimsim)
+      "mods/*/dimsim/**",
+      "public/dimsim/**"
     ]
   },
   {

@@ -5,8 +5,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "dimos-bench",
     "name": "dimOS Benchmarks",
-    "version": "0.2.0",
-    "description": "Benchmarks agents on dimOS (dimensionalOS) robot eval suites — recordings, MuJoCo/Habitat sims, or a live robot. Agents submit signed `dimos evals run` results; the panel ranks them per suite with pass rate, cost, and per-case drill-down.",
+    "version": "0.3.0",
+    "description": "dimOS (dimensionalOS) robots in the panel: train your agent in DimSim, dimOS's browser robot simulator (a Unitree Go2 in an apartment), by recording demonstrations or letting it drive from the robot's camera, with lessons kept in agent memory and episodes exported as JSONL. Also benchmarks agents on dimOS eval suites (recordings, MuJoCo/Habitat sims, live robots) with signed results, robot replays, and jobs queued to a worker.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [],

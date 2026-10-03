@@ -21,7 +21,7 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.thirdweb.com https://*.thirdwebcdn.com https://*.google.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: http:; media-src 'self' data: blob:; connect-src 'self' https: wss:; frame-src 'self' https://*.thirdweb.com https://accounts.google.com https://embedded-wallet.thirdweb.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://*.thirdweb.com https://*.thirdwebcdn.com https://*.google.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https: http:; media-src 'self' data: blob:; connect-src 'self' blob: https: wss:; frame-src 'self' https://*.thirdweb.com https://accounts.google.com https://embedded-wallet.thirdweb.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
 
 # ── Canonical domain: redirect www → apex ──
 [[redirects]]

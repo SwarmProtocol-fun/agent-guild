@@ -78,7 +78,8 @@ const SECURITY_HEADERS: Record<string, string> = {
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com https://fonts.reown.com data:",
     "img-src 'self' data: blob: https: http:",
-    "connect-src 'self' https: wss:",
+    // blob: — DimSim's GLTFLoader decodes embedded model textures through blob: URLs (public/dimsim)
+    "connect-src 'self' blob: https: wss:",
     "frame-src 'self' https://verify.walletconnect.com https://verify.walletconnect.org https://secure.walletconnect.com https://secure.walletconnect.org https://accounts.google.com",
     "media-src 'self' data: blob:",
     "worker-src 'self' blob:",

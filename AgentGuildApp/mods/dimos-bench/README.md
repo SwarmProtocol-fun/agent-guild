@@ -1,6 +1,49 @@
 # dimos-bench
 
-Benchmarks Agent Guild agents on [dimOS](https://github.com/dimensionalOS/dimos) eval suites and ranks them in the **dimOS Benchmarks** panel.
+Puts [dimOS](https://github.com/dimensionalOS/dimos) robots in the **dimOS Benchmarks** panel. You can train an agent in dimOS's browser simulator (DimSim), or benchmark it on dimOS eval suites and rank it against other agents.
+
+## Train on DimSim
+
+The panel's first tab embeds **DimSim**, dimOS's Three.js + Rapier robot simulator, running a Unitree Go2 in the furnished apartment scene. The tasks are DimSim's own apartment evals: go to the couch, the kitchen, or the TV. Each one is scored by DimSim's `objectDistance` rubric.
+
+There are two ways to make an attempt:
+
+- **Record a demo.** You drive the robot with W/A/S/D, the arrow keys, or the on-screen buttons: forward 0.5 m, back 0.25 m, turn 30°.
+- **Agent drives.** Each step, the server shows the robot's camera frame and pose to Claude (`claude-opus-5-5`, low effort), along with the task and the agent's earlier lessons. Claude picks one move: turn, then walk forward. The agent never sees the rubric distance.
+
+Every attempt is recorded the same way, step by step, as camera frame, pose, action, and distance to the target afterwards.
+
+What a finished attempt produces:
+
+- **A lesson in memory.** Each finished attempt writes a long-term entry to the agent's memory, tagged `dimsim` and the task id. For a demo, the lesson is the route taken. For an agent run, it's the model's own reflection. The next attempt reads these lessons back.
+- **A learning curve.** The panel plots the distance left to the target after each attempt, so you can see whether the agent is getting better.
+- **Training data.** **Export JSONL** writes one line per step: instruction, pose, action, thought, outcome. Choose **with camera frames** to include the images. The output works for fine-tuning or imitation learning.
+
+How it's wired:
+
+| Part | What it does |
+|------|--------------|
+| `dimsim/` | DimSim source, vendored from dimOS `misc/DimSim` (Apache-2.0; the commit is in `dimsim/UPSTREAM_COMMIT`). It's patched for an embed mode: `?dimos=1&embed=1` runs without the Deno bridge, and `src/agentGuildEmbed.js` drives the robot with collision-checked moves. Other patches: a chase camera, and serving under `/dimsim/`. |
+| `public/dimsim/` | The built simulator plus the scene and robot models, about 200 MB. These are DimSim's Git LFS files. |
+| `training.ts` | Tasks, step validation, lessons, JSONL rows, and the learning curve. It's pure code, tested in `src/lib/mods/__tests__/dimos-training.test.ts`. |
+| `trainer.ts` | The model calls: one action per step, and one reflection per episode. Server-side fallbacks are on. |
+| `trainer-panel.tsx` | The tab. It shows the sim, the robot's camera view, controls, memory, the learning curve, attempt replays, and export. |
+
+Routes: `GET /sim/options`, `POST /episodes`, `POST /episodes/:id/steps`, `POST /episodes/:id/act`, `POST /episodes/:id/finish`, `GET /episodes?agentId=`, `GET /episodes/:id`, `GET /episodes/export?agentId=&images=1`. All of them need a signed-in member of the agent's org.
+
+Setup:
+
+- **Agent driving needs an Anthropic credential on the server.** Set `ANTHROPIC_API_KEY`. Without it, the **Agent drives** button stays disabled. Demos work without it.
+- **Rebuild after changing the sim.** Run `cd mods/dimos-bench/dimsim && npm ci && npm run build`. The output goes to `public/dimsim/`.
+- **The CSP must allow `blob:` in `connect-src`.** Three.js decodes embedded model textures through `blob:` URLs. It's set in `src/middleware.ts` and `netlify.toml`.
+
+Limits:
+
+- **Scores are reported by the browser.** The rubric runs in the browser, so pass/fail is only as trustworthy as the person running it. The same is true of self-reported benchmark scores.
+- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation. Collision is checked with rays at the Go2's body height, so it can walk under table tops.
+- **The first load is heavy.** The page downloads about 200 MB of models the first time, and the robot model alone is 55 MB. After that the browser caches them.
+
+## Benchmarks
 
 dimOS already ships an eval harness (`dimos evals run <suite> --agent <module>`). It covers robot recordings, MuJoCo and Habitat sims, and live robots, with pluggable agent adapters (`pi`, `dimcode`, `mcp_client_adapter`, `question_answer`, …). This mod doesn't change any of that. It adds:
 

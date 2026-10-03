@@ -11,12 +11,15 @@
  *   dimosBenchJobs   — benchmarks queued from the panel, claimed and run by
  *                    an `agentguild-dimos worker` in the same org.
  *   dimosBenchWorkers — one heartbeat document per worker agent.
+ *   dimosBenchEpisodes — DimSim training attempts (human demos and agent
+ *                    runs), with per-step camera frames in a subcollection.
  *
  * Queries use single-field filters and sort in memory, so no composite
  * index is needed. Server-only (Firebase Admin SDK).
  */
 import type { Query } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
+import type { Episode, EpisodeStep } from "./training";
 import { replayBrief, type BenchJob, type BenchRun, type ReplayBrief, type RobotReplay, type RunSubmission } from "./bench";
 
 const RUNS = "dimosBenchRuns";
@@ -176,4 +179,52 @@ export async function listWorkers(orgIds: string[]): Promise<WorkerBeat[]> {
     orgIds.slice(0, 10).map((orgId) => db().collection(WORKERS).where("orgId", "==", orgId).get()),
   );
   return snaps.flatMap((s) => s.docs.map((d) => d.data() as WorkerBeat));
+}
+
+// ── DimSim training episodes ─────────────────────────────────────────────
+// dimosBenchEpisodes/{id} holds the episode; its steps (each with a camera
+// frame) live in the `steps` subcollection so the episode document stays small.
+
+const EPISODES = "dimosBenchEpisodes";
+
+export async function createEpisode(ep: Omit<Episode, "id">): Promise<Episode> {
+  const ref = db().collection(EPISODES).doc();
+  const doc: Episode = { ...ep, id: ref.id };
+  await ref.set(doc);
+  return doc;
+}
+
+export async function getEpisode(id: string): Promise<Episode | null> {
+  const snap = await db().collection(EPISODES).doc(id).get();
+  return snap.exists ? (snap.data() as Episode) : null;
+}
+
+export async function updateEpisode(id: string, patch: Partial<Episode>): Promise<void> {
+  await db().collection(EPISODES).doc(id).update(patch);
+}
+
+export async function addSteps(episodeId: string, steps: EpisodeStep[]): Promise<void> {
+  const batch = db().batch();
+  const col = db().collection(EPISODES).doc(episodeId).collection("steps");
+  for (const s of steps) batch.set(col.doc(String(s.i).padStart(3, "0")), s);
+  await batch.commit();
+}
+
+export async function getSteps(episodeId: string, withImages = true): Promise<EpisodeStep[]> {
+  let q: Query = db().collection(EPISODES).doc(episodeId).collection("steps").orderBy("i");
+  if (!withImages) q = q.select("i", "pose", "action", "distance", "blocked", "thought");
+  const snap = await q.get();
+  return snap.docs.map((d) => {
+    const step = d.data() as Partial<EpisodeStep>;
+    return { ...step, jpeg: step.jpeg ?? "" } as EpisodeStep;
+  });
+}
+
+/** An agent's episodes, newest first. */
+export async function listEpisodes(agentId: string, max = 200): Promise<Episode[]> {
+  const snap = await db().collection(EPISODES).where("agentId", "==", agentId).limit(SCAN_LIMIT).get();
+  return snap.docs
+    .map((d) => d.data() as Episode)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .slice(0, max);
 }

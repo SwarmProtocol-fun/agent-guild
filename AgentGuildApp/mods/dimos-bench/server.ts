@@ -1,12 +1,17 @@
 import { defineServerMod } from "@agent-guild/sdk";
 import type { Timestamp } from "firebase-admin/firestore";
 import { cancelAssignment, getAssignment, AssignmentError, assignmentErrorStatus } from "@/lib/assignments";
-import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { addMemoryEntry, getAgent, getAgentsByOrg, getMemoryEntries, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import {
   buildLeaderboard, feedbackContext, lineageReport, parseJobRequest, parseReplay, parseSubmission, resolveLineage,
   HARNESSES, SUITE_CATALOG, type BenchJob, type BenchRun,
 } from "./bench";
 import {
+  SIM_TASKS, exportLine, findTask, learningCurve, parsePoseInput, parseSteps, plainLesson, type Episode, type SimTask,
+} from "./training";
+import { canDrive, decideAction, DriverError, DRIVER_MODEL, reflect } from "./trainer";
+import {
+  addSteps, createEpisode, getEpisode, getSteps, listEpisodes, updateEpisode,
   claimJob, createJob, getAncestors, getJob, getReplay, getRun, heartbeat, lineageExists, listJobs, listReplays, listRuns,
   listWorkers, newRunId, saveReplay, saveRun, updateJob,
 } from "./store";
@@ -33,6 +38,27 @@ async function workerJob(jobId: string, agentId: string): Promise<BenchJob | Res
   if (!job || job.workerAgentId !== agentId) return Response.json({ error: "Job not found" }, { status: 404 });
   if (job.status !== "running") return Response.json({ error: `Job is ${job.status}` }, { status: 409 });
   return job;
+}
+
+/** The episode, if the signed-in user's orgs include its agent's org. */
+async function sessionEpisode(id: string, address: string): Promise<Episode | Response> {
+  const ep = await getEpisode(id);
+  if (!ep || !(await sessionOrgIds(address)).includes(ep.orgId)) {
+    return Response.json({ error: "Episode not found" }, { status: 404 });
+  }
+  return ep;
+}
+
+/** The agent's DimSim lessons, this task's first, newest first. Memory is best-effort. */
+async function lessonsFor(ep: Pick<Episode, "orgId" | "agentId">, task: SimTask, max = 8): Promise<string[]> {
+  try {
+    const entries = (await getMemoryEntries(ep.orgId, ep.agentId, "long_term")).filter((m) => m.tags?.includes("dimsim"));
+    const mine = entries.filter((m) => m.tags?.includes(task.id));
+    const rest = entries.filter((m) => !m.tags?.includes(task.id));
+    return [...mine, ...rest].slice(0, max).map((m) => m.content);
+  } catch {
+    return [];
+  }
 }
 
 /** A run without its per-case rows — what list views need. */
@@ -367,6 +393,185 @@ export default defineServerMod({
       const b = (await req.json().catch(() => ({}))) as { error?: unknown };
       await updateJob(held.id, { status: "failed", error: String(b.error ?? "worker failed").slice(0, 1000), finishedAt: new Date().toISOString() });
       return { id: held.id, status: "failed" };
+    },
+
+    // ── Training on DimSim (the robot sim embedded in the panel) ──────────
+
+    /** GET /sim/options — tasks, your agents, and whether agents can drive (model credential set). */
+    "GET /sim/options": async (_req, { session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const orgIds = await sessionOrgIds(session.address);
+      const agents = (await Promise.all(orgIds.map(getAgentsByOrg))).flat();
+      return {
+        tasks: SIM_TASKS,
+        agents: agents.map((a) => ({ id: a.id, name: a.name, orgId: a.orgId })).sort((a, b) => a.name.localeCompare(b.name)),
+        canDrive: canDrive(),
+        model: DRIVER_MODEL,
+      };
+    },
+
+    /** POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent" }. */
+    "POST /episodes": async (req, { session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const task = findTask(b.taskId);
+      const actor = b.actor === "agent" ? "agent" : b.actor === "human" ? "human" : null;
+      if (!task || !actor || typeof b.agentId !== "string") {
+        return Response.json({ error: "agentId, a known taskId and actor (human|agent) are required" }, { status: 400 });
+      }
+      if (actor === "agent" && !canDrive()) {
+        return Response.json({ error: "Set ANTHROPIC_API_KEY on the server to let agents drive" }, { status: 503 });
+      }
+      const agent = await getAgent(b.agentId);
+      if (!agent || !(await sessionOrgIds(session.address)).includes(agent.orgId)) {
+        return Response.json({ error: "That agent isn't in one of your orgs" }, { status: 403 });
+      }
+      const episode = await createEpisode({
+        orgId: agent.orgId, agentId: agent.id, agentName: agent.name,
+        taskId: task.id, task: task.task, scene: task.scene, actor,
+        model: actor === "agent" ? DRIVER_MODEL : null,
+        status: "running", steps: 0,
+        startDistance: typeof b.startDistance === "number" ? b.startDistance : null,
+        finalDistance: null, lesson: "",
+        createdBy: session.address, createdAt: new Date().toISOString(), finishedAt: null,
+      });
+      return Response.json({ episode, task, lessons: await lessonsFor(episode, task) }, { status: 201 });
+    },
+
+    /** POST /episodes/:id/steps — record steps (camera frame, pose, action, distance after). */
+    "POST /episodes/:id/steps": async (req, { params, session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      if (ep.status !== "running") return Response.json({ error: `Episode is ${ep.status}` }, { status: 409 });
+      const parsed = parseSteps(await req.json().catch(() => null), ep.steps);
+      if (!parsed.ok) return Response.json({ error: "Invalid steps", details: parsed.errors }, { status: 400 });
+      await addSteps(ep.id, parsed.steps);
+      await updateEpisode(ep.id, { steps: ep.steps + parsed.steps.length });
+      return { steps: ep.steps + parsed.steps.length };
+    },
+
+    /**
+     * POST /episodes/:id/act — { jpeg, pose }: the agent looks through the
+     * robot's camera and picks the next move. The panel executes it in the
+     * sim, then records the step.
+     */
+    "POST /episodes/:id/act": async (req, { params, session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      if (ep.actor !== "agent" || ep.status !== "running") return Response.json({ error: "Not a running agent episode" }, { status: 409 });
+      const task = findTask(ep.taskId);
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const pose = parsePoseInput(b.pose);
+      if (!task || !pose || typeof b.jpeg !== "string" || !b.jpeg) {
+        return Response.json({ error: "jpeg and pose are required" }, { status: 400 });
+      }
+      try {
+        const decision = await decideAction({
+          agentName: ep.agentName,
+          task,
+          lessons: await lessonsFor(ep, task),
+          history: await getSteps(ep.id, false),
+          jpeg: b.jpeg,
+          pose,
+          stepsLeft: Math.max(0, task.maxSteps - ep.steps),
+        });
+        return decision;
+      } catch (err) {
+        if (err instanceof DriverError) return Response.json({ error: err.message }, { status: 502 });
+        throw err;
+      }
+    },
+
+    /**
+     * POST /episodes/:id/finish — { status: "success" | "failed" | "stopped", finalDistance }.
+     * A finished (not stopped) attempt leaves a lesson in the agent's memory:
+     * the route for a demonstration, the model's reflection for an agent run.
+     */
+    "POST /episodes/:id/finish": async (req, { params, session, log }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      if (ep.status !== "running") return Response.json({ error: `Episode is already ${ep.status}` }, { status: 409 });
+      const task = findTask(ep.taskId);
+      const b = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+      const status = b.status === "success" || b.status === "failed" || b.status === "stopped" ? b.status : null;
+      if (!task || !status) return Response.json({ error: "status must be success, failed or stopped" }, { status: 400 });
+      const finalDistance = typeof b.finalDistance === "number" && Number.isFinite(b.finalDistance) ? b.finalDistance : null;
+      const done: Partial<Episode> = { status, finalDistance, finishedAt: new Date().toISOString() };
+
+      if (status !== "stopped" && ep.steps > 0) {
+        const steps = await getSteps(ep.id, false);
+        let lesson = plainLesson({ ...ep, status, finalDistance }, task, steps.map((s) => s.action));
+        if (ep.actor === "agent" && canDrive()) {
+          try {
+            lesson = await reflect({ task, succeeded: status === "success", finalDistance, steps });
+          } catch (err) {
+            log.warn("reflection failed, keeping the plain lesson:", err);
+          }
+        }
+        done.lesson = lesson;
+        await addMemoryEntry({
+          orgId: ep.orgId,
+          agentId: ep.agentId,
+          agentName: ep.agentName,
+          type: "long_term",
+          title: `DimSim · ${task.label} · ${ep.actor === "human" ? "demonstration" : status}`,
+          content: lesson,
+          tags: ["dimsim", task.id, ep.actor, status],
+          structuredData: { episodeId: ep.id, scene: ep.scene },
+        });
+      }
+      await updateEpisode(ep.id, done);
+      return { episode: { ...ep, ...done } };
+    },
+
+    /** GET /episodes?agentId= — an agent's attempts, newest first, plus a learning curve per task. */
+    "GET /episodes": async (req, { session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const agentId = new URL(req.url).searchParams.get("agentId");
+      const agent = agentId ? await getAgent(agentId) : null;
+      if (!agent || !(await sessionOrgIds(session.address)).includes(agent.orgId)) {
+        return Response.json({ error: "Agent not found" }, { status: 404 });
+      }
+      const episodes = await listEpisodes(agent.id);
+      return {
+        episodes,
+        curves: Object.fromEntries(SIM_TASKS.map((t) => [t.id, learningCurve(episodes, t.id)])),
+      };
+    },
+
+    /**
+     * GET /episodes/export?agentId=&images=1 — every finished step as JSONL
+     * (instruction, pose, action, outcome; camera frames with images=1), for
+     * fine-tuning or imitation learning.
+     */
+    "GET /episodes/export": async (req, { session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const url = new URL(req.url);
+      const agent = await getAgent(url.searchParams.get("agentId") ?? "");
+      if (!agent || !(await sessionOrgIds(session.address)).includes(agent.orgId)) {
+        return Response.json({ error: "Agent not found" }, { status: 404 });
+      }
+      const withImages = url.searchParams.get("images") === "1";
+      const episodes = (await listEpisodes(agent.id)).filter((e) => e.status === "success" || e.status === "failed");
+      const lines: string[] = [];
+      for (const ep of episodes.reverse()) {
+        for (const step of await getSteps(ep.id, withImages)) lines.push(exportLine(ep, step, withImages));
+      }
+      const name = `${agent.name.replace(/[^\w.-]+/g, "_")}-dimsim${withImages ? "-images" : ""}.jsonl`;
+      return new Response(lines.join("\n") + (lines.length ? "\n" : ""), {
+        headers: { "Content-Type": "application/x-ndjson", "Content-Disposition": `attachment; filename="${name}"` },
+      });
+    },
+
+    /** GET /episodes/:id — one attempt with its steps and camera frames, for replay. */
+    "GET /episodes/:id": async (_req, { params, session }) => {
+      if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
+      const ep = await sessionEpisode(params.id, session.address);
+      if (ep instanceof Response) return ep;
+      return { episode: ep, steps: await getSteps(ep.id) };
     },
 
     /** GET /suites — suites that have runs, most-run first. */
