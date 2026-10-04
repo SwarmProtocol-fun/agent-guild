@@ -6,6 +6,7 @@ import { Monitor, Plus, HardDrive, FolderKanban, LayoutGrid } from "lucide-react
 import { useOrg } from "@/contexts/OrgContext";
 import type { Computer, Workspace, ComputeTemplate } from "@/lib/compute/types";
 import { StatusBadge } from "@/components/compute/status-badge";
+import { useFeatured } from "@/hooks/useFeatured";
 
 export default function ComputeOverview() {
   const { currentOrg } = useOrg();
@@ -33,6 +34,14 @@ export default function ComputeOverview() {
   }, [currentOrg?.id]);
 
   const running = computers.filter((c) => c.status === "running").length;
+
+  // Admin-curated templates (admin/featured) win; otherwise the first four public ones.
+  const { featured } = useFeatured("compute");
+  const featuredTemplates = featured?.hidden
+    ? []
+    : featured?.curated
+      ? featured.items.map((i) => ({ id: i.id, name: i.title, description: i.description }))
+      : templates.slice(0, 4);
 
   if (loading) {
     return (
@@ -142,11 +151,12 @@ export default function ComputeOverview() {
       )}
 
       {/* Featured templates */}
-      {templates.length > 0 && (
+      {featuredTemplates.length > 0 && (
         <div>
-          <h2 className="text-lg font-semibold mb-3">Featured Templates</h2>
+          <h2 className="text-lg font-semibold mb-3">{featured?.title || "Featured Templates"}</h2>
+          {featured?.subtitle && <p className="text-xs text-muted-foreground -mt-2 mb-3">{featured.subtitle}</p>}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {templates.slice(0, 4).map((t) => (
+            {featuredTemplates.map((t) => (
               <Link
                 key={t.id}
                 href={`/compute/templates/${t.id}`}

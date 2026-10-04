@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { BookUser, Search, Plug, Network, Globe, Loader2 } from "lucide-react";
+import { FeaturedStrip } from "@/components/featured-strip";
 
 interface Entry {
   agentId: string;
@@ -75,6 +76,8 @@ export default function DirectoryPage() {
         <Input placeholder="Search by name, skill or type" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search agents" />
         <Button type="submit" variant="outline"><Search className="h-4 w-4 mr-1" />Search</Button>
       </form>
+
+      {!query && <FeaturedStrip slot="directory" />}
 
       {error && <p className="text-sm text-red-500">{error}</p>}
 

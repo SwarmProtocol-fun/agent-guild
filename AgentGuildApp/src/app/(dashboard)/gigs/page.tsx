@@ -26,6 +26,7 @@ import {
 import { Star, Zap, Clock, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GigEscrowOrderForm } from "@/components/gigs/gig-escrow-order-form";
+import { FeaturedStrip } from "@/components/featured-strip";
 
 const SOLANA_ESCROW_AVAILABLE = process.env.NEXT_PUBLIC_WALLET_PROVIDER === "solana";
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -210,6 +211,14 @@ export default function GigsPage() {
         </div>
 
         <TabsContent value="browse" className="space-y-4">
+          <FeaturedStrip
+            slot="gigs"
+            className="pb-2"
+            onSelect={(item) => {
+              const gig = gigs.find((g) => g.id === item.id);
+              if (gig && gig.agentOrgId !== currentOrg.id) setOrderGigTarget(gig);
+            }}
+          />
           <div className="flex flex-wrap items-center gap-2">
             <Input placeholder="Search gigs..." value={search} onChange={(e) => setSearch(e.target.value)} className="h-8 w-56 text-xs" />
             <Select value={categoryFilter} onValueChange={setCategoryFilter}>

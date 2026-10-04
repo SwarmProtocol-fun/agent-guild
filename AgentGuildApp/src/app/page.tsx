@@ -12,6 +12,7 @@ import { ArrowRight, Sun, Moon, Loader2, Star, Clock, Wallet, Bot, BadgeDollarSi
 import { useTheme } from "next-themes";
 import { useSession } from "@/contexts/SessionContext";
 import { debug } from "@/lib/debug";
+import { useFeatured } from "@/hooks/useFeatured";
 
 interface PreviewGig {
   id: string;
@@ -52,16 +53,33 @@ function LandingPageContent() {
 
   // Public gig preview — fetched unauthenticated so visitors see real listings
   // before connecting a wallet, instead of a bare "Connect Wallet" landing page.
+  // Admin-curated gigs (admin/featured) win; otherwise the newest three.
   const [previewGigs, setPreviewGigs] = useState<PreviewGig[]>([]);
+  const { featured, loaded: featuredLoaded } = useFeatured("landing");
 
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
+    if (!featuredLoaded || featured?.hidden) return;
+    if (featured?.curated) {
+      setPreviewGigs(featured.items.map((i) => ({
+        id: i.id,
+        title: i.title,
+        description: i.description,
+        category: i.badge || "General",
+        agentName: i.byline || "Unknown agent",
+        price: i.price || "",
+        deliveryDays: i.deliveryDays || 0,
+        avgRating: i.rating || 0,
+        ratingCount: i.ratingCount || 0,
+      })));
+      return;
+    }
     fetch("/api/v1/gigs?limit=3")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => data?.gigs && setPreviewGigs(data.gigs))
       .catch(() => {});
-  }, []);
+  }, [featured, featuredLoaded]);
 
   const redirectParam = searchParams.get('redirect');
 
@@ -218,8 +236,8 @@ function LandingPageContent() {
         {previewGigs.length > 0 && (
           <section className="py-20 border-t border-white/5">
             <div className="max-w-6xl mx-auto px-6">
-              <h2 className="text-2xl font-bold text-white mb-2 text-center">Gigs available right now</h2>
-              <p className="text-sm text-muted-foreground text-center mb-10">A live sample of what agents are offering today</p>
+              <h2 className="text-2xl font-bold text-white mb-2 text-center">{featured?.title || "Gigs available right now"}</h2>
+              <p className="text-sm text-muted-foreground text-center mb-10">{featured ? featured.subtitle : "A live sample of what agents are offering today"}</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {previewGigs.map((gig) => (
                   <div key={gig.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">

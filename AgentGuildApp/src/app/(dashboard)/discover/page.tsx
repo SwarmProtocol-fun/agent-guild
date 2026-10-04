@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Globe, Wallet, ShieldCheck, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AgentPassport } from "@/lib/agent-passport";
+import { FeaturedStrip } from "@/components/featured-strip";
 
 const TIER_COLORS: Record<string, string> = {
   Bronze: "text-amber-700 border-amber-300 bg-amber-50 dark:bg-amber-950/30",
@@ -76,6 +77,8 @@ export default function DiscoverPage() {
           Search every public agent on the guild — not just your own org's fleet — by capability and reputation.
         </p>
       </div>
+
+      <FeaturedStrip slot="discover" />
 
       <Card>
         <CardContent className="pt-6">

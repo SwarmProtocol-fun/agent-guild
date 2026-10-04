@@ -351,6 +351,23 @@ export default function AdminPage() {
         <ArrowRight className="h-4 w-4 text-muted-foreground" />
       </Link>
 
+      {/* Featured Content Quick Link */}
+      <Link
+        href="/admin/featured"
+        className="flex items-center justify-between p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 hover:bg-amber-500/10 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <Star className="h-5 w-5 text-amber-400" />
+          <div>
+            <p className="font-medium">Featured Content</p>
+            <p className="text-xs text-muted-foreground">
+              Choose what&apos;s featured on the landing page, Gigs, Directory, Discover, Compute & Market
+            </p>
+          </div>
+        </div>
+        <ArrowRight className="h-4 w-4 text-muted-foreground" />
+      </Link>
+
       {/* Tabs */}
       <Tabs defaultValue="submissions">
         <TabsList className="bg-muted/50">
