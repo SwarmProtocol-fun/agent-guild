@@ -85,7 +85,24 @@ interface ShroudSettings {
   blockedDomains: string[];
   injectionAction: "block" | "flag";
   injectionThreshold: number;
+  piiRedaction: string[];
+  dailySpendCapUsdPerAgent: number;
+  dailySpendCapUsdOrg: number;
+  loopGuardPerMinute: number;
+  loopGuardRepeats: number;
+  modelPrices: Record<string, { input: number; output: number }>;
 }
+
+interface ShroudHaltRow {
+  agentId: string;
+  reason: string;
+  by: string;
+  at: number;
+}
+
+const PII_OPTIONS: [string, string][] = [
+  ["email", "Emails"], ["phone", "Phone numbers"], ["ssn", "US SSNs"], ["card", "Card numbers"], ["iban", "IBANs"], ["ip", "IP addresses"],
+];
 
 interface ShroudEventRow {
   id: string;
@@ -102,6 +119,9 @@ interface ShroudEventRow {
   status: number;
   inputTokens: number;
   outputTokens: number;
+  microUsd?: number;
+  pii?: string[];
+  killSwitch?: string;
 }
 
 interface WalletPolicy {
@@ -467,7 +487,7 @@ export default function VaultPage() {
 
         {/* ── LLM proxy (Shroud) ───────────────────────────────── */}
         <TabsContent value="shroud" className="space-y-4">
-          <ShroudPanel orgId={orgId} isOwner={isOwner} secrets={secrets} agentName={agentName} />
+          <ShroudPanel orgId={orgId} isOwner={isOwner} secrets={secrets} agentName={agentName} agents={agents} />
         </TabsContent>
 
         {/* ── Wallets / intents ─────────────────────────────────── */}
@@ -905,14 +925,17 @@ function PolicyDialog({ wallet, networks, mainnetAllowed, onClose, onSave }: {
   );
 }
 
-function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
+function ShroudPanel({ orgId, isOwner, secrets, agentName, agents }: {
   orgId: string;
   isOwner: boolean;
   secrets: SecretRow[];
   agentName: (id: string) => string;
+  agents: Agent[];
 }) {
   const [cfg, setCfg] = useState<ShroudSettings | null>(null);
   const [events, setEvents] = useState<ShroudEventRow[]>([]);
+  const [halts, setHalts] = useState<ShroudHaltRow[]>([]);
+  const [haltTarget, setHaltTarget] = useState("");
   const [models, setModels] = useState("");
   const [domains, setDomains] = useState("");
   const [busy, setBusy] = useState(false);
@@ -920,9 +943,10 @@ function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
 
   const load = useCallback(async () => {
     try {
-      const d = await api<{ config: ShroudSettings; events: ShroudEventRow[] }>(`/api/vault/shroud?orgId=${orgId}`);
+      const d = await api<{ config: ShroudSettings; events: ShroudEventRow[]; halts: ShroudHaltRow[] }>(`/api/vault/shroud?orgId=${orgId}`);
       setCfg(d.config);
       setEvents(d.events);
+      setHalts(d.halts || []);
       setModels(d.config.allowedModels.join(", "));
       setDomains(d.config.blockedDomains.join(", "));
     } catch (e) {
@@ -947,6 +971,21 @@ function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
       setBusy(false);
     }
   };
+
+  const killSwitch = async (action: "halt" | "resume", agentId: string) => {
+    setMsg(null);
+    try {
+      await api(`/api/vault/shroud`, { method: "POST", body: JSON.stringify({ orgId, action, agentId }) });
+      setMsg({ ok: true, text: action === "halt" ? `${agentName(agentId)} halted.` : `${agentName(agentId)} resumed.` });
+      setHaltTarget("");
+      await load();
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const togglePii = (kind: string, on: boolean) =>
+    set({ piiRedaction: on ? [...cfg.piiRedaction, kind] : cfg.piiRedaction.filter((k) => k !== kind) });
 
   const secretSelect = (provider: "anthropic" | "openai", label: string) => (
     <div className="space-y-1">
@@ -1011,9 +1050,71 @@ function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
               <Label htmlFor="sh-th">Risk score threshold (1–100, default 40)</Label>
               <Input id="sh-th" type="number" min={1} max={100} disabled={!isOwner} value={cfg.injectionThreshold} onChange={(e) => set({ injectionThreshold: Number(e.target.value) || 40 })} />
             </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-cap-agent">Daily spend cap per agent, USD (0 = none)</Label>
+              <Input id="sh-cap-agent" type="number" min={0} step="0.5" disabled={!isOwner} value={cfg.dailySpendCapUsdPerAgent} onChange={(e) => set({ dailySpendCapUsdPerAgent: Number(e.target.value) || 0 })} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-cap-org">Daily spend cap for the org, USD (0 = none)</Label>
+              <Input id="sh-cap-org" type="number" min={0} step="1" disabled={!isOwner} value={cfg.dailySpendCapUsdOrg} onChange={(e) => set({ dailySpendCapUsdOrg: Number(e.target.value) || 0 })} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-loop-min">Loop guard: halt above N requests/minute per agent (0 = off)</Label>
+              <Input id="sh-loop-min" type="number" min={0} disabled={!isOwner} value={cfg.loopGuardPerMinute} onChange={(e) => set({ loopGuardPerMinute: Number(e.target.value) || 0 })} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="sh-loop-rep">Loop guard: halt after N identical requests in a row (0 = off)</Label>
+              <Input id="sh-loop-rep" type="number" min={0} disabled={!isOwner} value={cfg.loopGuardRepeats} onChange={(e) => set({ loopGuardRepeats: Number(e.target.value) || 0 })} />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label>Mask personal data before it reaches the model</Label>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {PII_OPTIONS.map(([kind, label]) => (
+                <label key={kind} className="flex items-center gap-1.5 text-sm">
+                  <input type="checkbox" disabled={!isOwner} checked={cfg.piiRedaction.includes(kind)} onChange={(e) => togglePii(kind, e.target.checked)} />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The model sees placeholders like [EMAIL_1]; non-streaming replies get the real values back, so tool calls still work. Spend is an
+              estimate from list prices.
+            </p>
           </div>
           {msg && <p className={`text-sm ${msg.ok ? "text-emerald-500" : "text-red-500"}`}>{msg.text}</p>}
           {isOwner && <div className="flex justify-end"><Button onClick={save} disabled={busy}>{busy && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}Save</Button></div>}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="p-4 space-y-3 text-sm">
+          <p className="font-medium">Kill switch</p>
+          {halts.length === 0 ? <p className="text-xs text-muted-foreground">No agents halted.</p> : (
+            <ul className="space-y-2">
+              {halts.map((h) => (
+                <li key={h.agentId} className="flex flex-wrap items-center justify-between gap-2 rounded border border-red-500/40 p-2">
+                  <div>
+                    <div className="font-medium">{agentName(h.agentId)}</div>
+                    <div className="text-xs text-muted-foreground">{h.reason} · {h.by === "loop-guard" ? "loop guard" : "admin"} · {fmtTime(h.at)}</div>
+                  </div>
+                  {isOwner && <Button size="sm" variant="outline" onClick={() => killSwitch("resume", h.agentId)}>Resume</Button>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {isOwner && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={haltTarget || "none"} onValueChange={(v) => setHaltTarget(v === "none" ? "" : v)}>
+                <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Pick an agent…</SelectItem>
+                  {agents.filter((a) => !halts.some((h) => h.agentId === a.id)).map((a) => <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Button size="sm" variant="destructive" disabled={!haltTarget} onClick={() => killSwitch("halt", haltTarget)}>Halt its LLM calls</Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -1046,6 +1147,7 @@ function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
                   <th className="text-left font-medium p-3">Result</th>
                   <th className="text-left font-medium p-3 hidden lg:table-cell">Signals</th>
                   <th className="text-right font-medium p-3 hidden md:table-cell">Tokens</th>
+                  <th className="text-right font-medium p-3 hidden md:table-cell">Est. cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -1055,13 +1157,16 @@ function ShroudPanel({ orgId, isOwner, secrets, agentName }: {
                     <td className="p-3 text-xs">{agentName(e.agentId)}</td>
                     <td className="p-3 text-xs font-mono hidden md:table-cell">{e.model}{e.stream ? " (stream)" : ""}</td>
                     <td className="p-3 text-xs">
-                      {e.blocked ? <Badge variant="destructive">Blocked · {e.score}</Badge>
+                      {e.killSwitch ? <Badge variant="destructive">Stopped · {e.killSwitch.replace(/_/g, " ")}</Badge>
+                        : e.blocked ? <Badge variant="destructive">Blocked · {e.score}</Badge>
                         : e.score > 0 || e.responseSignals.length ? <Badge variant="outline">Flagged · {e.score}</Badge>
                         : <span className="text-muted-foreground">{e.status}</span>}
                       {e.redactions.length > 0 && <div className="text-muted-foreground mt-0.5">{e.redactions.length} secret(s) removed</div>}
+                      {e.pii && e.pii.length > 0 && <div className="text-muted-foreground mt-0.5">PII masked: {e.pii.join(", ")}</div>}
                     </td>
                     <td className="p-3 text-[11px] text-muted-foreground font-mono hidden lg:table-cell break-all">{[...e.signals, ...e.responseSignals].join(" · ")}</td>
                     <td className="p-3 text-xs text-right tabular-nums hidden md:table-cell">{e.inputTokens + e.outputTokens}</td>
+                    <td className="p-3 text-xs text-right tabular-nums hidden md:table-cell">{e.microUsd ? `$${(e.microUsd / 1_000_000).toFixed(4)}` : "—"}</td>
                   </tr>
                 ))}
               </tbody>

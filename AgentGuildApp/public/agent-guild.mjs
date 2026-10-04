@@ -32,6 +32,14 @@
  *   agent-guild memory       working [--set "<text>" [--section "<name>"]]      — get/set working memory
  *   agent-guild memory       append "<text>" [--section "<name>"]               — append to long-term memory
  *   agent-guild memory       daily ["<text>"] [--section "<name>"] [--date <d>] — get/append today's journal
+ *   agent-guild grow         — memory, skills you have, mods you don't
+ *   agent-guild grow remember "<lesson>" [--section <name>]
+ *   agent-guild grow skill <id> --name "<name>" [--type skill|plugin]
+ *   agent-guild grow propose --playbook "<rules>" --note "<why>"
+ *   agent-guild vault        — list identity-vault slots
+ *   agent-guild vault get <slot>
+ *   agent-guild vault put <slot> --data "<text>" | --file <path>
+ *   agent-guild vault delete <slot>
  *   agent-guild wallet       [--json] — list this agent's custodial wallets
  *   agent-guild intent       transfer|call --wallet <id> --network <chain> ... — ask the hub to sign under the wallet's policy
  *   agent-guild intents      [--json] — recent intents
@@ -3424,6 +3432,56 @@ const MCP_TOOLS = {
     required: ["audience"],
     argv: (a) => ["identity", "--audience", a.audience, ...(a.nonce ? ["--nonce", a.nonce] : [])],
   },
+  guild_grow: {
+    description: "See this agent's memory, the skills it has, the mods it holds, and the mods it does not. Call this before remember, skill, or propose. Does not write anything.",
+    properties: {},
+    argv: () => ["grow"],
+  },
+  guild_remember: {
+    description: "Save a lesson into this agent's long-term memory so the next guild_grow and guild_context include it. Default section is Learnings.",
+    properties: {
+      text: str("What you learned, as one or two sentences"),
+      section: { type: "string", enum: ["About Me", "Key Facts", "Patterns & Preferences", "Learnings", "Context"] },
+    },
+    required: ["text"],
+    argv: (a) => ["grow", "remember", a.text, "--json", ...(a.section ? ["--section", a.section] : [])],
+  },
+  guild_skill: {
+    description: "Add a skill this agent can now do. It is merged into the profile other agents discover. Does not remove skills already reported.",
+    properties: {
+      id: str("Lowercase slug, e.g. dimsim-nav"),
+      name: str("Human name, e.g. DimSim navigation"),
+      type: { type: "string", enum: ["skill", "plugin"] },
+    },
+    required: ["id", "name"],
+    argv: (a) => ["grow", "skill", a.id, "--name", a.name, "--json", ...(a.type ? ["--type", a.type] : [])],
+  },
+  guild_vault_list: {
+    description: "List this agent's identity-vault slots and the three identity addresses (protocol, agent, user) that can open them. Names and sizes only. The hub does not return plaintext.",
+    properties: {},
+    argv: () => ["vault", "list", "--json"],
+  },
+  guild_vault_get: {
+    description: "Open one identity-vault slot with this agent's identity key. The protocol key and the user's wallet key open the same ciphertext. Use slots like memory and capabilities.",
+    properties: { slot: str("Lowercase slot name, e.g. memory or capabilities") },
+    required: ["slot"],
+    argv: (a) => ["vault", "get", a.slot, "--json"],
+  },
+  guild_vault_put: {
+    description: "Seal a string into an identity-vault slot for all three identity NFT holders: protocol, this agent, and the user. Any one of those keys opens it. The hub stores the wraps, not the plaintext.",
+    properties: { slot: str("Lowercase slot name"), data: str("Plaintext to seal. Up to 256KB.") },
+    required: ["slot", "data"],
+    argv: (a) => ["vault", "put", a.slot, "--data", a.data, "--json"],
+  },
+  guild_propose: {
+    description: "File a new operating playbook for this agent. The org owner approves it before it changes replies. Base it on guild_grow's memory and failures.",
+    properties: {
+      playbook: str("The complete new operating rules, under 8000 characters"),
+      note: str("What changed and which evidence each change answers"),
+    },
+    required: ["playbook", "note"],
+    argv: (a) => ["grow", "propose", "--playbook", a.playbook, "--note", a.note, "--json"],
+  },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
     properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
@@ -3459,7 +3517,7 @@ async function handleMcpRequest(msg) {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-guild", version: "1.1.0" },
-      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory, and call external APIs through vault bindings without seeing their keys. Call guild_status first to confirm the agent is registered.",
+      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Also: messages and assignments. Call guild_status first if you are not sure you are registered.",
     };
   }
   if (method === "ping") return {};
@@ -3651,6 +3709,429 @@ async function cmdSetup() {
 }
 
 // ---------------------------------------------------------------------------
+// Grow (`agent-guild grow`)
+//
+// One tool any model can call. It reads this agent's memory and the
+// capabilities it actually holds, writes a lesson back, and adds a skill
+// it has learned. A playbook change still waits for the org owner.
+// ---------------------------------------------------------------------------
+const GROW_SECTIONS = ["About Me", "Key Facts", "Patterns & Preferences", "Learnings", "Context"];
+
+function growFail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function growUsage(msg) {
+  console.error(`${msg || "Bad arguments"}
+
+Usage:
+  grow                                          — memory, skills you have, mods you don't
+  grow remember "<lesson>" [--section <name>]  — append to long-term memory (default: Learnings)
+  grow skill <id> --name "<name>" [--type skill|plugin]
+  grow propose --playbook "<rules>" --note "<what changed>" [--file <playbook.md>]`);
+  process.exit(2);
+}
+
+async function growSignedGet(config, privateKey, pathAndQuery, message) {
+  const ts = Date.now().toString();
+  const sig = sign(`${message}:${ts}`, privateKey);
+  const sep = pathAndQuery.includes("?") ? "&" : "?";
+  const resp = await fetch(`${config.hubUrl}${pathAndQuery}${sep}agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`);
+  const text = await resp.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { text }; }
+  if (!resp.ok) throw new Error(`${resp.status} ${data.error || "request failed"}`);
+  return { data, text };
+}
+
+async function buildGrowPacket(config, privateKey) {
+  const [capsR, catalogR, memoryR, harnessR, passportR] = await Promise.all([
+    growSignedGet(config, privateKey, "/api/v1/capabilities", "GET:/v1/capabilities").then((r) => r.data.capabilities || []).catch((err) => ({ error: err.message })),
+    fetch(`${config.hubUrl}/api/v1/capabilities`).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `catalog ${r.status}`);
+      return d.capabilities || [];
+    }).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, "/api/v1/context?format=markdown&limit=30", `GET:/v1/context:${config.agentId}`).then((r) => r.text).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, "/api/v1/harness", `GET:/v1/harness:${config.agentId}`).then((r) => r.data).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, `/api/v1/agents/${config.agentId}/passport`, `GET:/v1/agents/${config.agentId}/passport:${config.agentId}`).then((r) => r.data.passport || r.data).catch((err) => ({ error: err.message })),
+  ]);
+
+  const installed = Array.isArray(capsR) ? capsR.map((c) => ({
+    key: c.key, name: c.name, slug: c.slug, requiredKeys: c.requiredKeys || [],
+  })) : [];
+  const held = new Set(installed.map((c) => c.key));
+  const catalog = Array.isArray(catalogR) ? catalogR : [];
+  const byMod = new Map();
+  for (const c of catalog) {
+    if (c.type && c.type !== "skill") continue;
+    if (!c.key || held.has(c.key)) continue;
+    const slug = String(c.modId || c.key).replace(/^mod-/, "");
+    if (!byMod.has(slug)) byMod.set(slug, { slug, name: c.modName || slug, skills: [] });
+    const group = byMod.get(slug);
+    if (group.skills.length < 6) group.skills.push({ key: c.key, name: c.name });
+  }
+  let memory = typeof memoryR === "string" ? memoryR : "";
+  let memoryTruncated = false;
+  if (memory.length > 6000) {
+    memory = memory.slice(0, 6000);
+    memoryTruncated = true;
+  }
+  const playbook = harnessR && harnessR.active ? {
+    generation: harnessR.active.generation,
+    text: String(harnessR.active.playbook || "").slice(0, 2000),
+  } : null;
+  const skills = Array.isArray(passportR?.reportedSkills) ? passportR.reportedSkills.map((s) => ({ id: s.id, name: s.name, type: s.type || "skill" })) : (config.skills || []);
+
+  return {
+    agentId: config.agentId,
+    name: config.agentName || null,
+    memory,
+    memoryTruncated,
+    skills,
+    installed,
+    notInstalled: [...byMod.values()].slice(0, 24),
+    playbook,
+    errors: {
+      ...(Array.isArray(capsR) ? {} : { installed: capsR.error }),
+      ...(Array.isArray(catalogR) ? {} : { catalog: catalogR.error }),
+      ...(typeof memoryR === "string" ? {} : { memory: memoryR.error }),
+      ...(harnessR && !harnessR.error ? {} : harnessR?.error ? { playbook: harnessR.error } : {}),
+    },
+    how: {
+      remember: 'grow remember "<what you learned>"',
+      skill: 'grow skill <id> --name "<Name>"',
+      propose: 'grow propose --playbook "<operating rules>" --note "<what changed and why>"',
+      note: "Remember and skill take effect now. A new playbook waits for the org owner. A mod in notInstalled is installed by a human from the dashboard.",
+    },
+  };
+}
+
+
+/**
+ * Identity vault cipher. One payload, three wraps.
+ * Keep this block identical to AgentGuildConnect/scripts/identity-vault-crypto.mjs.
+ */
+const VAULT_P = (1n << 255n) - 19n;
+const VAULT_X25519_PKCS8 = Buffer.from("302e020100300506032b656e04220420", "hex");
+const VAULT_X25519_SPKI = Buffer.from("302a300506032b656e032100", "hex");
+
+function vaultModPow(base, exp, mod) {
+  let result = 1n;
+  let b = base % mod;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) result = (result * b) % mod;
+    b = (b * b) % mod;
+    e >>= 1n;
+  }
+  return result;
+}
+
+function vaultReadLe(buf) {
+  let x = 0n;
+  for (let i = 0; i < buf.length; i++) x += BigInt(buf[i]) << (8n * BigInt(i));
+  return x;
+}
+
+function vaultWriteLe32(n) {
+  const out = Buffer.alloc(32);
+  let x = n;
+  for (let i = 0; i < 32; i++) {
+    out[i] = Number(x & 0xffn);
+    x >>= 8n;
+  }
+  return out;
+}
+
+function vaultEdwardsToMontgomery(pub32) {
+  const y = vaultReadLe(pub32) & ((1n << 255n) - 1n);
+  const den = ((1n - y) % VAULT_P + VAULT_P) % VAULT_P;
+  const u = ((1n + y) * vaultModPow(den, VAULT_P - 2n, VAULT_P)) % VAULT_P;
+  return vaultWriteLe32(u);
+}
+
+function vaultSeedToMontgomery(seed32) {
+  const s = Buffer.from(crypto.createHash("sha512").update(seed32).digest().subarray(0, 32));
+  s[0] &= 248;
+  s[31] &= 127;
+  s[31] |= 64;
+  return s;
+}
+
+function vaultB58decode(text) {
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  if (typeof text !== "string" || !text) throw new Error("Missing identity address");
+  let n = 0n;
+  for (const ch of text) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) throw new Error("Bad identity address");
+    n = n * 58n + BigInt(v);
+  }
+  const out = [];
+  while (n > 0n) {
+    out.push(Number(n & 0xffn));
+    n >>= 8n;
+  }
+  let zeros = 0;
+  while (zeros < text.length && text[zeros] === "1") zeros++;
+  const body = Buffer.from(out.reverse());
+  const raw = Buffer.concat([Buffer.alloc(zeros), body]);
+  if (raw.length !== 32) throw new Error("Identity address must be 32 bytes");
+  return raw;
+}
+
+function vaultEd25519Seed(privateKeyPem) {
+  const key = crypto.createPrivateKey({ key: privateKeyPem, format: "pem", type: "pkcs8" });
+  const jwk = key.export({ format: "jwk" });
+  if (!jwk.d) throw new Error("Identity key has no seed");
+  return Buffer.from(jwk.d, "base64url");
+}
+
+function vaultX25519Private(scalar) {
+  return crypto.createPrivateKey({ key: Buffer.concat([VAULT_X25519_PKCS8, scalar]), format: "der", type: "pkcs8" });
+}
+
+function vaultX25519Public(raw) {
+  return crypto.createPublicKey({ key: Buffer.concat([VAULT_X25519_SPKI, raw]), format: "der", type: "spki" });
+}
+
+function vaultWrapKey(dek, recipientAddress) {
+  const recipient = vaultX25519Public(vaultEdwardsToMontgomery(vaultB58decode(recipientAddress)));
+  const eph = crypto.generateKeyPairSync("x25519");
+  const ephDer = eph.publicKey.export({ type: "spki", format: "der" });
+  const ephRaw = ephDer.subarray(ephDer.length - 32);
+  const shared = crypto.diffieHellman({ privateKey: eph.privateKey, publicKey: recipient });
+  const key = Buffer.from(crypto.hkdfSync("sha256", shared, ephRaw, Buffer.from("agent-guild-wrap-v2"), 32));
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, nonce);
+  const boxed = Buffer.concat([cipher.update(dek), cipher.final(), cipher.getAuthTag()]);
+  return { eph: ephRaw.toString("base64"), nonce: nonce.toString("base64"), boxed: boxed.toString("base64") };
+}
+
+function vaultUnwrapKey(wrap, seed) {
+  const eph = vaultX25519Public(Buffer.from(wrap.eph, "base64"));
+  const shared = crypto.diffieHellman({ privateKey: vaultX25519Private(vaultSeedToMontgomery(seed)), publicKey: eph });
+  const ephRaw = Buffer.from(wrap.eph, "base64");
+  const key = Buffer.from(crypto.hkdfSync("sha256", shared, ephRaw, Buffer.from("agent-guild-wrap-v2"), 32));
+  const raw = Buffer.from(wrap.boxed, "base64");
+  const tag = raw.subarray(raw.length - 16);
+  const body = raw.subarray(0, raw.length - 16);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(wrap.nonce, "base64"));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(body), decipher.final()]);
+}
+
+function sealIdentityVault(privateKeyPem, slot, plaintext, recipients) {
+  if (!recipients?.protocol || !recipients?.agent) throw new Error("protocol and agent identity keys are required");
+  const dek = crypto.randomBytes(32);
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", dek, nonce);
+  cipher.setAAD(Buffer.from(`v2:${slot}`, "utf8"));
+  const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  return {
+    v: 2,
+    nonce: nonce.toString("base64"),
+    ciphertext: body.toString("base64"),
+    wraps: {
+      protocol: vaultWrapKey(dek, recipients.protocol),
+      agent: vaultWrapKey(dek, recipients.agent),
+      user: recipients.user ? vaultWrapKey(dek, recipients.user) : null,
+    },
+  };
+}
+
+function openIdentityVault(privateKeyPem, slot, record) {
+  const seed = vaultEd25519Seed(privateKeyPem);
+  const wraps = record?.wraps || {};
+  const order = [wraps.agent, wraps.protocol, wraps.user].filter(Boolean);
+  let dek = null;
+  for (const wrap of order) {
+    try {
+      dek = vaultUnwrapKey(wrap, seed);
+      break;
+    } catch { /* this wrap belongs to one of the other two holders */ }
+  }
+  if (!dek) throw new Error("None of the identity keys on this machine opened the slot");
+  const raw = Buffer.from(record.ciphertext, "base64");
+  const tag = raw.subarray(raw.length - 16);
+  const body = raw.subarray(0, raw.length - 16);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", dek, Buffer.from(record.nonce, "base64"));
+  decipher.setAAD(Buffer.from(`v2:${slot}`, "utf8"));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+}
+
+async function cmdGrow() {
+  const sub = process.argv[3];
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  if (!sub || sub === "status") {
+    console.log(JSON.stringify(await buildGrowPacket(config, privateKey), null, 2));
+    return;
+  }
+
+  if (sub === "remember") {
+    const text = process.argv[4];
+    if (!text || text.startsWith("--")) growUsage("remember needs the lesson text");
+    const section = arg("--section") || "Learnings";
+    if (!GROW_SECTIONS.includes(section)) growUsage(`section must be one of: ${GROW_SECTIONS.join(", ")}`);
+    const entry = text.slice(0, 2000);
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/memory/append",
+      `${config.hubUrl}/api/v1/memory/append?agent=${config.agentId}`,
+      { entry, section },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) growFail(`Remember failed (${resp.status}): ${data.error || "unknown"}`);
+    const out = { ok: true, section, id: data.id || null };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Remembered in ${section}.`);
+    return;
+  }
+
+  if (sub === "skill") {
+    const id = process.argv[4];
+    const name = arg("--name");
+    const type = arg("--type") || "skill";
+    if (!id || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) growUsage("skill id must be a lowercase slug");
+    if (!name) growUsage("--name is required");
+    if (type !== "skill" && type !== "plugin") growUsage("--type must be skill or plugin");
+    let held = Array.isArray(config.skills) ? config.skills : [];
+    try {
+      const passport = await growSignedGet(config, privateKey, `/api/v1/agents/${config.agentId}/passport`, `GET:/v1/agents/${config.agentId}/passport:${config.agentId}`);
+      const reported = passport.data.passport?.reportedSkills || passport.data.reportedSkills;
+      if (Array.isArray(reported) && reported.length) held = reported;
+    } catch { /* local skills are the fallback */ }
+    const skills = held
+      .filter((s) => s && s.id && s.id !== id)
+      .map((s) => ({ id: s.id, name: s.name, type: s.type === "plugin" ? "plugin" : "skill" }));
+    skills.push({ id, name: name.slice(0, 80), type });
+    const result = await reportSkills(config, privateKey, skills, config.bio);
+    config.skills = skills;
+    saveConfig(config);
+    const out = { ok: true, added: id, reportedSkills: result.reportedSkills };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Skill ${id} is on your profile (${skills.length} total).`);
+    return;
+  }
+
+  if (sub === "propose") {
+    const file = arg("--file");
+    const playbook = (arg("--playbook") || (file ? readFileSync(file, "utf8") : "")).trim();
+    const note = (arg("--note") || "").trim();
+    if (!playbook || !note) growUsage("propose needs --playbook (or --file) and --note");
+    if (playbook.length > 8000) growUsage("playbook is over 8000 characters");
+    if (note.length > 4000) growUsage("note is over 4000 characters");
+    const current = await growSignedGet(config, privateKey, "/api/v1/harness", `GET:/v1/harness:${config.agentId}`);
+    const parent = current.data.active?.generation ?? null;
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/harness",
+      `${config.hubUrl}/api/v1/harness?agent=${config.agentId}`,
+      { playbook, improvement: note, parentGeneration: parent },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) growFail(`Propose failed (${resp.status}): ${data.error || "unknown"}`);
+    const out = { ok: true, generation: data.generation, awaitingOwner: true };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Proposed generation ${data.generation}. The org owner approves it on the Harness tab.`);
+    return;
+  }
+
+  growUsage(`Unknown grow command "${sub}"`);
+}
+
+const VAULT_SLOT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function vaultUsage(msg) {
+  console.error(`${msg || "Bad arguments"}
+
+Usage:
+  vault                         — list slots (names and sizes, not contents)
+  vault get <slot>              — open a slot with this agent's identity key
+  vault put <slot> --data "<text>" | --file <path>
+  vault delete <slot>`);
+  process.exit(2);
+}
+
+function vaultHolders(recipients) {
+  return recipients?.user ? "the protocol, this agent, and the user" : "the protocol and this agent (user copy is not minted yet)";
+}
+
+async function cmdVault() {
+  const sub = process.argv[3] || "list";
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const slot = ["get", "put", "delete"].includes(sub) ? process.argv[4] : null;
+  if (slot !== null && !VAULT_SLOT.test(slot || "")) vaultUsage("slot must be a lowercase slug");
+
+  if (sub === "list") {
+    const { data } = await growSignedGet(config, privateKey, "/api/v1/identity-vault", `GET:/v1/identity-vault:${config.agentId}`);
+    if (hasFlag("--json")) return console.log(JSON.stringify({ slots: data.slots || [], recipients: data.recipients || null }, null, 2));
+    const slots = data.slots || [];
+    if (!slots.length) console.log("Identity vault is empty.");
+    for (const row of slots) console.log(`${row.slot}  ${row.bytes} bytes  ${row.updatedAt || ""}`);
+    console.log(`Opens with ${vaultHolders(data.recipients)}.`);
+    return;
+  }
+
+  if (sub === "get") {
+    const { data } = await growSignedGet(config, privateKey, `/api/v1/identity-vault/${slot}`, `GET:/v1/identity-vault/${slot}:${config.agentId}`);
+    let plain;
+    try {
+      plain = openIdentityVault(privateKey, slot, data);
+    } catch {
+      console.error("Could not open this slot with this agent's identity key.");
+      process.exit(1);
+    }
+    if (hasFlag("--json")) return console.log(JSON.stringify({ slot, data: plain }));
+    console.log(plain);
+    return;
+  }
+
+  if (sub === "put") {
+    const file = arg("--file");
+    const text = arg("--data") ?? (file ? readFileSync(file, "utf8") : null);
+    if (text == null || text === "") vaultUsage("put needs --data or --file");
+    if (Buffer.byteLength(text) > 256 * 1024) vaultUsage("entry is over 256KB");
+    const listed = await growSignedGet(config, privateKey, "/api/v1/identity-vault", `GET:/v1/identity-vault:${config.agentId}`);
+    const recipients = listed.data.recipients;
+    if (!recipients?.protocol || !recipients?.agent) {
+      console.error("Hub did not name the protocol and agent identity keys.");
+      process.exit(1);
+    }
+    const box = sealIdentityVault(privateKey, slot, text, recipients);
+    const resp = await signedBodyRequest(
+      config, privateKey, "PUT", `PUT:/v1/identity-vault/${slot}`,
+      `${config.hubUrl}/api/v1/identity-vault/${slot}?agent=${config.agentId}`,
+      box,
+    );
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error(`Vault put failed (${resp.status}): ${body.error || "unknown"}`);
+      process.exit(1);
+    }
+    const line = `Sealed ${slot} for ${vaultHolders(recipients)}.`;
+    console.log(hasFlag("--json") ? JSON.stringify({ ok: true, slot, user: Boolean(recipients.user) }) : line);
+    return;
+  }
+
+  if (sub === "delete") {
+    const ts = Date.now().toString();
+    const sig = sign(`DELETE:/v1/identity-vault/${slot}:${config.agentId}:${ts}`, privateKey);
+    const resp = await fetch(`${config.hubUrl}/api/v1/identity-vault/${slot}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, { method: "DELETE" });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error(`Vault delete failed (${resp.status}): ${body.error || "unknown"}`);
+      process.exit(1);
+    }
+    console.log(hasFlag("--json") ? JSON.stringify({ ok: true, slot }) : `Deleted ${slot}.`);
+    return;
+  }
+
+  vaultUsage(`Unknown vault command "${sub}"`);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -3695,6 +4176,8 @@ try {
   else if (cmd === "close-session") await cmdCloseSession();
   else if (cmd === "context") await cmdContext();
   else if (cmd === "memory") await cmdMemory();
+  else if (cmd === "grow") await cmdGrow();
+  else if (cmd === "vault") await cmdVault();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
   else if (cmd === "endpoints") await cmdEndpoints();
@@ -3742,6 +4225,18 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Grow (any model — read yourself, then write what you learned):
+  grow                                              — memory + skills you have + mods you don't
+  grow remember "<lesson>" [--section <name>]      — append to long-term memory
+  grow skill <id> --name "<name>" [--type skill|plugin]  — add a skill without dropping the ones you have
+  grow propose --playbook "<rules>" --note "<why>" — file the next playbook; the owner approves it
+
+Identity vault (one ciphertext, three keys — protocol, this agent, and the user):
+  vault                                          — list slots and who can open them
+  vault get <slot>                               — open a slot with this agent's key
+  vault put <slot> --data "<text>" | --file <path>
+  vault delete <slot>
 
 Wallet Intents (the hub signs under your org's spending policy):
   wallet      [--json]                                   — list this agent's custodial wallets

@@ -14,7 +14,8 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, submitJobDelivery, recordEscrowDelivered } from "@/lib/jobs-admin";
+import { submitJobDelivery, recordEscrowDelivered } from "@/lib/jobs-admin";
+import { checkDeliverable, JobActionError } from "@/lib/job-actions";
 
 export async function POST(
   request: NextRequest,
@@ -49,21 +50,12 @@ export async function POST(
     const rateLimitResponse = await rateLimit(verified.agentId);
     if (rateLimitResponse) return rateLimitResponse;
 
-    const job = await getJob(jobId);
-    if (!job) {
-      return Response.json({ error: "Job not found" }, { status: 404 });
-    }
-    // A gig order's delivering agent belongs to job.sellerOrgId, not job.orgId
-    // (the buyer's org) — only non-gig jobs are scoped to a single org.
-    const callerOrgMatches = job.gigId ? job.sellerOrgId === verified.orgId : job.orgId === verified.orgId;
-    if (!callerOrgMatches) {
-      return Response.json({ error: "Job not found in your organization" }, { status: 403 });
-    }
-    if (job.takenByAgentId !== verified.agentId) {
-      return Response.json({ error: "You are not assigned to this job" }, { status: 403 });
-    }
-    if (job.status !== "in_progress") {
-      return Response.json({ error: `Job is not in progress (status: ${job.status})` }, { status: 409 });
+    let job;
+    try {
+      job = await checkDeliverable(verified, jobId);
+    } catch (e) {
+      if (e instanceof JobActionError) return Response.json({ error: e.message }, { status: e.status });
+      throw e;
     }
 
     const body = await request.json().catch(() => ({}));

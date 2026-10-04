@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   attemptedTaskIds, clampAction, cleanTitle, describeActions, exportLine, findTask, learningCurve, objectTask, parseFrames,
-  parseDriveMove, parseSteps, plainLesson, rankLessons, recentPassRate, SIM_TASKS, MAX_EPISODE_STEPS,
+  parseDriveMove, parseRobot, parseSteps, plainLesson, rankLessons, recentPassRate, SIM_TASKS, MAX_EPISODE_STEPS,
   type Episode, type EpisodeStep,
+  episodeRobot,
 } from "../../../../mods/dimos-bench/training";
 
 const couch = SIM_TASKS.find((t) => t.id === "go-to-couch")!;
@@ -123,5 +124,23 @@ describe("parseDriveMove (an agent driving with its own model)", () => {
   it("tolerates junk", () => {
     expect(parseDriveMove(null, 2)).toEqual({ seq: 2, action: { turn: 0, forward: 0 }, look: false, done: false, thought: "" });
     expect(parseDriveMove({ thought: "x".repeat(900) }, 2).thought).toHaveLength(500);
+  });
+});
+
+describe("robots", () => {
+  const entry = (content: string, ...tags: string[]) => ({ content, tags: ["dimsim", "go-to-couch", ...tags] });
+
+  it("keeps each robot's lessons apart; untagged ones are the Go2's", () => {
+    const entries = [entry("old go2"), entry("rover tip", "robot:rover"), entry("go2 tip", "robot:go2"), entry("tall tip", "robot:humanoid")];
+    expect(rankLessons(entries, "go-to-couch")).toEqual(["old go2", "go2 tip"]);
+    expect(rankLessons(entries, "go-to-couch", 8, "rover")).toEqual(["rover tip"]);
+    expect(rankLessons(entries, "go-to-couch", 8, "humanoid")).toEqual(["tall tip"]);
+  });
+
+  it("defaults unknown or missing robots to the Go2", () => {
+    expect(parseRobot("humanoid")).toBe("humanoid");
+    expect(parseRobot("tank")).toBe("go2");
+    expect(episodeRobot(ep())).toBe("go2");
+    expect(episodeRobot(ep({ robot: "rover" }))).toBe("rover");
   });
 });

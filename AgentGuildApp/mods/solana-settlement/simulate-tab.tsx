@@ -6,7 +6,11 @@ import type { Idl } from "@coral-xyz/anchor";
 import { fetchIdl } from "./devtools";
 import { simulate, type InstructionSpec, type SimulationReport } from "./txbuilder";
 import { DecodedErrorView } from "./inspect-tools";
-import { Addr, Badge, CopyButton, ErrorNote, Row, Section, buttonClass, inputClass, mono, muted, useRunner, type Env } from "./ui";
+import { CircleCheck, CircleX, FileCode, FlaskConical, Plus, Send } from "lucide-react";
+import {
+  Addr, Button, Card, CodeBlock, CopyButton, ErrorNote, Field, PageHeader, Row, Select, Skeleton, Stat, TextInput,
+  cx, inputClass, linkClass, logLineClass, muted, useRunner, type Env,
+} from "./ui";
 
 // Build & simulate: the same instruction-spec JSON agents send to
 // POST /dev/simulate, run here in the browser (so localnet works too), with
@@ -124,79 +128,109 @@ export function SimulateTab({ env }: { env: Env }) {
     setText(JSON.stringify([...keep, spec], null, 2));
   }
 
+  const jsonError = (() => { try { JSON.parse(text); return null; } catch (err) { return (err as Error).message; } })();
+
   return (
-    <div className="space-y-3">
-      <Section title="Instruction template" description="Load a program's IDL to generate an instruction spec. PDAs and fixed-address accounts are left out — Anchor derives them.">
-        <div className="flex flex-wrap gap-2">
-          <input className={`${inputClass} flex-1 font-mono text-xs`} placeholder="program id" value={programId} onChange={(e) => setProgramId(e.target.value)} spellCheck={false} />
-          <button type="button" className={buttonClass()} onClick={loadIdl} disabled={!programId.trim()}>Load IDL</button>
+    <div className="space-y-4">
+      <PageHeader icon={FlaskConical} title="Simulate & send"
+        description="Build a transaction from plain JSON — the same format agents send — dry-run it, then send it as the agent on devnet." />
+
+      <Card title="Start from a program's IDL" description="Generates an instruction with its args and the accounts Anchor can't derive on its own.">
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Program ID" className="min-w-64 flex-1">
+            {(id) => <TextInput id={id} mono placeholder="Program address" value={programId} onChange={(e) => setProgramId(e.target.value)} />}
+          </Field>
+          <Button onClick={loadIdl} disabled={!programId.trim()} icon={FileCode}>Load IDL</Button>
           {idl && (
             <>
-              <select className={inputClass} value={ixName} onChange={(e) => setIxName(e.target.value)} aria-label="instruction">
+              <Select value={ixName} onChange={(e) => setIxName(e.target.value)} aria-label="Instruction">
                 {idl.instructions.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
-              </select>
-              <button type="button" className={buttonClass(true)} onClick={insertTemplate}>Insert</button>
+              </Select>
+              <Button variant="primary" icon={Plus} onClick={insertTemplate}>Add instruction</Button>
             </>
           )}
         </div>
-        {templateError && <ErrorNote message={templateError} />}
-      </Section>
+        {templateError && <div className="mt-3"><ErrorNote message={templateError} /></div>}
+      </Card>
 
-      <Section title="Transaction" description='Same JSON your agents send to solana_simulate / solana_send. "payer" = fee payer; "new:<label>" = a fresh keypair that signs.'>
-        <textarea className={`${inputClass} w-full font-mono text-xs min-h-56`} value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label="instructions JSON" />
-        <div className="flex flex-wrap items-center gap-2">
-          <input className={`${inputClass} flex-1 min-w-64 font-mono text-xs`} placeholder={env.agent?.devWallet ? `fee payer (default: ${env.agent.name}'s dev wallet)` : "fee payer address"}
-            value={feePayer} onChange={(e) => setFeePayer(e.target.value)} spellCheck={false} />
-          <input className={`${inputClass} w-28 font-mono text-xs`} placeholder="CU limit" inputMode="numeric" value={cuLimit} onChange={(e) => setCuLimit(e.target.value.replace(/\D/g, ""))} />
-          <input className={`${inputClass} w-36 font-mono text-xs`} placeholder="µ-lamports/CU" inputMode="numeric" value={priorityFee} onChange={(e) => setPriorityFee(e.target.value.replace(/\D/g, ""))} />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className={buttonClass(true)} disabled={sim.loading || !payer}
-            onClick={() => sim.run(() => simulate(env.conn, new PublicKey(payer), parseSpecs(), budget()))}>
-            {sim.loading ? "Simulating…" : `Simulate on ${env.cluster}`}
-          </button>
-          <button type="button" className={buttonClass()} disabled={!canSend || send.loading}
-            title={canSend ? undefined : "Needs a selected agent with the devnet upgrade and a dev wallet, on devnet or testnet"}
-            onClick={() => send.run(async () => {
-              const res = await env.agentApi("dev/send", { method: "POST", body: JSON.stringify({ cluster: env.cluster, instructions: parseSpecs(), ...budget() }) });
-              const data = await res.json();
-              if (!res.ok) throw new Error(data.error);
-              return data;
-            })}>
-            {send.loading ? "Sending…" : env.agent ? `Send as ${env.agent.name}` : "Send as agent"}
-          </button>
-          {!payer && <span className={`text-xs ${muted}`}>Enter a fee payer, or pick an agent with a dev wallet.</span>}
-        </div>
-      </Section>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+        <Card title="Instructions" description={<>Use <code className="font-mono">&quot;payer&quot;</code> for the fee payer and <code className="font-mono">&quot;new:label&quot;</code> for a fresh keypair that signs.</>}
+          actions={<CopyButton text={text} label="Copy JSON" />}>
+          <label htmlFor="sim-json" className="sr-only">Instructions JSON</label>
+          <textarea id="sim-json" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)}
+            className={cx(inputClass, "h-auto min-h-72 resize-y py-2 font-mono text-xs leading-relaxed", jsonError && "border-red-500/60")} />
+          {jsonError && <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">Invalid JSON — {jsonError}</p>}
+        </Card>
+
+        <Card title="Run">
+          <div className="space-y-3">
+            <Field label="Fee payer" hint={!feePayer && env.agent?.devWallet ? `Defaults to ${env.agent.name}'s dev wallet` : undefined}>
+              {(id) => <TextInput id={id} mono placeholder={env.agent?.devWallet ?? "Payer address"} value={feePayer} onChange={(e) => setFeePayer(e.target.value)} />}
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="CU limit">{(id) => <TextInput id={id} mono inputMode="numeric" placeholder="auto" value={cuLimit} onChange={(e) => setCuLimit(e.target.value.replace(/\D/g, ""))} />}</Field>
+              <Field label="µ-lamports/CU">{(id) => <TextInput id={id} mono inputMode="numeric" placeholder="0" value={priorityFee} onChange={(e) => setPriorityFee(e.target.value.replace(/\D/g, ""))} />}</Field>
+            </div>
+            <Button variant="primary" className="w-full" icon={FlaskConical} loading={sim.loading} disabled={!payer || !!jsonError}
+              onClick={() => sim.run(() => simulate(env.conn, new PublicKey(payer), parseSpecs(), budget()))}>
+              Simulate on {env.cluster}
+            </Button>
+            <Button className="w-full" icon={Send} loading={send.loading} disabled={!canSend || !!jsonError}
+              onClick={() => send.run(async () => {
+                const res = await env.agentApi("dev/send", { method: "POST", body: JSON.stringify({ cluster: env.cluster, instructions: parseSpecs(), ...budget() }) });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error);
+                return data;
+              })}>
+              {env.agent ? `Send as ${env.agent.name}` : "Send as agent"}
+            </Button>
+            {!canSend && (
+              <p className={cx("text-xs", muted)}>
+                {!env.agent ? "Pick an agent to send as it." : !env.agent.capabilities["solana-dev-devnet"] ? `${env.agent.name} needs the “Act on devnet” upgrade.`
+                  : !env.agent.devWallet ? `${env.agent.name} has no dev wallet yet — create one on Overview.` : "Sending works on devnet and testnet only."}
+              </p>
+            )}
+            {!payer && <p className={cx("text-xs", muted)}>Enter a fee payer to simulate.</p>}
+          </div>
+        </Card>
+      </div>
 
       {sim.error && <ErrorNote message={sim.error} />}
+      {sim.loading && !sim.data && <Skeleton className="h-40" />}
       {sim.data && (
-        <Section title="Simulation" right={<Badge tone={sim.data.success ? "success" : "danger"}>{sim.data.success ? "success" : "failed"}</Badge>}>
-          {sim.data.error && <DecodedErrorView error={sim.data.error} env={env} />}
-          <div>
-            <Row label="Compute units">{sim.data.unitsConsumed?.toLocaleString() ?? "—"}{sim.data.recommendedComputeUnitLimit && <span className={`text-xs ${muted}`}> · set limit {sim.data.recommendedComputeUnitLimit.toLocaleString()}</span>}</Row>
-            <Row label="Size">{sim.data.sizeBytes} / 1232 bytes</Row>
-            <Row label="Instructions">{sim.data.instructionCount}</Row>
-            {Object.entries(sim.data.newAccounts).map(([label, pk]) => <Row key={label} label={`new:${label}`}><Addr value={pk} env={env} /></Row>)}
-            <Row label="Unsigned tx"><span className={`${mono} ${muted}`}>{sim.data.transactionBase64.slice(0, 48)}…</span> <CopyButton text={sim.data.transactionBase64} label="copy base64" /></Row>
+        <Card title={<span className="flex items-center gap-2">{sim.data.success
+          ? <CircleCheck className="h-4 w-4 text-green-600 dark:text-green-400" aria-hidden /> : <CircleX className="h-4 w-4 text-red-600 dark:text-red-400" aria-hidden />}
+          Simulation {sim.data.success ? "succeeded" : "failed"}</span>}
+          actions={<CopyButton text={sim.data.transactionBase64} label="Copy unsigned transaction (base64)" />}>
+          <div className="space-y-4">
+            {sim.data.error && <DecodedErrorView error={sim.data.error} env={env} />}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Stat label="Compute units" value={sim.data.unitsConsumed?.toLocaleString() ?? "—"} />
+              <Stat label="Suggested limit" value={sim.data.recommendedComputeUnitLimit?.toLocaleString() ?? "—"} sub="used + 10%" />
+              <Stat label="Size" value={`${sim.data.sizeBytes} B`} sub="of 1,232" tone={sim.data.sizeBytes > 1232 ? "danger" : undefined} />
+              <Stat label="Instructions" value={sim.data.instructionCount} />
+            </div>
+            {Object.keys(sim.data.newAccounts).length > 0 && (
+              <div>{Object.entries(sim.data.newAccounts).map(([label, pk]) => <Row key={label} label={`new:${label}`}><Addr value={pk} env={env} /></Row>)}</div>
+            )}
+            <CodeBlock title={`Program logs · ${sim.data.logs.length} lines`} code={sim.data.logs.join("\n")} lineClass={logLineClass} />
           </div>
-          <pre className="max-h-72 overflow-auto rounded-md bg-[hsl(var(--muted))] p-2 text-xs leading-relaxed">
-            {sim.data.logs.map((line, i) => <div key={i} className={/failed|error/i.test(line) ? "text-red-600 dark:text-red-400" : ""}>{line}</div>)}
-          </pre>
-        </Section>
+        </Card>
       )}
 
       {send.error && <ErrorNote message={send.error} />}
       {send.data && (
-        <Section title="Sent" right={<Badge tone={send.data.success ? "success" : "danger"}>{send.data.success ? "confirmed" : send.data.signature ? "failed" : "rejected in simulation"}</Badge>}>
-          {send.data.error && <DecodedErrorView error={send.data.error} env={env} />}
-          {send.data.signature && (
-            <Row label="Signature">
-              <button type="button" className={`${mono} text-blue-600 dark:text-blue-400 hover:underline text-left`} onClick={() => env.go("tx", send.data!.signature)}>{send.data.signature}</button>
-            </Row>
-          )}
-          {Object.entries(send.data.newAccounts ?? {}).map(([label, pk]) => <Row key={label} label={`new:${label}`}><Addr value={pk} env={env} /></Row>)}
-        </Section>
+        <Card title={send.data.success ? "Sent and confirmed" : send.data.signature ? "Sent, but failed on-chain" : "Rejected in simulation — nothing was sent"}>
+          <div className="space-y-3">
+            {send.data.error && <DecodedErrorView error={send.data.error} env={env} />}
+            {send.data.signature && (
+              <Row label="Signature">
+                <button type="button" className={cx("font-mono text-xs break-all text-left", linkClass)} onClick={() => env.go("tx", send.data!.signature)}>{send.data.signature}</button>
+              </Row>
+            )}
+            {Object.entries(send.data.newAccounts ?? {}).map(([label, pk]) => <Row key={label} label={`new:${label}`}><Addr value={pk} env={env} /></Row>)}
+          </div>
+        </Card>
       )}
     </div>
   );

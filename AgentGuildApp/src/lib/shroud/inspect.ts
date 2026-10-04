@@ -179,6 +179,125 @@ export function inspectRequest(provider: Provider, body: Record<string, unknown>
   return { score, signals: deduped, redactions: [...new Set(redactions)] };
 }
 
+// ─── PII masking ───────────────────────────────────────────────
+
+export const PII_KINDS = ["email", "phone", "ssn", "card", "iban", "ip"] as const;
+export type PiiKind = (typeof PII_KINDS)[number];
+
+function luhn(digits: string): boolean {
+  let sum = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let d = Number(digits[digits.length - 1 - i]);
+    if (i % 2) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
+
+function ibanValid(raw: string): boolean {
+  const s = raw.replace(/\s/g, "");
+  const rearranged = `${s.slice(4)}${s.slice(0, 4)}`.replace(/[A-Z]/g, (c) => String(c.charCodeAt(0) - 55));
+  let rem = 0;
+  for (const ch of rearranged) rem = (rem * 10 + Number(ch)) % 97;
+  return rem === 1;
+}
+
+/** Each kind: a pattern plus a check that weeds out look-alikes (dates, order numbers, versions). */
+const PII_PATTERNS: Record<PiiKind, { re: RegExp; ok: (m: string) => boolean }> = {
+  email: { re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g, ok: () => true },
+  ssn: { re: /\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/g, ok: () => true },
+  card: { re: /\b\d(?:[ -]?\d){12,18}\b/g, ok: (m) => luhn(m.replace(/\D/g, "")) },
+  iban: { re: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g, ok: ibanValid },
+  phone: {
+    re: /(?<![\w+.-])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?|\d{2,4}[\s.-])\d{3,4}[\s.-]\d{3,4}(?![\w-]|\.\d)/g,
+    ok: (m) => { const n = m.replace(/\D/g, "").length; return n >= 9 && n <= 15; },
+  },
+  ip: { re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g, ok: (m) => !/^(?:0|127|10)\./.test(m) },
+};
+// Card and IBAN before phone: a spaced card number also looks like a phone number.
+const PII_ORDER: PiiKind[] = ["email", "ssn", "card", "iban", "phone", "ip"];
+
+/**
+ * Swaps PII for numbered placeholders ([EMAIL_1], [PHONE_2]) and remembers
+ * the originals so the response can be restored for the agent. Numbering
+ * follows first appearance, so an append-only conversation masks to the same
+ * bytes every turn and the provider's prompt cache still hits.
+ */
+export class PiiMasker {
+  private byValue = new Map<string, string>();
+  private byPlaceholder = new Map<string, string>();
+  private counts: Partial<Record<PiiKind, number>> = {};
+  readonly found: PiiKind[] = [];
+
+  constructor(private kinds: readonly PiiKind[]) {}
+
+  mask(text: string): string {
+    let out = text;
+    for (const kind of PII_ORDER) {
+      if (!this.kinds.includes(kind)) continue;
+      const { re, ok } = PII_PATTERNS[kind];
+      out = out.replace(re, (m) => {
+        if (!ok(m)) return m;
+        const existing = this.byValue.get(m);
+        if (existing) return existing;
+        const n = (this.counts[kind] = (this.counts[kind] || 0) + 1);
+        const ph = `[${kind.toUpperCase()}_${n}]`;
+        this.byValue.set(m, ph);
+        this.byPlaceholder.set(ph, m);
+        if (!this.found.includes(kind)) this.found.push(kind);
+        return ph;
+      });
+    }
+    return out;
+  }
+
+  restore(text: string): string {
+    if (!this.byPlaceholder.size) return text;
+    return text.replace(/\[(?:EMAIL|PHONE|SSN|CARD|IBAN|IP)_\d+\]/g, (ph) => this.byPlaceholder.get(ph) ?? ph);
+  }
+
+  get size() {
+    return this.byPlaceholder.size;
+  }
+}
+
+/** Keys whose string values are ids, encodings or signatures — never text a person wrote. */
+const STRUCTURAL_KEYS = new Set(["type", "role", "id", "tool_use_id", "tool_call_id", "name", "media_type", "data", "signature", "url", "model", "cache_control"]);
+/** Blocks the provider verifies byte-for-byte. */
+const SEALED_BLOCKS = new Set(["thinking", "redacted_thinking"]);
+
+/** Apply `fn` to every free-text string under `node`, in document order. */
+export function walkText(node: unknown, fn: (s: string) => string): unknown {
+  if (typeof node === "string") return fn(node);
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) node[i] = walkText(node[i], fn);
+    return node;
+  }
+  if (node && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (typeof obj.type === "string" && SEALED_BLOCKS.has(obj.type)) return node;
+    for (const key of Object.keys(obj)) {
+      if (STRUCTURAL_KEYS.has(key)) continue;
+      obj[key] = walkText(obj[key], fn);
+    }
+  }
+  return node;
+}
+
+/**
+ * Mask PII in the system prompt and every message — text, tool inputs the
+ * model produced earlier (they hold the restored values), tool results and
+ * OpenAI tool-call arguments. Mutates `body`.
+ */
+export function maskRequestPii(body: Record<string, unknown>, kinds: readonly PiiKind[]): PiiMasker {
+  const masker = new PiiMasker(kinds);
+  if (!kinds.length) return masker;
+  const fn = (s: string) => masker.mask(s);
+  if (body.system !== undefined) body.system = walkText(body.system, fn);
+  if (Array.isArray(body.messages)) walkText(body.messages, fn);
+  return masker;
+}
+
 // ─── response inspection ───────────────────────────────────────
 
 export interface ResponseInspection {

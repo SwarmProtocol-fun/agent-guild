@@ -5,7 +5,7 @@ import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { RobotReplayView, token } from "./replay-view";
 import { TrainerPanel } from "./trainer-panel";
 import type {
-  BenchJob, BenchRun, GenerationPoint, HarnessKey, LeaderboardRow, LineageReport, ReplayBrief, RobotReplay, SUITE_CATALOG,
+  BENCH_ROBOTS, BenchJob, BenchRobot, BenchRun, GenerationPoint, HarnessKey, LeaderboardRow, LineageReport, ReplayBrief, RobotReplay, SUITE_CATALOG,
 } from "./bench";
 
 type RunBrief = Omit<BenchRun, "results">;
@@ -257,7 +257,26 @@ interface BenchOptions {
   agents: { id: string; name: string; orgId: string }[];
   workers: { agentId: string; name: string; orgId: string; lastSeen: string; busyJobId: string | null; online: boolean }[];
   suites: typeof SUITE_CATALOG;
+  robots: typeof BENCH_ROBOTS;
   harnesses: Record<HarnessKey, string>;
+}
+
+/** "All robots", then one option per robot that has suites to show. */
+function RobotFilter({ robots, present, value, onChange, id }: {
+  robots: Partial<Record<BenchRobot, string>>;
+  present: BenchRobot[];
+  value: BenchRobot | "";
+  onChange: (r: BenchRobot | "") => void;
+  id?: string;
+}) {
+  return (
+    <select id={id} className="border rounded px-2 py-1 bg-background w-full" value={value} onChange={(e) => onChange(e.target.value as BenchRobot | "")}>
+      <option value="">All robots</option>
+      {(Object.keys(robots) as BenchRobot[]).filter((r) => present.includes(r)).map((r) => (
+        <option key={r} value={r}>{robots[r]}</option>
+      ))}
+    </select>
+  );
 }
 
 const HARNESS_LABEL: Record<HarnessKey, string> = {
@@ -286,6 +305,7 @@ function RunBenchmark({ api, onQueued }: { api: PanelProps["api"]; onQueued: () 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [agentId, setAgentId] = useState("");
   const [suite, setSuite] = useState("dimos.evals.suites.go2_smoke");
+  const [robot, setRobot] = useState<BenchRobot | "">("");
   const [custom, setCustom] = useState("");
   const [harness, setHarness] = useState<HarnessKey>("pi");
   const [model, setModel] = useState("claude-sonnet-5-5");
@@ -354,9 +374,23 @@ function RunBenchmark({ api, onQueued }: { api: PanelProps["api"]; onQueued: () 
           </select>
         </label>
         <label className="space-y-1">
+          <div className="text-muted-foreground">Robot</div>
+          <RobotFilter
+            robots={options.robots}
+            present={[...new Set(options.suites.map((x) => x.robot))]}
+            value={robot}
+            onChange={(r) => {
+              setRobot(r);
+              // Keep the suite consistent with the robot: its first suite, unless the current one fits.
+              const fits = options.suites.filter((x) => !r || x.robot === r);
+              if (suite !== "custom" && !fits.some((x) => x.suite === suite) && fits[0]) setSuite(fits[0].suite);
+            }}
+          />
+        </label>
+        <label className="space-y-1">
           <div className="text-muted-foreground">Suite</div>
           <select className={`${field} w-full`} value={suite} onChange={(e) => setSuite(e.target.value)}>
-            {options.suites.map((x) => (
+            {options.suites.filter((x) => !robot || x.robot === robot).map((x) => (
               <option key={x.suite} value={x.suite}>{x.label} · {x.cases} case{x.cases > 1 ? "s" : ""} · {x.needs}</option>
             ))}
             <option value="custom">Custom suite module…</option>
@@ -494,7 +528,9 @@ function JobList({ api, refresh, onOpenRun, onFinished }: {
 function LeaderboardPanel(props: PanelProps) {
   const { api } = props;
   const [tab, setTab] = useState<"train" | "bench">("train");
-  const [suites, setSuites] = useState<{ suite: string; runs: number }[] | null>(null);
+  const [suites, setSuites] = useState<{ suite: string; runs: number; robot: BenchRobot }[] | null>(null);
+  const [robotLabels, setRobotLabels] = useState<Partial<Record<BenchRobot, string>>>({});
+  const [boardRobot, setBoardRobot] = useState<BenchRobot | "">("");
   const [suite, setSuite] = useState("");
   const [rows, setRows] = useState<LeaderboardRow[] | null>(null);
   const [runs, setRuns] = useState<RunBrief[] | null>(null);
@@ -512,6 +548,7 @@ function LeaderboardPanel(props: PanelProps) {
       .then((r) => r.json())
       .then((d) => {
         setSuites(d.suites ?? []);
+        setRobotLabels(d.robots ?? {});
         if (d.suites?.length) setSuite((cur) => cur || d.suites[0].suite);
       })
       .catch(() => setSuites([]));
@@ -538,6 +575,7 @@ function LeaderboardPanel(props: PanelProps) {
     if (job.suite === suite) setOpenRun(job.runId);
     else {
       jumpTo.current = job.runId;
+      setBoardRobot("");
       setSuite(job.suite);
       if (!suites?.some((x) => x.suite === job.suite)) refreshBoards();
     }
@@ -584,10 +622,24 @@ agentguild-dimos run dimos.evals.suites.examples \\
       )}
 
       {!!suites?.length && (
-        <div className="flex gap-2 items-center text-sm">
+        <div className="flex flex-wrap gap-2 items-center text-sm">
+          <label htmlFor="dimos-robot" className="text-muted-foreground">Robot</label>
+          <span className="w-56">
+            <RobotFilter
+              id="dimos-robot"
+              robots={robotLabels}
+              present={[...new Set(suites.map((s) => s.robot))]}
+              value={boardRobot}
+              onChange={(r) => {
+                setBoardRobot(r);
+                const fits = suites.filter((s) => !r || s.robot === r);
+                if (!fits.some((s) => s.suite === suite) && fits[0]) setSuite(fits[0].suite);
+              }}
+            />
+          </span>
           <label htmlFor="dimos-suite" className="text-muted-foreground">Suite</label>
           <select id="dimos-suite" className="border rounded px-2 py-1 bg-background" value={suite} onChange={(e) => setSuite(e.target.value)}>
-            {suites.map((s) => (
+            {suites.filter((s) => !boardRobot || s.robot === boardRobot || s.suite === suite).map((s) => (
               <option key={s.suite} value={s.suite}>{s.suite} ({s.runs})</option>
             ))}
           </select>

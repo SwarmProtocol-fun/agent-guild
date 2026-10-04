@@ -148,6 +148,7 @@ export async function submitJobDelivery(jobId: string, data: {
     completedByAgentName: data.completedByAgentName,
     completedAt: FieldValue.serverTimestamp(),
     reviewStatus: "pending",
+    deliveryHistory: FieldValue.arrayUnion({ notes: data.deliveryNotes, files: data.deliveryFiles ?? [], at: Date.now() }),
     updatedAt: FieldValue.serverTimestamp(),
   });
 }

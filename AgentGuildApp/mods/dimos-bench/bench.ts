@@ -543,15 +543,29 @@ export function replayBrief(r: RobotReplay): ReplayBrief {
 // ── Benchmark jobs: queued from the panel, run by an agentguild-dimos worker ──
 
 /** Suites that ship with dimOS, for the panel's picker. `robot`: needs a sim or robot recording. */
-export const SUITE_CATALOG: { suite: string; label: string; cases: number; needs: "dataset" | "sim" }[] = [
-  { suite: "dimos.evals.suites.examples", label: "Examples (go2 recording)", cases: 2, needs: "dataset" },
-  { suite: "dimos.evals.suites.go2_smoke", label: "Go2 smoke (recordings)", cases: 5, needs: "dataset" },
-  { suite: "dimos.evals.suites.go2_vqa", label: "Go2 visual QA", cases: 3, needs: "dataset" },
-  { suite: "dimos.evals.suites.mujoco_xarm", label: "MuJoCo xArm pick & place", cases: 2, needs: "sim" },
-  { suite: "dimos.evals.suites.habitat_smoke", label: "Habitat navigation", cases: 1, needs: "sim" },
-  { suite: "dimos.evals.suites.dimsim_house", label: "DimSim house navigation", cases: 1, needs: "sim" },
-  { suite: "dimos.evals.suites.dimsim_apartment_qa", label: "DimSim apartment QA", cases: 23, needs: "sim" },
+/** The robots the shipped suites benchmark on; a suite outside the catalog is "other". */
+export const BENCH_ROBOTS = {
+  go2: "Unitree Go2 (quadruped)",
+  xarm: "UFactory xArm (robot arm)",
+  habitat: "Habitat agent (virtual)",
+  other: "Other / custom",
+} as const;
+export type BenchRobot = keyof typeof BENCH_ROBOTS;
+
+export const SUITE_CATALOG: { suite: string; label: string; cases: number; needs: "dataset" | "sim"; robot: BenchRobot }[] = [
+  { suite: "dimos.evals.suites.examples", label: "Examples (go2 recording)", cases: 2, needs: "dataset", robot: "go2" },
+  { suite: "dimos.evals.suites.go2_smoke", label: "Go2 smoke (recordings)", cases: 5, needs: "dataset", robot: "go2" },
+  { suite: "dimos.evals.suites.go2_vqa", label: "Go2 visual QA", cases: 3, needs: "dataset", robot: "go2" },
+  { suite: "dimos.evals.suites.mujoco_xarm", label: "MuJoCo xArm pick & place", cases: 2, needs: "sim", robot: "xarm" },
+  { suite: "dimos.evals.suites.habitat_smoke", label: "Habitat navigation", cases: 1, needs: "sim", robot: "habitat" },
+  { suite: "dimos.evals.suites.dimsim_house", label: "DimSim house navigation", cases: 1, needs: "sim", robot: "go2" },
+  { suite: "dimos.evals.suites.dimsim_apartment_qa", label: "DimSim apartment QA", cases: 23, needs: "sim", robot: "go2" },
 ];
+
+/** Which robot a suite benchmarks on: the catalog's answer, else "other". */
+export function suiteRobot(suite: string): BenchRobot {
+  return SUITE_CATALOG.find((x) => x.suite === suite)?.robot ?? "other";
+}
 
 /** dimOS agent harnesses a job can run; `remote` hands each case to the Agent Guild agent itself. */
 export const HARNESSES = {

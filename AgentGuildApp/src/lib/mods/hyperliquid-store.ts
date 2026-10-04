@@ -9,6 +9,8 @@
  *   hyperliquidSniperState — per-network "known coins" baseline for new-listing sniping
  *   hyperliquidReferrals   — per-agent referral attribution + accrued reward
  *   hyperliquidInstant     — per-agent opt-in to passphrase-free (custodial) trading
+ *   hyperliquidStrategies/{id}/decisions — AI Trader decision log (reasoning + action)
+ *   hyperliquidAiRequests  — AI Trader decision requests waiting for the agent's own model to answer
  *
  * Server-only (Firebase Admin SDK) — mirrors the pattern in
  * `@/lib/gateway/store.ts`. Only import from the mod's server.ts / API routes.
@@ -24,6 +26,8 @@ const WALLETS = "hyperliquidWallets";
 const SNIPER_STATE = "hyperliquidSniperState";
 const REFERRALS = "hyperliquidReferrals";
 const INSTANT = "hyperliquidInstant";
+const DECISIONS = "decisions"; // subcollection of each AI strategy
+const AI_REQUESTS = "hyperliquidAiRequests";
 
 function db() {
   return adminDb();
@@ -253,7 +257,7 @@ export async function getDailyRealizedPnl(agentId: string): Promise<number> {
 
 // ── Strategies ───────────────────────────────────────────────────────────────
 
-export type StrategyType = "dca" | "grid" | "signal" | "sniper";
+export type StrategyType = "dca" | "grid" | "signal" | "sniper" | "ai";
 
 export interface DcaParams { intervalMs: number }
 export interface GridParams { lowerPrice: number; upperPrice: number; levels: number; visitedLevels?: number[] }
@@ -267,6 +271,26 @@ export interface SignalParams { direction?: "buy" | "sell" }
  * one-shot "wait for it, then buy" trigger, not a recurring strategy.
  */
 export interface SniperParams { mode: "new-listing" | "price-above" | "price-below"; targetPrice?: number }
+/**
+ * "AI Trader": every intervalMs the hub posts a market snapshot as a
+ * decision request (AiRequest) and the agent's *own* model — run by its
+ * daemon on its own machine, never platform inference — answers
+ * LONG/SHORT/CLOSE/NOTHING (mods/hyperliquid-trading/ai-trader-core.ts).
+ * openRequestId is the round currently waiting on the agent.
+ * startEquity is captured on the first round; once equity falls
+ * maxDrawdownPct below it the bot is stopped for good (eliminated).
+ * flipTo is set when a flip's close has been sent and the new side still
+ * has to open — the tick opens it once the close has filled.
+ */
+export interface AiParams {
+  intervalMs: number;
+  openRequestId?: string | null;
+  maxDrawdownPct: number;
+  leverage?: number;
+  startEquity?: number;
+  eliminated?: boolean;
+  flipTo?: "long" | "short" | null;
+}
 
 export interface Strategy {
   id: string;
@@ -277,7 +301,7 @@ export interface Strategy {
   coin: string;
   sizeUsd: number;
   enabled: boolean;
-  params: DcaParams | GridParams | SignalParams | SniperParams | Record<string, unknown>;
+  params: DcaParams | GridParams | SignalParams | SniperParams | AiParams | Record<string, unknown>;
   lastRunAt: Date | null;
   createdAt: Date | null;
   /** Set by the tick evaluator when a dca/grid/sniper trigger condition is
@@ -404,6 +428,149 @@ export async function getStrategies(agentId: string): Promise<Strategy[]> {
 export async function getEnabledStrategies(): Promise<Strategy[]> {
   const snap = await db().collection(STRATEGIES).where("enabled", "==", true).get();
   return snap.docs.map(docToStrategy);
+}
+
+// ── AI Trader decisions ──────────────────────────────────────────────────────
+
+export interface AiDecisionRecord {
+  id: string;
+  decision: "LONG" | "SHORT" | "CLOSE" | "NOTHING" | null;
+  action: string;
+  reasoning: string;
+  model: string | null;
+  price: number | null;
+  equity: number | null;
+  taskId: string | null;
+  error: string | null;
+  createdAt: Date | null;
+}
+
+export async function recordAiDecision(
+  strategyId: string,
+  data: Omit<AiDecisionRecord, "id" | "createdAt">,
+): Promise<string> {
+  const ref = await db().collection(STRATEGIES).doc(strategyId).collection(DECISIONS).add({
+    ...data,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function getAiDecisions(strategyId: string, limit = 50): Promise<AiDecisionRecord[]> {
+  const snap = await db().collection(STRATEGIES).doc(strategyId).collection(DECISIONS)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.map((d) => {
+    const data = d.data();
+    return {
+      id: d.id,
+      decision: data.decision ?? null,
+      action: data.action,
+      reasoning: data.reasoning ?? "",
+      model: data.model ?? null,
+      price: data.price ?? null,
+      equity: data.equity ?? null,
+      taskId: data.taskId ?? null,
+      error: data.error ?? null,
+      createdAt: data.createdAt?.toDate() ?? null,
+    };
+  });
+}
+
+export type AiDecisionWord = "LONG" | "SHORT" | "CLOSE" | "NOTHING";
+
+/**
+ * One question for an agent's own model: the system + user prompt built from
+ * a market snapshot. "live" requests belong to an AI Trader bot and are
+ * executed when answered; "backtest" requests come from the panel's
+ * backtester and only report the answer back.
+ */
+export interface AiRequest {
+  id: string;
+  agentId: string;
+  orgId: string;
+  purpose: "live" | "backtest";
+  strategyId: string | null;
+  coin: string;
+  system: string;
+  prompt: string;
+  status: "open" | "answered" | "expired";
+  decision: AiDecisionWord | null;
+  reasoning: string | null;
+  createdAt: Date | null;
+  expiresAt: Date;
+}
+
+function docToAiRequest(d: FirebaseFirestore.DocumentSnapshot): AiRequest {
+  const data = d.data() ?? {};
+  return {
+    id: d.id,
+    agentId: data.agentId,
+    orgId: data.orgId,
+    purpose: data.purpose,
+    strategyId: data.strategyId ?? null,
+    coin: data.coin,
+    system: data.system,
+    prompt: data.prompt,
+    status: data.status,
+    decision: data.decision ?? null,
+    reasoning: data.reasoning ?? null,
+    createdAt: data.createdAt?.toDate() ?? null,
+    expiresAt: data.expiresAt?.toDate() ?? new Date(0),
+  };
+}
+
+export async function createAiRequest(
+  data: Pick<AiRequest, "agentId" | "orgId" | "purpose" | "strategyId" | "coin" | "system" | "prompt" | "expiresAt">,
+): Promise<string> {
+  const ref = await db().collection(AI_REQUESTS).add({
+    ...data,
+    status: "open",
+    decision: null,
+    reasoning: null,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function getAiRequest(id: string): Promise<AiRequest | null> {
+  const snap = await db().collection(AI_REQUESTS).doc(id).get();
+  return snap.exists ? docToAiRequest(snap) : null;
+}
+
+/** An agent's unanswered, unexpired requests, oldest first. */
+export async function listOpenAiRequests(agentId: string): Promise<AiRequest[]> {
+  const snap = await db().collection(AI_REQUESTS)
+    .where("agentId", "==", agentId)
+    .where("status", "==", "open")
+    .get();
+  const now = Date.now();
+  return snap.docs
+    .map(docToAiRequest)
+    .filter((r) => r.expiresAt.getTime() > now)
+    .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0));
+}
+
+/**
+ * Records the agent's answer — once. Returns the request as it was when
+ * answered, or null if it was already answered, expired, or past its deadline
+ * (a late answer must never trade on a stale snapshot).
+ */
+export async function answerAiRequest(id: string, decision: AiDecisionWord, reasoning: string): Promise<AiRequest | null> {
+  const ref = db().collection(AI_REQUESTS).doc(id);
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return null;
+    const req = docToAiRequest(snap);
+    if (req.status !== "open" || req.expiresAt.getTime() <= Date.now()) return null;
+    tx.update(ref, { status: "answered", decision, reasoning, answeredAt: FieldValue.serverTimestamp() });
+    return { ...req, status: "answered" as const, decision, reasoning };
+  });
+}
+
+export async function expireAiRequest(id: string): Promise<void> {
+  await db().collection(AI_REQUESTS).doc(id).update({ status: "expired" });
 }
 
 // ── Sniper state ─────────────────────────────────────────────────────────────

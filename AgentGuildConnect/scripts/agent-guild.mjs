@@ -44,14 +44,16 @@
  *   agent-guild sim observe  [--episode <id>] [--after <seq>] [--json]           — DimSim: what the robot sees in your running attempt
  *   agent-guild sim act      --episode <id> --seq <n> [--turn <deg>] [--forward <m>] [--look] [--done] [--thought "..."] [--json]
  *   agent-guild sim lesson   --episode <id> "<lesson>"                           — DimSim: save what you learned from an attempt
+ *   agent-guild sim drive    [--once]                                            — DimSim: drive the open attempt (the daemon does this on its own)
  */
 
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, readdirSync, constants as fsConstants } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, chmodSync, renameSync, openSync, accessSync, readdirSync, unlinkSync, constants as fsConstants } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { solanaKeypairFromPrivateKeyPem, claimTaskOnChain, submitDeliveryOnChain, sha256Bytes32 } from "./solana-escrow.mjs";
+import { openIdentityVault, sealIdentityVault } from "./identity-vault-crypto.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -1582,6 +1584,7 @@ async function cmdDaemon() {
   console.log(`  Heartbeat: ${intervalSec}s`);
   console.log(`  Reply poll: ${REPLY_POLL_INTERVAL_MS / 1000}s active, up to ${REPLY_POLL_IDLE_MS / 1000}s idle${config.replyCommand ? "" : " (no replyCommand configured — messages will be logged, not answered)"}`);
   console.log(`  DM belt:  ${DM_REPLY_TIMEOUT_MS / 1000}s, tools + vault in private DMs`);
+  console.log(`  DimSim:   drives an open attempt from the robot camera`);
   console.log(`  Hub:      ${config.hubUrl}`);
   console.log(`  Mode:     ${config.offline ? "OFFLINE (pending registration)" : "online"}`);
   if (webhookUrl) {
@@ -1641,6 +1644,44 @@ async function cmdDaemon() {
   };
   scheduleReplyPoll();
 
+  // DimSim: poll the drive relay on its own timer so a model call never
+  // delays the heartbeat. Idle backs off; an open attempt stays tight.
+  let driveTimer = null;
+  let driveDelay = 400;
+  const scheduleDrive = () => {
+    driveTimer = setTimeout(async () => {
+      try {
+        const phase = await driveEpisode();
+        driveDelay = phase === "idle" ? 8000 : phase === "active" ? 1000 : 3000;
+      } catch (err) {
+        console.error(`[${simNow()}] dimsim: ${err.message}`);
+        driveDelay = 8000;
+      } finally {
+        if (!shuttingDown) scheduleDrive();
+      }
+    }, driveDelay);
+  };
+  scheduleDrive();
+
+  // Hyperliquid AI Trader: answer this agent's trade questions on its own
+  // model, on a separate timer so a slow model never delays the heartbeat.
+  let tradeTimer = null;
+  let tradeDelay = 5000;
+  const scheduleTrade = () => {
+    tradeTimer = setTimeout(async () => {
+      try {
+        const state = await answerTradeRequests(config, privateKey);
+        tradeDelay = state === "busy" ? 2000 : state === "idle" ? 15000 : 5 * 60 * 1000;
+      } catch (err) {
+        console.error(`[${new Date().toISOString()}] hyperliquid: ${err.message}`);
+        tradeDelay = 60000;
+      } finally {
+        if (!shuttingDown) scheduleTrade();
+      }
+    }, tradeDelay);
+  };
+  scheduleTrade();
+
   // Graceful shutdown. Checkout is sent only after the hub has confirmed
   // it understands presenceProtocol — an older hub treats every
   // report-skills POST as a heartbeat and would mark a stopping agent online.
@@ -1651,6 +1692,8 @@ async function cmdDaemon() {
     console.log(`\nDaemon stopped (${signal}).`);
     clearInterval(interval);
     clearTimeout(replyInterval);
+    clearTimeout(driveTimer);
+    clearTimeout(tradeTimer);
     if (config.presenceProtocol === 1) {
       try {
         await Promise.race([
@@ -2814,8 +2857,8 @@ async function cmdAssignments() {
 
 const SIM_WAIT_MS = 50000; // under the MCP tool timeout; the hub long-polls ~8 s per request
 
-/** One signed call to a dimos-bench route (agent auth: METHOD:/mods/<mod>/<path>:<ts>). */
-async function simRequest(method, path, { query = {}, body } = {}) {
+/** One signed call to a dimos-bench route (agent auth: METHOD:/mods/<mod>/<path>:<ts>). Never exits. */
+async function simCall(method, path, { query = {}, body } = {}) {
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
   const ts = Date.now().toString();
@@ -2826,11 +2869,17 @@ async function simRequest(method, path, { query = {}, body } = {}) {
     ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    console.error(`DimSim ${path} failed (${resp.status}): ${data.error || "Unknown error"}`);
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+/** CLI wrapper: a failed relay call is a usage error and exits. */
+async function simRequest(method, path, opts) {
+  const res = await simCall(method, path, opts);
+  if (!res.ok) {
+    console.error(`DimSim ${path} failed (${res.status}): ${res.data.error || "Unknown error"}`);
     process.exit(1);
   }
-  return data;
+  return res.data;
 }
 
 /** Long-poll GET /drive until there's a view newer than `after` (or the attempt ended), up to SIM_WAIT_MS. */
@@ -2868,9 +2917,261 @@ function printSimView(view) {
   if (files.length) console.log(`\nCamera images:\n${files.map((f) => `  ${f}`).join("\n")}`);
 }
 
+// The daemon drives an open DimSim attempt on its own: the panel posts the
+// camera, this loop looks at it and posts one move, until the attempt ends.
+// `sim drive` runs the same loop once from the shell.
+const DRIVE_MOVE_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: {
+    thought: { type: "string" },
+    turn: { type: "number" },
+    forward: { type: "number" },
+    look: { type: "boolean" },
+    done: { type: "boolean" },
+  },
+  required: ["thought", "turn", "forward", "look", "done"],
+  additionalProperties: false,
+});
+const DRIVE_LESSON_SCHEMA = JSON.stringify({
+  type: "object",
+  properties: { lesson: { type: "string" } },
+  required: ["lesson"],
+  additionalProperties: false,
+});
+const DRIVE_LABELS = ["front", "left (+90°)", "back (180°)", "right (-90°)"];
+const simDrive = {
+  running: false,
+  episodeId: null,
+  actedSeq: null,
+  history: [],
+  guide: "",
+  lessons: [],
+  lessoned: null,
+  idleNoted: false,
+  retryAt: 0,
+};
+
+function simNow() {
+  return new Date().toISOString().replace("T", " ").slice(0, 19);
+}
+
+/** Clamp to what the sim accepts: ≤2 m forward, ≤1 m back, ±180°. */
+function clampDriveMove(out) {
+  const look = out.look === true && out.done !== true;
+  const turnN = Number(out.turn);
+  const fwdN = Number(out.forward);
+  const turn = look ? 0 : Math.round(Math.min(180, Math.max(-180, Number.isFinite(turnN) ? turnN : 0)));
+  const forward = look ? 0 : Math.round(Math.min(2, Math.max(-1, Number.isFinite(fwdN) ? fwdN : 0)) * 100) / 100;
+  return {
+    look,
+    done: out.done === true,
+    thought: String(out.thought || "").slice(0, 500),
+    turn,
+    forward,
+  };
+}
+
+function resetSimDrive() {
+  simDrive.episodeId = null;
+  simDrive.actedSeq = null;
+  simDrive.history = [];
+  simDrive.guide = "";
+  simDrive.lessons = [];
+}
+
+/** One headless Grok call. `blocks` is ACP content (text + image). Returns structuredOutput or null. */
+function askDriveModel(blocks, schema, timeoutMs) {
+  return new Promise((resolve) => {
+    const dir = join(dirname(CONFIG_PATH), "dimsim");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "prompt.json");
+    writeFileSync(file, JSON.stringify(blocks));
+    const child = spawn("grok", [
+      "--prompt-file", file,
+      "--json-schema", schema,
+      "--output-format", "json",
+      "--max-turns", "1",
+      "--tools", "",
+      "--no-subagents",
+      "--no-plan",
+      "--disable-web-search",
+      "--reasoning-effort", "low",
+      "--cwd", dir,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { unlinkSync(file); } catch { /* the frames should not linger */ }
+      resolve(value);
+    };
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", (err) => finish({ error: err.message }));
+    child.on("close", (code) => {
+      let parsed = null;
+      try { parsed = JSON.parse(stdout); } catch { /* model noise */ }
+      const structured = parsed?.structuredOutput;
+      if (code !== 0 || !structured || typeof structured !== "object") {
+        const detail = (stderr || stdout || `exit ${code}`).trim().split("\n").pop();
+        finish({ error: String(detail || "no move").slice(0, 300) });
+        return;
+      }
+      finish({ structured });
+    });
+  });
+}
+
+function drivePrompt(view) {
+  const pose = view.pose || {};
+  const past = simDrive.history.length
+    ? simDrive.history.slice(-8).map((h, k) => `${k + 1}. (${h.x}, ${h.z}) yaw ${h.yaw}° → ${h.look ? "looked around" : `turn ${h.turn}°, forward ${h.forward} m`}${h.blocked ? " BLOCKED" : ""} — ${h.thought}`).join("\n")
+    : "none yet";
+  const lessons = simDrive.lessons.length ? simDrive.lessons.map((l) => `- ${l}`).join("\n") : "none yet";
+  const text = [
+    simDrive.guide || "You drive a Unitree Go2 through a simulated apartment from its front camera.",
+    `Task: ${view.task || "reach the goal"}`,
+    `Lessons from earlier attempts:\n${lessons}`,
+    `Moves this attempt:\n${past}`,
+    `Current pose: x ${Number(pose.x).toFixed(2)}, z ${Number(pose.z).toFixed(2)}, yaw ${pose.yaw}°. Steps left: ${view.stepsLeft ?? "?"}. Last move blocked: ${view.blocked === true}.`,
+    "Choose one move. look=true spends this step photographing all four directions instead of moving. done=true only when you believe the goal is reached. turn is degrees (positive = left, -180..180). forward is metres (-1..2).",
+  ].join("\n\n");
+  const blocks = [{ type: "text", text }];
+  (view.panorama || []).slice(0, 4).forEach((jpeg, k) => {
+    if (!jpeg) return;
+    blocks.push({ type: "text", text: DRIVE_LABELS[k] || `view ${k + 1}` }, { type: "image", data: jpeg, mimeType: "image/jpeg" });
+  });
+  if (view.jpeg) blocks.push({ type: "text", text: "Camera now:" }, { type: "image", data: view.jpeg, mimeType: "image/jpeg" });
+  return blocks;
+}
+
+async function saveDriveLesson(view) {
+  if (!view.episodeId || simDrive.lessoned === view.episodeId) return;
+  if (view.ended === "stopped") {
+    simDrive.lessoned = view.episodeId;
+    return;
+  }
+  const trace = simDrive.history.map((h, k) => `${k + 1}. (${h.x}, ${h.z}) yaw ${h.yaw} → ${h.look ? "look" : `turn ${h.turn} forward ${h.forward}`}${h.blocked ? " blocked" : ""}`).join("\n") || "no moves";
+  const asked = await askDriveModel(
+    [{ type: "text", text: `The robot attempted "${view.task}". Outcome: ${view.ended}.\n${trace}\nWrite one or two sentences on where the target and obstacles are (coordinates, room, landmarks), useful if the next attempt starts somewhere else. No preamble.` }],
+    DRIVE_LESSON_SCHEMA,
+    45000,
+  );
+  const lesson = (asked.structured?.lesson || `Attempt ${view.ended} on "${view.task}" after ${simDrive.history.length} moves.`).trim().slice(0, 600);
+  const saved = await simCall("POST", "drive/lesson", { body: { episodeId: view.episodeId, lesson } });
+  simDrive.lessoned = view.episodeId;
+  if (saved.ok) console.log(`[${simNow()}] dimsim lesson saved (${view.episodeId})`);
+  else console.error(`[${simNow()}] dimsim lesson failed (${saved.status}): ${saved.data.error || "unknown"}`);
+}
+
+/**
+ * Drive the open attempt until it ends, the panel is between frames, or the
+ * model needs a breather. A 404 means nobody has pressed "agent drives".
+ * Returns "idle" | "wait" | "active".
+ */
+async function driveEpisode() {
+  if (simDrive.running || Date.now() < simDrive.retryAt) return "wait";
+  simDrive.running = true;
+  try {
+    let res = await simCall("GET", "drive");
+    if (res.status === 404) {
+      if (simDrive.episodeId) resetSimDrive();
+      if (!simDrive.idleNoted) {
+        simDrive.idleNoted = true;
+        console.log(`[${simNow()}] dimsim: no running attempt`);
+      }
+      return "idle";
+    }
+    if (!res.ok) {
+      console.error(`[${simNow()}] dimsim observe failed (${res.status}): ${res.data.error || "unknown"}`);
+      simDrive.retryAt = Date.now() + 20000;
+      return "wait";
+    }
+    simDrive.idleNoted = false;
+    for (let step = 0; step < 40; step++) {
+      const view = res.data || {};
+      if (view.ended) {
+        console.log(`[${simNow()}] dimsim attempt ended: ${view.ended} (${view.episodeId})`);
+        await saveDriveLesson(view);
+        resetSimDrive();
+        return "idle";
+      }
+      if (view.waiting || view.seq == null || !view.jpeg) return "wait";
+      if (simDrive.episodeId !== view.episodeId) {
+        resetSimDrive();
+        simDrive.episodeId = view.episodeId;
+        console.log(`[${simNow()}] dimsim driving ${view.episodeId}: ${view.task}`);
+      }
+      if (view.guide) simDrive.guide = view.guide;
+      if (Array.isArray(view.lessons) && view.lessons.length) simDrive.lessons = view.lessons.map((l) => String(l)).slice(0, 8);
+      if (simDrive.actedSeq === view.seq) return "wait";
+
+      const asked = await askDriveModel(drivePrompt(view), DRIVE_MOVE_SCHEMA, 60000);
+      if (!asked.structured) {
+        console.error(`[${simNow()}] dimsim model failed: ${asked.error}`);
+        simDrive.retryAt = Date.now() + 20000;
+        return "wait";
+      }
+      const move = clampDriveMove(asked.structured);
+      console.log(`[${simNow()}] dimsim seq ${view.seq}: turn ${move.turn}° forward ${move.forward} m${move.look ? " look" : ""}${move.done ? " done" : ""}`);
+      const acted = await simCall("POST", "drive/act", {
+        body: {
+          episodeId: view.episodeId,
+          seq: view.seq,
+          turn: move.turn,
+          forward: move.forward,
+          look: move.look,
+          done: move.done,
+          thought: move.thought,
+        },
+      });
+      if (!acted.ok) {
+        console.error(`[${simNow()}] dimsim act failed (${acted.status}): ${acted.data.error || "unknown"}`);
+        simDrive.retryAt = Date.now() + 5000;
+        return "wait";
+      }
+      simDrive.actedSeq = view.seq;
+      const pose = view.pose || {};
+      simDrive.history.push({
+        x: Number(pose.x).toFixed(2),
+        z: Number(pose.z).toFixed(2),
+        yaw: pose.yaw,
+        turn: move.turn,
+        forward: move.forward,
+        look: move.look,
+        blocked: view.blocked === true,
+        thought: move.thought.slice(0, 160),
+      });
+      if (simDrive.history.length > 40) simDrive.history.splice(0, simDrive.history.length - 40);
+      if (acted.data?.waiting) return "active";
+      res = { ok: true, status: 200, data: acted.data };
+    }
+    return "active";
+  } catch (err) {
+    console.error(`[${simNow()}] dimsim: ${err.message}`);
+    simDrive.retryAt = Date.now() + 20000;
+    return "wait";
+  } finally {
+    simDrive.running = false;
+  }
+}
+
 async function cmdSim() {
   const sub = process.argv[3];
   const episodeId = arg("--episode");
+  if (sub === "drive") {
+    const once = hasFlag("--once");
+    for (;;) {
+      const phase = await driveEpisode();
+      if (once || phase === "idle") break;
+      await new Promise((r) => setTimeout(r, phase === "active" ? 1000 : 3000));
+    }
+    return;
+  }
   if (sub === "observe") {
     const after = arg("--after");
     printSimView(await simObserve(episodeId, after != null ? Number(after) : undefined));
@@ -2901,7 +3202,7 @@ async function cmdSim() {
     await simRequest("POST", "drive/lesson", { body: { episodeId, lesson } });
     console.log("Lesson saved to long-term memory.");
   } else {
-    console.error("Usage: agent-guild sim observe|act|lesson … (see agent-guild help)");
+    console.error("Usage: agent-guild sim observe|act|lesson|drive … (see agent-guild help)");
     process.exit(1);
   }
 }
@@ -4318,6 +4619,56 @@ const MCP_TOOLS = {
     required: ["episodeId", "lesson"],
     argv: (a) => ["sim", "lesson", "--episode", a.episodeId, a.lesson],
   },
+  guild_grow: {
+    description: "See this agent's memory, the skills it has, the mods it holds, and the mods it does not. Call this before remember, skill, or propose. Does not write anything.",
+    properties: {},
+    argv: () => ["grow"],
+  },
+  guild_remember: {
+    description: "Save a lesson into this agent's long-term memory so the next guild_grow and guild_context include it. Default section is Learnings.",
+    properties: {
+      text: str("What you learned, as one or two sentences"),
+      section: { type: "string", enum: ["About Me", "Key Facts", "Patterns & Preferences", "Learnings", "Context"] },
+    },
+    required: ["text"],
+    argv: (a) => ["grow", "remember", a.text, "--json", ...(a.section ? ["--section", a.section] : [])],
+  },
+  guild_skill: {
+    description: "Add a skill this agent can now do. It is merged into the profile other agents discover. Does not remove skills already reported.",
+    properties: {
+      id: str("Lowercase slug, e.g. dimsim-nav"),
+      name: str("Human name, e.g. DimSim navigation"),
+      type: { type: "string", enum: ["skill", "plugin"] },
+    },
+    required: ["id", "name"],
+    argv: (a) => ["grow", "skill", a.id, "--name", a.name, "--json", ...(a.type ? ["--type", a.type] : [])],
+  },
+  guild_vault_list: {
+    description: "List this agent's identity-vault slots and the three identity addresses (protocol, agent, user) that can open them. Names and sizes only. The hub does not return plaintext.",
+    properties: {},
+    argv: () => ["vault", "list", "--json"],
+  },
+  guild_vault_get: {
+    description: "Open one identity-vault slot with this agent's identity key. The protocol key and the user's wallet key open the same ciphertext. Use slots like memory and capabilities.",
+    properties: { slot: str("Lowercase slot name, e.g. memory or capabilities") },
+    required: ["slot"],
+    argv: (a) => ["vault", "get", a.slot, "--json"],
+  },
+  guild_vault_put: {
+    description: "Seal a string into an identity-vault slot for all three identity NFT holders: protocol, this agent, and the user. Any one of those keys opens it. The hub stores the wraps, not the plaintext.",
+    properties: { slot: str("Lowercase slot name"), data: str("Plaintext to seal. Up to 256KB.") },
+    required: ["slot", "data"],
+    argv: (a) => ["vault", "put", a.slot, "--data", a.data, "--json"],
+  },
+  guild_propose: {
+    description: "File a new operating playbook for this agent. The org owner approves it before it changes replies. Base it on guild_grow's memory and failures.",
+    properties: {
+      playbook: str("The complete new operating rules, under 8000 characters"),
+      note: str("What changed and which evidence each change answers"),
+    },
+    required: ["playbook", "note"],
+    argv: (a) => ["grow", "propose", "--playbook", a.playbook, "--note", a.note, "--json"],
+  },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
     properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
@@ -4368,7 +4719,7 @@ async function handleMcpRequest(msg) {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-guild", version: "1.1.0" },
-      instructions: "Tools for an agent registered on Agent Guild (agent-guild.com): read and send channel messages, manage task assignments, find other agents, and read/write agent memory, and call external APIs through vault bindings without seeing their keys, and drive the DimSim robot (guild_sim_observe, then guild_sim_act per move). Call guild_status first to confirm the agent is registered.",
+      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Also: guild_grow, messages, assignments, and DimSim. Call guild_status first if you are not sure you are registered.",
     };
   }
   if (method === "ping") return {};
@@ -4638,6 +4989,82 @@ async function hlRequest(config, privateKey, method, modPath, body) {
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(`${method} /${modPath} (${resp.status}): ${data.error || "request failed"}`);
   return data;
+}
+
+// --- Hyperliquid AI Trader: decide on this agent's own model ----------------
+// The hub never runs a model for an AI Trader bot. Each round it posts the
+// question (market snapshot + rules) to this agent's queue; the daemon runs
+// it through the agent's own replyCommand — sandboxed, one turn, no tools —
+// and posts the answer back. Backtest bars arrive through the same queue.
+
+const TRADE_ANSWER_TIMEOUT_MS = 3 * 60 * 1000;
+
+/** The last LONG/SHORT/CLOSE/NOTHING in the model's text wins (the hub parses it the same way). */
+function parseTradeDecision(text) {
+  const words = String(text || "").toUpperCase().replace(/DO NOTHING/g, "NOTHING").match(/\b(LONG|SHORT|CLOSE|NOTHING)\b/g);
+  return words ? words[words.length - 1] : null;
+}
+
+/**
+ * Answers every open AI Trader question for this agent, oldest first.
+ * Returns "busy" if it answered something, "idle" if the queue was empty, or
+ * "off" when the mod isn't installed / no replyCommand (poll slowly then).
+ */
+async function answerTradeRequests(config, privateKey) {
+  let queue;
+  try {
+    queue = await hlRequest(config, privateKey, "GET", "ai/requests");
+  } catch (err) {
+    if (/\((401|403|404)\)/.test(err.message)) return "off";
+    throw err;
+  }
+  const requests = Array.isArray(queue.requests) ? queue.requests : [];
+  if (requests.length === 0) return "idle";
+
+  const replyScript = join(__dirname, "grok-reply.mjs");
+  const command = config.replyCommand || (existsSync(replyScript) ? `node ${replyScript}` : null);
+  if (!command) {
+    console.error(`[${new Date().toISOString()}] hyperliquid: ${requests.length} trade question(s) waiting, but no replyCommand is configured to answer them`);
+    return "off";
+  }
+
+  for (const r of requests) {
+    const left = Date.parse(r.expiresAt) - Date.now();
+    if (!(left > 5000)) continue;
+    const result = await runReplyCommand(command, {
+      id: `trade-${r.id}`,
+      channelId: "hyperliquid",
+      channelName: "hyperliquid-ai-trader",
+      from: "Agent Guild",
+      fromType: "system",
+      text: `${r.system}\n\n${r.prompt}`,
+      timestamp: Date.now(),
+      history: [],
+    }, {
+      AGENT_GUILD_AGENT_NAME: config.agentName || "",
+      AGENT_GUILD_AGENT_TYPE: config.agentType || "",
+      AGENT_GUILD_AGENT_BIO: config.bio || "",
+      AGENT_GUILD_AGENT_ID: config.agentId || "",
+      AGENT_GUILD_CHANNEL_KIND: "trade",
+    }, Math.min(TRADE_ANSWER_TIMEOUT_MS, left - 3000));
+    const stamp = new Date().toISOString();
+    if (!result.ok) {
+      console.error(`[${stamp}] hyperliquid ${r.coin}: model failed (${result.error}) — the round will be skipped`);
+      continue;
+    }
+    if (!parseTradeDecision(result.text)) {
+      console.error(`[${stamp}] hyperliquid ${r.coin}: the model's answer named no decision — the round will be skipped`);
+      continue;
+    }
+    try {
+      const res = await hlRequest(config, privateKey, "POST", `ai/requests/${r.id}/answer`, { text: result.text });
+      const outcome = res.action ? ` → ${res.action}${res.taskId ? ` (task ${res.taskId})` : ""}${res.error ? ` — ${res.error}` : ""}` : "";
+      console.log(`[${stamp}] hyperliquid ${r.purpose} ${r.coin}: ${res.decision}${outcome}`);
+    } catch (err) {
+      console.error(`[${stamp}] hyperliquid ${r.coin}: answer rejected — ${err.message}`);
+    }
+  }
+  return "busy";
 }
 
 function hlUsage(msg) {
@@ -5043,6 +5470,274 @@ function cmdSupervise() {
   spawnOnce();
 }
 
+// ---------------------------------------------------------------------------
+// Grow (`agent-guild grow`)
+//
+// One tool any model can call. It reads this agent's memory and the
+// capabilities it actually holds, writes a lesson back, and adds a skill
+// it has learned. A playbook change still waits for the org owner.
+// ---------------------------------------------------------------------------
+const GROW_SECTIONS = ["About Me", "Key Facts", "Patterns & Preferences", "Learnings", "Context"];
+
+function growFail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+function growUsage(msg) {
+  console.error(`${msg || "Bad arguments"}
+
+Usage:
+  grow                                          — memory, skills you have, mods you don't
+  grow remember "<lesson>" [--section <name>]  — append to long-term memory (default: Learnings)
+  grow skill <id> --name "<name>" [--type skill|plugin]
+  grow propose --playbook "<rules>" --note "<what changed>" [--file <playbook.md>]`);
+  process.exit(2);
+}
+
+async function growSignedGet(config, privateKey, pathAndQuery, message) {
+  const ts = Date.now().toString();
+  const sig = sign(`${message}:${ts}`, privateKey);
+  const sep = pathAndQuery.includes("?") ? "&" : "?";
+  const resp = await fetch(`${config.hubUrl}${pathAndQuery}${sep}agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`);
+  const text = await resp.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { text }; }
+  if (!resp.ok) throw new Error(`${resp.status} ${data.error || "request failed"}`);
+  return { data, text };
+}
+
+async function buildGrowPacket(config, privateKey) {
+  const [capsR, catalogR, memoryR, harnessR, passportR] = await Promise.all([
+    growSignedGet(config, privateKey, "/api/v1/capabilities", "GET:/v1/capabilities").then((r) => r.data.capabilities || []).catch((err) => ({ error: err.message })),
+    fetch(`${config.hubUrl}/api/v1/capabilities`).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || `catalog ${r.status}`);
+      return d.capabilities || [];
+    }).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, "/api/v1/context?format=markdown&limit=30", `GET:/v1/context:${config.agentId}`).then((r) => r.text).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, "/api/v1/harness", `GET:/v1/harness:${config.agentId}`).then((r) => r.data).catch((err) => ({ error: err.message })),
+    growSignedGet(config, privateKey, `/api/v1/agents/${config.agentId}/passport`, `GET:/v1/agents/${config.agentId}/passport:${config.agentId}`).then((r) => r.data.passport || r.data).catch((err) => ({ error: err.message })),
+  ]);
+
+  const installed = Array.isArray(capsR) ? capsR.map((c) => ({
+    key: c.key, name: c.name, slug: c.slug, requiredKeys: c.requiredKeys || [],
+  })) : [];
+  const held = new Set(installed.map((c) => c.key));
+  const catalog = Array.isArray(catalogR) ? catalogR : [];
+  const byMod = new Map();
+  for (const c of catalog) {
+    if (c.type && c.type !== "skill") continue;
+    if (!c.key || held.has(c.key)) continue;
+    const slug = String(c.modId || c.key).replace(/^mod-/, "");
+    if (!byMod.has(slug)) byMod.set(slug, { slug, name: c.modName || slug, skills: [] });
+    const group = byMod.get(slug);
+    if (group.skills.length < 6) group.skills.push({ key: c.key, name: c.name });
+  }
+  let memory = typeof memoryR === "string" ? memoryR : "";
+  let memoryTruncated = false;
+  if (memory.length > 6000) {
+    memory = memory.slice(0, 6000);
+    memoryTruncated = true;
+  }
+  const playbook = harnessR && harnessR.active ? {
+    generation: harnessR.active.generation,
+    text: String(harnessR.active.playbook || "").slice(0, 2000),
+  } : null;
+  const skills = Array.isArray(passportR?.reportedSkills) ? passportR.reportedSkills.map((s) => ({ id: s.id, name: s.name, type: s.type || "skill" })) : (config.skills || []);
+
+  return {
+    agentId: config.agentId,
+    name: config.agentName || null,
+    memory,
+    memoryTruncated,
+    skills,
+    installed,
+    notInstalled: [...byMod.values()].slice(0, 24),
+    playbook,
+    errors: {
+      ...(Array.isArray(capsR) ? {} : { installed: capsR.error }),
+      ...(Array.isArray(catalogR) ? {} : { catalog: catalogR.error }),
+      ...(typeof memoryR === "string" ? {} : { memory: memoryR.error }),
+      ...(harnessR && !harnessR.error ? {} : harnessR?.error ? { playbook: harnessR.error } : {}),
+    },
+    how: {
+      remember: 'grow remember "<what you learned>"',
+      skill: 'grow skill <id> --name "<Name>"',
+      propose: 'grow propose --playbook "<operating rules>" --note "<what changed and why>"',
+      note: "Remember and skill take effect now. A new playbook waits for the org owner. A mod in notInstalled is installed by a human from the dashboard.",
+    },
+  };
+}
+
+async function cmdGrow() {
+  const sub = process.argv[3];
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+
+  if (!sub || sub === "status") {
+    console.log(JSON.stringify(await buildGrowPacket(config, privateKey), null, 2));
+    return;
+  }
+
+  if (sub === "remember") {
+    const text = process.argv[4];
+    if (!text || text.startsWith("--")) growUsage("remember needs the lesson text");
+    const section = arg("--section") || "Learnings";
+    if (!GROW_SECTIONS.includes(section)) growUsage(`section must be one of: ${GROW_SECTIONS.join(", ")}`);
+    const entry = text.slice(0, 2000);
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/memory/append",
+      `${config.hubUrl}/api/v1/memory/append?agent=${config.agentId}`,
+      { entry, section },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) growFail(`Remember failed (${resp.status}): ${data.error || "unknown"}`);
+    const out = { ok: true, section, id: data.id || null };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Remembered in ${section}.`);
+    return;
+  }
+
+  if (sub === "skill") {
+    const id = process.argv[4];
+    const name = arg("--name");
+    const type = arg("--type") || "skill";
+    if (!id || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) growUsage("skill id must be a lowercase slug");
+    if (!name) growUsage("--name is required");
+    if (type !== "skill" && type !== "plugin") growUsage("--type must be skill or plugin");
+    let held = Array.isArray(config.skills) ? config.skills : [];
+    try {
+      const passport = await growSignedGet(config, privateKey, `/api/v1/agents/${config.agentId}/passport`, `GET:/v1/agents/${config.agentId}/passport:${config.agentId}`);
+      const reported = passport.data.passport?.reportedSkills || passport.data.reportedSkills;
+      if (Array.isArray(reported) && reported.length) held = reported;
+    } catch { /* local skills are the fallback */ }
+    const skills = held
+      .filter((s) => s && s.id && s.id !== id)
+      .map((s) => ({ id: s.id, name: s.name, type: s.type === "plugin" ? "plugin" : "skill" }));
+    skills.push({ id, name: name.slice(0, 80), type });
+    const result = await reportSkills(config, privateKey, skills, config.bio);
+    config.skills = skills;
+    saveConfig(config);
+    const out = { ok: true, added: id, reportedSkills: result.reportedSkills };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Skill ${id} is on your profile (${skills.length} total).`);
+    return;
+  }
+
+  if (sub === "propose") {
+    const file = arg("--file");
+    const playbook = (arg("--playbook") || (file ? readFileSync(file, "utf8") : "")).trim();
+    const note = (arg("--note") || "").trim();
+    if (!playbook || !note) growUsage("propose needs --playbook (or --file) and --note");
+    if (playbook.length > 8000) growUsage("playbook is over 8000 characters");
+    if (note.length > 4000) growUsage("note is over 4000 characters");
+    const current = await growSignedGet(config, privateKey, "/api/v1/harness", `GET:/v1/harness:${config.agentId}`);
+    const parent = current.data.active?.generation ?? null;
+    const resp = await signedBodyRequest(
+      config, privateKey, "POST", "POST:/v1/harness",
+      `${config.hubUrl}/api/v1/harness?agent=${config.agentId}`,
+      { playbook, improvement: note, parentGeneration: parent },
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) growFail(`Propose failed (${resp.status}): ${data.error || "unknown"}`);
+    const out = { ok: true, generation: data.generation, awaitingOwner: true };
+    console.log(hasFlag("--json") ? JSON.stringify(out) : `Proposed generation ${data.generation}. The org owner approves it on the Harness tab.`);
+    return;
+  }
+
+  growUsage(`Unknown grow command "${sub}"`);
+}
+
+const VAULT_SLOT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+function vaultUsage(msg) {
+  console.error(`${msg || "Bad arguments"}
+
+Usage:
+  vault                         — list slots (names and sizes, not contents)
+  vault get <slot>              — open a slot with this agent's identity key
+  vault put <slot> --data "<text>" | --file <path>
+  vault delete <slot>`);
+  process.exit(2);
+}
+
+function vaultHolders(recipients) {
+  return recipients?.user ? "the protocol, this agent, and the user" : "the protocol and this agent (user copy is not minted yet)";
+}
+
+async function cmdVault() {
+  const sub = process.argv[3] || "list";
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const slot = ["get", "put", "delete"].includes(sub) ? process.argv[4] : null;
+  if (slot !== null && !VAULT_SLOT.test(slot || "")) vaultUsage("slot must be a lowercase slug");
+
+  if (sub === "list") {
+    const { data } = await growSignedGet(config, privateKey, "/api/v1/identity-vault", `GET:/v1/identity-vault:${config.agentId}`);
+    if (hasFlag("--json")) return console.log(JSON.stringify({ slots: data.slots || [], recipients: data.recipients || null }, null, 2));
+    const slots = data.slots || [];
+    if (!slots.length) console.log("Identity vault is empty.");
+    for (const row of slots) console.log(`${row.slot}  ${row.bytes} bytes  ${row.updatedAt || ""}`);
+    console.log(`Opens with ${vaultHolders(data.recipients)}.`);
+    return;
+  }
+
+  if (sub === "get") {
+    const { data } = await growSignedGet(config, privateKey, `/api/v1/identity-vault/${slot}`, `GET:/v1/identity-vault/${slot}:${config.agentId}`);
+    let plain;
+    try {
+      plain = openIdentityVault(privateKey, slot, data);
+    } catch {
+      console.error("Could not open this slot with this agent's identity key.");
+      process.exit(1);
+    }
+    if (hasFlag("--json")) return console.log(JSON.stringify({ slot, data: plain }));
+    console.log(plain);
+    return;
+  }
+
+  if (sub === "put") {
+    const file = arg("--file");
+    const text = arg("--data") ?? (file ? readFileSync(file, "utf8") : null);
+    if (text == null || text === "") vaultUsage("put needs --data or --file");
+    if (Buffer.byteLength(text) > 256 * 1024) vaultUsage("entry is over 256KB");
+    const listed = await growSignedGet(config, privateKey, "/api/v1/identity-vault", `GET:/v1/identity-vault:${config.agentId}`);
+    const recipients = listed.data.recipients;
+    if (!recipients?.protocol || !recipients?.agent) {
+      console.error("Hub did not name the protocol and agent identity keys.");
+      process.exit(1);
+    }
+    const box = sealIdentityVault(privateKey, slot, text, recipients);
+    const resp = await signedBodyRequest(
+      config, privateKey, "PUT", `PUT:/v1/identity-vault/${slot}`,
+      `${config.hubUrl}/api/v1/identity-vault/${slot}?agent=${config.agentId}`,
+      box,
+    );
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error(`Vault put failed (${resp.status}): ${body.error || "unknown"}`);
+      process.exit(1);
+    }
+    const line = `Sealed ${slot} for ${vaultHolders(recipients)}.`;
+    console.log(hasFlag("--json") ? JSON.stringify({ ok: true, slot, user: Boolean(recipients.user) }) : line);
+    return;
+  }
+
+  if (sub === "delete") {
+    const ts = Date.now().toString();
+    const sig = sign(`DELETE:/v1/identity-vault/${slot}:${config.agentId}:${ts}`, privateKey);
+    const resp = await fetch(`${config.hubUrl}/api/v1/identity-vault/${slot}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, { method: "DELETE" });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      console.error(`Vault delete failed (${resp.status}): ${body.error || "unknown"}`);
+      process.exit(1);
+    }
+    console.log(hasFlag("--json") ? JSON.stringify({ ok: true, slot }) : `Deleted ${slot}.`);
+    return;
+  }
+
+  vaultUsage(`Unknown vault command "${sub}"`);
+}
+
 // `--as` was already stripped out of process.argv above, so the command
 // name is back to a fixed position regardless of where `--as` was written.
 const cmd = process.argv[2];
@@ -5108,6 +5803,8 @@ try {
   else if (cmd === "key") await cmdKey();
   else if (cmd === "harness") await cmdHarness();
   else if (cmd === "evolve") await cmdEvolve();
+  else if (cmd === "grow") await cmdGrow();
+  else if (cmd === "vault") await cmdVault();
   else {
     console.log(`@agent-guild/agent-skill — Sandbox-safe Agent Guild agent
 
@@ -5165,6 +5862,18 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Grow (any model — read yourself, then write what you learned):
+  grow                                              — memory + skills you have + mods you don't
+  grow remember "<lesson>" [--section <name>]      — append to long-term memory
+  grow skill <id> --name "<name>" [--type skill|plugin]  — add a skill without dropping the ones you have
+  grow propose --playbook "<rules>" --note "<why>" — file the next playbook; the owner approves it
+
+Identity vault (one ciphertext, three keys — protocol, this agent, and the user):
+  vault                                          — list slots and who can open them
+  vault get <slot>                               — open a slot with this agent's key
+  vault put <slot> --data "<text>" | --file <path>
+  vault delete <slot>
 
 Installed Mods (a human installs from the dashboard; testnet only):
   capabilities [--json]                                    — what this agent's org has installed for it

@@ -20,7 +20,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "./firebase-admin";
 
 export const TOKEN_PREFIX = "agt_";
-export const TOKEN_SCOPES = ["bindings:list", "bindings:execute", "llm:proxy", "intents:submit", "identity:assert", "mods:call"] as const;
+export const TOKEN_SCOPES = ["bindings:list", "bindings:execute", "llm:proxy", "intents:submit", "identity:assert", "mods:call", "mcp:read", "mcp:write"] as const;
 export type TokenScope = (typeof TOKEN_SCOPES)[number];
 
 const ISSUER = "agent-guild";

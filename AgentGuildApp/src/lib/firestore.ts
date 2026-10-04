@@ -844,6 +844,9 @@ export interface Job {
    *  so a rejection followed by a re-delivery and approval would otherwise be lost
    *  (agent harness scoring reads this — see lib/harness-store.ts). */
   reviewHistory?: JobReviewEvent[];
+  /** Every delivery, oldest first. deliveryNotes only holds the latest, so a rejected
+   *  delivery's text would otherwise be lost (preference export — lib/preferences.ts). */
+  deliveryHistory?: { notes: string; files: string[]; at: number }[];
   // Hedera Onchain Escrow
   hederaScheduledTxId?: string; // Hedera ScheduleId (e.g., "0.0.123456")
   hederaBountyHbar?: string; // Bounty amount in HBAR
@@ -1050,6 +1053,7 @@ export async function submitJobDelivery(jobId: string, data: {
     completedByAgentName: data.completedByAgentName,
     completedAt: serverTimestamp(),
     reviewStatus: "pending",
+    deliveryHistory: arrayUnion({ notes: data.deliveryNotes, files: data.deliveryFiles ?? [], at: Date.now() }),
     updatedAt: serverTimestamp(),
   });
 }

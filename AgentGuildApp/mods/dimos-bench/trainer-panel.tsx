@@ -2,7 +2,8 @@
 
 /**
  * "Train on DimSim" — dimOS's browser robot simulator (vendored under
- * public/dimsim, embed mode) inside the panel. You can drive the Go2 freely
+ * public/dimsim, embed mode) inside the panel, with a choice of robot (Go2,
+ * rover, humanoid: SIM_ROBOTS). You can drive it freely
  * with the keyboard, or let the agent drive with its own model: the panel
  * posts what the robot sees to the server's drive relay, the agent reads it
  * and answers with a move (agent-guild sim tools), and the panel runs it. A
@@ -17,7 +18,7 @@ import { RobotReplayView, token } from "./replay-view";
 import { SimMap, type FloorPlan } from "./sim-map";
 import {
   objectTask, recentPassRate,
-  type DriveMove, type Episode, type EpisodeStatus, type EpisodeStep, type LearningPoint, type SimAction, type SimPose, type SimTask,
+  type DriveMove, type Episode, type EpisodeStatus, type EpisodeStep, type LearningPoint, type SimAction, type SimPose, type SimRobot, type SimTask,
 } from "./training";
 
 /** window.__agentGuild inside the sim iframe (mods/dimos-bench/dimsim/src/agentGuildEmbed.js). */
@@ -32,10 +33,12 @@ interface SimApi {
   panorama(): string[];
   floorPlan(): FloorPlan;
   randomStart(target: string, thresholdM: number): SimPose | null;
+  setRobot(id: SimRobot): SimRobot;
 }
 
 interface SimOptions {
   tasks: SimTask[];
+  robots: { id: SimRobot; label: string; about: string }[];
   agents: { id: string; name: string; orgId: string }[];
   canDrive: boolean;
   model: string;
@@ -134,6 +137,7 @@ export function TrainerPanel({ api }: PanelProps) {
   const [options, setOptions] = useState<SimOptions | null>(null);
   const [agentId, setAgentId] = useState("");
   const [taskId, setTaskId] = useState("go-to-couch");
+  const [robot, setRobot] = useState<SimRobot>("go2");
   const [mode, setMode] = useState<Mode>("idle");
   const [lessons, setLessons] = useState<string[]>([]);
   const [newLesson, setNewLesson] = useState<string | null>(null);
@@ -206,11 +210,11 @@ export function TrainerPanel({ api }: PanelProps) {
 
   const loadHistory = useCallback(() => {
     if (!agentId) return;
-    api(`episodes?agentId=${encodeURIComponent(agentId)}`)
+    api(`episodes?agentId=${encodeURIComponent(agentId)}&robot=${robot}`)
       .then((r) => json<{ episodes: Episode[]; curves: Record<string, LearningPoint[]> }>(r))
       .then(setHistory)
       .catch(() => setHistory(null));
-  }, [api, agentId]);
+  }, [api, agentId, robot]);
   useEffect(loadHistory, [loadHistory]);
 
   /** Put the robot at `pose` (default: the task's start) and show what it sees. */
@@ -225,9 +229,19 @@ export function TrainerPanel({ api }: PanelProps) {
   }, [task]);
   // Back to the start when the sim comes up or the task changes — not when an
   // attempt ends, so you can see where the robot finished.
+  // Switching robots changes its look, camera and collisions in the sim, and
+  // where it can go (the floor plan's reachable area), so reload the plan too.
   useEffect(() => {
-    if (simState === "ready") resetRobot();
-  }, [simState, resetRobot]);
+    if (simState !== "ready" || !sim.current) return;
+    sim.current.setRobot(robot);
+    try {
+      const p = sim.current.floorPlan();
+      setPlan(p.cells ? p : null);
+    } catch {
+      setPlan(null);
+    }
+    resetRobot();
+  }, [simState, robot, resetRobot]);
 
   // The best earlier attempt at this task, drawn on the minimap as a ghost trail.
   const best = useMemo(() => (history ? bestEpisode(history.episodes, taskId) : null), [history, taskId]);
@@ -258,7 +272,7 @@ export function TrainerPanel({ api }: PanelProps) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            agentId, taskId, actor: "agent", driver: standIn ? "server" : "own", startPose,
+            agentId, taskId, actor: "agent", driver: standIn ? "server" : "own", robot, startPose,
             title: task.id.startsWith("obj:") ? task.task : undefined,
             startDistance: sim.current.score(task.target, task.thresholdM).score,
           }),
@@ -533,7 +547,7 @@ export function TrainerPanel({ api }: PanelProps) {
   return (
     <div className="space-y-4 text-sm">
       <p className="text-muted-foreground">
-        dimOS&apos;s DimSim robot simulator: a Unitree Go2 in a furnished apartment. Drive it yourself with the
+        dimOS&apos;s DimSim robot simulator: a robot (Unitree Go2, a wheeled rover or a humanoid) in a furnished apartment. Drive it yourself with the
         keyboard, or let your agent drive from the robot&apos;s camera. Each agent attempt is scored by DimSim&apos;s rubric,
         teaches the agent a lesson it keeps in memory, and becomes training data.
       </p>
@@ -545,6 +559,20 @@ export function TrainerPanel({ api }: PanelProps) {
           <div className="text-muted-foreground">Agent</div>
           <select className={field} value={agentId} disabled={!idle} onChange={(e) => setAgentId(e.target.value)}>
             {options?.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <div className="text-muted-foreground">Robot</div>
+          <select
+            className={field}
+            value={robot}
+            disabled={!idle}
+            title={options?.robots.find((r) => r.id === robot)?.about}
+            onChange={(e) => setRobot(e.target.value as SimRobot)}
+          >
+            {(options?.robots ?? [{ id: "go2" as const, label: "Unitree Go2 (quadruped)", about: "" }]).map((r) => (
+              <option key={r.id} value={r.id}>{r.label}</option>
+            ))}
           </select>
         </label>
         <label className="space-y-1">
@@ -616,7 +644,7 @@ export function TrainerPanel({ api }: PanelProps) {
             <iframe ref={frame} src={SIM_URL} title="DimSim robot simulator" className="absolute inset-0 w-full h-full pointer-events-none" onLoad={onFrameLoad} />
             {simState !== "ready" && (
               <div className="absolute inset-0 grid place-items-center text-white/80 text-sm bg-black/60">
-                {simState === "loading" ? "Loading the apartment and the Go2 (about 200 MB the first time)…" : "The simulator failed to start."}
+                {simState === "loading" ? "Loading the apartment and the robot (about 200 MB the first time)…" : "The simulator failed to start."}
               </div>
             )}
             {waiting && (

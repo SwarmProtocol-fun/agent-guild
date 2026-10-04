@@ -25,9 +25,10 @@ describe("address placeholders", () => {
 });
 
 describe("IDL arg coercion", () => {
+  // Shaped like Anchor's camelCased program.idl, which coercion runs against.
   const types = [
-    { name: "Kind", type: { kind: "enum", variants: [{ name: "Simple" }, { name: "WithData", fields: [{ name: "amount_in", type: "u64" }] }] } },
-    { name: "Point", type: { kind: "struct", fields: [{ name: "x_pos", type: "i64" }, { name: "owner", type: "pubkey" }] } },
+    { name: "kind", type: { kind: "enum", variants: [{ name: "simple" }, { name: "withData", fields: [{ name: "amountIn", type: "u64" }] }] } },
+    { name: "point", type: { kind: "struct", fields: [{ name: "xPos", type: "i64" }, { name: "owner", type: "pubkey" }] } },
   ];
 
   it("turns JSON into the shapes Anchor's coder expects", () => {
@@ -37,17 +38,17 @@ describe("IDL arg coercion", () => {
     expect(coerceArg({ option: "u8" }, null, [], "a", c)).toBeNull();
     expect(Array.from(coerceArg({ vec: "u8" }, "0x0102", [], "a", c) as Uint8Array)).toEqual([1, 2]);
     expect(coerceArg({ array: ["u8", 2] }, "0xffee", [], "a", c)).toEqual([255, 238]);
-    expect(coerceArg({ defined: { name: "Kind" } }, "Simple", types, "a", c)).toEqual({ simple: {} });
-    const v = coerceArg({ defined: { name: "Kind" } }, { WithData: { amountIn: "5" } }, types, "a", c) as { withData: { amountIn: BN } };
+    expect(coerceArg({ defined: { name: "kind" } }, "Simple", types, "a", c)).toEqual({ simple: {} });
+    const v = coerceArg({ defined: { name: "kind" } }, { WithData: { amountIn: "5" } }, types, "a", c) as { withData: { amountIn: BN } };
     expect(v.withData.amountIn.toString()).toBe("5");
-    const p = coerceArg({ defined: { name: "Point" } }, { x_pos: -3, owner: "payer" }, types, "a", c) as { xPos: BN; owner: PublicKey };
+    const p = coerceArg({ defined: { name: "point" } }, { x_pos: -3, owner: "payer" }, types, "a", c) as { xPos: BN; owner: PublicKey };
     expect(p.xPos.toString()).toBe("-3");
     expect(p.owner.equals(payer)).toBe(true);
   });
 
   it("reports the path of a bad value", () => {
     expect(() => coerceArg({ array: ["u8", 32] }, "0x00", [], "args.hash", ctx())).toThrow(/args.hash.*length 32/);
-    expect(() => coerceArg({ defined: { name: "Kind" } }, "Nope", types, "args.kind", ctx())).toThrow(/unknown Kind variant/);
+    expect(() => coerceArg({ defined: { name: "kind" } }, "Nope", types, "args.kind", ctx())).toThrow(/unknown kind variant/);
   });
 });
 
@@ -103,5 +104,7 @@ describe("buildInstructions", () => {
     await expect(buildInstructions(offline, payer, [{ programId: PROGRAM.toBase58(), instruction: "claim_task", idl, accounts: { claimant: "payer" } }]))
       .rejects.toBeInstanceOf(DevtoolsInputError);
     await expect(buildInstructions(offline, payer, [])).rejects.toThrow(/required/);
+    await expect(buildInstructions(offline, payer, [{ programId: PROGRAM.toBase58(), instruction: "claim_task", idl, accounts: { claimer: "payer" } }]))
+      .rejects.toThrow(/no account "claimer" — one of claimant, taskAccount/);
   });
 });

@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -19,9 +19,11 @@ import { Plus, Zap } from "lucide-react";
 
 interface QuickPostJobDialogProps {
   onJobCreated?: () => void;
+  /** Custom trigger; receives the opener. Defaults to the "Quick Post Job" button. */
+  renderTrigger?: (open: () => void) => ReactNode;
 }
 
-export function QuickPostJobDialog({ onJobCreated }: QuickPostJobDialogProps) {
+export function QuickPostJobDialog({ onJobCreated, renderTrigger }: QuickPostJobDialogProps) {
   const { currentOrg } = useOrg();
   const account = useWalletAccount();
 
@@ -66,13 +68,15 @@ export function QuickPostJobDialog({ onJobCreated }: QuickPostJobDialogProps) {
 
   return (
     <>
-      <Button
-        onClick={() => setOpen(true)}
-        className="bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white"
-      >
-        <Zap className="h-4 w-4 mr-2" />
-        Quick Post Job
-      </Button>
+      {renderTrigger ? renderTrigger(() => setOpen(true)) : (
+        <Button
+          onClick={() => setOpen(true)}
+          className="bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-700 hover:to-orange-700 text-white"
+        >
+          <Zap className="h-4 w-4 mr-2" />
+          Quick Post Job
+        </Button>
+      )}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
         <DialogHeader>

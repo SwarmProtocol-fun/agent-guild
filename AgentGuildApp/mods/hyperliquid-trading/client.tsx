@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { parseOrder, describeOrder, type ParsedOrder } from "./orders";
+import { BacktestPanel, type BotSpec } from "./backtest-panel";
 
 type Network = "testnet" | "mainnet";
 
@@ -26,12 +27,27 @@ interface TradeRecord {
 
 interface Strategy {
   id: string;
-  type: "dca" | "grid" | "signal" | "sniper";
+  type: "dca" | "grid" | "signal" | "sniper" | "ai";
   coin: string;
   sizeUsd: number;
   enabled: boolean;
   pendingSignal: boolean;
   webhookToken: string | null;
+  params?: Record<string, unknown>;
+  lastRunAt?: string | null;
+}
+
+interface AiDecisionEntry {
+  id: string;
+  decision: "LONG" | "SHORT" | "CLOSE" | "NOTHING" | null;
+  action: string;
+  reasoning: string;
+  model: string | null;
+  price: number | null;
+  equity: number | null;
+  taskId: string | null;
+  error: string | null;
+  createdAt: string | null;
 }
 
 interface RiskConfig {
@@ -60,7 +76,6 @@ interface MyAgent {
 
 interface OrderLogEntry {
   id: number;
-  text: string;
   summary: string;
   agentName: string;
   taskId?: string;
@@ -86,18 +101,23 @@ interface MarketCoin {
   maxLeverage: number;
 }
 
-type Tab = "market" | "trade" | "positions" | "strategies" | "history" | "risk" | "referral";
-type MarketSort = "volume" | "price" | "change" | "funding";
+interface Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "market", label: "Market" },
-  { id: "trade", label: "Trade" },
-  { id: "positions", label: "Positions" },
-  { id: "strategies", label: "Strategies" },
-  { id: "history", label: "History" },
-  { id: "risk", label: "Risk limits" },
-  { id: "referral", label: "Referral" },
-];
+interface BookLevel {
+  px: number;
+  sz: number;
+}
+
+type BottomTab = "positions" | "orders" | "bots" | "backtest" | "history" | "agent";
+type MarketSort = "volume" | "price" | "change" | "funding";
+type StrategyType = Strategy["type"];
 
 const MARKET_SORTS: { id: MarketSort; label: string }[] = [
   { id: "volume", label: "Vol" },
@@ -105,6 +125,24 @@ const MARKET_SORTS: { id: MarketSort; label: string }[] = [
   { id: "change", label: "24h%" },
   { id: "funding", label: "Funding" },
 ];
+
+const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
+type Interval = (typeof INTERVALS)[number];
+
+const SIZE_PRESETS = [15, 25, 50, 100];
+
+/** Hyperliquid rejects opening orders worth less than this. */
+const MIN_ORDER_USD = 10;
+
+const BOT_KINDS: Record<StrategyType, { label: string; blurb: string }> = {
+  ai: { label: "AI Trader", blurb: "Your agent reads the market each round and goes long, short or flat — on its own model." },
+  dca: { label: "DCA", blurb: "Buys a fixed amount on a schedule." },
+  grid: { label: "Grid", blurb: "Buys low and sells high inside a price range." },
+  signal: { label: "Signal", blurb: "Fires from a webhook (TradingView) or by hand." },
+  sniper: { label: "Sniper", blurb: "Fires on a new listing or a price trigger." },
+};
+
+const TERMINAL_STATUSES = ["completed", "failed", "cancelled", "timeout"];
 
 function formatPrice(n: number) {
   return n.toLocaleString(undefined, n >= 1 ? { maximumFractionDigits: 2, minimumFractionDigits: 2 } : { maximumFractionDigits: 6 });
@@ -117,6 +155,24 @@ function formatCompactUsd(n: number) {
   return `$${n.toFixed(0)}`;
 }
 
+function formatSize(n: number) {
+  return n.toLocaleString(undefined, { maximumFractionDigits: n >= 100 ? 2 : 4 });
+}
+
+function formatTime(t: number, interval: Interval) {
+  const d = new Date(t);
+  return interval === "1d" || interval === "4h"
+    ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+    : d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatEvery(ms: number) {
+  if (!ms) return "—";
+  if (ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  return `${Math.round(ms / 60_000)}m`;
+}
+
 const inputClass =
   "w-full rounded-sm border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2.5 py-1.5 text-sm placeholder:text-[hsl(var(--muted-foreground))] " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))]";
@@ -124,6 +180,10 @@ const inputClass =
 const labelClass = "block text-[11px] font-medium uppercase tracking-wide text-[hsl(var(--muted-foreground))] mb-1";
 
 const monoClass = "font-mono tabular-nums";
+
+const mutedClass = "text-[hsl(var(--muted-foreground))]";
+
+const panelClass = "rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--card))]";
 
 function pnlClass(value: number) {
   return value >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400";
@@ -133,11 +193,17 @@ function signed(value: number) {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }
 
+function orderTone(status: string): "success" | "danger" | "neutral" {
+  if (status === "completed") return "success";
+  if (/^(rejected|failed|cancelled|timeout)/.test(status)) return "danger";
+  return "neutral";
+}
+
 function PulseDot({ tone }: { tone: "live" | "idle" | "danger" }) {
   const color = { live: "bg-green-500", idle: "bg-[hsl(var(--muted-foreground))]/40", danger: "bg-red-500" }[tone];
   return (
     <span className="relative inline-flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
-      {tone === "live" && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${color} opacity-60`} />}
+      {tone === "live" && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${color} opacity-60 motion-reduce:animate-none`} />}
       <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${color}`} />
     </span>
   );
@@ -158,6 +224,36 @@ function secondaryButtonClass(extra = "") {
     "transition-colors hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] disabled:pointer-events-none disabled:opacity-50 " +
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))] " +
     extra
+  );
+}
+
+/** Two-or-more option toggle, e.g. Market | Limit or the chart intervals. */
+function Segmented<T extends string>({ value, options, onChange, label, size = "sm" }: {
+  value: T;
+  options: { id: T; label: string }[];
+  onChange: (v: T) => void;
+  label: string;
+  size?: "sm" | "xs";
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex shrink-0 rounded-sm border border-[hsl(var(--border))] overflow-hidden">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          role="radio"
+          aria-checked={value === o.id}
+          className={
+            (size === "xs" ? "px-2 py-0.5 text-[11px] " : "px-3 py-1 text-xs ") +
+            "font-medium uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[hsl(var(--ring))] " +
+            (value === o.id ? "bg-[hsl(var(--primary))] text-white" : `${mutedClass} hover:text-[hsl(var(--foreground))]`)
+          }
+          onClick={() => onChange(o.id)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -183,11 +279,11 @@ function Section({ title, description, dense, right, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
+    <div className={panelClass}>
       <div className="flex items-center justify-between gap-2 border-b border-[hsl(var(--border))] px-3 py-2">
         <div>
           <h2 className="text-xs font-semibold uppercase tracking-wide text-[hsl(var(--card-foreground))]">{title}</h2>
-          {description && <p className="text-xs text-[hsl(var(--muted-foreground))] mt-0.5">{description}</p>}
+          {description && <p className={`text-xs ${mutedClass} mt-0.5`}>{description}</p>}
         </div>
         {right}
       </div>
@@ -198,7 +294,7 @@ function Section({ title, description, dense, right, children }: {
 
 function Spinner({ label }: { label: string }) {
   return (
-    <div className="flex items-center gap-2 text-sm text-[hsl(var(--muted-foreground))] py-4" role="status">
+    <div className={`flex items-center gap-2 text-sm ${mutedClass} py-4`} role="status">
       <span
         className="h-4 w-4 animate-spin rounded-full border-2 border-[hsl(var(--muted-foreground))]/30 border-t-foreground motion-reduce:animate-none"
         aria-hidden="true"
@@ -221,23 +317,224 @@ function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void
   );
 }
 
+function Stat({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <div className={`text-[10px] uppercase tracking-wide ${mutedClass}`}>{label}</div>
+      <div className={`${monoClass} text-xs text-[hsl(var(--foreground))] whitespace-nowrap`}>{children}</div>
+    </div>
+  );
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+
+const AXIS_W = 64;
+const TIME_H = 18;
+const VOL_H = 44;
+
+/** Candlesticks + volume, drawn in SVG. Hover shows the bar's OHLC; dashed lines mark the last price and the open position's entry. */
+function CandleChart({ candles: all, interval, entryPx }: { candles: Candle[]; interval: Interval; entryPx: number | null }) {
+  const [hover, setHover] = useState<number | null>(null);
+  // Drawn at the box's real pixel size so text stays legible from phone to desktop.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 800, h: 340 });
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const measure = (width: number, height: number) => {
+      if (width > 0 && height > 0) setBox({ w: Math.round(width), h: Math.round(height) });
+    };
+    const rect = el.getBoundingClientRect();
+    measure(rect.width, rect.height);
+    const ro = new ResizeObserver(([e]) => measure(e.contentRect.width, e.contentRect.height));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const CHART_W = box.w;
+  const CHART_H = box.h;
+  // Narrow screens show fewer, wider bars.
+  const maxBars = Math.max(20, Math.floor((CHART_W - AXIS_W) / 5));
+  const candles = all.length > maxBars ? all.slice(-maxBars) : all;
+  const plotW = CHART_W - AXIS_W;
+  const priceH = CHART_H - TIME_H - VOL_H;
+
+  const highs = candles.map((c) => c.h);
+  const lows = candles.map((c) => c.l);
+  if (entryPx) {
+    highs.push(entryPx);
+    lows.push(entryPx);
+  }
+  const hi = Math.max(...highs);
+  const lo = Math.min(...lows);
+  const pad = (hi - lo || hi * 0.01 || 1) * 0.06;
+  const top = hi + pad;
+  const bottom = lo - pad;
+  const y = (p: number) => ((top - p) / (top - bottom)) * priceH;
+  const step = plotW / candles.length;
+  const bodyW = Math.max(1, step * 0.66);
+  const maxVol = Math.max(...candles.map((c) => c.v)) || 1;
+  const ticks = Array.from({ length: 5 }, (_, i) => bottom + ((top - bottom) * (i + 0.5)) / 5);
+  const timeEvery = Math.max(1, Math.round(candles.length / Math.max(2, Math.floor(plotW / 110))));
+  const last = candles[candles.length - 1];
+  const shown = hover != null ? candles[hover] : last;
+  const shownUp = shown.c >= shown.o;
+
+  function onMove(e: React.MouseEvent<SVGSVGElement>) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * CHART_W;
+    const i = Math.floor(x / step);
+    setHover(x < plotW && i >= 0 && i < candles.length ? i : null);
+  }
+
+  return (
+    <div ref={boxRef} className="absolute inset-1 overflow-hidden">
+      <div className={`absolute left-2 top-1 flex flex-wrap gap-x-2 text-[11px] ${monoClass} pointer-events-none`}>
+        <span className={mutedClass}>{formatTime(shown.t, interval)}</span>
+        <span>O <span className={shownUp ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>{formatPrice(shown.o)}</span></span>
+        <span>H <span className={shownUp ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>{formatPrice(shown.h)}</span></span>
+        <span>L <span className={shownUp ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>{formatPrice(shown.l)}</span></span>
+        <span>C <span className={shownUp ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>{formatPrice(shown.c)}</span></span>
+      </div>
+      <svg
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        width={CHART_W} height={CHART_H} className="absolute inset-0 select-none"
+        role="img"
+        aria-label={`Price chart, last ${formatPrice(last.c)}`}
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
+      >
+        {ticks.map((p) => (
+          <g key={p}>
+            <line x1={0} x2={plotW} y1={y(p)} y2={y(p)} className="stroke-[hsl(var(--border))]" strokeWidth={1} />
+            <text x={plotW + 6} y={y(p) + 4} className="fill-[hsl(var(--muted-foreground))]" fontSize={11} fontFamily="ui-monospace, monospace">
+              {formatPrice(p)}
+            </text>
+          </g>
+        ))}
+        {candles.map((c, i) => {
+          const up = c.c >= c.o;
+          const cx = i * step + step / 2;
+          const color = up ? "fill-green-500 stroke-green-500" : "fill-red-500 stroke-red-500";
+          const bodyTop = y(Math.max(c.o, c.c));
+          const bodyH = Math.max(1, Math.abs(y(c.o) - y(c.c)));
+          const volH = (c.v / maxVol) * (VOL_H - 6);
+          return (
+            <g key={c.t} className={color} opacity={hover == null || hover === i ? 1 : 0.55}>
+              <line x1={cx} x2={cx} y1={y(c.h)} y2={y(c.l)} strokeWidth={1} />
+              <rect x={cx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH} strokeWidth={0} />
+              <rect x={cx - bodyW / 2} y={priceH + VOL_H - volH} width={bodyW} height={volH} strokeWidth={0} opacity={0.3} />
+              {i % timeEvery === 0 && cx > 28 && cx < plotW - 28 && (
+                <text
+                  x={cx} y={CHART_H - 4} textAnchor="middle" className="fill-[hsl(var(--muted-foreground))] stroke-none"
+                  fontSize={10} fontFamily="ui-monospace, monospace"
+                >
+                  {formatTime(c.t, interval)}
+                </text>
+              )}
+            </g>
+          );
+        })}
+        {entryPx != null && (
+          <g>
+            <line x1={0} x2={plotW} y1={y(entryPx)} y2={y(entryPx)} className="stroke-amber-500" strokeDasharray="2 3" strokeWidth={1} />
+            <text x={4} y={y(entryPx) - 4} className="fill-amber-600 dark:fill-amber-400" fontSize={10} fontFamily="ui-monospace, monospace">
+              entry {formatPrice(entryPx)}
+            </text>
+          </g>
+        )}
+        <line
+          x1={0} x2={plotW} y1={y(last.c)} y2={y(last.c)} strokeDasharray="4 3" strokeWidth={1}
+          className={last.c >= last.o ? "stroke-green-500" : "stroke-red-500"}
+        />
+        <rect x={plotW} y={y(last.c) - 9} width={AXIS_W} height={18} className={last.c >= last.o ? "fill-green-600" : "fill-red-600"} />
+        <text x={plotW + 6} y={y(last.c) + 4} fill="white" fontSize={11} fontFamily="ui-monospace, monospace">
+          {formatPrice(last.c)}
+        </text>
+        {hover != null && (
+          <line
+            x1={hover * step + step / 2} x2={hover * step + step / 2} y1={0} y2={priceH + VOL_H}
+            className="stroke-[hsl(var(--muted-foreground))]" strokeDasharray="3 3" strokeWidth={1}
+          />
+        )}
+      </svg>
+    </div>
+  );
+}
+
+// ── Order book ────────────────────────────────────────────────────────────────
+
+function OrderBook({ bids, asks, onPick }: { bids: BookLevel[]; asks: BookLevel[]; onPick: (px: number) => void }) {
+  const depth = 10;
+  const withTotals = (levels: BookLevel[]) => {
+    let total = 0;
+    return levels.slice(0, depth).map((l) => ({ ...l, total: (total += l.sz) }));
+  };
+  const askRows = withTotals(asks).reverse();
+  const bidRows = withTotals(bids);
+  const maxTotal = Math.max(askRows[0]?.total ?? 0, bidRows[bidRows.length - 1]?.total ?? 0) || 1;
+  const spread = asks[0] && bids[0] ? asks[0].px - bids[0].px : null;
+
+  const row = (l: BookLevel & { total: number }, side: "ask" | "bid") => (
+    <button
+      key={`${side}-${l.px}`}
+      type="button"
+      className="relative grid w-full grid-cols-3 px-2 py-[3px] text-[11px] hover:bg-[hsl(var(--accent))]/60 focus-visible:outline-none focus-visible:bg-[hsl(var(--accent))]"
+      onClick={() => onPick(l.px)}
+      title="Use this price for a limit order"
+    >
+      <span
+        className={`absolute inset-y-0 right-0 ${side === "ask" ? "bg-red-500/10" : "bg-green-500/10"}`}
+        style={{ width: `${(l.total / maxTotal) * 100}%` }}
+        aria-hidden="true"
+      />
+      <span className={`relative text-left ${monoClass} ${side === "ask" ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"}`}>
+        {formatPrice(l.px)}
+      </span>
+      <span className={`relative text-right ${monoClass}`}>{formatSize(l.sz)}</span>
+      <span className={`relative text-right ${monoClass} ${mutedClass}`}>{formatSize(l.total)}</span>
+    </button>
+  );
+
+  return (
+    <div>
+      <div className={`grid grid-cols-3 px-2 pb-1 text-[10px] uppercase tracking-wide ${mutedClass}`}>
+        <span>Price</span>
+        <span className="text-right">Size</span>
+        <span className="text-right">Total</span>
+      </div>
+      {askRows.map((l) => row(l, "ask"))}
+      <div className={`flex items-center justify-between border-y border-[hsl(var(--border))] px-2 py-1 text-[11px] ${monoClass}`}>
+        <span className={mutedClass}>Spread</span>
+        <span>
+          {spread != null ? formatPrice(spread) : "—"}
+          {spread != null && bids[0] && <span className={`ml-2 ${mutedClass}`}>{((spread / bids[0].px) * 100).toFixed(3)}%</span>}
+        </span>
+      </div>
+      {bidRows.map((l) => row(l, "bid"))}
+    </div>
+  );
+}
+
+// ── Panel ─────────────────────────────────────────────────────────────────────
+
 function TradingPanel({ api }: PanelProps) {
   const [orgId, setOrgId] = useState("");
   const [agentId, setAgentId] = useState("");
   const [wallet, setWallet] = useState("");
-  const [activeTab, setActiveTab] = useState<Tab>("trade");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("positions");
 
   // Shared, in-memory only — never written to localStorage, never sent anywhere
   // but this mod's own API, and re-entered whenever the panel reloads. This is
   // the agent's own passphrase decrypting its own stored Hyperliquid key; the
-  // platform never retains it (see server.ts's resolveAgentWallet).
+  // platform never retains it (see server.ts's resolveAgentWallet). Not needed
+  // at all once instant trading is on.
   const [masterSecret, setMasterSecret] = useState("");
 
   // ── Agent picker ───────────────────────────────────────────────────────────
   const [myAgents, setMyAgents] = useState<MyAgent[] | "loading" | "error">("loading");
 
   async function loadMyAgents() {
-    setMyAgents("loading");
+    setMyAgents((prev) => (Array.isArray(prev) ? prev : "loading"));
     try {
       const resp = await api("my-agents");
       const data = await resp.json();
@@ -323,28 +620,30 @@ function TradingPanel({ api }: PanelProps) {
     if (agentId) loadAgentData();
   }, [agentId]);
 
-  const network: Network = walletStatus?.network ?? "testnet";
-
   // ── Instant trading ────────────────────────────────────────────────────────
   // On: the platform signs with the agent's own platform-held wallet, so no
-  // passphrase is needed anywhere below. The org owner is already signed in,
-  // so their first trade switches it on silently (ensureSigner); anyone in the
+  // passphrase is needed anywhere. The org owner is already signed in, so
+  // their first order switches it on silently (ensureSigner); anyone in the
   // org can turn it off.
   const instant = !!walletStatus?.instant;
   const isOwner = !!selectedAgent?.isOwner;
   const [usePassphrase, setUsePassphrase] = useState(false);
-  useEffect(() => { setUsePassphrase(false); setInstantStatus(null); }, [agentId]);
-  // Owners can always act — ensureSigner turns instant trading on as needed.
-  const canSign = instant || !!masterSecret || (isOwner && !usePassphrase);
   const [instantNetwork, setInstantNetwork] = useState<Network>("testnet");
   const [instantBusy, setInstantBusy] = useState(false);
   const [instantStatus, setInstantStatus] = useState<string | null>(null);
+  useEffect(() => { setUsePassphrase(false); setInstantStatus(null); }, [agentId]);
+  // Owners can always act — ensureSigner turns instant trading on as needed.
+  const canSign = instant || !!masterSecret || (isOwner && !usePassphrase);
+  const needsPassphraseInput = !instant && (!isOwner || usePassphrase);
+  // Market data follows the network the agent trades on — or, before it
+  // trades, the one its owner has picked.
+  const network: Network = walletStatus?.network ?? instantNetwork;
 
-  async function enableInstant(net: Network = instantNetwork): Promise<boolean> {
-    if (!agentId) return false;
+  async function enableInstant(net: Network = instantNetwork): Promise<string | null> {
+    if (!agentId) return null;
     if (net === "mainnet" && !confirm(
       "Trade on MAINNET? Your agent will sign real-money trades from its own wallet, within its risk limits.",
-    )) return false;
+    )) return null;
     setInstantBusy(true);
     setInstantStatus(null);
     try {
@@ -356,27 +655,30 @@ function TradingPanel({ api }: PanelProps) {
       const data = await resp.json();
       if (data.error) {
         setInstantStatus(`error: ${data.error}`);
-        return false;
+        return null;
       }
       setWalletStatus({ hasWallet: true, network: data.network, instant: true, address: data.address });
       setWallet(data.address);
       setInstantStatus(`Your agent trades from ${data.address} on Hyperliquid ${data.network} — fund it there if it's empty.`);
       loadMyAgents();
-      return true;
+      loadRiskConfig();
+      return data.address as string;
     } finally {
       setInstantBusy(false);
     }
   }
 
   /**
-   * Called before any trade, close or strategy fire. Already signing (instant
-   * or passphrase) → go. Owner without instant → switch it on now, on the
-   * network picked in the agent section. No prompt on testnet.
+   * Called before any trade, close or bot fire. Already signing (instant or
+   * passphrase) → go. Owner without instant → switch it on now, on the
+   * network picked in the top bar. No prompt on testnet. Resolves to the
+   * wallet the agent trades from (state may not have caught up yet), or null.
    */
-  async function ensureSigner(): Promise<boolean> {
-    if (instant || masterSecret) return true;
-    if (!isOwner || usePassphrase) return false;
-    return enableInstant(instantNetwork);
+  async function ensureSigner(): Promise<{ wallet: string } | null> {
+    if (instant || masterSecret) return { wallet };
+    if (!isOwner || usePassphrase) return null;
+    const address = await enableInstant(instantNetwork);
+    return address ? { wallet: address } : null;
   }
 
   async function disableInstant() {
@@ -394,10 +696,13 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
-  // ── Market overview ────────────────────────────────────────────────────────
+  // ── Markets ────────────────────────────────────────────────────────────────
+  const [coin, setCoin] = useState("ETH");
   const [marketCoins, setMarketCoins] = useState<MarketCoin[] | "loading" | "error" | null>(null);
   const [marketQuery, setMarketQuery] = useState("");
   const [marketSort, setMarketSort] = useState<MarketSort>("volume");
+  const [marketOpen, setMarketOpen] = useState(false);
+  const marketSearchRef = useRef<HTMLInputElement>(null);
 
   async function loadMarket() {
     setMarketCoins((prev) => (Array.isArray(prev) ? prev : "loading"));
@@ -415,11 +720,18 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   useEffect(() => {
-    if (activeTab !== "market") return;
     loadMarket();
     const id = setInterval(loadMarket, 15000);
     return () => clearInterval(id);
-  }, [activeTab, network]);
+  }, [network]);
+
+  useEffect(() => {
+    if (!marketOpen) return;
+    marketSearchRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMarketOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [marketOpen]);
 
   const filteredMarket = Array.isArray(marketCoins)
     ? marketCoins
@@ -432,28 +744,26 @@ function TradingPanel({ api }: PanelProps) {
         })
     : [];
 
+  const coinInfo = Array.isArray(marketCoins) ? marketCoins.find((c) => c.coin === coin) : undefined;
+  const markOf = (c: string) => (Array.isArray(marketCoins) ? marketCoins.find((m) => m.coin === c)?.markPx : undefined);
+
   function pickCoin(c: string) {
     setCoin(c);
-    setActiveTab("trade");
+    setMarketOpen(false);
+    setMarketQuery("");
+    setLimitPrice("");
   }
 
-  // ── Trade form ───────────────────────────────────────────────────────────
-  const [coin, setCoin] = useState("ETH");
-  const [sizeUsd, setSizeUsd] = useState("10");
-  const [isBuy, setIsBuy] = useState(true);
-  const [orderType, setOrderType] = useState<"market" | "limit">("market");
-  const [limitPrice, setLimitPrice] = useState("");
-  const [leverage, setLeverage] = useState("");
-  const [stopLossPct, setStopLossPct] = useState("");
-  const [takeProfitPct, setTakeProfitPct] = useState("");
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const [tradeStatus, setTradeStatus] = useState<string | null>(null);
-  const [tradeSubmitting, setTradeSubmitting] = useState(false);
+  // ── Live price, chart, book ────────────────────────────────────────────────
   const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [chartInterval, setChartInterval] = useState<Interval>("15m");
+  const [candles, setCandles] = useState<Candle[] | "loading" | "error">("loading");
+  const [book, setBook] = useState<{ bids: BookLevel[]; asks: BookLevel[] } | null>(null);
 
   useEffect(() => {
     if (!coin) return;
     let cancelled = false;
+    setLivePrice(null);
     async function poll() {
       try {
         const resp = await api(`price/${coin}?network=${network}`);
@@ -471,50 +781,183 @@ function TradingPanel({ api }: PanelProps) {
     };
   }, [coin, network, api]);
 
-  async function submitTrade(e: FormEvent) {
+  useEffect(() => {
+    let cancelled = false;
+    setCandles("loading");
+    async function poll() {
+      try {
+        const resp = await api(`candles/${coin}?interval=${chartInterval}&network=${network}`);
+        const data = await resp.json();
+        if (cancelled) return;
+        setCandles(data.error ? "error" : data.candles ?? []);
+      } catch {
+        if (!cancelled) setCandles((prev) => (Array.isArray(prev) ? prev : "error"));
+      }
+    }
+    poll();
+    const id = setInterval(poll, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [coin, chartInterval, network, api]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setBook(null);
+    async function poll() {
+      try {
+        const resp = await api(`book/${coin}?network=${network}`);
+        const data = await resp.json();
+        if (!cancelled && !data.error) setBook({ bids: data.bids ?? [], asks: data.asks ?? [] });
+      } catch {
+        // transient — keep the last book
+      }
+    }
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [coin, network, api]);
+
+  // Keep the last candle in step with the 5s live price between chart polls.
+  const chartCandles = Array.isArray(candles) && candles.length > 0 && livePrice != null
+    ? [...candles.slice(0, -1), (() => {
+        const last = candles[candles.length - 1];
+        return { ...last, c: livePrice, h: Math.max(last.h, livePrice), l: Math.min(last.l, livePrice) };
+      })()]
+    : candles;
+
+  const price = livePrice ?? coinInfo?.markPx ?? null;
+
+  // ── Order ticket ───────────────────────────────────────────────────────────
+  const [isBuy, setIsBuy] = useState(true);
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
+  const [sizeUsd, setSizeUsd] = useState("25");
+  const [limitPrice, setLimitPrice] = useState("");
+  const [leverage, setLeverage] = useState(1);
+  const [tpslOn, setTpslOn] = useState(false);
+  const [stopLossPct, setStopLossPct] = useState("");
+  const [takeProfitPct, setTakeProfitPct] = useState("");
+
+  const maxLeverage = coinInfo?.maxLeverage ?? 20;
+  useEffect(() => {
+    if (leverage > maxLeverage) setLeverage(maxLeverage);
+  }, [maxLeverage]);
+
+  const sizeNum = Number(sizeUsd) || 0;
+  const execPrice = orderType === "limit" ? Number(limitPrice) || null : price;
+  const belowMinimum = sizeNum > 0 && sizeNum < MIN_ORDER_USD;
+  const ticketReady = !!agentId && canSign && sizeNum >= MIN_ORDER_USD && (orderType === "market" || !!Number(limitPrice));
+
+  function pickBookPrice(px: number) {
+    setOrderType("limit");
+    setLimitPrice(String(px));
+  }
+
+  async function submitTicket(e: FormEvent) {
     e.preventDefault();
-    if (!(await ensureSigner())) return;
-    setTradeSubmitting(true);
-    setTradeStatus("submitting…");
+    if (!ticketReady) return;
+    const lev = leverage > 1 ? ` ${leverage}x` : "";
+    const at = orderType === "limit" ? ` @ ${limitPrice}` : "";
+    await placeOrder("trade", {
+      coin, isBuy, sizeUsd: sizeNum, orderType,
+      limitPrice: orderType === "limit" ? Number(limitPrice) : undefined,
+      leverage,
+      stopLossPct: tpslOn && stopLossPct ? Number(stopLossPct) : undefined,
+      takeProfitPct: tpslOn && takeProfitPct ? Number(takeProfitPct) : undefined,
+    }, `${isBuy ? "Long" : "Short"} ${coin} $${sizeNum}${lev}${at}`);
+  }
+
+  // ── Orders (every trade/close sent from this panel) ───────────────────────
+  const [orderLog, setOrderLog] = useState<OrderLogEntry[]>([]);
+  const [orderSending, setOrderSending] = useState(false);
+
+  function updateOrder(id: number, patch: Partial<OrderLogEntry>) {
+    setOrderLog((log) => log.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+  }
+
+  /** One path for the ticket, the command line and Close buttons: sign, send, then follow the task. */
+  async function placeOrder(kind: "trade" | "close", fields: Record<string, unknown>, summary: string): Promise<boolean> {
+    if (!agentId) return false;
+    if (!(await ensureSigner())) return false;
+    const entry: OrderLogEntry = { id: Date.now(), summary, agentName: selectedAgent?.name ?? agentId, status: "sending…" };
+    setOrderLog((log) => [entry, ...log].slice(0, 50));
+    setOrderSending(true);
     try {
-      const resp = await api("trade", {
+      const resp = await api(kind, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          orgId, agentId, coin, isBuy, sizeUsd: Number(sizeUsd), orderType, masterSecret,
-          limitPrice: orderType === "limit" ? Number(limitPrice) : undefined,
-          leverage: leverage ? Number(leverage) : undefined,
-          stopLossPct: stopLossPct ? Number(stopLossPct) : undefined,
-          takeProfitPct: takeProfitPct ? Number(takeProfitPct) : undefined,
-        }),
+        body: JSON.stringify({ orgId, agentId, ...(masterSecret ? { masterSecret } : {}), ...fields }),
       });
       const data = await resp.json();
       if (data.error) {
-        setTradeStatus(`error: ${data.error}`);
-        return;
+        updateOrder(entry.id, { status: `rejected: ${data.error}` });
+        return false;
       }
-      setTaskId(data.taskId);
-      setTradeStatus("queued");
+      updateOrder(entry.id, { taskId: data.taskId, status: "queued" });
+      pollOrder(entry.id, data.taskId);
+      return true;
+    } catch {
+      updateOrder(entry.id, { status: "failed to send" });
+      return false;
     } finally {
-      setTradeSubmitting(false);
+      setOrderSending(false);
     }
   }
 
-  async function checkStatus() {
-    if (!taskId) return;
-    const resp = await api(`status/${taskId}`);
-    const data = await resp.json();
-    setTradeStatus(data.status ?? data.error);
+  /** Follows one order's task until the worker finishes it (or ~2 minutes pass). */
+  async function pollOrder(id: number, orderTaskId: string) {
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const resp = await api(`status/${orderTaskId}`);
+        const data = await resp.json();
+        const status: string = data.status ?? data.error ?? "unknown";
+        updateOrder(id, { status: status === "failed" && data.error ? `failed: ${data.error}` : status });
+        if (TERMINAL_STATUSES.includes(status)) {
+          if (status === "completed") {
+            refreshAccount();
+            loadHistory();
+          }
+          return;
+        }
+      } catch {
+        // transient — keep polling
+      }
+    }
+  }
+
+  const openOrders = orderLog.filter((o) => !TERMINAL_STATUSES.includes(o.status) && !/^(rejected|failed)/.test(o.status));
+  const lastOrder = orderLog[0];
+
+  // ── Command line ("long ETH $25 5x sl 3 tp 8") ────────────────────────────
+  const [orderText, setOrderText] = useState("");
+  const parsedOrder: ParsedOrder | { error: string } | null = orderText.trim() ? parseOrder(orderText) : null;
+
+  async function sendCommand(e: FormEvent) {
+    e.preventDefault();
+    if (!parsedOrder || "error" in parsedOrder || !agentId || !canSign) return;
+    const { kind, ...fields } = parsedOrder;
+    const ok = await placeOrder(
+      kind,
+      kind === "close" ? { ...fields, ...(wallet ? { wallet } : {}) } : fields,
+      describeOrder(parsedOrder),
+    );
+    if (ok) setOrderText("");
   }
 
   // ── Positions / account ────────────────────────────────────────────────────
   const [positions, setPositions] = useState<Position[] | "loading" | "error" | null>(null);
   const [accountValue, setAccountValue] = useState<number | null>(null);
+  const [marginUsed, setMarginUsed] = useState<number | null>(null);
   const [closingCoin, setClosingCoin] = useState<string | null>(null);
 
   async function refreshAccount() {
     if (!wallet) return;
-    setPositions("loading");
+    setPositions((prev) => (Array.isArray(prev) ? prev : "loading"));
     try {
       const [posResp, acctResp] = await Promise.all([
         api(`positions/${wallet}?network=${network}`),
@@ -528,29 +971,34 @@ function TradingPanel({ api }: PanelProps) {
       }
       setPositions(posData.positions ?? []);
       setAccountValue(acctData.accountValue ?? null);
+      setMarginUsed(acctData.marginUsed ?? null);
     } catch {
       setPositions("error");
     }
   }
 
-  async function closePosition(positionCoin: string) {
-    if (!(await ensureSigner())) return;
-    setClosingCoin(positionCoin);
-    const resp = await api("close", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orgId, agentId, wallet, coin: positionCoin, masterSecret }),
-    });
-    const data = await resp.json();
-    setClosingCoin(null);
-    if (data.error) {
-      setTradeStatus(`error closing ${positionCoin}: ${data.error}`);
-      return;
-    }
-    setTaskId(data.taskId);
-    setTradeStatus(`closing ${positionCoin} — task ${data.taskId}`);
+  useEffect(() => {
+    setPositions(null);
+    setAccountValue(null);
+    setMarginUsed(null);
+    if (!wallet) return;
     refreshAccount();
+    const id = setInterval(refreshAccount, 10000);
+    return () => clearInterval(id);
+  }, [wallet, network]);
+
+  async function closePosition(positionCoin: string) {
+    setClosingCoin(positionCoin);
+    try {
+      await placeOrder("close", { coin: positionCoin, ...(wallet ? { wallet } : {}) }, `Close ${positionCoin}`);
+    } finally {
+      setClosingCoin(null);
+    }
   }
+
+  const positionList = Array.isArray(positions) ? positions : [];
+  const coinPosition = positionList.find((p) => p.coin === coin);
+  const totalUpnl = positionList.reduce((sum, p) => sum + p.unrealizedPnl, 0);
 
   // ── Risk config ────────────────────────────────────────────────────────────
   const [riskMaxPosition, setRiskMaxPosition] = useState("100");
@@ -568,6 +1016,7 @@ function TradingPanel({ api }: PanelProps) {
       setRiskMaxPosition(String(data.config.maxPositionUsd));
       setRiskMaxDailyLoss(String(data.config.maxDailyLossUsd));
       setRiskLeverage(String(data.config.leverage));
+      setLeverage(Math.max(1, Math.min(data.config.leverage, maxLeverage)));
     }
   }
 
@@ -588,6 +1037,9 @@ function TradingPanel({ api }: PanelProps) {
     setRiskStatus(data.error ? `error: ${data.error}` : "saved");
     if (!data.error) loadRiskConfig();
   }
+
+  const overLeverageCap = riskConfig != null && leverage > riskConfig.leverage;
+  const overSizeCap = riskConfig != null && sizeNum > riskConfig.maxPositionUsd;
 
   // ── Referral ───────────────────────────────────────────────────────────────
   const [referral, setReferral] = useState<ReferralStats | "loading" | "error" | null>(null);
@@ -627,7 +1079,7 @@ function TradingPanel({ api }: PanelProps) {
 
   async function loadHistory() {
     if (!agentId) return;
-    setHistory("loading");
+    setHistory((prev) => (prev && prev !== "loading" && prev !== "error" ? prev : "loading"));
     try {
       const resp = await api(`history/${agentId}`);
       const data = await resp.json();
@@ -641,11 +1093,18 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
-  // ── Strategies ─────────────────────────────────────────────────────────────
+  // ── Bots (strategies) ──────────────────────────────────────────────────────
   const [strategies, setStrategies] = useState<Strategy[] | "loading" | "error" | null>(null);
-  const [strategyType, setStrategyType] = useState<"dca" | "grid" | "signal" | "sniper">("dca");
+  const [newBotOpen, setNewBotOpen] = useState(false);
+  const [strategyType, setStrategyType] = useState<StrategyType>("ai");
+  const [aiIntervalMin, setAiIntervalMin] = useState("60");
+  const [aiMaxDrawdown, setAiMaxDrawdown] = useState("50");
+  const [backtestInitial, setBacktestInitial] = useState<BotSpec | null>(null);
+  const [backtestKey, setBacktestKey] = useState(0);
+  const [decisionsOpen, setDecisionsOpen] = useState<string | null>(null);
+  const [aiDecisions, setAiDecisions] = useState<Record<string, AiDecisionEntry[] | "loading" | "error">>({});
   const [strategyCoin, setStrategyCoin] = useState("ETH");
-  const [strategySizeUsd, setStrategySizeUsd] = useState("10");
+  const [strategySizeUsd, setStrategySizeUsd] = useState("15");
   const [dcaIntervalMin, setDcaIntervalMin] = useState("60");
   const [gridLower, setGridLower] = useState("");
   const [gridUpper, setGridUpper] = useState("");
@@ -659,7 +1118,7 @@ function TradingPanel({ api }: PanelProps) {
 
   async function loadStrategies() {
     if (!agentId) return;
-    setStrategies("loading");
+    setStrategies((prev) => (Array.isArray(prev) ? prev : "loading"));
     try {
       const resp = await api(`strategy/${agentId}`);
       const data = await resp.json();
@@ -673,23 +1132,64 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  function openNewBot() {
+    setStrategyCoin(coin);
+    setNewBotOpen(true);
+    setBottomTab("bots");
+  }
+
+  /** Creates a bot — from the New bot form or a backtest's "Start this bot live". */
+  async function createBot(spec: { type: StrategyType; coin: string; sizeUsd: number; params: Record<string, unknown> }): Promise<boolean> {
+    const signer = await ensureSigner();
+    if (!signer) return false;
+    setStrategyStatus("creating…");
+    const resp = await api("strategy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orgId, agentId, wallet: signer.wallet || wallet, ...spec }),
+    });
+    const data = await resp.json();
+    setStrategyStatus(data.error ? `error: ${data.error}` : null);
+    if (data.error) return false;
+    loadStrategies();
+    return true;
+  }
+
   async function createStrategy(e: FormEvent) {
     e.preventDefault();
-    setStrategyStatus("creating…");
     const params =
+      strategyType === "ai" ? { intervalMs: Number(aiIntervalMin) * 60_000, maxDrawdownPct: Number(aiMaxDrawdown), ...(leverage > 1 ? { leverage } : {}) } :
       strategyType === "dca" ? { intervalMs: Number(dcaIntervalMin) * 60_000 } :
       strategyType === "grid" ? { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels) } :
       strategyType === "sniper" ? { mode: sniperMode, ...(sniperMode !== "new-listing" ? { targetPrice: Number(sniperTargetPrice) } : {}) } :
       {};
-    const coin = strategyType === "sniper" && sniperMode === "new-listing" ? strategyCoin || "ANY" : strategyCoin;
-    const resp = await api("strategy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orgId, agentId, wallet, type: strategyType, coin, sizeUsd: Number(strategySizeUsd), params }),
-    });
-    const data = await resp.json();
-    setStrategyStatus(data.error ? `error: ${data.error}` : "created");
-    if (!data.error) loadStrategies();
+    const botCoin = strategyType === "sniper" && sniperMode === "new-listing" ? strategyCoin || "ANY" : strategyCoin;
+    if (await createBot({ type: strategyType, coin: botCoin, sizeUsd: Number(strategySizeUsd), params })) setNewBotOpen(false);
+  }
+
+  async function startBotFromBacktest(spec: BotSpec): Promise<boolean> {
+    const ok = await createBot(spec);
+    if (ok) setStrategyStatus(`${BOT_KINDS[spec.type].label} bot started on ${spec.coin}.`);
+    return ok;
+  }
+
+  /** Opens the Backtest tab prefilled with a bot's settings. */
+  function backtestBot(s: Strategy) {
+    if (s.type === "signal") return;
+    setBacktestInitial({ type: s.type, coin: s.coin === "ANY" ? coin : s.coin, sizeUsd: s.sizeUsd, params: s.params ?? {} });
+    setBacktestKey((k) => k + 1);
+    setBottomTab("backtest");
+  }
+
+  async function loadAiDecisions(id: string) {
+    setAiDecisions((prev) => ({ ...prev, [id]: Array.isArray(prev[id]) ? prev[id] : "loading" }));
+    try {
+      const resp = await api(`strategy/${id}/decisions`);
+      const data = await resp.json();
+      setAiDecisions((prev) => ({ ...prev, [id]: data.error ? "error" : data.decisions ?? [] }));
+    } catch {
+      setAiDecisions((prev) => ({ ...prev, [id]: "error" }));
+    }
   }
 
   async function toggleStrategy(id: string, enabled: boolean) {
@@ -707,7 +1207,7 @@ function TradingPanel({ api }: PanelProps) {
     const resp = await api(`strategy/${id}/signal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ masterSecret }),
+      body: JSON.stringify(masterSecret ? { masterSecret } : {}),
     });
     const data = await resp.json();
     setStrategyStatus(data.error ? `error: ${data.error}` : `fired — task ${data.taskId}`);
@@ -755,7 +1255,7 @@ function TradingPanel({ api }: PanelProps) {
       const resp = await api(`strategy/${id}/execute-pending`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ masterSecret }),
+        body: JSON.stringify(masterSecret ? { masterSecret } : {}),
       });
       const data = await resp.json();
       setStrategyStatus(data.error ? `error: ${data.error}` : `executed — task ${data.taskId}`);
@@ -764,6 +1264,23 @@ function TradingPanel({ api }: PanelProps) {
       setExecutingId(null);
     }
   }
+
+  const strategyList = Array.isArray(strategies) ? strategies : [];
+  const aiBotIds = strategyList.filter((s) => s.type === "ai").map((s) => s.id).join(",");
+
+  // Keep each AI bot's latest decision fresh while the Bots tab is open.
+  useEffect(() => {
+    if (bottomTab !== "bots" || !aiBotIds) return;
+    const refresh = () => aiBotIds.split(",").forEach(loadAiDecisions);
+    refresh();
+    const id = setInterval(() => {
+      refresh();
+      loadStrategies();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [bottomTab, aiBotIds]);
+  const pendingStrategies = strategyList.filter((s) => s.pendingSignal);
+  const runningBots = strategyList.filter((s) => s.enabled).length;
 
   // --- Connect your agent ---------------------------------------------------
   const [connection, setConnection] = useState<AgentConnection | "loading" | "error" | null>(null);
@@ -787,12 +1304,16 @@ function TradingPanel({ api }: PanelProps) {
     `#    POST /api/v1/tokens  body: {"scopes":["mods:call"],"ttlSeconds":86400}`,
     `export AGENT_GUILD_URL=${typeof window !== "undefined" ? window.location.origin : "https://agent-guild.com"}`,
     `export AGENT_GUILD_TOKEN=agt_...        # or AGENT_GUILD_AGENT_ID=${agentId || "<agentId>"} + AGENT_GUILD_API_KEY=...`,
-    `export HL_MASTER_SECRET=...            # the wallet passphrase you set above`,
+    ...(instant ? [] : [`export HL_MASTER_SECRET=...            # the wallet passphrase (not needed with instant trading)`]),
     ``,
     `# 2. Check it's plugged in, then let it trade:`,
     `node mods/hyperliquid-trading/agent/hl-agent.mjs me`,
     `node mods/hyperliquid-trading/agent/hl-agent.mjs call hyperliquid_trade '{"coin":"ETH","isBuy":true,"sizeUsd":10}'`,
-    `node mods/hyperliquid-trading/agent/hl-agent.mjs daemon   # fires DCA/grid/sniper signals`,
+    ...(instant ? [] : [`node mods/hyperliquid-trading/agent/hl-agent.mjs daemon   # fires DCA/grid/sniper signals`]),
+    ``,
+    `# AI Trader bots ask YOUR agent each round — answered on its own model by:`,
+    `agent-guild daemon                      # polls ai/requests, runs your replyCommand, posts the decision`,
+    `#   (or any runtime: GET ai/requests, then POST ai/requests/{id}/answer {"decision":"LONG","reasoning":"..."})`,
     ``,
     `# Or inside your agent: import { connect } from ".../hl-agent.mjs"`,
     `#   const hl = await connect(); llm tools = hl.tools; run picks with hl.call(name, input)`,
@@ -808,72 +1329,6 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
-  // --- Give orders ----------------------------------------------------------
-  const [orderText, setOrderText] = useState("");
-  const [orderLog, setOrderLog] = useState<OrderLogEntry[]>([]);
-  const [orderSending, setOrderSending] = useState(false);
-  const parsedOrder: ParsedOrder | { error: string } | null = orderText.trim() ? parseOrder(orderText) : null;
-
-  function updateOrder(id: number, patch: Partial<OrderLogEntry>) {
-    setOrderLog((log) => log.map((o) => (o.id === id ? { ...o, ...patch } : o)));
-  }
-
-  async function sendOrder(e: FormEvent) {
-    e.preventDefault();
-    if (!parsedOrder || "error" in parsedOrder || !agentId || !canSign) return;
-    if (!(await ensureSigner())) return;
-    const entry: OrderLogEntry = {
-      id: Date.now(),
-      text: orderText.trim(),
-      summary: describeOrder(parsedOrder),
-      agentName: selectedAgent?.name ?? agentId,
-      status: "sending…",
-    };
-    setOrderLog((log) => [entry, ...log].slice(0, 20));
-    setOrderSending(true);
-    try {
-      const body = parsedOrder.kind === "close"
-        ? { orgId, agentId, coin: parsedOrder.coin, masterSecret, ...(wallet ? { wallet } : {}) }
-        : { orgId, agentId, masterSecret, ...parsedOrder };
-      const resp = await api(parsedOrder.kind === "close" ? "close" : "trade", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await resp.json();
-      if (data.error) {
-        updateOrder(entry.id, { status: `rejected: ${data.error}` });
-        return;
-      }
-      updateOrder(entry.id, { taskId: data.taskId, status: "queued" });
-      setOrderText("");
-      pollOrder(entry.id, data.taskId);
-    } catch {
-      updateOrder(entry.id, { status: "failed to send" });
-    } finally {
-      setOrderSending(false);
-    }
-  }
-
-  /** Follows one order's task until the worker finishes it (or ~2 minutes pass). */
-  async function pollOrder(id: number, orderTaskId: string) {
-    for (let i = 0; i < 40; i++) {
-      await new Promise((r) => setTimeout(r, 3000));
-      try {
-        const resp = await api(`status/${orderTaskId}`);
-        const data = await resp.json();
-        const status: string = data.status ?? data.error ?? "unknown";
-        updateOrder(id, { status: status === "failed" && data.error ? `failed: ${data.error}` : status });
-        if (["completed", "failed", "cancelled", "timeout"].includes(status)) {
-          if (status === "completed") refreshAccount();
-          return;
-        }
-      } catch {
-        // transient — keep polling
-      }
-    }
-  }
-
   function loadAgentData() {
     loadConnection();
     loadWalletStatus();
@@ -883,47 +1338,35 @@ function TradingPanel({ api }: PanelProps) {
     loadReferral();
   }
 
-  const pendingStrategies = Array.isArray(strategies) ? strategies.filter((s) => s.pendingSignal) : [];
+  const bottomTabs: { id: BottomTab; label: string; count?: number }[] = [
+    { id: "positions", label: "Positions", count: positionList.length },
+    { id: "orders", label: "Orders", count: openOrders.length },
+    { id: "bots", label: "Bots", count: strategyList.length },
+    { id: "backtest", label: "Backtest" },
+    { id: "history", label: "Trade history" },
+    { id: "agent", label: "Agent & limits" },
+  ];
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="max-w-3xl mx-auto space-y-3 p-4 text-sm">
-      <div className="flex items-center justify-between gap-3 rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2">
+    <div className="mx-auto max-w-[1440px] space-y-2 p-2 sm:p-3 text-sm">
+      {/* Account bar: who's trading, and with what. */}
+      <div className={`${panelClass} flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2`}>
         <div className="flex items-center gap-2">
-          <PulseDot tone={walletStatus?.hasWallet ? "live" : "idle"} />
-          <h1 className="text-sm font-semibold uppercase tracking-wide text-[hsl(var(--foreground))]">Hyperliquid Trading</h1>
-          {walletStatus?.hasWallet && (
-            <Badge tone={walletStatus.network === "mainnet" ? "danger" : "neutral"}>{walletStatus.network}</Badge>
-          )}
+          <PulseDot tone={instant ? "live" : walletStatus?.hasWallet ? "idle" : "idle"} />
+          <span className="text-xs font-semibold uppercase tracking-wide">Hyperliquid</span>
         </div>
-        <div className="flex items-center gap-4 text-xs">
-          {livePrice != null && (
-            <span className="text-[hsl(var(--muted-foreground))]">
-              {coin} <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${livePrice.toLocaleString()}</span>
-            </span>
-          )}
-          {accountValue != null && (
-            <span className="text-[hsl(var(--muted-foreground))]">
-              Equity <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${accountValue.toFixed(2)}</span>
-            </span>
-          )}
-        </div>
-      </div>
-      <p className="text-xs text-[hsl(var(--muted-foreground))] px-1">
-        Each agent trades with its own wallet via a GatewayAgent worker running the official SDK — no shared platform key.
-      </p>
-
-      <Section title="Agent" dense>
-        <div>
-          <label htmlFor="agentPick" className={labelClass}>Trade as</label>
+        <div className="flex items-center gap-2 min-w-0">
+          <label htmlFor="agentPick" className={`text-[11px] uppercase tracking-wide ${mutedClass}`}>Agent</label>
           {myAgents === "loading" ? (
-            <Spinner label="Loading your agents…" />
+            <span className={`text-xs ${mutedClass}`}>loading…</span>
           ) : myAgents === "error" ? (
-            <ErrorNote message="Couldn't load your agents." onRetry={loadMyAgents} />
+            <button type="button" className="text-xs text-red-600 dark:text-red-400 underline" onClick={loadMyAgents}>Couldn&apos;t load — retry</button>
           ) : myAgents.length === 0 ? (
-            <p className="text-xs text-[hsl(var(--muted-foreground))]">You don&apos;t have any agents yet — create one first.</p>
+            <span className={`text-xs ${mutedClass}`}>No agents yet — create one first.</span>
           ) : (
             <select
-              id="agentPick" name="agentPick" className={inputClass} value={agentId}
+              id="agentPick" name="agentPick" className={`${inputClass} w-auto max-w-56 py-1 text-xs`} value={agentId}
               onChange={(e) => selectAgent(myAgents.find((a) => a.agentId === e.target.value))}
             >
               <option value="">Pick an agent…</option>
@@ -931,785 +1374,1018 @@ function TradingPanel({ api }: PanelProps) {
                 <option key={a.agentId} value={a.agentId}>
                   {a.name}
                   {new Set(myAgents.map((x) => x.orgId)).size > 1 ? ` — ${a.orgName}` : ""}
-                  {a.wallet ? ` · ${a.wallet.network}` : " · no wallet yet"}
                 </option>
               ))}
             </select>
           )}
-          {selectedAgent?.wallet?.address && (
-            <p className={`text-xs text-[hsl(var(--muted-foreground))] mt-1 ${monoClass}`}>{selectedAgent.wallet.address}</p>
-          )}
         </div>
         {agentId && (
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[hsl(var(--border))] pt-2">
-            <div className="text-xs">
-              {instant ? (
-                <span className="flex items-center gap-2">
-                  <Badge tone={network === "mainnet" ? "danger" : "success"}>Ready to trade · {network}</Badge>
-                  <span className="text-[hsl(var(--muted-foreground))]">Your agent signs from its own wallet — no passphrase.</span>
-                </span>
-              ) : isOwner ? (
-                <span className="text-[hsl(var(--muted-foreground))]">
-                  Just place an order — your agent fills it from its own wallet.
-                </span>
-              ) : (
-                <span className="text-[hsl(var(--muted-foreground))]">
-                  Trades need the passphrase until the org owner places an order with this agent.
-                </span>
-              )}
-            </div>
-            {instant ? (
-              <button type="button" className={secondaryButtonClass()} onClick={disableInstant} disabled={instantBusy}>
-                Require passphrase
-              </button>
-            ) : isOwner ? (
-              <select
-                aria-label="Network your agent trades on" className={`${inputClass} w-auto`}
-                value={instantNetwork} onChange={(e) => setInstantNetwork(e.target.value as Network)}
-              >
-                <option value="testnet">Testnet</option>
-                <option value="mainnet">Mainnet</option>
-              </select>
-            ) : null}
-          </div>
-        )}
-        {instantStatus && <p className="text-xs text-[hsl(var(--muted-foreground))]">{instantStatus}</p>}
-        {!instant && isOwner && !usePassphrase && (
-          <button
-            type="button" className="text-xs underline text-[hsl(var(--muted-foreground))] self-start"
-            onClick={() => setUsePassphrase(true)}
-          >
-            Use a passphrase-protected wallet instead
-          </button>
-        )}
-        {!instant && (!isOwner || usePassphrase) && (
-          <div>
-            <label htmlFor="masterSecret" className={labelClass}>Passphrase</label>
-            <input
-              id="masterSecret" name="masterSecret" type="password" className={inputClass}
-              placeholder="Decrypts this agent's wallet — never stored" value={masterSecret}
-              onChange={(e) => setMasterSecret(e.target.value)} autoComplete="off"
-            />
-            <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">
-              Held only in this tab while it&apos;s open. Required for every trade, close, or strategy execution below.
-            </p>
-          </div>
-        )}
-      </Section>
-
-      {agentId && (
-        <Section title="Give orders" description={`Tell ${selectedAgent?.name ?? "this agent"} what to trade, in plain words.`} dense>
-          <form className="flex gap-2" onSubmit={sendOrder}>
-            <input
-              id="orderText" name="orderText" className={`${inputClass} flex-1`} autoComplete="off"
-              placeholder="long ETH $25 5x sl 3 tp 8 · short SOL 50 @ 140 · close BTC"
-              value={orderText} onChange={(e) => setOrderText(e.target.value)}
-              aria-describedby="orderPreview"
-            />
-            <button
-              type="submit" className={primaryButtonClass()}
-              disabled={orderSending || !parsedOrder || "error" in parsedOrder || !canSign || (!walletStatus?.hasWallet && !isOwner)}
-            >
-              {orderSending ? "Sending…" : "Send"}
-            </button>
-          </form>
-          <p id="orderPreview" className="text-xs min-h-4" aria-live="polite">
-            {!walletStatus?.hasWallet && walletStatus && !isOwner ? (
-              <span className="text-amber-700 dark:text-amber-400">This agent needs a wallet before it can trade — set one below.</span>
-            ) : !canSign ? (
-              <span className="text-[hsl(var(--muted-foreground))]">Enter the passphrase above to send orders.</span>
-            ) : parsedOrder && "error" in parsedOrder ? (
-              <span className="text-[hsl(var(--muted-foreground))]">{parsedOrder.error}</span>
-            ) : parsedOrder ? (
-              <span className="text-[hsl(var(--foreground))]">{describeOrder(parsedOrder)} on {network}</span>
-            ) : null}
-          </p>
-          {orderLog.length > 0 && (
-            <ul className="divide-y divide-[hsl(var(--border))] border-t border-[hsl(var(--border))]">
-              {orderLog.map((o) => (
-                <li key={o.id} className="flex items-center justify-between gap-3 py-1.5 text-xs">
-                  <span>
-                    <span className="text-[hsl(var(--muted-foreground))]">{o.agentName}:</span> {o.summary}
-                  </span>
-                  <Badge tone={o.status === "completed" ? "success" : /^(rejected|failed|cancelled|timeout)/.test(o.status) ? "danger" : "neutral"}>
-                    {o.status.length > 40 ? `${o.status.slice(0, 40)}…` : o.status}
-                  </Badge>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Section>
-      )}
-
-      <Section
-        title="Wallet"
-        dense
-        right={
-          walletStatus?.hasWallet ? (
-            <div className="flex gap-2">
-              <button type="button" className={secondaryButtonClass()} onClick={() => setWalletFormOpen((v) => !v)}>
-                Rotate key
-              </button>
-              <button type="button" className={secondaryButtonClass("text-red-600 dark:text-red-400 hover:bg-[hsl(var(--destructive))]/10")} onClick={removeWallet}>
-                Remove
-              </button>
-            </div>
-          ) : (
-            <button type="button" className={primaryButtonClass()} onClick={() => setWalletFormOpen(true)} disabled={!agentId || !orgId}>
-              Set wallet
-            </button>
-          )
-        }
-      >
-        {walletLoading ? (
-          <Spinner label="Checking wallet status…" />
-        ) : walletStatus?.hasWallet ? (
           <div className="flex items-center gap-2">
-            <Badge tone="success">Wallet set</Badge>
-          </div>
-        ) : (
-          <Badge tone="warning">No wallet set — this agent can&apos;t trade yet</Badge>
-        )}
-
-        {walletFormOpen && (
-          <form className="space-y-2 border-t border-[hsl(var(--border))] pt-2" onSubmit={saveWallet}>
-            <div>
-              <label htmlFor="walletKey" className={labelClass}>Hyperliquid private key</label>
-              <input
-                id="walletKey" name="walletKey" type="password" className={inputClass} required
-                value={walletKeyInput} onChange={(e) => setWalletKeyInput(e.target.value)} autoComplete="new-password"
+            {instant ? (
+              <Badge tone={network === "mainnet" ? "danger" : "success"}>Live · {network}</Badge>
+            ) : isOwner && !usePassphrase ? (
+              <Segmented
+                label="Network" size="xs" value={instantNetwork} onChange={setInstantNetwork}
+                options={[{ id: "testnet", label: "Testnet" }, { id: "mainnet", label: "Mainnet" }]}
               />
-            </div>
-            <div className="flex gap-2 items-end">
-              <div className="flex-1">
-                <label htmlFor="walletNetwork" className={labelClass}>Network</label>
-                <select
-                  id="walletNetwork" name="walletNetwork" className={inputClass}
-                  value={walletNetwork} onChange={(e) => setWalletNetwork(e.target.value as Network)}
-                >
-                  <option value="testnet">Testnet</option>
-                  <option value="mainnet">Mainnet</option>
-                </select>
-              </div>
-              <button type="submit" className={primaryButtonClass()} disabled={!masterSecret || !walletKeyInput}>
-                Save
-              </button>
-            </div>
-            {!masterSecret && <p className="text-xs text-[hsl(var(--muted-foreground))]">Enter a passphrase above first — it encrypts this key.</p>}
-          </form>
-        )}
-        {walletActionStatus && <p className="text-xs text-[hsl(var(--muted-foreground))]">{walletActionStatus}</p>}
-      </Section>
-
-      <Section
-        title="Connect your agent"
-        description="Let the agent trade on its own through this mod's API — same wallet, capabilities, and risk limits."
-        dense
-        right={
-          <div className="flex gap-2">
-            <button type="button" className={secondaryButtonClass()} onClick={loadConnection} disabled={!agentId}>
-              Check
-            </button>
-            <button type="button" className={secondaryButtonClass()} onClick={() => setConnectOpen((v) => !v)}>
-              {connectOpen ? "Hide setup" : "Setup"}
-            </button>
-          </div>
-        }
-      >
-        {!agentId ? (
-          <p className="text-xs text-[hsl(var(--muted-foreground))]">Pick an agent above to check its connection.</p>
-        ) : connection === "loading" ? (
-          <Spinner label="Checking agent…" />
-        ) : connection === "error" ? (
-          <ErrorNote message="Couldn't check this agent." onRetry={loadConnection} />
-        ) : connection ? (
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              {connection.readyToTrade
-                ? <Badge tone="success">Ready to trade</Badge>
-                : <Badge tone="warning">Not ready yet</Badge>}
-              {connection.pendingStrategies > 0 && (
-                <Badge tone="warning">{connection.pendingStrategies} pending signal{connection.pendingStrategies === 1 ? "" : "s"}</Badge>
-              )}
-            </div>
-            <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-              <li className="flex items-center gap-1.5">
-                <span aria-hidden="true">{connection.wallet.configured ? "✓" : "✗"}</span>
-                Wallet {connection.wallet.configured ? `(${connection.wallet.network})` : "not set"}
-              </li>
-              <li className="flex items-center gap-1.5">
-                <span aria-hidden="true">{connection.risk ? "✓" : "–"}</span>
-                {connection.risk ? `Risk limits: max $${connection.risk.maxPositionUsd}/trade` : "No risk limits (recommended)"}
-              </li>
-              {Object.entries(connection.capabilities).map(([key, granted]) => (
-                <li key={key} className={`flex items-center gap-1.5 ${granted ? "" : "text-[hsl(var(--muted-foreground))]"}`}>
-                  <span aria-hidden="true">{granted ? "✓" : "✗"}</span>
-                  <span className={monoClass}>{key}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        {connectOpen && (
-          <div className="space-y-2 border-t border-[hsl(var(--border))] pt-2">
-            <div className="flex items-center justify-between">
-              <span className={labelClass}>Run from your agent&apos;s machine</span>
-              <button type="button" className={secondaryButtonClass()} onClick={copySnippet}>
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <pre className={`${monoClass} overflow-x-auto whitespace-pre rounded-sm bg-[hsl(var(--muted))] p-2 text-[11px] leading-relaxed`}>
-              {connectSnippet}
-            </pre>
-            <p className="text-xs text-[hsl(var(--muted-foreground))]">
-              The tool manifest at <span className={monoClass}>/api/mods/hyperliquid-trading/agent/tools</span> works as LLM tool
-              definitions. The passphrase stays in the agent&apos;s environment and is never part of the model&apos;s context.
-            </p>
+            ) : (
+              <Badge tone="warning">Passphrase · {network}</Badge>
+            )}
           </div>
         )}
-      </Section>
-
-      {pendingStrategies.length > 0 && (
-        <div className="rounded-sm border border-amber-500/30 bg-amber-500/5">
-          <div className="flex items-center gap-2 border-b border-amber-500/20 px-3 py-1.5">
-            <PulseDot tone="danger" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
-              Pending signals
+        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1">
+          {wallet && (
+            <span className={`hidden md:inline text-[11px] ${monoClass} ${mutedClass}`} title={wallet}>
+              {wallet.slice(0, 6)}…{wallet.slice(-4)}
             </span>
-            <span className="text-xs text-[hsl(var(--muted-foreground))]">— needs your passphrase to fire</span>
-          </div>
-          <div className="divide-y divide-amber-500/10">
-            {pendingStrategies.map((s) => (
-              <div key={s.id} className="flex items-center justify-between px-3 py-1.5 text-sm">
-                <span className={monoClass}>
-                  {s.type} · {s.coin} · ${s.sizeUsd}
-                </span>
-                <button
-                  type="button"
-                  className={primaryButtonClass()}
-                  onClick={() => executePending(s.id)}
-                  disabled={!canSign || executingId === s.id}
-                >
-                  {executingId === s.id ? "Executing…" : "Execute"}
-                </button>
-              </div>
-            ))}
-          </div>
+          )}
+          <Stat label="Equity">{accountValue != null ? `$${accountValue.toFixed(2)}` : "—"}</Stat>
+          <Stat label="Margin used">{marginUsed != null ? `$${marginUsed.toFixed(2)}` : "—"}</Stat>
+          <Stat label="uPnL"><span className={positionList.length ? pnlClass(totalUpnl) : ""}>{positionList.length ? signed(totalUpnl) : "—"}</span></Stat>
         </div>
-      )}
-
-      <div role="tablist" aria-label="Trading sections" className="flex gap-1 border-b border-[hsl(var(--border))] overflow-x-auto">
-        {TABS.map((tab) => {
-          const count =
-            tab.id === "positions" ? (Array.isArray(positions) ? positions.length : null) :
-            tab.id === "strategies" ? (Array.isArray(strategies) ? strategies.length : null) :
-            tab.id === "history" ? (history && history !== "loading" && history !== "error" ? history.stats.count : null) :
-            null;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === tab.id}
-              className={
-                "px-2.5 py-1.5 text-xs font-medium uppercase tracking-wide border-b-2 -mb-px whitespace-nowrap transition-colors " +
-                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] " +
-                (activeTab === tab.id
-                  ? "border-[hsl(var(--primary))] text-[hsl(var(--foreground))]"
-                  : "border-transparent text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]")
-              }
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.label}
-              {count != null && <span className={`ml-1 ${monoClass} text-[hsl(var(--muted-foreground))]`}>{count}</span>}
-            </button>
-          );
-        })}
       </div>
+      {instantStatus && <p className={`px-1 text-xs ${mutedClass}`}>{instantStatus}</p>}
 
-      {activeTab === "market" && (
-        <Section
-          title="Market overview"
-          dense
-          description="Every tradeable perp, ranked by 24h volume — click a row to load it into Trade."
-          right={<button type="button" className={secondaryButtonClass()} onClick={loadMarket}>Refresh</button>}
+      {/* Market bar: the coin being traded, with a picker for every perp. */}
+      <div className={`${panelClass} relative flex flex-wrap items-center gap-x-5 gap-y-2 px-3 py-2`}>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 rounded-sm px-1 -mx-1 text-base font-semibold hover:bg-[hsl(var(--accent))] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]"
+          aria-haspopup="dialog" aria-expanded={marketOpen}
+          onClick={() => setMarketOpen((v) => !v)}
         >
-          <div className="flex items-center justify-between gap-2">
-              <div className="flex shrink-0 rounded-sm border border-[hsl(var(--border))] overflow-hidden">
-                {MARKET_SORTS.map((s) => (
-                  <button
-                    key={s.id}
-                    type="button"
-                    className={
-                      "px-2 py-1 text-[11px] font-medium uppercase tracking-wide transition-colors " +
-                      (marketSort === s.id ? "bg-[hsl(var(--primary))] text-white" : "text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]")
-                    }
-                    onClick={() => setMarketSort(s.id)}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-              <input
-                aria-label="Search coins"
-                className={`${inputClass} ${monoClass} max-w-48`}
-                placeholder="search coin"
-                value={marketQuery}
-                onChange={(e) => setMarketQuery(e.target.value)}
-              />
-          </div>
-          {marketCoins === "loading" && <Spinner label="Loading market…" />}
-          {marketCoins === "error" && <ErrorNote message="Couldn't load market overview." onRetry={loadMarket} />}
-          {Array.isArray(marketCoins) && filteredMarket.length === 0 && (
-            <p className="text-sm text-[hsl(var(--muted-foreground))]">No coins match &quot;{marketQuery}&quot;.</p>
-          )}
-          {Array.isArray(marketCoins) && filteredMarket.length > 0 && (
-            <div className="max-h-[28rem] overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-[hsl(var(--card))]">
-                  <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
-                    <th className="pb-1 font-medium">Coin</th>
-                    <th className="pb-1 font-medium text-right">Price</th>
-                    <th className="pb-1 font-medium text-right">24h %</th>
-                    <th className="pb-1 font-medium text-right">Volume</th>
-                    <th className="pb-1 font-medium text-right">OI</th>
-                    <th className="pb-1 font-medium text-right">Funding</th>
-                    <th className="pb-1 font-medium text-right">Max lev</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[hsl(var(--border))]">
-                  {filteredMarket.map((c) => (
-                    <tr
-                      key={c.coin}
-                      className="cursor-pointer hover:bg-[hsl(var(--accent))]/50"
-                      onClick={() => pickCoin(c.coin)}
-                    >
-                      <td className="py-1.5 font-medium text-[hsl(var(--foreground))]">{c.coin}</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${formatPrice(c.markPx)}</td>
-                      <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.change24hPct)}`}>{signed(c.change24hPct)}%</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{formatCompactUsd(c.volume24hUsd)}</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{formatCompactUsd(c.openInterestUsd)}</td>
-                      <td className={`py-1.5 text-right ${monoClass} ${pnlClass(c.fundingRatePct)}`}>{c.fundingRatePct.toFixed(4)}%</td>
-                      <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>{c.maxLeverage}x</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Section>
-      )}
+          {coin}-PERP
+          <svg viewBox="0 0 12 12" className="h-3 w-3 opacity-60" aria-hidden="true"><path d="M2 4l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" /></svg>
+        </button>
+        <span className={`${monoClass} text-lg font-semibold ${coinInfo ? pnlClass(coinInfo.change24hPct) : ""}`}>
+          {price != null ? formatPrice(price) : "—"}
+        </span>
+        {coinInfo && (
+          <>
+            <Stat label="24h change"><span className={pnlClass(coinInfo.change24hPct)}>{signed(coinInfo.change24hPct)}%</span></Stat>
+            <Stat label="24h volume">{formatCompactUsd(coinInfo.volume24hUsd)}</Stat>
+            <Stat label="Open interest">{formatCompactUsd(coinInfo.openInterestUsd)}</Stat>
+            <Stat label="Funding / 1h"><span className={pnlClass(coinInfo.fundingRatePct)}>{coinInfo.fundingRatePct.toFixed(4)}%</span></Stat>
+            <Stat label="Max leverage">{coinInfo.maxLeverage}x</Stat>
+          </>
+        )}
 
-      {activeTab === "trade" && (
-        <Section title="Place a trade" dense>
-          <form className="space-y-2" onSubmit={submitTrade}>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label htmlFor="coin" className={labelClass}>Coin</label>
-                <input id="coin" name="coin" className={`${inputClass} ${monoClass}`} value={coin} onChange={(e) => setCoin(e.target.value)} required />
-              </div>
-              <div>
-                <label htmlFor="sizeUsd" className={labelClass}>Size (USD)</label>
+        {marketOpen && (
+          <>
+            <div className="fixed inset-0 z-10" aria-hidden="true" onClick={() => setMarketOpen(false)} />
+            <div role="dialog" aria-label="Markets" className={`${panelClass} absolute left-2 top-full z-20 mt-1 w-[min(36rem,calc(100vw-2rem))] p-2 space-y-2 shadow-lg`}>
+              <div className="flex items-center gap-2">
                 <input
-                  id="sizeUsd" name="sizeUsd" type="number" min="0" step="0.01" className={`${inputClass} ${monoClass}`}
-                  value={sizeUsd} onChange={(e) => setSizeUsd(e.target.value)} required
+                  ref={marketSearchRef}
+                  aria-label="Search coins"
+                  className={`${inputClass} ${monoClass}`}
+                  placeholder="Search coin"
+                  value={marketQuery}
+                  onChange={(e) => setMarketQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && filteredMarket[0]) pickCoin(filteredMarket[0].coin);
+                  }}
                 />
+                <Segmented label="Sort markets" size="xs" value={marketSort} onChange={setMarketSort} options={MARKET_SORTS} />
               </div>
-            </div>
-            <div className="flex items-center justify-between rounded-sm border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2.5 py-1.5">
-              <span className="flex items-center gap-1.5 text-xs text-[hsl(var(--muted-foreground))]">
-                <PulseDot tone={livePrice != null ? "live" : "idle"} />
-                Mid price
-              </span>
-              <span className={`${monoClass} text-sm text-[hsl(var(--foreground))]`}>
-                {livePrice != null ? `$${livePrice.toLocaleString()}` : "—"}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label htmlFor="orderType" className={labelClass}>Order type</label>
-                <select id="orderType" name="orderType" className={inputClass} value={orderType} onChange={(e) => setOrderType(e.target.value as "market" | "limit")}>
-                  <option value="market">Market</option>
-                  <option value="limit">Limit</option>
-                </select>
-              </div>
-              {orderType === "limit" && (
-                <div>
-                  <label htmlFor="limitPrice" className={labelClass}>Limit price</label>
-                  <input id="limitPrice" name="limitPrice" type="number" min="0" step="0.01" className={inputClass} value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)} required />
-                </div>
+              {marketCoins === "loading" && <Spinner label="Loading markets…" />}
+              {marketCoins === "error" && <ErrorNote message="Couldn't load markets." onRetry={loadMarket} />}
+              {Array.isArray(marketCoins) && filteredMarket.length === 0 && (
+                <p className={`text-sm ${mutedClass} p-2`}>No coins match &quot;{marketQuery}&quot;.</p>
               )}
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label htmlFor="leverage" className={labelClass}>Leverage</label>
-                <input id="leverage" name="leverage" type="number" min="1" className={inputClass} value={leverage} onChange={(e) => setLeverage(e.target.value)} />
-              </div>
-              <div>
-                <label htmlFor="stopLossPct" className={labelClass}>Stop-loss %</label>
-                <input id="stopLossPct" name="stopLossPct" type="number" min="0" className={inputClass} value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} />
-              </div>
-              <div>
-                <label htmlFor="takeProfitPct" className={labelClass}>Take-profit %</label>
-                <input id="takeProfitPct" name="takeProfitPct" type="number" min="0" className={inputClass} value={takeProfitPct} onChange={(e) => setTakeProfitPct(e.target.value)} />
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <input id="isBuy" name="isBuy" type="checkbox" checked={isBuy} onChange={(e) => setIsBuy(e.target.checked)} className="h-4 w-4 rounded border-[hsl(var(--input))] focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]" />
-              <label htmlFor="isBuy" className="text-sm">Buy (unchecked = sell)</label>
-            </div>
-            <div className="flex gap-2">
-              <button type="submit" className={primaryButtonClass()} disabled={tradeSubmitting || !canSign || (!walletStatus?.hasWallet && !isOwner)}>
-                {tradeSubmitting ? "Placing…" : "Place trade"}
-              </button>
-              <button type="button" className={secondaryButtonClass()} onClick={checkStatus} disabled={!taskId}>
-                Check status
-              </button>
-            </div>
-            {!walletStatus?.hasWallet && <p className="text-xs text-[hsl(var(--muted-foreground))]">Set a wallet above before trading.</p>}
-            {taskId && <p className="text-xs text-[hsl(var(--muted-foreground))]">task: {taskId}</p>}
-            {tradeStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{tradeStatus}</p>}
-          </form>
-        </Section>
-      )}
-
-      {activeTab === "positions" && (
-        <Section
-          title="Positions & account"
-          dense
-          right={
-            <div className="flex items-center gap-3">
-              {accountValue != null && (
-                <span className="text-xs text-[hsl(var(--muted-foreground))]">
-                  Equity <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${accountValue.toFixed(2)}</span>
-                </span>
-              )}
-              <button type="button" className={secondaryButtonClass()} onClick={refreshAccount} disabled={!wallet}>
-                Refresh
-              </button>
-            </div>
-          }
-        >
-          {positions === "loading" && <Spinner label="Loading positions…" />}
-          {positions === "error" && <ErrorNote message="Couldn't load positions." onRetry={refreshAccount} />}
-          {positions === null && <p className="text-sm text-[hsl(var(--muted-foreground))]">Enter a wallet address and refresh to see positions.</p>}
-          {Array.isArray(positions) && positions.length === 0 && <p className="text-sm text-[hsl(var(--muted-foreground))]">No open positions.</p>}
-          {Array.isArray(positions) && positions.length > 0 && (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
-                  <th className="pb-1 font-medium">Coin</th>
-                  <th className="pb-1 font-medium text-right">Notional</th>
-                  <th className="pb-1 font-medium text-right">Entry</th>
-                  <th className="pb-1 font-medium text-right">PnL</th>
-                  <th className="pb-1 font-medium text-right"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[hsl(var(--border))]">
-                {positions.map((p) => (
-                  <tr key={p.coin}>
-                    <td className="py-1.5">
-                      <span className="font-medium text-[hsl(var(--foreground))]">{p.coin}</span>{" "}
-                      <Badge tone={p.size > 0 ? "success" : "danger"}>{p.size > 0 ? "long" : "short"}</Badge>
-                    </td>
-                    <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${Math.abs(p.notionalUsd).toFixed(2)}</td>
-                    <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--muted-foreground))]`}>${p.entryPrice.toFixed(2)}</td>
-                    <td className={`py-1.5 text-right ${monoClass} ${pnlClass(p.unrealizedPnl)}`}>{signed(p.unrealizedPnl)}</td>
-                    <td className="py-1.5 text-right">
-                      <button
-                        type="button"
-                        className={secondaryButtonClass()}
-                        onClick={() => closePosition(p.coin)}
-                        disabled={closingCoin === p.coin || !canSign}
-                      >
-                        {closingCoin === p.coin ? "Closing…" : "Close"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Section>
-      )}
-
-      {activeTab === "strategies" && (
-        <Section
-          title="Strategies"
-          dense
-          description="DCA, grid, and sniper conditions are detected automatically but still need your passphrase to execute (see Pending signals above)."
-          right={<button type="button" className={secondaryButtonClass()} onClick={loadStrategies}>Refresh</button>}
-        >
-          {strategies === "loading" && <Spinner label="Loading strategies…" />}
-          {strategies === "error" && <ErrorNote message="Couldn't load strategies." onRetry={loadStrategies} />}
-          {Array.isArray(strategies) && strategies.length === 0 && <p className="text-sm text-[hsl(var(--muted-foreground))]">No strategies yet — create one below.</p>}
-          {Array.isArray(strategies) && strategies.length > 0 && (
-            <div className="divide-y divide-[hsl(var(--border))] rounded-sm border border-[hsl(var(--border))]">
-              {strategies.map((s) => (
-                <div key={s.id} className="p-2 text-sm space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className={`flex items-center gap-2 ${monoClass}`}>
-                      <Badge tone="neutral">{s.type}</Badge>
-                      {s.coin} · ${s.sizeUsd}
-                      {!s.enabled && <Badge tone="neutral">disabled</Badge>}
-                      {s.pendingSignal && <Badge tone="warning">pending</Badge>}
-                    </span>
-                    <div className="flex gap-2">
-                      {s.type === "signal" && (
-                        <button type="button" className={secondaryButtonClass()} onClick={() => fireSignal(s.id)} disabled={!canSign}>
-                          Fire
-                        </button>
-                      )}
-                      <button type="button" className={secondaryButtonClass()} onClick={() => toggleStrategy(s.id, !s.enabled)}>
-                        {s.enabled ? "Disable" : "Enable"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {s.type === "signal" && (
-                    <div className="border-t border-[hsl(var(--border))] pt-2 space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        {webhookUrls[s.id] || s.webhookToken ? (
-                          <>
-                            <code className={`text-xs text-[hsl(var(--muted-foreground))] truncate ${monoClass}`}>
-                              {webhookUrls[s.id] ?? "webhook configured — generate again to view the URL"}
-                            </code>
-                            <button
-                              type="button"
-                              className={secondaryButtonClass("text-red-600 dark:text-red-400 hover:bg-[hsl(var(--destructive))]/10 shrink-0")}
-                              onClick={() => revokeWebhook(s.id)}
-                              disabled={webhookBusyId === s.id}
-                            >
-                              Revoke webhook
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <span className="text-xs text-[hsl(var(--muted-foreground))]">No webhook — paste a URL from TradingView to fire this strategy externally.</span>
-                            <button type="button" className={secondaryButtonClass("shrink-0")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
-                              {webhookBusyId === s.id ? "Generating…" : "Generate webhook"}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                      {webhookUrls[s.id] && (
-                        <p className="text-xs text-amber-600 dark:text-amber-500">
-                          TradingView&apos;s alert body for this webhook must include your wallet passphrase
-                          (masterSecret) in plain text — it will be stored and transmitted by TradingView&apos;s
-                          infrastructure, outside this platform&apos;s control. Only use a passphrase you&apos;re
-                          comfortable exposing to that third party.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          <form className="space-y-2 border-t border-[hsl(var(--border))] pt-3" onSubmit={createStrategy}>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label htmlFor="strategyType" className={labelClass}>Type</label>
-                <select id="strategyType" name="strategyType" className={inputClass} value={strategyType} onChange={(e) => setStrategyType(e.target.value as typeof strategyType)}>
-                  <option value="dca">DCA</option>
-                  <option value="grid">Grid</option>
-                  <option value="signal">Signal</option>
-                  <option value="sniper">Sniper</option>
-                </select>
-              </div>
-              <div>
-                <label htmlFor="strategyCoin" className={labelClass}>Coin</label>
-                <input
-                  id="strategyCoin" name="strategyCoin" className={inputClass} value={strategyCoin}
-                  onChange={(e) => setStrategyCoin(e.target.value)}
-                  placeholder={strategyType === "sniper" && sniperMode === "new-listing" ? "ANY (or a specific coin)" : undefined}
-                  required={!(strategyType === "sniper" && sniperMode === "new-listing")}
-                />
-              </div>
-              <div>
-                <label htmlFor="strategySizeUsd" className={labelClass}>Size (USD)</label>
-                <input id="strategySizeUsd" name="strategySizeUsd" type="number" min="0" className={inputClass} value={strategySizeUsd} onChange={(e) => setStrategySizeUsd(e.target.value)} required />
-              </div>
-            </div>
-            {strategyType === "dca" && (
-              <div>
-                <label htmlFor="dcaInterval" className={labelClass}>Interval (minutes)</label>
-                <input id="dcaInterval" name="dcaInterval" type="number" min="1" className={inputClass} value={dcaIntervalMin} onChange={(e) => setDcaIntervalMin(e.target.value)} required />
-              </div>
-            )}
-            {strategyType === "grid" && (
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <label htmlFor="gridLower" className={labelClass}>Lower price</label>
-                  <input id="gridLower" name="gridLower" type="number" min="0" className={inputClass} value={gridLower} onChange={(e) => setGridLower(e.target.value)} required />
-                </div>
-                <div>
-                  <label htmlFor="gridUpper" className={labelClass}>Upper price</label>
-                  <input id="gridUpper" name="gridUpper" type="number" min="0" className={inputClass} value={gridUpper} onChange={(e) => setGridUpper(e.target.value)} required />
-                </div>
-                <div>
-                  <label htmlFor="gridLevels" className={labelClass}>Levels</label>
-                  <input id="gridLevels" name="gridLevels" type="number" min="1" className={inputClass} value={gridLevels} onChange={(e) => setGridLevels(e.target.value)} required />
-                </div>
-              </div>
-            )}
-            {strategyType === "sniper" && (
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label htmlFor="sniperMode" className={labelClass}>Trigger</label>
-                  <select id="sniperMode" name="sniperMode" className={inputClass} value={sniperMode} onChange={(e) => setSniperMode(e.target.value as typeof sniperMode)}>
-                    <option value="new-listing">New listing</option>
-                    <option value="price-above">Price rises above</option>
-                    <option value="price-below">Price falls below</option>
-                  </select>
-                </div>
-                {sniperMode !== "new-listing" && (
-                  <div>
-                    <label htmlFor="sniperTargetPrice" className={labelClass}>Target price</label>
-                    <input id="sniperTargetPrice" name="sniperTargetPrice" type="number" min="0" className={inputClass} value={sniperTargetPrice} onChange={(e) => setSniperTargetPrice(e.target.value)} required />
-                  </div>
-                )}
-                {sniperMode === "new-listing" && (
-                  <p className="text-xs text-[hsl(var(--muted-foreground))] self-end pb-2 col-span-1">
-                    Fires once, the moment a new Hyperliquid perp lists. Auto-disarms after firing.
-                  </p>
-                )}
-              </div>
-            )}
-            <button type="submit" className={primaryButtonClass()} disabled={!agentId || !wallet}>Create strategy</button>
-            {strategyStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{strategyStatus}</p>}
-          </form>
-        </Section>
-      )}
-
-      {activeTab === "history" && (
-        <Section
-          title="Trade history"
-          dense
-          right={<button type="button" className={secondaryButtonClass()} onClick={loadHistory}>Refresh</button>}
-        >
-          {history === "loading" && <Spinner label="Loading history…" />}
-          {history === "error" && <ErrorNote message="Couldn't load trade history." onRetry={loadHistory} />}
-          {history && history !== "loading" && history !== "error" && (
-            <>
-              {history.stats.count === 0 ? (
-                <p className="text-sm text-[hsl(var(--muted-foreground))]">No closed trades yet.</p>
-              ) : (
-                <>
-                  <div className="flex items-center gap-3 text-xs text-[hsl(var(--muted-foreground))]">
-                    <span><span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.stats.count}</span> closed</span>
-                    <span>win rate <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
-                    <span>
-                      total <span className={`${monoClass} ${pnlClass(history.stats.totalPnl)}`}>{signed(history.stats.totalPnl)}</span>
-                    </span>
-                  </div>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">
-                        <th className="pb-1 font-medium">Coin</th>
-                        <th className="pb-1 font-medium text-right">Size</th>
-                        <th className="pb-1 font-medium text-right">Status</th>
-                        <th className="pb-1 font-medium text-right">PnL</th>
+              {filteredMarket.length > 0 && (
+                <div className="max-h-80 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-[hsl(var(--card))]">
+                      <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                        <th className="pb-1 font-medium">Market</th>
+                        <th className="pb-1 font-medium text-right">Price</th>
+                        <th className="pb-1 font-medium text-right">24h</th>
+                        <th className="pb-1 font-medium text-right">Volume</th>
+                        <th className="pb-1 font-medium text-right hidden sm:table-cell">Funding</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[hsl(var(--border))]">
-                      {history.trades.map((t) => (
-                        <tr key={t.id}>
-                          <td className="py-1.5">
-                            <span className="font-medium text-[hsl(var(--foreground))]">{t.coin}</span>{" "}
-                            <Badge tone={t.isBuy ? "success" : "danger"}>{t.isBuy ? "buy" : "sell"}</Badge>
+                    <tbody>
+                      {filteredMarket.map((c) => (
+                        <tr
+                          key={c.coin}
+                          className={`cursor-pointer hover:bg-[hsl(var(--accent))]/60 ${c.coin === coin ? "bg-[hsl(var(--accent))]/40" : ""}`}
+                          onClick={() => pickCoin(c.coin)}
+                        >
+                          <td className="py-1 font-medium">
+                            {c.coin} <span className={`${mutedClass} font-normal`}>{c.maxLeverage}x</span>
                           </td>
-                          <td className={`py-1.5 text-right ${monoClass} text-[hsl(var(--foreground))]`}>${t.sizeUsd}</td>
-                          <td className="py-1.5 text-right text-xs text-[hsl(var(--muted-foreground))]">{t.status}</td>
-                          <td className={`py-1.5 text-right ${monoClass} ${t.realizedPnl != null ? pnlClass(t.realizedPnl) : "text-[hsl(var(--muted-foreground))]"}`}>
-                            {t.realizedPnl != null ? signed(t.realizedPnl) : "—"}
-                          </td>
+                          <td className={`py-1 text-right ${monoClass}`}>{formatPrice(c.markPx)}</td>
+                          <td className={`py-1 text-right ${monoClass} ${pnlClass(c.change24hPct)}`}>{signed(c.change24hPct)}%</td>
+                          <td className={`py-1 text-right ${monoClass} ${mutedClass}`}>{formatCompactUsd(c.volume24hUsd)}</td>
+                          <td className={`py-1 text-right ${monoClass} hidden sm:table-cell ${pnlClass(c.fundingRatePct)}`}>{c.fundingRatePct.toFixed(4)}%</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                </>
+                </div>
               )}
-            </>
-          )}
-        </Section>
-      )}
+            </div>
+          </>
+        )}
+      </div>
 
-      {activeTab === "risk" && (
-        <Section title="Risk limits" dense description="Enforced on every trade this agent places, manual or strategy-fired.">
-          <form className="space-y-2" onSubmit={saveRiskConfig}>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label htmlFor="riskLeverage" className={labelClass}>Leverage</label>
-                <input id="riskLeverage" name="riskLeverage" type="number" min="1" className={`${inputClass} ${monoClass}`} value={riskLeverage} onChange={(e) => setRiskLeverage(e.target.value)} />
-              </div>
-              <div>
-                <label htmlFor="riskMaxPosition" className={labelClass}>Max position $</label>
-                <input id="riskMaxPosition" name="riskMaxPosition" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxPosition} onChange={(e) => setRiskMaxPosition(e.target.value)} />
-              </div>
-              <div>
-                <label htmlFor="riskMaxDailyLoss" className={labelClass}>Max daily loss $</label>
-                <input id="riskMaxDailyLoss" name="riskMaxDailyLoss" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxDailyLoss} onChange={(e) => setRiskMaxDailyLoss(e.target.value)} />
+      {/* Chart | Book | Ticket */}
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-12">
+        <div className={`${panelClass} min-w-0 lg:col-span-6 xl:col-span-7 flex flex-col`}>
+          <div className="flex items-center justify-between gap-2 border-b border-[hsl(var(--border))] px-2 py-1.5">
+            <Segmented
+              label="Chart interval" size="xs" value={chartInterval} onChange={setChartInterval}
+              options={INTERVALS.map((i) => ({ id: i, label: i }))}
+            />
+            <span className={`text-[11px] ${mutedClass}`}>{network}</span>
+          </div>
+          <div className="relative h-[280px] sm:h-[360px] lg:h-auto lg:min-h-[420px] lg:flex-1">
+            {chartCandles === "loading" ? (
+              <Spinner label="Loading chart…" />
+            ) : chartCandles === "error" ? (
+              <ErrorNote message="Couldn't load the chart." />
+            ) : chartCandles.length === 0 ? (
+              <p className={`p-4 text-sm ${mutedClass}`}>No trades for {coin} in this window.</p>
+            ) : (
+              <CandleChart candles={chartCandles} interval={chartInterval} entryPx={coinPosition?.entryPrice ?? null} />
+            )}
+          </div>
+        </div>
+
+        <div className={`${panelClass} order-3 lg:order-none lg:col-span-3 xl:col-span-2`}>
+          <div className="border-b border-[hsl(var(--border))] px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide">Order book</div>
+          <div className="py-1">
+            {book && (book.bids.length || book.asks.length) ? (
+              <OrderBook bids={book.bids} asks={book.asks} onPick={pickBookPrice} />
+            ) : (
+              <Spinner label="Loading book…" />
+            )}
+          </div>
+        </div>
+
+        <form className={`${panelClass} order-2 lg:order-none lg:col-span-3 p-2 space-y-3`} onSubmit={submitTicket}>
+          <div className="grid grid-cols-2 gap-1 rounded-sm bg-[hsl(var(--muted))] p-0.5" role="radiogroup" aria-label="Side">
+            {[true, false].map((buy) => (
+              <button
+                key={String(buy)}
+                type="button"
+                role="radio"
+                aria-checked={isBuy === buy}
+                className={
+                  "rounded-sm py-1.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] " +
+                  (isBuy === buy
+                    ? buy ? "bg-green-600 text-white" : "bg-red-600 text-white"
+                    : `${mutedClass} hover:text-[hsl(var(--foreground))]`)
+                }
+                onClick={() => setIsBuy(buy)}
+              >
+                {buy ? "Buy / Long" : "Sell / Short"}
+              </button>
+            ))}
+          </div>
+
+          <Segmented
+            label="Order type" value={orderType} onChange={setOrderType}
+            options={[{ id: "market", label: "Market" }, { id: "limit", label: "Limit" }]}
+          />
+
+          {orderType === "limit" && (
+            <div>
+              <label htmlFor="limitPrice" className={labelClass}>Price (USD)</label>
+              <div className="flex gap-1">
+                <input
+                  id="limitPrice" name="limitPrice" type="number" min="0" step="any" inputMode="decimal"
+                  className={`${inputClass} ${monoClass}`} value={limitPrice} onChange={(e) => setLimitPrice(e.target.value)}
+                  placeholder={price != null ? String(price) : ""} required
+                />
+                <button type="button" className={secondaryButtonClass("px-2 text-xs")} onClick={() => price != null && setLimitPrice(String(price))}>
+                  Mid
+                </button>
               </div>
             </div>
-            <button type="submit" className={primaryButtonClass()} disabled={!agentId}>Save risk limits</button>
-            {riskConfig && (
-              <p className={`text-xs text-[hsl(var(--muted-foreground))] ${monoClass}`}>
-                Current: {riskConfig.leverage}x, max ${riskConfig.maxPositionUsd}/trade, max ${riskConfig.maxDailyLossUsd}/day loss
-              </p>
+          )}
+
+          <div>
+            <label htmlFor="sizeUsd" className={labelClass}>Size (USD)</label>
+            <input
+              id="sizeUsd" name="sizeUsd" type="number" min="0" step="any" inputMode="decimal"
+              className={`${inputClass} ${monoClass}`} value={sizeUsd} onChange={(e) => setSizeUsd(e.target.value)} required
+            />
+            <div className="mt-1 flex gap-1">
+              {SIZE_PRESETS.map((n) => (
+                <button
+                  key={n} type="button"
+                  className={`flex-1 rounded-sm border border-[hsl(var(--border))] py-0.5 text-[11px] ${monoClass} hover:bg-[hsl(var(--accent))] ${sizeNum === n ? "border-[hsl(var(--primary))]" : ""}`}
+                  onClick={() => setSizeUsd(String(n))}
+                >
+                  ${n}
+                </button>
+              ))}
+              {riskConfig && (
+                <button
+                  type="button"
+                  className={`flex-1 rounded-sm border border-[hsl(var(--border))] py-0.5 text-[11px] hover:bg-[hsl(var(--accent))]`}
+                  onClick={() => setSizeUsd(String(riskConfig.maxPositionUsd))}
+                >
+                  Max
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between">
+              <label htmlFor="leverage" className={labelClass}>Leverage</label>
+              <span className={`${monoClass} text-xs font-semibold`}>{leverage}x</span>
+            </div>
+            <input
+              id="leverage" name="leverage" type="range" min={1} max={maxLeverage} step={1} value={leverage}
+              onChange={(e) => setLeverage(Number(e.target.value))}
+              className="w-full accent-[hsl(var(--primary))]"
+            />
+          </div>
+
+          <div>
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox" checked={tpslOn} onChange={(e) => setTpslOn(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-[hsl(var(--input))]"
+              />
+              Take profit / Stop loss
+            </label>
+            {tpslOn && (
+              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                <div>
+                  <label htmlFor="takeProfitPct" className={labelClass}>TP %</label>
+                  <input id="takeProfitPct" name="takeProfitPct" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={takeProfitPct} onChange={(e) => setTakeProfitPct(e.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="stopLossPct" className={labelClass}>SL %</label>
+                  <input id="stopLossPct" name="stopLossPct" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} />
+                </div>
+              </div>
             )}
-            {riskStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{riskStatus}</p>}
-          </form>
-        </Section>
+          </div>
+
+          {needsPassphraseInput && agentId && (
+            <div>
+              <label htmlFor="masterSecret" className={labelClass}>Wallet passphrase</label>
+              <input
+                id="masterSecret" name="masterSecret" type="password" className={inputClass}
+                placeholder="Decrypts this agent's wallet — never stored" value={masterSecret}
+                onChange={(e) => setMasterSecret(e.target.value)} autoComplete="off"
+              />
+            </div>
+          )}
+
+          <dl className={`space-y-0.5 text-[11px] ${monoClass}`}>
+            <div className="flex justify-between"><dt className={mutedClass}>Est. size</dt><dd>{execPrice && sizeNum ? `${formatSize(sizeNum / execPrice)} ${coin}` : "—"}</dd></div>
+            <div className="flex justify-between"><dt className={mutedClass}>Margin</dt><dd>{sizeNum ? `$${(sizeNum / leverage).toFixed(2)}` : "—"}</dd></div>
+            {riskConfig && (
+              <div className="flex justify-between">
+                <dt className={mutedClass}>Agent limits</dt>
+                <dd className={overLeverageCap || overSizeCap ? "text-amber-600 dark:text-amber-400" : ""}>
+                  ${riskConfig.maxPositionUsd} · {riskConfig.leverage}x
+                </dd>
+              </div>
+            )}
+          </dl>
+
+          <button
+            type="submit"
+            className={
+              "w-full rounded-md py-2.5 text-sm font-semibold text-white transition-colors disabled:pointer-events-none disabled:opacity-50 " +
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))] focus-visible:ring-offset-2 focus-visible:ring-offset-[hsl(var(--background))] " +
+              (isBuy ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700")
+            }
+            disabled={!ticketReady || orderSending || instantBusy}
+          >
+            {orderSending || instantBusy ? "Sending…" : !agentId ? "Pick an agent" : `${isBuy ? "Buy / Long" : "Sell / Short"} ${coin}`}
+          </button>
+
+          <p className="min-h-4 text-[11px]" aria-live="polite">
+            {!agentId ? (
+              <span className={mutedClass}>Pick an agent in the top bar — it fills orders from its own wallet.</span>
+            ) : !canSign ? (
+              <span className={mutedClass}>Enter the passphrase to trade, or have the org owner place an order.</span>
+            ) : belowMinimum ? (
+              <span className="text-amber-600 dark:text-amber-400">Hyperliquid&apos;s minimum order is ${MIN_ORDER_USD}.</span>
+            ) : overLeverageCap ? (
+              <span className="text-amber-600 dark:text-amber-400">Above this agent&apos;s {riskConfig!.leverage}x limit — it will be rejected.</span>
+            ) : overSizeCap ? (
+              <span className="text-amber-600 dark:text-amber-400">Above this agent&apos;s ${riskConfig!.maxPositionUsd} position limit — it will be rejected.</span>
+            ) : lastOrder ? (
+              <span className="flex items-center justify-between gap-2">
+                <span className="truncate">{lastOrder.summary}</span>
+                <Badge tone={orderTone(lastOrder.status)}>{lastOrder.status.length > 28 ? `${lastOrder.status.slice(0, 28)}…` : lastOrder.status}</Badge>
+              </span>
+            ) : !instant && isOwner ? (
+              <span className={mutedClass}>Your first order switches {selectedAgent?.name ?? "the agent"} to its own wallet — no passphrase.</span>
+            ) : null}
+          </p>
+        </form>
+      </div>
+
+      {/* Command line — plain-words orders. */}
+      {agentId && (
+        <form className={`${panelClass} flex items-center gap-2 px-2 py-1.5`} onSubmit={sendCommand}>
+          <span className={`${monoClass} text-xs ${mutedClass}`} aria-hidden="true">&gt;</span>
+          <input
+            aria-label={`Order for ${selectedAgent?.name ?? "this agent"} in plain words`}
+            aria-describedby="commandPreview"
+            className={`flex-1 bg-transparent py-1 text-sm ${monoClass} placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none`}
+            placeholder="long ETH $25 5x sl 3 tp 8 · short SOL 50 @ 140 · close BTC"
+            value={orderText} onChange={(e) => setOrderText(e.target.value)} autoComplete="off"
+          />
+          <span id="commandPreview" className={`hidden sm:inline text-[11px] ${mutedClass} truncate max-w-[40%]`} aria-live="polite">
+            {parsedOrder ? ("error" in parsedOrder ? parsedOrder.error : `${describeOrder(parsedOrder)} on ${network}`) : ""}
+          </span>
+          <button type="submit" className={secondaryButtonClass("py-1 text-xs")} disabled={orderSending || !parsedOrder || "error" in parsedOrder || !canSign}>
+            Send
+          </button>
+        </form>
       )}
 
-      {activeTab === "referral" && (
-        <Section title="Referral" dense description="Refer another agent and earn a cut of the trading volume it generates.">
-          {referral === "loading" && <Spinner label="Loading referral stats…" />}
-          {referral === "error" && <ErrorNote message="Couldn't load referral stats." onRetry={loadReferral} />}
-          {referral && referral !== "loading" && referral !== "error" && (
-            <>
-              <div>
-                <p className={labelClass}>Your referral code</p>
-                <code className={`text-sm ${monoClass}`}>{referral.code}</code>
-                <p className="text-xs text-[hsl(var(--muted-foreground))] mt-1">Share this agent ID — anyone who applies it below counts toward your referral stats.</p>
+      {/* Bottom: positions, orders, bots, history, agent settings. */}
+      <div className={panelClass}>
+        <div role="tablist" aria-label="Account" className="flex items-center gap-1 overflow-x-auto border-b border-[hsl(var(--border))] px-1">
+          {bottomTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={bottomTab === tab.id}
+              className={
+                "px-2.5 py-2 text-xs font-medium border-b-2 -mb-px whitespace-nowrap transition-colors " +
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[hsl(var(--ring))] " +
+                (bottomTab === tab.id
+                  ? "border-[hsl(var(--primary))] text-[hsl(var(--foreground))]"
+                  : `border-transparent ${mutedClass} hover:text-[hsl(var(--foreground))]`)
+              }
+              onClick={() => setBottomTab(tab.id)}
+            >
+              {tab.label}
+              {tab.count ? <span className={`ml-1 ${monoClass} ${mutedClass}`}>({tab.count})</span> : null}
+              {tab.id === "bots" && pendingStrategies.length > 0 && !instant && <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-500 align-middle" aria-label="pending signals" />}
+            </button>
+          ))}
+          <div className="ml-auto pr-1">
+            {bottomTab === "bots" && agentId && (
+              <button type="button" className={primaryButtonClass("px-3 py-1 text-xs")} onClick={openNewBot}>+ New bot</button>
+            )}
+          </div>
+        </div>
+
+        <div className="p-2">
+          {!agentId && bottomTab !== "agent" ? (
+            <p className={`p-3 text-sm ${mutedClass}`}>Pick an agent in the top bar to see its account.</p>
+          ) : bottomTab === "positions" ? (
+            positions === "loading" ? <Spinner label="Loading positions…" /> :
+            positions === "error" ? <ErrorNote message="Couldn't load positions." onRetry={refreshAccount} /> :
+            !wallet ? <p className={`p-3 text-sm ${mutedClass}`}>No wallet yet — place an order and the agent&apos;s wallet is set up for you.</p> :
+            positionList.length === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>No open positions.</p> : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                      <th className="px-2 pb-1 font-medium">Market</th>
+                      <th className="px-2 pb-1 font-medium text-right">Size</th>
+                      <th className="px-2 pb-1 font-medium text-right">Value</th>
+                      <th className="px-2 pb-1 font-medium text-right">Entry</th>
+                      <th className="px-2 pb-1 font-medium text-right">Mark</th>
+                      <th className="px-2 pb-1 font-medium text-right">PnL (%)</th>
+                      <th className="px-2 pb-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[hsl(var(--border))]">
+                    {positionList.map((p) => {
+                      const mark = markOf(p.coin);
+                      const cost = Math.abs(p.size) * p.entryPrice;
+                      return (
+                        <tr key={p.coin} className="hover:bg-[hsl(var(--accent))]/40">
+                          <td className="px-2 py-1.5">
+                            <button type="button" className="font-semibold hover:underline" onClick={() => pickCoin(p.coin)}>{p.coin}</button>{" "}
+                            <Badge tone={p.size > 0 ? "success" : "danger"}>{p.size > 0 ? "long" : "short"}</Badge>
+                          </td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>{formatSize(Math.abs(p.size))}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>${Math.abs(p.notionalUsd).toFixed(2)}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>{formatPrice(p.entryPrice)}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>{mark != null ? formatPrice(mark) : "—"}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass} ${pnlClass(p.unrealizedPnl)}`}>
+                            {signed(p.unrealizedPnl)} {cost > 0 && <span className="opacity-75">({signed((p.unrealizedPnl / cost) * 100)}%)</span>}
+                          </td>
+                          <td className="px-2 py-1.5 text-right">
+                            <button
+                              type="button"
+                              className={secondaryButtonClass("px-2 py-0.5 text-xs")}
+                              onClick={() => closePosition(p.coin)}
+                              disabled={closingCoin === p.coin || !canSign}
+                            >
+                              {closingCoin === p.coin ? "Closing…" : "Market close"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-              <div className="grid grid-cols-3 gap-2 text-sm">
-                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Referred agents</div>
-                  <div className={`font-medium ${monoClass}`}>{referral.referredCount}</div>
-                </div>
-                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Volume generated</div>
-                  <div className={`font-medium ${monoClass}`}>${referral.totalVolumeUsd.toFixed(2)}</div>
-                </div>
-                <div className="rounded-sm border border-[hsl(var(--border))] p-2">
-                  <div className="text-[11px] uppercase tracking-wide text-[hsl(var(--muted-foreground))]">Reward earned</div>
-                  <div className={`font-medium ${monoClass} text-green-600 dark:text-green-400`}>${referral.rewardUsd.toFixed(2)}</div>
-                </div>
-              </div>
-              {referral.referredBy ? (
-                <p className="text-sm text-[hsl(var(--muted-foreground))]">Referred by <code className={monoClass}>{referral.referredBy}</code>.</p>
-              ) : (
-                <form className="flex gap-2 items-end border-t border-[hsl(var(--border))] pt-3" onSubmit={applyReferral}>
-                  <div className="flex-1">
-                    <label htmlFor="referralCodeInput" className={labelClass}>Have a referral code?</label>
-                    <input
-                      id="referralCodeInput" name="referralCodeInput" className={inputClass}
-                      value={referralCodeInput} onChange={(e) => setReferralCodeInput(e.target.value)}
-                      placeholder="Referring agent's ID"
-                    />
+            )
+          ) : bottomTab === "orders" ? (
+            orderLog.length === 0 ? (
+              <p className={`p-3 text-sm ${mutedClass}`}>Orders you send from this screen show up here while they fill.</p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                    <th className="px-2 pb-1 font-medium">Time</th>
+                    <th className="px-2 pb-1 font-medium">Order</th>
+                    <th className="px-2 pb-1 font-medium hidden sm:table-cell">Agent</th>
+                    <th className="px-2 pb-1 font-medium text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[hsl(var(--border))]">
+                  {orderLog.map((o) => (
+                    <tr key={o.id}>
+                      <td className={`px-2 py-1.5 ${monoClass} ${mutedClass}`}>{new Date(o.id).toLocaleTimeString()}</td>
+                      <td className="px-2 py-1.5">{o.summary}</td>
+                      <td className={`px-2 py-1.5 hidden sm:table-cell ${mutedClass}`}>{o.agentName}</td>
+                      <td className="px-2 py-1.5 text-right" title={o.status}>
+                        <Badge tone={orderTone(o.status)}>{o.status.length > 40 ? `${o.status.slice(0, 40)}…` : o.status}</Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )
+          ) : bottomTab === "bots" ? (
+            <div className="space-y-2">
+              <p className={`px-1 text-xs ${mutedClass}`}>
+                {instant
+                  ? `${runningBots} running — bots trade on their own from ${selectedAgent?.name ?? "the agent"}'s wallet, within its limits.`
+                  : "Bots spot their conditions automatically; with a passphrase wallet each fire waits for you to confirm it."}
+              </p>
+              {strategyStatus && <p className={`px-1 text-xs ${mutedClass}`}>{strategyStatus}</p>}
+              {strategies === "loading" && <Spinner label="Loading bots…" />}
+              {strategies === "error" && <ErrorNote message="Couldn't load bots." onRetry={loadStrategies} />}
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                {strategyList.map((s) => (
+                  <div key={s.id} className={`rounded-sm border p-2.5 space-y-2 ${s.enabled ? "border-[hsl(var(--border))]" : "border-dashed border-[hsl(var(--border))] opacity-75"}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-1.5 text-sm font-semibold">
+                          <PulseDot tone={s.enabled ? "live" : "idle"} />
+                          {BOT_KINDS[s.type].label} · {s.coin}
+                        </div>
+                        <p className={`text-[11px] ${mutedClass}`}>{BOT_KINDS[s.type].blurb}</p>
+                      </div>
+                      {s.type === "ai" && s.params?.eliminated ? (
+                        <Badge tone="danger">eliminated</Badge>
+                      ) : (
+                        <Badge tone={s.pendingSignal ? "warning" : s.enabled ? "success" : "neutral"}>
+                          {s.pendingSignal ? "pending" : s.enabled ? "running" : "stopped"}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className={`text-xs ${monoClass}`}>
+                      ${s.sizeUsd} per order
+                      {s.type === "ai" && s.params && (
+                        <span className={mutedClass}>
+                          {" "}· every {formatEvery(Number(s.params.intervalMs))} · stop at −{String(s.params.maxDrawdownPct)}%
+                        </span>
+                      )}
+                    </div>
+                    {s.type === "ai" && (() => {
+                      const log = aiDecisions[s.id];
+                      const latest = Array.isArray(log) ? log[0] : undefined;
+                      if (s.params?.openRequestId) {
+                        return (
+                          <p className={`flex items-center gap-1.5 text-[11px] ${mutedClass}`}>
+                            <PulseDot tone="live" /> Waiting for {selectedAgent?.name ?? "the agent"} to decide…
+                          </p>
+                        );
+                      }
+                      return latest ? (
+                        <div className="rounded-sm bg-[hsl(var(--muted))]/50 p-1.5 text-[11px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`font-semibold ${latest.decision === "LONG" ? "text-green-600 dark:text-green-400" : latest.decision === "SHORT" ? "text-red-600 dark:text-red-400" : ""}`}>
+                              {latest.decision ?? latest.action}
+                            </span>
+                            {latest.decision && <span className={mutedClass}>→ {latest.action}</span>}
+                            <span className={`ml-auto ${mutedClass}`}>{latest.createdAt ? new Date(latest.createdAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                          </div>
+                          {latest.error ? (
+                            <p className="text-amber-700 dark:text-amber-400">{latest.error}</p>
+                          ) : latest.reasoning ? (
+                            <p className={`line-clamp-3 ${mutedClass}`}>{latest.reasoning}</p>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <p className={`text-[11px] ${mutedClass}`}>
+                          {s.enabled ? "First decision on the next tick (within a minute)." : "No decisions yet."}
+                        </p>
+                      );
+                    })()}
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        className={s.enabled ? secondaryButtonClass("px-2 py-1 text-xs") : primaryButtonClass("px-2 py-1 text-xs")}
+                        onClick={() => toggleStrategy(s.id, !s.enabled)}
+                      >
+                        {s.enabled ? "Stop" : "Start"}
+                      </button>
+                      {s.pendingSignal && (
+                        <button type="button" className={primaryButtonClass("px-2 py-1 text-xs")} onClick={() => executePending(s.id)} disabled={!canSign || executingId === s.id}>
+                          {executingId === s.id ? "Running…" : "Run now"}
+                        </button>
+                      )}
+                      {s.type === "signal" && (
+                        <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => fireSignal(s.id)} disabled={!canSign}>
+                          Fire
+                        </button>
+                      )}
+                      {s.type === "ai" && (
+                        <button
+                          type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} aria-expanded={decisionsOpen === s.id}
+                          onClick={() => {
+                            setDecisionsOpen((cur) => (cur === s.id ? null : s.id));
+                            loadAiDecisions(s.id);
+                          }}
+                        >
+                          Decisions
+                        </button>
+                      )}
+                      {s.type !== "signal" && (
+                        <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => backtestBot(s)}>
+                          Backtest
+                        </button>
+                      )}
+                      {s.type === "signal" && (webhookUrls[s.id] || s.webhookToken ? (
+                        <button
+                          type="button"
+                          className={secondaryButtonClass("px-2 py-1 text-xs text-red-600 dark:text-red-400")}
+                          onClick={() => revokeWebhook(s.id)} disabled={webhookBusyId === s.id}
+                        >
+                          Revoke webhook
+                        </button>
+                      ) : (
+                        <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => issueWebhook(s.id)} disabled={webhookBusyId === s.id}>
+                          {webhookBusyId === s.id ? "Generating…" : "Webhook"}
+                        </button>
+                      ))}
+                    </div>
+                    {s.type === "signal" && webhookUrls[s.id] && (
+                      <div className="space-y-1">
+                        <code className={`block truncate text-[11px] ${monoClass} ${mutedClass}`} title={webhookUrls[s.id]}>{webhookUrls[s.id]}</code>
+                        {!instant && (
+                          <p className="text-[11px] text-amber-600 dark:text-amber-500">
+                            With a passphrase wallet, TradingView&apos;s alert body must include the passphrase in plain text —
+                            only use one you&apos;re comfortable exposing to that third party.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <button type="submit" className={primaryButtonClass()} disabled={!agentId || !referralCodeInput}>Apply</button>
+                ))}
+                {!newBotOpen && (
+                  <button
+                    type="button"
+                    className={`flex min-h-28 flex-col items-center justify-center gap-1 rounded-sm border border-dashed border-[hsl(var(--border))] text-sm ${mutedClass} hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]/40`}
+                    onClick={openNewBot}
+                  >
+                    <span className="text-lg leading-none">+</span>
+                    New bot
+                  </button>
+                )}
+              </div>
+
+              {decisionsOpen && (() => {
+                const bot = strategyList.find((x) => x.id === decisionsOpen);
+                const log = aiDecisions[decisionsOpen];
+                return (
+                  <div className="rounded-sm border border-[hsl(var(--border))]">
+                    <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-2.5 py-1.5">
+                      <span className="text-xs font-semibold uppercase tracking-wide">
+                        Decisions · {bot ? `${BOT_KINDS[bot.type].label} ${bot.coin}` : ""}
+                      </span>
+                      <div className="flex gap-3">
+                        <button type="button" className={`text-xs ${mutedClass} hover:underline`} onClick={() => loadAiDecisions(decisionsOpen)}>Refresh</button>
+                        <button type="button" className={`text-xs ${mutedClass} hover:underline`} onClick={() => setDecisionsOpen(null)}>Close</button>
+                      </div>
+                    </div>
+                    {log === "loading" || log === undefined ? <Spinner label="Loading decisions…" /> :
+                      log === "error" ? <ErrorNote message="Couldn't load decisions." onRetry={() => loadAiDecisions(decisionsOpen)} /> :
+                      log.length === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>No decisions yet.</p> : (
+                        <ul className="max-h-96 divide-y divide-[hsl(var(--border))] overflow-y-auto text-xs">
+                          {log.map((d) => (
+                            <li key={d.id} className="px-2.5 py-2">
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                <span className={`${monoClass} ${mutedClass}`}>{d.createdAt ? new Date(d.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                                {d.decision && (
+                                  <span className={`font-semibold ${d.decision === "LONG" ? "text-green-600 dark:text-green-400" : d.decision === "SHORT" ? "text-red-600 dark:text-red-400" : ""}`}>{d.decision}</span>
+                                )}
+                                <span className={mutedClass}>→ {d.action}</span>
+                                {d.price != null && <span className={monoClass}>@ {formatPrice(d.price)}</span>}
+                                {d.equity != null && <span className={`${monoClass} ${mutedClass}`}>equity ${d.equity.toFixed(2)}</span>}
+                                {d.taskId && <Badge tone="success">order sent</Badge>}
+                                {d.model && <span className={`ml-auto ${mutedClass}`}>{d.model === "agent" ? selectedAgent?.name ?? "agent" : d.model}</span>}
+                              </div>
+                              {d.error && <p className="mt-0.5 text-amber-700 dark:text-amber-400">{d.error}</p>}
+                              {d.reasoning && <p className={`mt-0.5 ${mutedClass}`}>{d.reasoning}</p>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                  </div>
+                );
+              })()}
+
+              {newBotOpen && (
+                <form className="rounded-sm border border-[hsl(var(--border))] p-2.5 space-y-2" onSubmit={createStrategy}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wide">New bot</span>
+                    <button type="button" className={`text-xs ${mutedClass} hover:underline`} onClick={() => setNewBotOpen(false)}>Cancel</button>
+                  </div>
+                  <div className="grid gap-1.5 sm:grid-cols-3 xl:grid-cols-5" role="radiogroup" aria-label="Bot type">
+                    {(Object.keys(BOT_KINDS) as StrategyType[]).map((t) => (
+                      <button
+                        key={t} type="button" role="radio" aria-checked={strategyType === t}
+                        className={`rounded-sm border p-2 text-left transition-colors ${strategyType === t ? "border-[hsl(var(--primary))] bg-[hsl(var(--primary))]/5" : "border-[hsl(var(--border))] hover:bg-[hsl(var(--accent))]/40"}`}
+                        onClick={() => setStrategyType(t)}
+                      >
+                        <div className="text-sm font-semibold">{BOT_KINDS[t].label}</div>
+                        <div className={`text-[11px] ${mutedClass}`}>{BOT_KINDS[t].blurb}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <div>
+                      <label htmlFor="strategyCoin" className={labelClass}>Coin</label>
+                      <input
+                        id="strategyCoin" name="strategyCoin" className={`${inputClass} ${monoClass}`} value={strategyCoin}
+                        onChange={(e) => setStrategyCoin(e.target.value.toUpperCase())}
+                        placeholder={strategyType === "sniper" && sniperMode === "new-listing" ? "ANY" : undefined}
+                        required={!(strategyType === "sniper" && sniperMode === "new-listing")}
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="strategySizeUsd" className={labelClass}>USD per order</label>
+                      <input id="strategySizeUsd" name="strategySizeUsd" type="number" min={MIN_ORDER_USD} className={`${inputClass} ${monoClass}`} value={strategySizeUsd} onChange={(e) => setStrategySizeUsd(e.target.value)} required />
+                    </div>
+                    {strategyType === "ai" && (
+                      <>
+                        <div>
+                          <label htmlFor="aiInterval" className={labelClass}>Decide every</label>
+                          <select id="aiInterval" name="aiInterval" className={inputClass} value={aiIntervalMin} onChange={(e) => setAiIntervalMin(e.target.value)}>
+                            <option value="15">15 minutes</option>
+                            <option value="60">1 hour</option>
+                            <option value="240">4 hours</option>
+                            <option value="1440">1 day</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="aiMaxDrawdown" className={labelClass}>Stop at −%</label>
+                          <input id="aiMaxDrawdown" name="aiMaxDrawdown" type="number" min="1" max="95" className={`${inputClass} ${monoClass}`} value={aiMaxDrawdown} onChange={(e) => setAiMaxDrawdown(e.target.value)} required />
+                        </div>
+                      </>
+                    )}
+                    {strategyType === "dca" && (
+                      <div>
+                        <label htmlFor="dcaInterval" className={labelClass}>Every (minutes)</label>
+                        <input id="dcaInterval" name="dcaInterval" type="number" min="1" className={`${inputClass} ${monoClass}`} value={dcaIntervalMin} onChange={(e) => setDcaIntervalMin(e.target.value)} required />
+                      </div>
+                    )}
+                    {strategyType === "grid" && (
+                      <>
+                        <div>
+                          <label htmlFor="gridLower" className={labelClass}>Lower price</label>
+                          <input id="gridLower" name="gridLower" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={gridLower} onChange={(e) => setGridLower(e.target.value)} required />
+                        </div>
+                        <div>
+                          <label htmlFor="gridUpper" className={labelClass}>Upper price</label>
+                          <input id="gridUpper" name="gridUpper" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={gridUpper} onChange={(e) => setGridUpper(e.target.value)} required />
+                        </div>
+                        <div>
+                          <label htmlFor="gridLevels" className={labelClass}>Levels</label>
+                          <input id="gridLevels" name="gridLevels" type="number" min="1" className={`${inputClass} ${monoClass}`} value={gridLevels} onChange={(e) => setGridLevels(e.target.value)} required />
+                        </div>
+                      </>
+                    )}
+                    {strategyType === "sniper" && (
+                      <>
+                        <div>
+                          <label htmlFor="sniperMode" className={labelClass}>Trigger</label>
+                          <select id="sniperMode" name="sniperMode" className={inputClass} value={sniperMode} onChange={(e) => setSniperMode(e.target.value as typeof sniperMode)}>
+                            <option value="new-listing">New listing</option>
+                            <option value="price-above">Price rises above</option>
+                            <option value="price-below">Price falls below</option>
+                          </select>
+                        </div>
+                        {sniperMode !== "new-listing" && (
+                          <div>
+                            <label htmlFor="sniperTargetPrice" className={labelClass}>Target price</label>
+                            <input id="sniperTargetPrice" name="sniperTargetPrice" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={sniperTargetPrice} onChange={(e) => setSniperTargetPrice(e.target.value)} required />
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  {strategyType === "grid" && price != null && (
+                    <p className={`text-[11px] ${mutedClass}`}>
+                      {strategyCoin === coin ? `${coin} is at ${formatPrice(price)}. ` : ""}
+                      <button
+                        type="button" className="underline"
+                        onClick={() => {
+                          if (strategyCoin !== coin) return;
+                          setGridLower(String(+(price * 0.95).toPrecision(5)));
+                          setGridUpper(String(+(price * 1.05).toPrecision(5)));
+                        }}
+                        disabled={strategyCoin !== coin}
+                      >
+                        Use ±5% around the current price
+                      </button>
+                    </p>
+                  )}
+                  {strategyType === "sniper" && sniperMode === "new-listing" && (
+                    <p className={`text-[11px] ${mutedClass}`}>Fires once, the moment a new Hyperliquid perp lists, then stops.</p>
+                  )}
+                  {strategyType === "ai" && (
+                    <p className={`text-[11px] ${mutedClass}`}>
+                      Each round {selectedAgent?.name ?? "your agent"} gets the last 72 bars, RSI, moving averages, bid/ask, funding and
+                      open interest — never your balance — and answers LONG, SHORT, CLOSE or NOTHING with its own model, through its
+                      daemon (<span className={monoClass}>agent-guild daemon</span>). No outside inference. Orders use the leverage on
+                      the ticket ({leverage}x) and this agent&apos;s risk limits. It stops for good if equity falls {aiMaxDrawdown}% below
+                      where it started. Try it in Backtest first.
+                    </p>
+                  )}
+                  <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId || instantBusy}>
+                    Start {BOT_KINDS[strategyType].label} bot
+                  </button>
                 </form>
               )}
-              {referralStatus && <p className="text-sm text-[hsl(var(--muted-foreground))]">{referralStatus}</p>}
-            </>
+            </div>
+          ) : bottomTab === "backtest" ? (
+            <BacktestPanel
+              key={backtestKey}
+              api={api}
+              agentId={agentId}
+              coin={coin}
+              initial={backtestInitial}
+              onStartBot={startBotFromBacktest}
+            />
+          ) : bottomTab === "history" ? (
+            history === "loading" ? <Spinner label="Loading history…" /> :
+            history === "error" ? <ErrorNote message="Couldn't load trade history." onRetry={loadHistory} /> :
+            !history || history.stats.count === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>No trades yet.</p> : (
+              <div className="space-y-2">
+                <div className={`flex items-center gap-4 px-2 text-xs ${mutedClass}`}>
+                  <span><span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.stats.count}</span> closed</span>
+                  <span>win rate <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
+                  <span>realized <span className={`${monoClass} ${pnlClass(history.stats.totalPnl)}`}>{signed(history.stats.totalPnl)}</span></span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                      <th className="px-2 pb-1 font-medium">Market</th>
+                      <th className="px-2 pb-1 font-medium text-right">Size</th>
+                      <th className="px-2 pb-1 font-medium text-right">Fill</th>
+                      <th className="px-2 pb-1 font-medium text-right">Status</th>
+                      <th className="px-2 pb-1 font-medium text-right">PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[hsl(var(--border))]">
+                    {history.trades.map((t) => (
+                      <tr key={t.id}>
+                        <td className="px-2 py-1.5">
+                          <span className="font-semibold">{t.coin}</span>{" "}
+                          <Badge tone={t.isBuy ? "success" : "danger"}>{t.isBuy ? "buy" : "sell"}</Badge>
+                        </td>
+                        <td className={`px-2 py-1.5 text-right ${monoClass}`}>${t.sizeUsd}</td>
+                        <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>{t.fillPrice != null ? formatPrice(t.fillPrice) : "—"}</td>
+                        <td className={`px-2 py-1.5 text-right ${mutedClass}`}>{t.status}</td>
+                        <td className={`px-2 py-1.5 text-right ${monoClass} ${t.realizedPnl != null ? pnlClass(t.realizedPnl) : mutedClass}`}>
+                          {t.realizedPnl != null ? signed(t.realizedPnl) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : (
+            <div className="grid gap-2 lg:grid-cols-2">
+              <Section title="Signing" dense>
+                {!agentId ? (
+                  <p className={`text-xs ${mutedClass}`}>Pick an agent first.</p>
+                ) : instant ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs">
+                      <Badge tone={network === "mainnet" ? "danger" : "success"}>Instant · {network}</Badge>{" "}
+                      <span className={mutedClass}>The agent signs from its own wallet — no passphrase.</span>
+                    </span>
+                    <button type="button" className={secondaryButtonClass("text-xs")} onClick={disableInstant} disabled={instantBusy}>
+                      Require passphrase
+                    </button>
+                  </div>
+                ) : isOwner && !usePassphrase ? (
+                  <div className="space-y-1">
+                    <p className="text-xs">Your first order switches the agent to its own wallet — no passphrase needed.</p>
+                    <button type="button" className={`text-xs underline ${mutedClass}`} onClick={() => setUsePassphrase(true)}>
+                      Use a passphrase-protected wallet instead
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <p className={`text-xs ${mutedClass}`}>
+                      Trades need the wallet passphrase{isOwner ? "." : " until the org owner places an order with this agent."}
+                    </p>
+                    {isOwner && (
+                      <button type="button" className={`text-xs underline ${mutedClass}`} onClick={() => setUsePassphrase(false)}>
+                        Switch back to no-passphrase trading
+                      </button>
+                    )}
+                  </div>
+                )}
+                {wallet && <p className={`text-[11px] ${monoClass} ${mutedClass} break-all`}>Wallet {wallet}</p>}
+              </Section>
+
+              <Section title="Risk limits" dense description="Enforced on every order this agent places — by you, a bot, or the agent itself.">
+                <form className="space-y-2" onSubmit={saveRiskConfig}>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label htmlFor="riskLeverage" className={labelClass}>Max leverage</label>
+                      <input id="riskLeverage" name="riskLeverage" type="number" min="1" className={`${inputClass} ${monoClass}`} value={riskLeverage} onChange={(e) => setRiskLeverage(e.target.value)} />
+                    </div>
+                    <div>
+                      <label htmlFor="riskMaxPosition" className={labelClass}>Max position $</label>
+                      <input id="riskMaxPosition" name="riskMaxPosition" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxPosition} onChange={(e) => setRiskMaxPosition(e.target.value)} />
+                    </div>
+                    <div>
+                      <label htmlFor="riskMaxDailyLoss" className={labelClass}>Max daily loss $</label>
+                      <input id="riskMaxDailyLoss" name="riskMaxDailyLoss" type="number" min="0" className={`${inputClass} ${monoClass}`} value={riskMaxDailyLoss} onChange={(e) => setRiskMaxDailyLoss(e.target.value)} />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId}>Save limits</button>
+                    {riskStatus && <span className={`text-xs ${mutedClass}`}>{riskStatus}</span>}
+                  </div>
+                </form>
+              </Section>
+
+              <Section
+                title="Imported wallet"
+                dense
+                description="Optional: trade from a Hyperliquid key you already have, encrypted with a passphrase."
+                right={
+                  walletStatus?.hasWallet && !instant ? (
+                    <div className="flex gap-2">
+                      <button type="button" className={secondaryButtonClass("text-xs")} onClick={() => setWalletFormOpen((v) => !v)}>Rotate key</button>
+                      <button type="button" className={secondaryButtonClass("text-xs text-red-600 dark:text-red-400")} onClick={removeWallet}>Remove</button>
+                    </div>
+                  ) : (
+                    <button type="button" className={secondaryButtonClass("text-xs")} onClick={() => setWalletFormOpen((v) => !v)} disabled={!agentId || !orgId}>
+                      Import key
+                    </button>
+                  )
+                }
+              >
+                {walletLoading ? (
+                  <Spinner label="Checking wallet…" />
+                ) : instant ? (
+                  <p className={`text-xs ${mutedClass}`}>Not in use — instant trading signs with the agent&apos;s own wallet.</p>
+                ) : walletStatus?.hasWallet ? (
+                  <Badge tone="success">Imported key set</Badge>
+                ) : (
+                  <p className={`text-xs ${mutedClass}`}>None.</p>
+                )}
+                {walletFormOpen && (
+                  <form className="space-y-2 border-t border-[hsl(var(--border))] pt-2" onSubmit={saveWallet}>
+                    <div>
+                      <label htmlFor="walletKey" className={labelClass}>Hyperliquid private key</label>
+                      <input
+                        id="walletKey" name="walletKey" type="password" className={inputClass} required
+                        value={walletKeyInput} onChange={(e) => setWalletKeyInput(e.target.value)} autoComplete="new-password"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="walletPassphrase" className={labelClass}>Passphrase (encrypts the key)</label>
+                      <input
+                        id="walletPassphrase" name="walletPassphrase" type="password" className={inputClass} required
+                        value={masterSecret} onChange={(e) => setMasterSecret(e.target.value)} autoComplete="new-password"
+                      />
+                    </div>
+                    <div className="flex gap-2 items-end">
+                      <div className="flex-1">
+                        <label htmlFor="walletNetwork" className={labelClass}>Network</label>
+                        <select
+                          id="walletNetwork" name="walletNetwork" className={inputClass}
+                          value={walletNetwork} onChange={(e) => setWalletNetwork(e.target.value as Network)}
+                        >
+                          <option value="testnet">Testnet</option>
+                          <option value="mainnet">Mainnet</option>
+                        </select>
+                      </div>
+                      <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!masterSecret || !walletKeyInput}>Save</button>
+                    </div>
+                  </form>
+                )}
+                {walletActionStatus && <p className={`text-xs ${mutedClass}`}>{walletActionStatus}</p>}
+              </Section>
+
+              <Section
+                title="Connect your agent"
+                description="Let the agent trade on its own through this mod's API — same wallet, capabilities, and limits."
+                dense
+                right={
+                  <div className="flex gap-2">
+                    <button type="button" className={secondaryButtonClass("text-xs")} onClick={loadConnection} disabled={!agentId}>Check</button>
+                    <button type="button" className={secondaryButtonClass("text-xs")} onClick={() => setConnectOpen((v) => !v)}>
+                      {connectOpen ? "Hide setup" : "Setup"}
+                    </button>
+                  </div>
+                }
+              >
+                {connection === "loading" ? (
+                  <Spinner label="Checking agent…" />
+                ) : connection === "error" ? (
+                  <ErrorNote message="Couldn't check this agent." onRetry={loadConnection} />
+                ) : connection ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      {connection.readyToTrade ? <Badge tone="success">Ready to trade</Badge> : <Badge tone="warning">Not ready yet</Badge>}
+                      {connection.pendingStrategies > 0 && (
+                        <Badge tone="warning">{connection.pendingStrategies} pending signal{connection.pendingStrategies === 1 ? "" : "s"}</Badge>
+                      )}
+                    </div>
+                    <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                      <li className="flex items-center gap-1.5">
+                        <span aria-hidden="true">{connection.wallet.configured ? "✓" : "✗"}</span>
+                        Wallet {connection.wallet.configured ? `(${connection.wallet.network})` : "not set"}
+                      </li>
+                      <li className="flex items-center gap-1.5">
+                        <span aria-hidden="true">{connection.risk ? "✓" : "–"}</span>
+                        {connection.risk ? `Limits: max $${connection.risk.maxPositionUsd}/trade` : "No risk limits"}
+                      </li>
+                      {Object.entries(connection.capabilities).map(([key, granted]) => (
+                        <li key={key} className={`flex items-center gap-1.5 ${granted ? "" : mutedClass}`}>
+                          <span aria-hidden="true">{granted ? "✓" : "✗"}</span>
+                          <span className={monoClass}>{key}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                {connectOpen && (
+                  <div className="space-y-2 border-t border-[hsl(var(--border))] pt-2">
+                    <div className="flex items-center justify-between">
+                      <span className={labelClass}>Run from your agent&apos;s machine</span>
+                      <button type="button" className={secondaryButtonClass("text-xs")} onClick={copySnippet}>{copied ? "Copied" : "Copy"}</button>
+                    </div>
+                    <pre className={`${monoClass} overflow-x-auto whitespace-pre rounded-sm bg-[hsl(var(--muted))] p-2 text-[11px] leading-relaxed`}>
+                      {connectSnippet}
+                    </pre>
+                    <p className={`text-xs ${mutedClass}`}>
+                      The tool manifest at <span className={monoClass}>/api/mods/hyperliquid-trading/agent/tools</span> works as LLM tool definitions.
+                    </p>
+                  </div>
+                )}
+              </Section>
+
+              <Section title="Referral" dense description="Refer another agent and earn a cut of the trading volume it generates.">
+                {referral === "loading" && <Spinner label="Loading referral stats…" />}
+                {referral === "error" && <ErrorNote message="Couldn't load referral stats." onRetry={loadReferral} />}
+                {referral && referral !== "loading" && referral !== "error" && (
+                  <>
+                    <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                      <Stat label="Your code"><span className="break-all">{referral.code}</span></Stat>
+                      <Stat label="Referred">{referral.referredCount}</Stat>
+                      <Stat label="Volume">${referral.totalVolumeUsd.toFixed(2)}</Stat>
+                      <Stat label="Earned"><span className="text-green-600 dark:text-green-400">${referral.rewardUsd.toFixed(2)}</span></Stat>
+                    </div>
+                    {referral.referredBy ? (
+                      <p className={`text-xs ${mutedClass}`}>Referred by <code className={monoClass}>{referral.referredBy}</code>.</p>
+                    ) : (
+                      <form className="flex gap-2 items-end" onSubmit={applyReferral}>
+                        <div className="flex-1">
+                          <label htmlFor="referralCodeInput" className={labelClass}>Have a referral code?</label>
+                          <input
+                            id="referralCodeInput" name="referralCodeInput" className={inputClass}
+                            value={referralCodeInput} onChange={(e) => setReferralCodeInput(e.target.value)}
+                            placeholder="Referring agent's ID"
+                          />
+                        </div>
+                        <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId || !referralCodeInput}>Apply</button>
+                      </form>
+                    )}
+                    {referralStatus && <p className={`text-xs ${mutedClass}`}>{referralStatus}</p>}
+                  </>
+                )}
+              </Section>
+            </div>
           )}
-        </Section>
-      )}
+        </div>
+      </div>
     </div>
   );
 }

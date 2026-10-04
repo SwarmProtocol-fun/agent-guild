@@ -24,8 +24,8 @@
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
-import { getJob, claimJob } from "@/lib/jobs-admin";
-import { getAgent } from "@/lib/firestore-admin";
+import { claimJob } from "@/lib/jobs-admin";
+import { checkClaimable, isPolicyRejection, JobActionError } from "@/lib/job-actions";
 import { getActiveDelegation, recordDelegationSpend } from "@/lib/delegation";
 
 /** Same free-text-to-number convention as the dashboard's parseQuoteValue — Job.reward has no fixed format. */
@@ -68,39 +68,12 @@ export async function POST(
     const rateLimitResponse = await rateLimit(verified.agentId);
     if (rateLimitResponse) return rateLimitResponse;
 
-    const job = await getJob(jobId);
-    if (!job) {
-      return Response.json({ error: "Job not found" }, { status: 404 });
-    }
-    if (job.orgId !== verified.orgId) {
-      return Response.json({ error: "Job not found in your organization" }, { status: 403 });
-    }
-    if (job.status !== "open") {
-      return Response.json({ error: `Job is not open (status: ${job.status})` }, { status: 409 });
-    }
-    if (job.hiringMode === "applications") {
-      return Response.json(
-        { error: "This job requires an application — use POST /v1/jobs/:jobId/apply" },
-        { status: 409 }
-      );
-    }
-
-    if (job.minCompletedJobs != null || job.minTrustScore != null) {
-      const agent = await getAgent(verified.agentId);
-      const tasksCompleted = agent?.tasksCompleted ?? 0;
-      const trustScore = agent?.trustScore ?? 0;
-      if (job.minCompletedJobs != null && tasksCompleted < job.minCompletedJobs) {
-        return Response.json(
-          { error: `Job requires ${job.minCompletedJobs}+ completed jobs (you have ${tasksCompleted})` },
-          { status: 403 }
-        );
-      }
-      if (job.minTrustScore != null && trustScore < job.minTrustScore) {
-        return Response.json(
-          { error: `Job requires ${job.minTrustScore}+ trust score (you have ${trustScore})` },
-          { status: 403 }
-        );
-      }
+    let job;
+    try {
+      job = await checkClaimable(verified, jobId);
+    } catch (e) {
+      if (e instanceof JobActionError) return Response.json({ error: e.message }, { status: e.status });
+      throw e;
     }
 
     const body = await request.json().catch(() => ({}));
@@ -149,7 +122,6 @@ export async function POST(
     console.error("Claim job error:", err);
     // claimJob() throws plain Errors for credit-policy rejections — surface those as 403, not 500.
     const message: string = err.message || "Internal error";
-    const isPolicyRejection = message.startsWith("Policy violation") || message.includes("requires manual approval");
-    return Response.json({ error: message }, { status: isPolicyRejection ? 403 : 500 });
+    return Response.json({ error: message }, { status: isPolicyRejection(message) ? 403 : 500 });
   }
 }

@@ -30,7 +30,7 @@ export function canDrive(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
 }
 
-const SYSTEM = `You drive a Unitree Go2 quadruped robot through a simulated apartment (DimOS DimSim).
+const SYSTEM = `You drive a robot through a simulated apartment (DimOS DimSim); which robot is in the first message.
 Each turn you get the robot's front camera image and its pose, and you choose ONE action:
 - turn: degrees to rotate in place before moving (positive = left, negative = right, -180..180)
 - forward: metres to walk after turning (-1..2; small values near obstacles)
@@ -74,6 +74,8 @@ export class DriverError extends Error {}
 export async function decideAction(args: {
   agentName: string;
   task: SimTask;
+  /** The robot, described: its height, camera and what it fits under (training.ts SIM_ROBOTS). */
+  robot: string;
   lessons: string[];
   history: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought" | "look">[];
   jpeg: string;
@@ -84,7 +86,7 @@ export async function decideAction(args: {
   /** The camera frames before the last moves, oldest first. */
   recent?: string[];
 }): Promise<Decision> {
-  const { agentName, task, lessons, history, jpeg, pose, stepsLeft, panorama = [], recent = [] } = args;
+  const { agentName, task, robot, lessons, history, jpeg, pose, stepsLeft, panorama = [], recent = [] } = args;
   const memory = lessons.length
     ? `What ${agentName} learned in earlier attempts (newest first):\n${lessons.map((l) => `- ${l}`).join("\n")}`
     : `${agentName} has no earlier attempts at this yet.`;
@@ -106,7 +108,7 @@ export async function decideAction(args: {
         {
           role: "user",
           content: [
-            { type: "text", text: `You are ${agentName}. Task: ${task.task}.\n\n${memory}\n\nYour moves so far this attempt:\n${past}` },
+            { type: "text", text: `You are ${agentName}, driving ${robot} Task: ${task.task}.\n\n${memory}\n\nYour moves so far this attempt:\n${past}` },
             ...(recent.length
               ? [{ type: "text" as const, text: `Your camera before your last ${recent.length === 1 ? "move" : `${recent.length} moves`} (oldest first):` }, ...recent.map(image)]
               : []),
@@ -136,13 +138,14 @@ export async function decideAction(args: {
 /** A finished episode → one or two sentences the agent should remember next time. */
 export async function reflect(args: {
   task: SimTask;
+  robot: string;
   succeeded: boolean;
   finalDistance: number | null;
   startPose: SimPose;
   finalPose: SimPose | null;
   steps: Pick<EpisodeStep, "pose" | "action" | "blocked" | "thought" | "look">[];
 }): Promise<string> {
-  const { task, succeeded, finalDistance, startPose, finalPose, steps } = args;
+  const { task, robot, succeeded, finalDistance, startPose, finalPose, steps } = args;
   const trace = steps
     .map((s, k) => `${k + 1}. (${s.pose.x.toFixed(2)}, ${s.pose.z.toFixed(2)}) yaw ${s.pose.yaw}° → ${s.look ? "looked around" : `turn ${s.action.turn}°, forward ${s.action.forward} m${s.blocked ? " BLOCKED" : ""}`}${s.thought ? ` — "${s.thought}"` : ""}`)
     .join("\n");
@@ -155,7 +158,7 @@ export async function reflect(args: {
     messages: [
       {
         role: "user",
-        content: `A robot attempted "${task.task}" in a simulated apartment, starting at x ${startPose.x}, z ${startPose.z}, facing ${startPose.yaw}°.
+        content: `A robot (${robot.replace(/\.$/, "")}) attempted "${task.task}" in a simulated apartment, starting at x ${startPose.x}, z ${startPose.z}, facing ${startPose.yaw}°.
 Outcome: ${succeeded ? "SUCCESS" : "FAILED"}${finalDistance == null ? "" : `, ended ${finalDistance.toFixed(2)} m from the target`}${finalPose ? ` at x ${finalPose.x.toFixed(2)}, z ${finalPose.z.toFixed(2)}` : ""}.
 Route taken: ${describeActions(steps.map((s) => s.action))}
 Steps:

@@ -13,6 +13,7 @@
 import { adminDb } from "@/lib/firebase-admin";
 import type { DocumentData, DocumentSnapshot } from "firebase-admin/firestore";
 import { liveWindows, type HarnessGeneration, type JobOutcome, type ReplyOutcome } from "./harness";
+import type { JobRecord } from "./preferences";
 
 const HARNESS = "agentHarness";
 const MAX_GENERATIONS = 100;
@@ -249,4 +250,39 @@ export async function listJobOutcomes(agentId: string): Promise<JobOutcome[]> {
       });
     })
     .sort((a, b) => b.at - a.at);
+}
+
+/**
+ * Jobs this agent delivered and had reviewed, with every delivery and verdict
+ * — the input to the preference-data export (lib/preferences.ts). Jobs from
+ * before deliveryHistory existed contribute their final delivery only.
+ */
+export async function listJobRecords(agentId: string, max = 1000): Promise<JobRecord[]> {
+  const db = adminDb();
+  const snap = await db.collection("jobs").where("takenByAgentId", "==", agentId).limit(max).get();
+  const reviewed = snap.docs.map((d) => ({ doc: d, reviews: reviewEvents(d.data()) })).filter((j) => j.reviews.length);
+  const ratings = new Map<string, number>();
+  const gigJobs = reviewed.filter((j) => j.doc.data().gigId && j.reviews.at(-1)!.approved);
+  for (let i = 0; i < gigJobs.length; i += 100) {
+    const chunk = gigJobs.slice(i, i + 100);
+    for (const r of await db.getAll(...chunk.map((j) => db.collection("gigReviews").doc(j.doc.id)))) {
+      const rating = r.data()?.rating;
+      if (typeof rating === "number") ratings.set(r.id, rating);
+    }
+  }
+  return reviewed.map(({ doc, reviews }) => {
+    const data = doc.data();
+    const history = Array.isArray(data.deliveryHistory) ? (data.deliveryHistory as { notes?: unknown; at?: unknown }[]) : [];
+    const deliveries = history.length
+      ? history.map((h) => ({ notes: typeof h.notes === "string" ? h.notes : "", at: toMillis(h.at) ?? 0 })).sort((a, b) => a.at - b.at)
+      : typeof data.deliveryNotes === "string" ? [{ notes: data.deliveryNotes, at: toMillis(data.completedAt) ?? 0 }] : [];
+    return {
+      jobId: doc.id,
+      title: String(data.title ?? ""),
+      description: String(data.description ?? ""),
+      deliveries,
+      reviews,
+      rating: ratings.get(doc.id) ?? null,
+    };
+  });
 }

@@ -38,6 +38,9 @@ const GO2_CAMERA_HEIGHT = 0.30;
 // body center. Offsetting places the camera origin outside the robot mesh so
 // POV captures don't render the inside of the body.
 const GO2_CAMERA_FORWARD = 0.18;
+// Agent Guild embed: the robot is selectable (agentGuildEmbed.js ROBOTS), so its
+// POV camera mount and the panel's chase camera are settable (setEmbedView).
+const embedView = { cameraHeight: GO2_CAMERA_HEIGHT, cameraForward: GO2_CAMERA_FORWARD, chaseBack: 1.6, chaseUp: 1.1, chaseLook: 0 };
 
 const canvas = document.getElementById("c");
 const statusEl = document.getElementById("status");
@@ -2394,10 +2397,10 @@ function updateAgentCameraFollow(dt) {
   // shows the robot itself (its own camera view is shown separately).
   // Tracks the eased visual (not the body) so the camera glides with the robot.
   if (embedMode) {
-    const back = 1.6, up = 1.1;
+    const { chaseBack: back, chaseUp: up, chaseLook: look } = embedView;
     const v = agent.group?.position ?? { x: ax, y: ay, z: az };
     camera.position.set(v.x - Math.sin(yaw) * back, v.y + up, v.z - Math.cos(yaw) * back);
-    camera.lookAt(v.x + Math.sin(yaw) * 0.8, v.y, v.z + Math.cos(yaw) * 0.8);
+    camera.lookAt(v.x + Math.sin(yaw) * 0.8, v.y + look, v.z + Math.cos(yaw) * 0.8);
     if (agent.group) agent.group.visible = true;
     return;
   }
@@ -5691,9 +5694,9 @@ if (dimosMode) {
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
         const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
-        const eyeY = feetY + GO2_CAMERA_HEIGHT;
-        const eyeX = ax + Math.sin(yaw) * GO2_CAMERA_FORWARD;
-        const eyeZ = az + Math.cos(yaw) * GO2_CAMERA_FORWARD;
+        const eyeY = feetY + (embedMode ? embedView.cameraHeight : GO2_CAMERA_HEIGHT);
+        const eyeX = ax + Math.sin(yaw) * (embedMode ? embedView.cameraForward : GO2_CAMERA_FORWARD);
+        const eyeZ = az + Math.cos(yaw) * (embedMode ? embedView.cameraForward : GO2_CAMERA_FORWARD);
         _dimosCapCam.position.set(eyeX, eyeY, eyeZ);
         _dimosCapCam.lookAt(eyeX + Math.sin(yaw)*cp, eyeY + sp, eyeZ + Math.cos(yaw)*cp);
         _dimosCapCam.updateProjectionMatrix();
@@ -5724,9 +5727,9 @@ if (dimosMode) {
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
         const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
-        const eyeY = feetY + GO2_CAMERA_HEIGHT;
-        const eyeX = ax + Math.sin(yaw) * GO2_CAMERA_FORWARD;
-        const eyeZ = az + Math.cos(yaw) * GO2_CAMERA_FORWARD;
+        const eyeY = feetY + (embedMode ? embedView.cameraHeight : GO2_CAMERA_HEIGHT);
+        const eyeX = ax + Math.sin(yaw) * (embedMode ? embedView.cameraForward : GO2_CAMERA_FORWARD);
+        const eyeZ = az + Math.cos(yaw) * (embedMode ? embedView.cameraForward : GO2_CAMERA_FORWARD);
         _dimosCapCam.position.set(eyeX, eyeY, eyeZ);
         _dimosCapCam.lookAt(eyeX + Math.sin(yaw)*cp, eyeY + sp, eyeZ + Math.cos(yaw)*cp);
         _dimosCapCam.updateProjectionMatrix();
@@ -5820,6 +5823,7 @@ if (dimosMode) {
           setYaw: (yaw) => { _dimosYaw = yaw; },
           getYaw: () => _dimosYaw,
           followAgent: () => enableAgentCameraFollow(agent.id),
+          setEmbedView: (v) => Object.assign(embedView, v),
         });
         return;
       }

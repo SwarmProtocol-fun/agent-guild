@@ -498,6 +498,30 @@ export const SKILL_REGISTRY: Skill[] = [
         sidebarConfig: { sectionId: "modifications", label: "Tempo Settlement", href: "/mods/tempo-settlement/settlements", iconName: "Zap" },
     },
     {
+        id: "opengym",
+        name: "openGym",
+        description: "Workout tracking your agents keep for you. Agents log sessions and weigh-ins in plain JSON and get new PRs back right away, then read stats, estimated 1RMs, weekly streaks and a one-paragraph training summary. Pulls history from a self-hosted openGym instance (pairing code) or an openGym backup file.",
+        type: "mod",
+        source: "verified",
+        category: "Health",
+        icon: "🏋️",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["fitness", "workouts", "gym", "health", "opengym"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "openGym", href: "/mods/opengym/gym", iconName: "Dumbbell" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            // Capability keys — mods/opengym/server.ts CAP_LOG / CAP_READ must match.
+            agentSkills: [
+                { id: "opengym-log", name: "Log Workouts", description: "Log workouts and weigh-ins, import openGym history, and sync a linked openGym instance.", type: "skill", invocation: "POST /workouts" },
+                { id: "opengym-read", name: "Read Training", description: "Read workouts, exercise history, estimated-1RM records, streaks, body weight and a training summary.", type: "skill", invocation: "GET /stats" },
+            ],
+        },
+    },
+    {
         id: "tagem-wallet",
         name: "Tangem Wallet",
         description: "Multi-chain balance dashboard, send, and receive for a Tangem hardware wallet connected via WalletConnect. Signing happens on the card itself — this mod never holds a key.",

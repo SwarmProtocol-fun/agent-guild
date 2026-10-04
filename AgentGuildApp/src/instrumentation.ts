@@ -35,5 +35,14 @@ export async function register() {
       console.warn(err instanceof Error ? err.message : String(err));
       console.warn("Some features may be unavailable. Routes will return errors individually.\n");
     }
+
+    // Tracing (OTLP): on only when a collector is configured, e.g.
+    // OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com + OTEL_EXPORTER_OTLP_HEADERS.
+    // Shroud's LLM-call spans come from src/lib/telemetry.ts.
+    if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+      const { registerOTel } = await import("@vercel/otel");
+      registerOTel({ serviceName: process.env.OTEL_SERVICE_NAME || "agent-guild" });
+      console.log("📡 OpenTelemetry tracing on →", process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+    }
   }
 }

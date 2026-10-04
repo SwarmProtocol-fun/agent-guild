@@ -5,6 +5,11 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const state = {
   config: {} as Record<string, unknown>,
   used: 0,
+  micro: 0,
+  spend: { agentMicroUsd: 0, orgMicroUsd: 0 },
+  halt: null as null | { reason: string },
+  halted: [] as { agentId: string; reason: string; by: string }[],
+  loop: null as string | null,
   events: [] as Record<string, unknown>[],
   audits: [] as Record<string, unknown>[],
   upstreamCalls: [] as { url: string; headers: Record<string, string>; body: Record<string, unknown> }[],
@@ -26,17 +31,27 @@ vi.mock("../config", async (orig) => ({
   ...(await orig<typeof import("../config")>()),
   getShroudConfig: async () => state.config,
   tokensUsedToday: async () => state.used,
-  addTokensUsed: async (_o: string, _a: string, n: number) => { state.used += n; },
+  addTokensUsed: async (_o: string, _a: string, n: number, micro = 0) => { state.used += n; state.micro += micro; },
   recordShroudEvent: (e: Record<string, unknown>) => state.events.push(e),
+  getHalt: async () => state.halt,
+  spendToday: async () => state.spend,
+  checkLoop: async () => state.loop,
+  haltAgent: async (_o: string, agentId: string, reason: string, by: string) => { state.halted.push({ agentId, reason, by }); },
 }));
 
-import { inspectRequest, inspectResponseText, redactSecrets, domainMatches } from "../inspect";
+import { inspectRequest, inspectResponseText, redactSecrets, domainMatches, PiiMasker, maskRequestPii } from "../inspect";
+import { priceFor, costMicroUsd } from "../pricing";
 import { handleShroud, countUsage } from "../proxy";
 import { DEFAULT_SHROUD_CONFIG, validateShroudConfig } from "../config";
 
 beforeEach(() => {
   state.config = { ...DEFAULT_SHROUD_CONFIG, enabled: true, providerSecrets: { anthropic: "s1", openai: "s2" }, blockedDomains: ["evil.example"] };
   state.used = 0;
+  state.micro = 0;
+  state.spend = { agentMicroUsd: 0, orgMicroUsd: 0 };
+  state.halt = null;
+  state.halted = [];
+  state.loop = null;
   state.events = [];
   state.audits = [];
   state.upstreamCalls = [];
@@ -212,5 +227,149 @@ describe("proxy", () => {
     countUsage("openai", 'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":9}}', u);
     countUsage("openai", "data: [DONE]", u);
     expect(u).toEqual({ input: 5, output: 9 });
+  });
+});
+
+describe("PII masking", () => {
+  const ALL = ["email", "phone", "ssn", "card", "iban", "ip"] as const;
+
+  it("masks each kind and skips look-alikes", () => {
+    const m = new PiiMasker(ALL);
+    const out = m.mask(
+      "Mail jo.doe+x@example.co.uk or call +1 415-555-0132. SSN 123-45-6789, card 4111 1111 1111 1111, " +
+      "IBAN GB82 WEST 1234 5698 7654 32, from 203.0.113.9. Order 1234-5678-9012-3456, on 2026-10-04, v1.2.3.4 local 127.0.0.1",
+    );
+    expect(out).toContain("[EMAIL_1]");
+    expect(out).toContain("[PHONE_1]");
+    expect(out).toContain("[SSN_1]");
+    expect(out).toContain("[CARD_1]");
+    expect(out).toContain("[IBAN_1]");
+    expect(out).toContain("[IP_1]");
+    expect(out).toContain("1234-5678-9012-3456"); // fails Luhn
+    expect(out).toContain("2026-10-04");
+    expect(out).toContain("127.0.0.1");
+    expect(out).not.toMatch(/example\.co\.uk|415-555|123-45-6789|4111 1111|GB82|203\.0\.113/);
+  });
+
+  it("numbers by first appearance, reuses placeholders, and restores", () => {
+    const m = new PiiMasker(["email"]);
+    expect(m.mask("a@x.io, b@y.io, a@x.io")).toBe("[EMAIL_1], [EMAIL_2], [EMAIL_1]");
+    expect(m.restore("write to [EMAIL_2] and [EMAIL_9]")).toBe("write to b@y.io and [EMAIL_9]");
+  });
+
+  it("masks text, tool inputs and tool results but not ids, images or thinking blocks", () => {
+    const body: Record<string, unknown> = {
+      system: "Operator: ops@corp.io",
+      messages: [
+        { role: "user", content: "email ann@corp.io" },
+        { role: "assistant", content: [
+          { type: "thinking", thinking: "ann@corp.io", signature: "sig" },
+          { type: "tool_use", id: "tu_ann@corp.io", name: "send", input: { to: "ann@corp.io" } },
+        ] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "sent to ann@corp.io" }] },
+      ],
+    };
+    const m = maskRequestPii(body, ["email"]);
+    const text = JSON.stringify(body);
+    expect(body.system).toBe("Operator: [EMAIL_1]");
+    expect(text).toContain('"to":"[EMAIL_2]"');
+    expect(text).toContain("sent to [EMAIL_2]");
+    expect(text).toContain('"thinking":"ann@corp.io"');
+    expect(text).toContain('"id":"tu_ann@corp.io"');
+    expect(m.found).toEqual(["email"]);
+  });
+
+  it("masks the same conversation to the same bytes every turn (prompt cache stays warm)", () => {
+    const turn = () => ({ messages: [{ role: "user", content: "hi, I'm bo@b.io" }, { role: "assistant", content: "hello" }] });
+    const a = turn(), b = { messages: [...turn().messages, { role: "user", content: "cc cy@c.io" }] };
+    maskRequestPii(a, ["email"]);
+    maskRequestPii(b, ["email"]);
+    expect(JSON.stringify(b.messages.slice(0, 2))).toBe(JSON.stringify(a.messages));
+  });
+});
+
+describe("pricing", () => {
+  it("matches exact ids, dated ids, overrides, and charges unknown models the top rate", () => {
+    expect(priceFor("claude-opus-5-5").price).toEqual({ input: 4, output: 20 });
+    expect(priceFor("claude-sonnet-4-20250514").price).toEqual({ input: 3, output: 15 });
+    expect(priceFor("gpt-4o-mini-2024-07-18").price).toEqual({ input: 0.15, output: 0.6 });
+    expect(priceFor("gpt-4o", { "gpt-4o": { input: 1, output: 1 } }).price).toEqual({ input: 1, output: 1 });
+    expect(priceFor("mystery-model")).toEqual({ price: { input: 10, output: 50 }, known: false });
+    expect(costMicroUsd("claude-haiku-4-5", 1_000_000, 0)).toBe(1_000_000);
+  });
+});
+
+describe("kill switch", () => {
+  it("refuses a halted agent before calling the provider", async () => {
+    state.halt = { reason: "loop guard: the same request 8 times in a row" };
+    const res = await handleShroud("anthropic", req("anthropic", userMsg("hi")));
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.message).toMatch(/halted/);
+    expect(state.upstreamCalls).toHaveLength(0);
+    expect(state.events[0]).toMatchObject({ killSwitch: "halted", blocked: true });
+  });
+
+  it("enforces per-agent and per-org daily spend caps", async () => {
+    state.config.dailySpendCapUsdPerAgent = 5;
+    state.spend = { agentMicroUsd: 5_000_000, orgMicroUsd: 0 };
+    expect((await handleShroud("openai", req("openai", userMsg("hi")))).status).toBe(429);
+    state.config.dailySpendCapUsdPerAgent = 0;
+    state.config.dailySpendCapUsdOrg = 20;
+    state.spend = { agentMicroUsd: 0, orgMicroUsd: 25_000_000 };
+    const res = await handleShroud("openai", req("openai", userMsg("hi")));
+    expect(res.status).toBe(429);
+    expect((await res.json()).error.message).toMatch(/organization/);
+    expect(state.upstreamCalls).toHaveLength(0);
+  });
+
+  it("halts the agent when the loop guard trips", async () => {
+    state.loop = "loop guard: 121 requests in one minute (limit 120)";
+    const res = await handleShroud("anthropic", req("anthropic", userMsg("hi")));
+    expect(res.status).toBe(429);
+    expect(state.halted).toEqual([{ agentId: "agentA", reason: state.loop, by: "loop-guard" }]);
+    expect(state.audits[0]).toMatchObject({ action: "shroud.halted", target: "agentA" });
+    expect(state.upstreamCalls).toHaveLength(0);
+  });
+
+  it("records estimated cost, pricing cache reads at a tenth", async () => {
+    state.upstreamReply = () => Response.json({
+      content: [{ type: "text", text: "ok" }],
+      usage: { input_tokens: 1000, output_tokens: 100, cache_read_input_tokens: 10_000 },
+    });
+    await handleShroud("anthropic", req("anthropic", { ...userMsg("hi"), model: "claude-sonnet-5-5" }));
+    // (1000 + 10000 * 0.1) * $2/M + 100 * $10/M = $0.005
+    expect(state.micro).toBe(5000);
+    expect(state.events[0]).toMatchObject({ microUsd: 5000 });
+  });
+});
+
+describe("proxy PII round trip", () => {
+  it("sends placeholders upstream and gives the agent real values back, in text and tool calls", async () => {
+    state.config.piiRedaction = ["email"];
+    state.upstreamReply = () => Response.json({
+      content: [
+        { type: "text", text: "Sending to [EMAIL_1] now." },
+        { type: "tool_use", id: "t1", name: "send_email", input: { to: "[EMAIL_1]" } },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const res = await handleShroud("anthropic", req("anthropic", userMsg("Email the invoice to pat@acme.io")));
+    expect(JSON.stringify(state.upstreamCalls[0].body)).not.toContain("pat@acme.io");
+    expect(JSON.stringify(state.upstreamCalls[0].body)).toContain("[EMAIL_1]");
+    const body = await res.json();
+    expect(body.content[0].text).toBe("Sending to pat@acme.io now.");
+    expect(body.content[1].input.to).toBe("pat@acme.io");
+    expect(res.headers.get("x-agent-guild-shroud")).toMatch(/pii=1/);
+    expect(state.events[0]).toMatchObject({ pii: ["email"] });
+  });
+});
+
+describe("config validation: kill switch + PII", () => {
+  it("accepts caps, loop guard and PII kinds; rejects junk", () => {
+    const ok = validateShroudConfig({ dailySpendCapUsdPerAgent: "2.555", piiRedaction: "email, card", modelPrices: { "My-Model": { input: 1, output: 2 } } });
+    expect(typeof ok !== "string" && [ok.dailySpendCapUsdPerAgent, ok.piiRedaction, ok.loopGuardPerMinute, ok.modelPrices]).toEqual([2.56, ["email", "card"], 120, { "my-model": { input: 1, output: 2 } }]);
+    expect(validateShroudConfig({ piiRedaction: ["dna"] })).toMatch(/piiRedaction/);
+    expect(validateShroudConfig({ dailySpendCapUsdOrg: -1 })).toMatch(/dailySpendCapUsdOrg/);
+    expect(validateShroudConfig({ modelPrices: { x: { input: "a" } } })).toMatch(/modelPrices/);
   });
 });

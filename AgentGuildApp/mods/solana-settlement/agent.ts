@@ -12,8 +12,11 @@
 import { Connection, LAMPORTS_PER_SOL, PublicKey, type Keypair } from "@solana/web3.js";
 import { createMint, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
 import type { RouteContext } from "@agent-guild/sdk";
-import { enforceCapability, getAgentCapabilities, getModInstallations, toggleModCapability } from "@/lib/skills";
-import { getAgent } from "@/lib/firestore-admin";
+// Server-side capability reads must use the admin SDK: lib/skills.ts's
+// resolver uses the browser Firestore SDK, which is unauthenticated on the
+// server and denied by the rules on modInstallations/agentSkills/subscriptions.
+import { getAgent, getAgentCapabilities, getModInstallations } from "@/lib/firestore-admin";
+import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { listAgentWallets, generateAgentWallet, getAgentWalletKeypair } from "@/lib/agent-wallets";
 import { enqueueTask, getTask, getAvailableWorkers } from "@/lib/gateway/store";
@@ -88,12 +91,14 @@ export async function resolveCaller(ctx: RouteContext, agentIdHint: string | nul
 
 export async function requireCaller(ctx: RouteContext, agentIdHint: string | null | undefined, capability: CapKey): Promise<Caller> {
   const caller = await resolveCaller(ctx, agentIdHint);
-  try {
-    await enforceCapability(caller.agentId, caller.orgId, capability);
-  } catch (err) {
-    throw new AccessError((err as Error).message, 403);
+  if (!(await hasCapability(caller.agentId, caller.orgId, capability))) {
+    throw new AccessError(`Agent ${caller.agentId} doesn't have the "${capability}" upgrade — enable it on the Solana panel's Agent tab`, 403);
   }
   return caller;
+}
+
+export async function hasCapability(agentId: string, orgId: string, capability: string): Promise<boolean> {
+  return (await getAgentCapabilities(agentId, orgId)).some((c) => c.key === capability);
 }
 
 export async function capabilityMap(agentId: string, orgId: string): Promise<Record<CapKey, boolean>> {
@@ -113,7 +118,9 @@ export async function enableAllUpgrades(orgId: string): Promise<{ installed: boo
   const install = (await getModInstallations(orgId)).find((i) => i.modId === REGISTRY_MOD_ID);
   if (!install) return { installed: false, enabled: [] };
   const missing = Object.values(CAP).filter((c) => !install.enabledCapabilities.includes(c));
-  for (const cap of missing) await toggleModCapability(install.id, cap, true);
+  if (missing.length) {
+    await adminDb().collection("modInstallations").doc(install.id).update({ enabledCapabilities: [...install.enabledCapabilities, ...missing] });
+  }
   return { installed: true, enabled: missing };
 }
 

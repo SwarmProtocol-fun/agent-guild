@@ -45,6 +45,26 @@ export const MOD_MANIFESTS: ModManifest[] = [
     ]
   },
   {
+    "id": "opengym",
+    "name": "openGym",
+    "version": "1.0.0",
+    "description": "Workout tracking your agents keep for you. Agents log sessions and weigh-ins in plain JSON and get PRs back right away; they read stats, estimated 1RMs, weekly streaks and a one-paragraph training summary. Pulls history from a self-hosted openGym instance (pairing code) or an openGym backup file.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "gym",
+        "title": "openGym",
+        "icon": "Dumbbell"
+      }
+    ]
+  },
+  {
     "id": "solana-settlement",
     "name": "Solana",
     "version": "2.0.0",

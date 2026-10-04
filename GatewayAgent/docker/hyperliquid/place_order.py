@@ -19,6 +19,19 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 MARKET_SLIPPAGE = 0.01  # 1% — wide enough to fill IOC on typical testnet depth
+MAX_PERP_PRICE_DECIMALS = 6
+
+
+def round_price(px, sz_decimals):
+    """Hyperliquid rejects perp prices with more than 5 significant figures or
+    more than (6 - szDecimals) decimals ("Order has invalid price"); same
+    rounding as the SDK's own market_open."""
+    return round(float(f"{px:.5g}"), MAX_PERP_PRICE_DECIMALS - sz_decimals)
+
+
+def fail(message, **extra):
+    print(json.dumps({"error": message, **extra}), file=sys.stderr)
+    sys.exit(1)
 
 
 def main():
@@ -51,20 +64,31 @@ def main():
 
     is_buy = args.side == "buy"
     mids = info.all_mids()
+    if args.coin not in mids:
+        fail(f"Unknown coin {args.coin} on {network}")
     mid_price = float(mids[args.coin])
+    asset = next((a for a in info.meta()["universe"] if a["name"] == args.coin), None)
+    sz_decimals = int(asset["szDecimals"]) if asset else 4
 
     if args.order_type == "market":
         # IOC limit priced through the mid so it fills like a market order.
-        limit_px = mid_price * (1 + MARKET_SLIPPAGE) if is_buy else mid_price * (1 - MARKET_SLIPPAGE)
+        limit_px = round_price(mid_price * (1 + MARKET_SLIPPAGE) if is_buy else mid_price * (1 - MARKET_SLIPPAGE), sz_decimals)
         tif = "Ioc"
     else:
         if args.limit_price is None:
             print(json.dumps({"error": "--limit-price required for limit orders"}), file=sys.stderr)
             sys.exit(1)
-        limit_px = args.limit_price
+        limit_px = round_price(args.limit_price, sz_decimals)
         tif = "Gtc"
 
-    size = round(args.size_usd / mid_price, 4)
+    # Size precision is per coin (szDecimals: BTC 5, ETH 4, SOL 2, DOGE 0, …).
+    size = round(args.size_usd / mid_price, sz_decimals)
+    if size <= 0:
+        fail(f"${args.size_usd} is below the smallest {args.coin} order size ({10 ** -sz_decimals} {args.coin})")
+    # Hyperliquid rejects opening orders worth under $10 — say so plainly
+    # rather than relaying its generic rejection. (Reduce-only closes are exempt.)
+    if not args.reduce_only and size * limit_px < 10:
+        fail(f"Order value ${size * limit_px:.2f} is below Hyperliquid's $10 minimum")
 
     result = exchange.order(
         args.coin,
@@ -76,6 +100,10 @@ def main():
     )
 
     statuses = result.get("response", {}).get("data", {}).get("statuses", [{}])
+    if result.get("status") != "ok" or "error" in statuses[0]:
+        # Rejected (bad size, margin, reduce-only with no position, IOC with no
+        # liquidity…) — fail the task instead of reporting a fill that never happened.
+        fail(statuses[0].get("error") or str(result.get("response")), raw=result)
     fill = statuses[0].get("filled") or statuses[0].get("resting") or statuses[0]
 
     # Hyperliquid's order response never carries realized PnL — that only
@@ -104,7 +132,7 @@ def main():
     if not args.reduce_only and (args.stop_loss_pct or args.take_profit_pct):
         entry_px = float(fill.get("avgPx", limit_px)) if isinstance(fill, dict) else limit_px
         if args.stop_loss_pct:
-            trigger_px = entry_px * (1 - args.stop_loss_pct / 100) if is_buy else entry_px * (1 + args.stop_loss_pct / 100)
+            trigger_px = round_price(entry_px * (1 - args.stop_loss_pct / 100) if is_buy else entry_px * (1 + args.stop_loss_pct / 100), sz_decimals)
             sl_result = exchange.order(
                 args.coin, not is_buy, size, trigger_px,
                 {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
@@ -112,7 +140,7 @@ def main():
             )
             triggers["stopLoss"] = {"triggerPx": trigger_px, "raw": sl_result}
         if args.take_profit_pct:
-            trigger_px = entry_px * (1 + args.take_profit_pct / 100) if is_buy else entry_px * (1 - args.take_profit_pct / 100)
+            trigger_px = round_price(entry_px * (1 + args.take_profit_pct / 100) if is_buy else entry_px * (1 - args.take_profit_pct / 100), sz_decimals)
             tp_result = exchange.order(
                 args.coin, not is_buy, size, trigger_px,
                 {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},

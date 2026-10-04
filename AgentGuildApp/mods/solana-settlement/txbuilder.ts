@@ -73,7 +73,14 @@ export function resolveAddress(value: string, ctx: AddressContext, label = "addr
 
 // ── IDL arg coercion ─────────────────────────────────────────────────────
 
-export const camel = (s: string) => s.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+/**
+ * Coercion runs against `program.idl` — Anchor's own camelCased copy, so
+ * every name we emit (struct fields, enum variants, accounts, methods) is
+ * exactly what its coder expects. User input is matched loosely: case and
+ * underscores are ignored, so "fee_rate_bps", "feeRateBps" and
+ * "FeeRateBps" all hit the same field.
+ */
+export const norm = (s: string) => s.replace(/_/g, "").toLowerCase();
 
 type IdlTypeLike = string | { [k: string]: unknown };
 interface TypeDefLike { name: string; type: { kind: string; fields?: unknown[]; variants?: { name: string; fields?: unknown[] }[] } }
@@ -90,9 +97,10 @@ function bytesFrom(v: unknown, what: string): Buffer {
   throw new DevtoolsInputError(`${what}: expected hex ("0x…"), base64, or a byte array`);
 }
 
-/** Picks a field from user input by its IDL name, accepting snake_case or camelCase keys. */
+/** Picks a field from user input by its IDL name, ignoring case and underscores. */
 function pick(obj: Record<string, unknown>, name: string): unknown {
-  return obj[name] ?? obj[camel(name)];
+  const key = Object.keys(obj).find((k) => norm(k) === norm(name));
+  return key === undefined ? undefined : obj[key];
 }
 
 export function coerceArg(type: IdlTypeLike, value: unknown, types: TypeDefLike[], path: string, ctx: AddressContext): unknown {
@@ -144,7 +152,7 @@ function coerceFields(fields: unknown[], value: unknown, types: TypeDefLike[], p
   if (named) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) throw new DevtoolsInputError(`${path}: expected an object`);
     return Object.fromEntries((fields as { name: string; type: IdlTypeLike }[]).map((f) => [
-      camel(f.name),
+      f.name,
       coerceArg(f.type, pick(value as Record<string, unknown>, f.name), types, `${path}.${f.name}`, ctx),
     ]));
   }
@@ -157,14 +165,20 @@ function coerceDefined(def: TypeDefLike, value: unknown, types: TypeDefLike[], p
   if (def.type.kind === "enum") {
     // Accept "Variant" or { Variant: {...fields} }; Anchor wants { variant: {...} }.
     const [variantName, inner] = typeof value === "string" ? [value, {}] : Object.entries((value ?? {}) as Record<string, unknown>)[0] ?? [];
-    const variant = def.type.variants?.find((v) => v.name === variantName || camel(v.name) === camel(String(variantName)));
+    const variant = def.type.variants?.find((v) => norm(v.name) === norm(String(variantName)));
     if (!variant) {
       throw new DevtoolsInputError(`${path}: unknown ${def.name} variant ${JSON.stringify(variantName)} — one of ${def.type.variants?.map((v) => v.name).join(", ")}`);
     }
     const fields = variant.fields?.length ? coerceFields(variant.fields, inner, types, `${path}.${variant.name}`, ctx) : {};
-    return { [camel(variant.name)]: fields };
+    return { [variant.name]: fields };
   }
   return value;
+}
+
+type IdlAccountItemLike = { name: string; accounts?: IdlAccountItemLike[] };
+
+function flattenAccountNames(items: IdlAccountItemLike[]): string[] {
+  return items.flatMap((a) => (a.accounts ? flattenAccountNames(a.accounts) : [a.name]));
 }
 
 // ── Building ─────────────────────────────────────────────────────────────
@@ -218,25 +232,31 @@ export async function buildInstructions(conn: Connection, payer: PublicKey, spec
     }
     idls.set(key, idl);
 
-    const ixDef = idl.instructions.find((x) => x.name === spec.instruction || camel(x.name) === camel(spec.instruction));
+    // Building a method only touches provider.connection + publicKey; nothing signs here.
+    const provider = { connection: conn, publicKey: payer, wallet: { publicKey: payer } } as unknown as Provider;
+    const program = new Program(idl, provider);
+    const ixDef = program.idl.instructions.find((x) => norm(x.name) === norm(spec.instruction));
     if (!ixDef) {
       throw new DevtoolsInputError(`${at}: ${spec.instruction} is not in the IDL — one of ${idl.instructions.map((x) => x.name).join(", ")}`);
     }
-    const types = (idl.types ?? []) as unknown as TypeDefLike[];
+    const types = (program.idl.types ?? []) as unknown as TypeDefLike[];
     const rawArgs = spec.args ?? {};
     const args = ixDef.args.map((a, j) => coerceArg(
       a.type as IdlTypeLike,
       Array.isArray(rawArgs) ? rawArgs[j] : pick(rawArgs, a.name),
       types, `${at}.args.${a.name}`, ctx,
     ));
-    const accounts = Object.fromEntries(Object.entries(spec.accounts ?? {}).map(([name, v]) => [camel(name), resolveAddress(v, ctx, `${at}.accounts.${name}`)]));
 
-    // fetchIdl / method building only touch provider.connection + publicKey; no wallet signs here.
-    const provider = { connection: conn, publicKey: payer, wallet: { publicKey: payer } } as unknown as Provider;
-    const program = new Program(idl, provider);
-    const method = program.methods[camel(ixDef.name)];
+    const accountNames = flattenAccountNames(ixDef.accounts as unknown as IdlAccountItemLike[]);
+    const accounts: Record<string, PublicKey> = {};
+    for (const [name, v] of Object.entries(spec.accounts ?? {})) {
+      const match = accountNames.find((n) => norm(n) === norm(name));
+      if (!match) throw new DevtoolsInputError(`${at}.accounts: ${ixDef.name} has no account "${name}" — one of ${accountNames.join(", ")}`);
+      accounts[match] = resolveAddress(v, ctx, `${at}.accounts.${name}`);
+    }
+
     try {
-      instructions.push(await method(...args).accountsPartial(accounts).remainingAccounts(metas(spec.remainingAccounts, `${at}.remainingAccounts`)).instruction());
+      instructions.push(await program.methods[ixDef.name](...args).accountsPartial(accounts).remainingAccounts(metas(spec.remainingAccounts, `${at}.remainingAccounts`)).instruction());
     } catch (err) {
       // Most often a missing account Anchor couldn't resolve on its own.
       throw new DevtoolsInputError(`${at} (${ixDef.name}): ${(err as Error).message}`);

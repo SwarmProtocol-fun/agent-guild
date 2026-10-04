@@ -16,7 +16,7 @@ import { getGlobalActiveRuns } from "@/lib/workflow/store";
 import { advanceRun } from "@/lib/workflow/executor";
 import { evaluateCronTriggers, evaluateRegularCronJobs } from "@/lib/workflow/cron-evaluator";
 import { getRedis } from "@/lib/redis";
-import { runHyperliquidStrategyTick } from "../../../../../mods/hyperliquid-trading/server";
+import { runHyperliquidStrategyTick, runAiTraderTick } from "../../../../../mods/hyperliquid-trading/server";
 import { sweepStaleAgents } from "@/lib/heartbeat";
 
 /** Max runs to advance per tick (fits within 10s Netlify timeout) */
@@ -122,6 +122,17 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── Phase 6: AI Trader bots. Puts each due bot's question to its agent
+  // (the agent's own daemon answers it — no model runs here) and retires
+  // rounds the agent didn't answer in time.
+  let aiTraderResult = { due: 0, asked: 0, errors: 0 };
+  try {
+    aiTraderResult = await runAiTraderTick();
+  } catch (err) {
+    console.error("[tick] AI Trader evaluation failed:", err);
+    aiTraderResult.errors = 1;
+  }
+
   // ── Release lock ────────────────────────────────────────────────────────
   if (redis) {
     try {
@@ -138,6 +149,7 @@ export async function POST(req: NextRequest) {
     cron: cronResult,
     cronJobs: cronJobsResult,
     hyperliquidStrategies: hyperliquidResult,
+    aiTraders: aiTraderResult,
     presenceFlipped,
   });
 }

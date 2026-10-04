@@ -1,9 +1,13 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { settleOnChains, hashJobResult, getBalance, verifyReceipt } from "@/lib/settlement/registry";
-import { enforceCapability } from "@/lib/skills";
 import { agentAlreadyRegistered, getAgentSlashingHistoryOnChain, mintIdentityToken } from "@/lib/solana/platform";
 import { getScoreEventHistoryForAsn } from "@/lib/solana/client";
 import { getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import {
+  claimSolanaSettlement, getSolanaSettlement, listSolanaSettlements, markSolanaSettlementPaid,
+  releaseSolanaSettlementClaim, saveSolanaSettlement, solanaSettlementTotal,
+  type SolanaSettlementRecord,
+} from "@/lib/mods/solana-settlement-store";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
@@ -13,7 +17,7 @@ import {
 } from "./devtools";
 import type { InstructionSpec } from "./txbuilder";
 import {
-  CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, requireCaller, resolveCaller, capabilityMap,
+  CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, requireCaller, resolveCaller, capabilityMap, hasCapability,
   logActivity, activityFor, getDevWallet, ensureDevWallet, sendAsAgent, simulateAsAgent, airdropToAgent,
   createTokenAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
 } from "./agent";
@@ -66,20 +70,23 @@ async function readTool<T extends object>(req: Request, ctx: RouteContext, descr
   });
 }
 
-interface SettlementRecord {
-  agentId: string;
-  taskId: string;
-  txSig: string;
-  explorerUrl: string;
-  amountUsdc: number;
-  resultHash: string;
-  reputationUpdated: boolean;
-  at: string;
+function receiptOf(record: SolanaSettlementRecord) {
+  return {
+    chain: "solana" as const,
+    txSig: record.txSig,
+    receiptHash: record.resultHash,
+    explorerUrl: record.explorerUrl,
+    reputationUpdated: record.reputationUpdated,
+  };
 }
 
-// In-memory for the demo panel — per-mod persistent storage isn't built yet
-// (see docs/mod-sdk.md "Not built yet"). Swap for a real store post-hackathon.
-const history: SettlementRecord[] = [];
+/** The signed agent settles for its own org. A wallet session sees every org it belongs to. */
+async function callerOrgIds(ctx: RouteContext): Promise<string[]> {
+  if (ctx.agent?.orgId) return [ctx.agent.orgId];
+  if (!ctx.session?.address) return [];
+  const orgs = await getOrganizationsByWalletAdmin(ctx.session.address);
+  return orgs.map((org) => org.id);
+}
 
 export default defineServerMod({
   setup(ctx) {
@@ -107,55 +114,81 @@ export default defineServerMod({
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
       const { agentWallet, taskId, exitCode, executionTimeMs, stdout, amountUsdc, creditScore, trustScore } = body;
+      const amount = typeof amountUsdc === "number" ? amountUsdc : Number(amountUsdc);
 
-      if (!orgId || !agentId || !agentWallet || !taskId || amountUsdc == null) {
+      if (!orgId || !agentId || !agentWallet || !taskId || amountUsdc == null || !Number.isFinite(amount)) {
         return Response.json({ error: "orgId, agentId, agentWallet, taskId, amountUsdc are required" }, { status: 400 });
       }
 
-      try {
-        // Capability key is the skill id ("solana-settlement"), not "solana-settle" —
-        // installMod() grants enabledCapabilities from mod.capabilities, which is
-        // [skill.id]. The two must match or enforceCapability() 403s unconditionally.
-        await enforceCapability(agentId, orgId, "solana-settlement");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
+      // Capability key must match the agentSkills id in lib/skills.ts. Resolved
+      // with the admin SDK (see agent.ts) — the browser-SDK resolver is denied server-side.
+      if (!(await hasCapability(agentId, orgId, CAP.settle))) {
+        return Response.json({ error: `Agent ${agentId} doesn't have the "${CAP.settle}" capability` }, { status: 403 });
       }
+
+      // Claim the task before paying. A retry finds the claim and returns
+      // the first receipt instead of sending a second USDC transfer.
+      const claim = await claimSolanaSettlement(agentId, taskId, orgId);
+      if (claim.state === "conflict") return Response.json({ error: "Task already settled for another org" }, { status: 409 });
+      if (claim.state === "pending") return Response.json({ error: "Settlement already in progress for this task" }, { status: 409 });
+      if (claim.state === "done") return Response.json({ receipt: receiptOf(claim.record), replayed: true, persisted: true });
 
       const resultHash = hashJobResult({ taskId, exitCode: exitCode ?? 0, executionTimeMs: executionTimeMs ?? 0, stdout });
 
-      const { receipts, errors } = await settleOnChains(["solana"], {
-        agentId,
-        agentWallet,
-        taskId,
-        resultHash,
-        amountUsdc,
-        creditScore: creditScore ?? 680,
-        trustScore: trustScore ?? 50,
-      });
+      let settled: Awaited<ReturnType<typeof settleOnChains>>;
+      try {
+        settled = await settleOnChains(["solana"], {
+          agentId,
+          agentWallet,
+          taskId,
+          resultHash,
+          amountUsdc: amount,
+          creditScore: creditScore ?? 680,
+          trustScore: trustScore ?? 50,
+        });
+      } catch (err) {
+        await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
+        throw err;
+      }
 
+      const { receipts, errors } = settled;
       if (receipts.length === 0) {
+        await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
         return Response.json({ error: "Settlement failed", details: errors }, { status: 502 });
       }
 
       const receipt = receipts[0];
-      history.unshift({
-        agentId, taskId, txSig: receipt.txSig, explorerUrl: receipt.explorerUrl,
-        amountUsdc, resultHash: receipt.receiptHash, reputationUpdated: receipt.reputationUpdated,
+      const record: SolanaSettlementRecord = {
+        orgId, agentId, taskId, txSig: receipt.txSig, explorerUrl: receipt.explorerUrl,
+        amountUsdc: amount, resultHash: receipt.receiptHash, reputationUpdated: Boolean(receipt.reputationUpdated),
         at: new Date().toISOString(),
-      });
-      if (history.length > 50) history.length = 50;
+      };
+      try {
+        await saveSolanaSettlement(record);
+      } catch (err) {
+        // The transfer already landed. Pin the sig on the claim so a retry
+        // returns this receipt and does not pay again.
+        await markSolanaSettlementPaid(record).catch(() => {});
+        return Response.json({ receipt, persisted: false, error: (err as Error).message });
+      }
 
-      return Response.json({ receipt });
+      return Response.json({ receipt, persisted: true });
     },
 
-    "GET /history": () => ({ history: history.slice(0, 20) }),
+    /** GET /history — this caller's orgs only. Rows survive a process restart. */
+    "GET /history": async (_req, ctx) => ({ history: await listSolanaSettlements(await callerOrgIds(ctx)) }),
 
     /** GET /agent/:agentId/total — lifetime USDC earned by one agent on Solana. */
-    "GET /agent/:agentId/total": (_req, { params }) => {
-      const total = history
-        .filter((h) => h.agentId === params.agentId)
-        .reduce((sum, h) => sum + h.amountUsdc, 0);
-      return Response.json({ agentId: params.agentId, totalUsdc: total, settlementCount: history.filter((h) => h.agentId === params.agentId).length });
+    "GET /agent/:agentId/total": async (_req, ctx) => {
+      const orgIds = await callerOrgIds(ctx);
+      const agentId = ctx.params.agentId;
+      if (!orgIds.length) return Response.json({ error: "No org for this caller" }, { status: 403 });
+      const totals = await Promise.all(orgIds.map((orgId) => solanaSettlementTotal(orgId, agentId)));
+      return Response.json({
+        agentId,
+        totalUsdc: totals.reduce((sum, row) => sum + row.totalUsdc, 0),
+        settlementCount: totals.reduce((sum, row) => sum + row.settlementCount, 0),
+      });
     },
 
     /** GET /balance/:wallet — live USDC balance, no signing key needed. */
@@ -172,11 +205,14 @@ export default defineServerMod({
      * the memo actually carries the receipt hash this mod recorded, instead
      * of trusting what /settle returned at the time.
      */
-    "GET /verify/:txSig": async (_req, { params }) => {
-      const record = history.find((h) => h.txSig === params.txSig);
-      if (!record) return Response.json({ error: "No local record of this tx" }, { status: 404 });
+    "GET /verify/:txSig": async (_req, ctx) => {
+      const record = await getSolanaSettlement(ctx.params.txSig);
+      const orgIds = await callerOrgIds(ctx);
+      if (!record || !orgIds.includes(record.orgId)) {
+        return Response.json({ error: "No local record of this tx" }, { status: 404 });
+      }
       try {
-        const result = await verifyReceipt("solana", params.txSig, record.resultHash);
+        const result = await verifyReceipt("solana", ctx.params.txSig, record.resultHash);
         return Response.json(result);
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 502 });
@@ -289,7 +325,14 @@ export default defineServerMod({
           const agents = await getAgentsByOrg(org.id);
           return Promise.all(agents.map(async (agent) => {
             const caller: Caller = { agentId: agent.id, orgId: org.id, via: "session" };
-            const [capabilities, wallet] = await Promise.all([capabilityMap(agent.id, org.id), getDevWallet(caller)]);
+            // One agent's lookup failing must not hide every agent from the picker.
+            const [capabilities, wallet] = await Promise.all([
+              capabilityMap(agent.id, org.id).catch((err) => {
+                console.warn(`[solana] capabilities for ${agent.id} failed:`, err);
+                return {} as Awaited<ReturnType<typeof capabilityMap>>;
+              }),
+              getDevWallet(caller).catch(() => null),
+            ]);
             const isOwner = !!org.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(ctx.session!.address);
             return { agentId: agent.id, name: agent.name, orgId: org.id, orgName: org.name || org.id, isOwner, capabilities, devWallet: wallet?.address ?? null };
           }));

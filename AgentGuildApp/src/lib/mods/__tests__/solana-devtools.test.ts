@@ -7,7 +7,18 @@ import {
   toPlainJson, SYSTEM_PROGRAM, TOKEN_PROGRAM, DevtoolsInputError,
 } from "../../../../mods/solana-settlement/devtools";
 
-vi.mock("@/lib/skills", () => ({ enforceCapability: vi.fn(async () => ({})) }));
+vi.mock("@/lib/skills", () => ({
+  enforceCapability: vi.fn(async () => ({})), getAgentCapabilities: vi.fn(async () => []),
+  getModInstallations: vi.fn(async () => []), toggleModCapability: vi.fn(),
+}));
+vi.mock("@/lib/firestore-admin", () => ({
+  getAgent: vi.fn(), getAgentsByOrg: vi.fn(), getOrganizationsByWalletAdmin: vi.fn(),
+  getAgentCapabilities: vi.fn(async () => []), getModInstallations: vi.fn(async () => []),
+}));
+vi.mock("@/lib/firebase-admin", () => ({ adminDb: vi.fn() }));
+vi.mock("@/lib/auth-guard", () => ({ requireOrgMembershipByAddress: vi.fn() }));
+vi.mock("@/lib/agent-wallets", () => ({ listAgentWallets: vi.fn(), generateAgentWallet: vi.fn(), getAgentWalletKeypair: vi.fn() }));
+vi.mock("@/lib/gateway/store", () => ({ enqueueTask: vi.fn(), getTask: vi.fn(), getAvailableWorkers: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({
   settleOnChains: vi.fn(), hashJobResult: vi.fn(), getBalance: vi.fn(), verifyReceipt: vi.fn(),
 }));

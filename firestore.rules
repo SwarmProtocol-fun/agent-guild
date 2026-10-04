@@ -60,6 +60,14 @@ service cloud.firestore {
     match /fraudReviewQueue/{document=**}       { allow read, write: if false; }
     match /platformConnections/{document=**}    { allow read, write: if false; }
     match /marketplaceTransactions/{document=**} { allow read, write: if false; }
+    // Solana job receipts. Written by the solana-settlement mod (Admin SDK)
+    // and read back by that mod's history/verify routes. A browser must not
+    // list another org's payouts.
+    match /solanaSettlements/{document=**}      { allow read, write: if false; }
+    match /solanaSettlementKeys/{document=**}   { allow read, write: if false; }
+    // One ciphertext, three wraps (protocol, agent, user). The hub serves
+    // it only while those identity NFT copies are still with their holders.
+    match /identityVault/{document=**}          { allow read, write: if false; }
     match /creditPolicyLog/{document=**}        { allow read, write: if false; }
     match /githubEvents/{document=**}           { allow read, write: if false; }
 

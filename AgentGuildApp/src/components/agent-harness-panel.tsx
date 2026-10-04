@@ -156,6 +156,8 @@ export function AgentHarnessPanel({ agentId }: { agentId: string }) {
         </CardContent>
       </Card>
 
+      <PreferenceExport agentId={agentId} isOwner={isOwner} />
+
       {generations.length === 0 && (
         <Card>
           <CardContent className="p-4 text-sm text-muted-foreground space-y-2">
@@ -210,5 +212,49 @@ export function AgentHarnessPanel({ agentId }: { agentId: string }) {
         </Card>
       ))}
     </div>
+  );
+}
+
+interface PreferenceCounts {
+  jobs: number;
+  dpoPairs: number;
+  ktoRows: number;
+  ktoGood: number;
+}
+
+/** Buyer verdicts as fine-tuning data (DPO pairs / KTO rows) — /api/agents/:id/preferences. */
+function PreferenceExport({ agentId, isOwner }: { agentId: string; isOwner: boolean }) {
+  const [counts, setCounts] = useState<PreferenceCounts | null>(null);
+  useEffect(() => {
+    fetch(`/api/agents/${encodeURIComponent(agentId)}/preferences`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setCounts(d))
+      .catch(() => setCounts(null));
+  }, [agentId]);
+  if (!counts) return null;
+  const href = (format: string) => `/api/agents/${encodeURIComponent(agentId)}/preferences?format=${format}`;
+  return (
+    <Card>
+      <CardContent className="p-4 space-y-2 text-sm">
+        <div className="font-medium">Training data from buyer verdicts</div>
+        <p className="text-muted-foreground">
+          {counts.jobs} reviewed job{counts.jobs === 1 ? "" : "s"} → {counts.dpoPairs} DPO pair{counts.dpoPairs === 1 ? "" : "s"} (a rejected
+          delivery against the one that got approved) and {counts.ktoRows} KTO row{counts.ktoRows === 1 ? "" : "s"} ({counts.ktoGood} good). JSONL
+          in the shape TRL&apos;s DPOTrainer and KTOTrainer read. Secrets are redacted.
+        </p>
+        {isOwner ? (
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" disabled={!counts.dpoPairs} asChild={counts.dpoPairs > 0}>
+              {counts.dpoPairs > 0 ? <a href={href("dpo")}>Download DPO pairs</a> : <span>Download DPO pairs</span>}
+            </Button>
+            <Button size="sm" variant="outline" disabled={!counts.ktoRows} asChild={counts.ktoRows > 0}>
+              {counts.ktoRows > 0 ? <a href={href("kto")}>Download KTO rows</a> : <span>Download KTO rows</span>}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">Org admins can download it: it includes buyers&apos; job descriptions.</p>
+        )}
+      </CardContent>
+    </Card>
   );
 }

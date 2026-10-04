@@ -4,10 +4,10 @@ import { cancelAssignment, getAssignment, AssignmentError, assignmentErrorStatus
 import { addMemoryEntry, getAgent, getAgentsByOrg, getMemoryEntries, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import {
   buildLeaderboard, feedbackContext, lineageReport, parseJobRequest, parseReplay, parseSubmission, resolveLineage,
-  HARNESSES, SUITE_CATALOG, type BenchJob, type BenchRun,
+  BENCH_ROBOTS, HARNESSES, SUITE_CATALOG, suiteRobot, type BenchJob, type BenchRun,
 } from "./bench";
 import {
-  SIM_TASKS, attemptedTaskIds, exportLine, findTask, learningCurve, parseDriveMove, parseFrames, parsePoseInput, parseSteps, plainLesson, rankLessons,
+  SIM_ROBOTS, SIM_TASKS, attemptedTaskIds, episodeRobot, exportLine, findTask, learningCurve, parseDriveMove, parseFrames, parsePoseInput, parseRobot, parseSteps, plainLesson, rankLessons, robotInfo, robotTag,
   type DriveRelay, type Driver, type Episode, type SimTask,
 } from "./training";
 import { canDrive, decideAction, DriverError, DRIVER_MODEL, reflect } from "./trainer";
@@ -51,10 +51,10 @@ async function sessionEpisode(id: string, address: string): Promise<Episode | Re
   return ep;
 }
 
-/** The agent's DimSim lessons, ranked by rankLessons (this task's successes first). Memory is best-effort. */
-async function lessonsFor(ep: Pick<Episode, "orgId" | "agentId">, task: SimTask, max = 8): Promise<string[]> {
+/** The agent's DimSim lessons for this robot, ranked by rankLessons (this task's successes first). Memory is best-effort. */
+async function lessonsFor(ep: Pick<Episode, "orgId" | "agentId" | "robot">, task: SimTask, max = 8): Promise<string[]> {
   try {
-    return rankLessons(await getMemoryEntries(ep.orgId, ep.agentId, "long_term"), task.id, max);
+    return rankLessons(await getMemoryEntries(ep.orgId, ep.agentId, "long_term"), task.id, max, episodeRobot(ep));
   } catch {
     return [];
   }
@@ -74,7 +74,7 @@ const RELAY_WAIT_MS = 8000;
 const OWN_MODEL = "own model";
 
 /** Told to the agent with its first view of an attempt. */
-const DRIVE_GUIDE = `You are driving a Unitree Go2 quadruped robot through a simulated apartment (dimOS DimSim), from its front camera.
+const driveGuide = (ep: Pick<Episode, "robot">) => `You are driving ${robotInfo(episodeRobot(ep)).about.replace(/\.$/, "")}, through a simulated apartment (dimOS DimSim), from its front camera.
 Each move: turn (degrees, positive = left, -180..180) in place, then walk forward (metres, -1..2; small near obstacles).
 The robot stops early if something is in the way ("blocked"). look=true spends the move turning in place to photograph
 all four directions instead (front, left, back, right). Set done=true when you believe you have reached the goal.
@@ -102,7 +102,8 @@ async function drivePayload(relay: DriveRelay, ep: Episode, first: boolean) {
     blocked: obs.blocked,
     jpeg: obs.jpeg,
     panorama: obs.panorama,
-    ...(first && task ? { guide: DRIVE_GUIDE, lessons: await lessonsFor(ep, task) } : {}),
+    robot: episodeRobot(ep),
+    ...(first && task ? { guide: driveGuide(ep), lessons: await lessonsFor(ep, task) } : {}),
     next: `Choose a move with guild_sim_act (episodeId ${ep.id}, seq ${obs.seq}).`,
   };
 }
@@ -342,6 +343,7 @@ export default defineServerMod({
         agents: agents.map((a) => ({ id: a.id, name: a.name, orgId: a.orgId })).sort((a, b) => a.name.localeCompare(b.name)),
         workers: workers.map((w) => ({ ...w, online: now - Date.parse(w.lastSeen) < WORKER_FRESH_MS })),
         suites: SUITE_CATALOG,
+        robots: BENCH_ROBOTS,
         harnesses: HARNESSES,
       };
     },
@@ -461,6 +463,7 @@ export default defineServerMod({
       const agents = (await Promise.all(orgIds.map(getAgentsByOrg))).flat();
       return {
         tasks: SIM_TASKS,
+        robots: SIM_ROBOTS,
         agents: agents.map((a) => ({ id: a.id, name: a.name, orgId: a.orgId })).sort((a, b) => a.name.localeCompare(b.name)),
         /** Whether the Claude stand-in driver is available (a model credential is set). */
         canDrive: canDrive(),
@@ -469,7 +472,7 @@ export default defineServerMod({
     },
 
     /**
-     * POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent", driver?, startPose?, startDistance? }.
+     * POST /episodes — start an attempt: { agentId, taskId, actor: "human" | "agent", driver?, robot?, startPose?, startDistance? }.
      * taskId is a built-in task or `obj:<assetId>` with the object's `title`.
      * An agent attempt's driver is "own" (default: the agent drives through the
      * relay with its own model) or "server" (the Claude stand-in).
@@ -494,6 +497,7 @@ export default defineServerMod({
         orgId: agent.orgId, agentId: agent.id, agentName: agent.name,
         taskId: task.id, task: task.task, scene: task.scene, actor,
         ...(driver ? { driver } : {}),
+        robot: parseRobot(b.robot),
         model: driver === "own" ? OWN_MODEL : driver === "server" ? DRIVER_MODEL : null,
         status: "running", steps: 0,
         startDistance: typeof b.startDistance === "number" && Number.isFinite(b.startDistance) ? b.startDistance : null,
@@ -596,6 +600,7 @@ export default defineServerMod({
         const decision = await decideAction({
           agentName: ep.agentName,
           task,
+          robot: robotInfo(episodeRobot(ep)).about,
           lessons: await lessonsFor(ep, task),
           history: await getSteps(ep.id, false),
           jpeg: frames[0],
@@ -634,7 +639,7 @@ export default defineServerMod({
         let lesson = plainLesson({ ...ep, status, finalDistance, finalPose }, task, steps.map((s) => s.action));
         if (ep.actor === "agent" && ep.driver !== "own" && canDrive()) {
           try {
-            lesson = await reflect({ task, succeeded: status === "success", finalDistance, startPose: ep.startPose ?? task.startPose, finalPose, steps });
+            lesson = await reflect({ task, robot: robotInfo(episodeRobot(ep)).about, succeeded: status === "success", finalDistance, startPose: ep.startPose ?? task.startPose, finalPose, steps });
           } catch (err) {
             log.warn("reflection failed, keeping the plain lesson:", err);
           }
@@ -647,7 +652,7 @@ export default defineServerMod({
           type: "long_term",
           title: `DimSim · ${task.label} · ${ep.actor === "human" ? "demonstration" : status}`,
           content: lesson,
-          tags: ["dimsim", task.id, ep.actor, status],
+          tags: ["dimsim", task.id, ep.actor, status, robotTag(episodeRobot(ep))],
           structuredData: { episodeId: ep.id, scene: ep.scene },
         });
       }
@@ -727,14 +732,14 @@ export default defineServerMod({
         type: "long_term",
         title: `DimSim · ${task.label} · ${ep.status} · own lesson`,
         content: lesson,
-        tags: ["dimsim", task.id, ep.actor, ep.status],
+        tags: ["dimsim", task.id, ep.actor, ep.status, robotTag(episodeRobot(ep))],
         structuredData: { episodeId: ep.id, scene: ep.scene },
       });
       await updateEpisode(ep.id, { lesson });
       return { saved: true };
     },
 
-    /** GET /episodes?agentId= — an agent's attempts, newest first, plus a learning curve per task. */
+    /** GET /episodes?agentId=&robot= — an agent's attempts (with one robot, when given), newest first, plus a learning curve per task. */
     "GET /episodes": async (req, { session }) => {
       if (!session) return Response.json({ error: "Sign in to train agents" }, { status: 401 });
       const agentId = new URL(req.url).searchParams.get("agentId");
@@ -742,7 +747,9 @@ export default defineServerMod({
       if (!agent || !(await sessionOrgIds(session.address)).includes(agent.orgId)) {
         return Response.json({ error: "Agent not found" }, { status: 404 });
       }
-      const episodes = await listEpisodes(agent.id);
+      const robot = new URL(req.url).searchParams.get("robot");
+      const all = await listEpisodes(agent.id);
+      const episodes = robot ? all.filter((e) => episodeRobot(e) === parseRobot(robot)) : all;
       return {
         episodes,
         curves: Object.fromEntries(attemptedTaskIds(episodes).map((id) => [id, learningCurve(episodes, id)])),
@@ -781,12 +788,13 @@ export default defineServerMod({
       return { episode: ep, steps: await getSteps(ep.id, new URL(req.url).searchParams.get("images") !== "0") };
     },
 
-    /** GET /suites — suites that have runs, most-run first. */
+    /** GET /suites — suites that have runs, most-run first, each with the robot it benchmarks on. */
     "GET /suites": async () => {
       const counts = new Map<string, number>();
       for (const run of await listRuns()) counts.set(run.suite, (counts.get(run.suite) ?? 0) + 1);
       return {
-        suites: [...counts].map(([suite, runs]) => ({ suite, runs })).sort((a, b) => b.runs - a.runs),
+        suites: [...counts].map(([suite, runs]) => ({ suite, runs, robot: suiteRobot(suite) })).sort((a, b) => b.runs - a.runs),
+        robots: BENCH_ROBOTS,
       };
     },
 

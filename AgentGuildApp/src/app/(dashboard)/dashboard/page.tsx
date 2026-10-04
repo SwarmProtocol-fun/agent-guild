@@ -1,4 +1,4 @@
-/** Dashboard — operator overview: what needs attention, what's moving, and how it's trending. */
+/** Dashboard — the guild command center: what needs you today, what's moving, who to hire, and how it's trending. */
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
@@ -7,12 +7,11 @@ import dynamic from "next/dynamic";
 import { motion, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { StatCard } from "@/components/analytics/stat-card";
 import { useOrg } from "@/contexts/OrgContext";
 import { VitalsWidget } from "@/components/vitals-widget";
 import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
-import { RotateCcw, X, Target, Briefcase, Wifi, DollarSign } from "lucide-react";
+import { RotateCcw, X } from "lucide-react";
 import {
   getTasksByOrg,
   getProjectsByOrg,
@@ -28,6 +27,7 @@ import {
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { getActivityFeed, type ActivityEvent } from "@/lib/activity";
+import { getPendingCount } from "@/lib/approvals";
 import type { DispatchPayload } from "@/components/agent-map/agent-map";
 import { TaskVelocityChart } from "@/components/charts/task-velocity-chart";
 import { CostTrendChart } from "@/components/charts/cost-trend-chart";
@@ -56,10 +56,16 @@ import {
   RecentJobsCard,
   ActivityFeedCard,
   TopPerformersCard,
-  formatRelativeTime,
   toMillis,
 } from "@/components/dashboard/dashboard-cards";
 import { DailyBriefingCard } from "@/components/dashboard/daily-briefing-card";
+import {
+  CommandHero,
+  ActionTiles,
+  ActiveWorkPanel,
+  RecommendedAgentsPanel,
+  buildWorkItems,
+} from "@/components/dashboard/command-center";
 
 const AgentMap = dynamic(
   () => import('@/components/agent-map/agent-map'),
@@ -72,18 +78,6 @@ const AgentMap = dynamic(
     ),
   }
 );
-
-/* ------------------------------------------------------------------ */
-/*  Types                                                              */
-/* ------------------------------------------------------------------ */
-
-interface OrgStats {
-  completedTasks: number;
-  activeTasks: number;
-  todoTasks: number;
-  jobCount: number;
-  openJobs: number;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -141,7 +135,6 @@ export default function DashboardPage() {
   const account = useWalletAccount();
   const { address: sessionAddress, authenticated } = useSession();
   const userAddress = account?.address || sessionAddress || "";
-  const [stats, setStats] = useState<OrgStats | null>(null);
   const [recentTasks, setRecentTasks] = useState<(Task & { agentName?: string; projectName?: string })[]>([]);
   const [recentJobs, setRecentJobs] = useState<Job[]>([]);
   const [allTasks, setAllTasks] = useState<Task[]>([]);
@@ -152,6 +145,7 @@ export default function DashboardPage() {
   const [agentSlots, setAgentSlots] = useState<Record<string, { agentId: string; assignedAt: unknown } | null>>({});
   const [briefingCronJob, setBriefingCronJob] = useState<CronJob | null>(null);
   const [latestBriefing, setLatestBriefing] = useState<DailySummary | null>(null);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState(false);
@@ -177,15 +171,6 @@ export default function DashboardPage() {
         getJobsByOrg(currentOrg.id),
         getOrganization(currentOrg.id),
       ]);
-
-      // Derived here rather than via getOrgStats, which re-reads all four collections.
-      setStats({
-        completedTasks: tasks.filter(t => t.status === 'done').length,
-        activeTasks: tasks.filter(t => t.status === 'in_progress').length,
-        todoTasks: tasks.filter(t => t.status === 'todo').length,
-        jobCount: jobs.length,
-        openJobs: jobs.filter(j => j.status === 'open').length,
-      });
 
       setAgentSlots(freshOrg?.agentSlots || freshOrg?.swarmSlots || {});
 
@@ -218,6 +203,13 @@ export default function DashboardPage() {
         setActivityAll(await getActivityFeed(currentOrg.id, { max: 200 }));
       } catch {
         // Activity feed is non-critical
+      }
+
+      // Governance approvals waiting on a human
+      try {
+        setPendingApprovals(await getPendingCount(currentOrg.id));
+      } catch {
+        // Approvals count is non-critical
       }
 
       // Cost data
@@ -350,11 +342,14 @@ export default function DashboardPage() {
     }
   }, [currentOrg, loadDashboardData]);
 
-  const onlineCount = agents.filter(a => a.status === "online").length;
-  const busyCount = agents.filter(a => a.status === "busy").length;
+  const onlineCount = agents.filter(a => a.status === "online" || a.status === "busy").length;
   const userAgent = agents.find(a => a.walletAddress === userAddress);
   const spend14d = dailyCosts.reduce((sum, d) => sum + d.costUsd, 0);
-  const tokens14d = dailyCosts.reduce((sum, d) => sum + d.tokens, 0);
+  const workItems = useMemo(() => buildWorkItems(allJobs, allTasks, agents), [allJobs, allTasks, agents]);
+  const ownAgentIds = useMemo(() => agents.map(a => a.id), [agents]);
+  const activeJobs = allJobs.filter(j => j.status === "claimed" || j.status === "in_progress").length;
+  const awaitingReview = allJobs.filter(j => j.status === "completed" && j.reviewStatus === "pending").length;
+  const pendingCount = awaitingReview + pendingApprovals;
 
   /* ── Greeting ── */
   const greeting = useMemo(() => {
@@ -435,46 +430,23 @@ export default function DashboardPage() {
     );
   }
 
-  const todo = stats?.todoTasks || 0;
-  const done = stats?.completedTasks || 0;
-
   /* ── Render ── */
 
   return (
     <div className="space-y-5">
-      {/* Dashboard hero header */}
-      <div className="relative overflow-hidden rounded-xl border border-amber-500/10 bg-gradient-to-br from-amber-500/5 via-transparent to-orange-500/5 dark:from-amber-500/[0.07] dark:to-orange-500/[0.04] px-5 py-3.5">
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_rgba(114,33,250,0.08),transparent_60%)] pointer-events-none" />
-        <div className="relative flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h1 className="text-xl font-bold tracking-tight text-glow-gold">{greeting}</h1>
-            <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
-              {currentOrg.name}
-              {lastUpdated && (
-                <>
-                  <span className="text-muted-foreground/30">·</span>
-                  <span className="text-xs text-muted-foreground/50 tabular-nums flex items-center gap-1.5">
-                    <span className="relative flex h-1.5 w-1.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" /><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" /></span>
-                    Updated {formatRelativeTime(lastUpdated)}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
-          {dashTab === "overview" && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleManualRefresh}
-              disabled={refreshing}
-              className="gap-1.5 h-8 border-amber-500/20 hover:border-amber-500/40 hover:bg-amber-500/5 shrink-0"
-            >
-              <RotateCcw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} aria-hidden="true" />
-              Refresh
-            </Button>
-          )}
-        </div>
-      </div>
+      <CommandHero
+        greeting={greeting}
+        orgName={currentOrg.name}
+        lastUpdated={lastUpdated}
+        refreshing={refreshing}
+        onRefresh={handleManualRefresh}
+        readouts={[
+          { label: "Agents online", value: `${onlineCount}/${agents.length}`, href: "/agents" },
+          { label: "Jobs active", value: String(activeJobs), href: "/jobs" },
+          { label: "Pending you", value: String(pendingCount), href: awaitingReview || !pendingApprovals ? "/jobs" : "/approvals", alert: pendingCount > 0 },
+          { label: "Spend (14d)", value: `$${spend14d.toFixed(2)}`, href: "/usage" },
+        ]}
+      />
 
       <Tabs value={dashTab} onValueChange={setDashTab}>
         <TabsList>
@@ -485,23 +457,24 @@ export default function DashboardPage() {
 
         <TabsContent value="overview" className="mt-3 space-y-5">
 
-          {/* ═══ At a glance ═══ */}
-          <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
-            {[
-              { title: "Agents Online", value: String(onlineCount), icon: Wifi, changeLabel: `of ${agents.length}${busyCount ? ` · ${busyCount} busy` : ""}` },
-              { title: "Active Tasks", value: String(stats?.activeTasks || 0), icon: Target, changeLabel: `${todo} to do · ${done} done` },
-              { title: "Open Jobs", value: String(stats?.openJobs || 0), icon: Briefcase, changeLabel: `${stats?.jobCount || 0} total` },
-              { title: "Spend (14d)", value: `$${spend14d.toFixed(2)}`, icon: DollarSign, changeLabel: `${(tokens14d / 1000).toFixed(1)}K tokens` },
-            ].map((s, i) => (
-              <Reveal key={s.title} delay={i * 0.04}>
-                <StatCard title={s.title} value={s.value} icon={s.icon} changeLabel={s.changeLabel} />
-              </Reveal>
-            ))}
+          {/* ═══ Primary actions ═══ */}
+          <Reveal>
+            <ActionTiles onJobPosted={() => loadDashboardData()} />
+          </Reveal>
+
+          {/* ═══ Mission board ═══ */}
+          <div className="grid gap-3 grid-cols-1 lg:grid-cols-5">
+            <Reveal delay={0.05} className="lg:col-span-3">
+              <ActiveWorkPanel items={workItems} />
+            </Reveal>
+            <Reveal delay={0.08} className="lg:col-span-2">
+              <RecommendedAgentsPanel ownAgentIds={ownAgentIds} />
+            </Reveal>
           </div>
 
           {/* ═══ Command ═══ */}
           <div className="space-y-3">
-            <SectionLabel>Command</SectionLabel>
+            <SectionLabel>Dispatch</SectionLabel>
             <div className="grid gap-3 grid-cols-1 lg:grid-cols-3">
               <Reveal delay={0.05} className="lg:col-span-2">
                 <PromptWidget onDispatch={handleDispatch} agents={agents} />

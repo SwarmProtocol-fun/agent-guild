@@ -6,6 +6,16 @@ Puts [dimOS](https://github.com/dimensionalOS/dimos) robots in the **dimOS Bench
 
 The panel's first tab embeds **DimSim**, dimOS's Three.js + Rapier robot simulator, running a Unitree Go2 in the furnished apartment scene. The tasks are DimSim's own apartment evals (go to the couch, the kitchen, or the TV), plus **go to any object** in the apartment: pick it from the list or click it on the floor plan. Each one is scored by DimSim's `objectDistance` rubric (1.5 m for objects).
 
+**Pick a robot.** All three share the same moves and the same scoring rubric. What differs is what each robot sees and where it fits:
+
+| Robot | Camera | Under table tops | Model |
+|-------|--------|------------------|-------|
+| Unitree Go2 (quadruped) | 0.3 m up | fits | dimOS's Go2 model, with a procedural trot |
+| Wheeled rover | 0.24 m up | fits | procedural, spinning wheels |
+| Humanoid | 1.5 m up, sees over furniture | doesn't fit | procedural, swinging limbs |
+
+Each robot keeps its own learning curves, best-attempt ghost and lessons: memory entries are tagged `robot:<id>`, and older untagged ones count as the Go2's. The agent is told which robot it's driving, and the export carries a `robot` field. Robot ids are shared by `SIM_ROBOTS` in `training.ts` and `ROBOTS` in `dimsim/src/agentGuildEmbed.js`. Only the Go2 has a real 3D model; the rover and the humanoid are built from simple shapes until real models are added.
+
 Two ways to drive it:
 
 - **Drive it yourself.** Hold W/A/S/D or the arrow keys to drive in real time (1 m/s, 90°/s). This is free play, not recorded.
@@ -45,13 +55,15 @@ Setup:
 Limits:
 
 - **Scores are reported by the browser.** The rubric runs in the browser, so pass/fail is only as trustworthy as the person running it. The same is true of self-reported benchmark scores.
-- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation; the trot is only an animation. Collision is checked with rays at the Go2's body height, so it can walk under table tops. The floor plan marks those cells as walkable. DimSim's evals start at (0, 3), under the kitchen table, so the panel starts at (1.5, 3.1) on open floor instead.
+- **Steps are discrete and kinematic.** It's one move at a time, with no gait simulation; the walk animations are only animations. Collision is checked with rays at the robot's body heights. A table top is thin enough to slip between those rays, so a robot that doesn't fit under tables (the humanoid) is also stopped at the floor plan's under-table cells. The floor plan marks those cells as walkable. DimSim's evals start at (0, 3), under the kitchen table, so the panel starts at (1.5, 3.1) on open floor instead.
 - **The agent sets the pace.** A step takes as long as the agent's own model takes to choose a move, and the robot waits between moves. A slow model makes a slow robot. The panel can't see the agent's token use or cost.
 - **Looking around costs a step.** A look-around step records the front frame with a zero action (`look: true` in the JSONL) and counts toward the step limit. The panorama at the first step is free.
 - **Some objects are hard to reach.** Wall-mounted or high items (range hood, wall cabinets) may stay out of the 1.5 m pass distance from the floor.
 - **The first load downloads about 26 MB** of models. After that the browser caches them for a week (`Cache-Control` in `next.config.ts` and `netlify.toml`).
 
 ## Benchmarks
+
+Each catalogued suite is labelled with the robot it benchmarks on (`BENCH_ROBOTS` / `suiteRobot` in `bench.ts`): Unitree Go2 (recordings and DimSim), UFactory xArm (MuJoCo), or a Habitat agent. The run form and the leaderboard both have a **Robot** filter. Suites outside the catalog show under "Other / custom".
 
 dimOS already ships an eval harness (`dimos evals run <suite> --agent <module>`). It covers robot recordings, MuJoCo and Habitat sims, and live robots, with pluggable agent adapters (`pi`, `dimcode`, `mcp_client_adapter`, `question_answer`, …). This mod doesn't change any of that. It adds:
 

@@ -228,43 +228,153 @@ export class AiAvatar {
         lower: calf.position.distanceTo(foot.position),
       });
     }
-    this._gait = { phase: 0, amp: 0, last: null };
   }
 
   /**
-   * Procedural trot: diagonal leg pairs swing in antiphase, knees bend to lift
-   * each foot on its forward swing. Driven by how fast the visual is moving or
-   * turning, so it fades to standing when the robot stops.
+   * Agent Guild embed: which robot to show — "go2" (the GLB), or a procedural
+   * "rover" or "humanoid" (there are no models for those). Only the look
+   * changes here; the embed API changes the camera mount and collisions.
+   */
+  setRobotVisual(kind) {
+    this._robot = kind;
+    if (kind !== "go2" && !this._procedural?.[kind]) {
+      this._procedural ??= {};
+      const built = kind === "rover" ? this._buildRover() : kind === "humanoid" ? this._buildHumanoid() : null;
+      if (built) {
+        this._procedural[kind] = built;
+        this.group.add(built.root);
+      }
+    }
+    if (this.model) this.model.visible = kind === "go2" || !this._procedural?.[kind];
+    for (const [k, v] of Object.entries(this._procedural ?? {})) v.root.visible = k === kind;
+  }
+
+  /** Feet sit this far below the body centre (the group origin). */
+  _feet() {
+    return -(this.halfHeight + this.radius);
+  }
+
+  /** A low four-wheeled base with a camera mast. Forward is +z. */
+  _buildRover() {
+    const root = new THREE.Group();
+    const y0 = this._feet();
+    const mat = (color, roughness = 0.6) => new THREE.MeshStandardMaterial({ color, roughness });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.12, 0.46), mat(0x3a3f47));
+    body.position.set(0, y0 + 0.13, 0);
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.4), mat(0xf28c28, 0.45));
+    deck.position.set(0, y0 + 0.2, 0);
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.1, 8), mat(0x222222));
+    mast.position.set(0, y0 + 0.25, 0.14);
+    const cam = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.05, 0.05), mat(0x111111, 0.3));
+    cam.position.set(0, y0 + 0.3, 0.16);
+    root.add(body, deck, mast, cam);
+    const wheels = [];
+    for (const x of [-0.2, 0.2]) for (const z of [-0.16, 0.16]) {
+      const w = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.05, 16), mat(0x151515, 0.9));
+      w.rotation.order = "ZXY";
+      w.rotation.z = Math.PI / 2; // axle along x
+      w.position.set(x, y0 + 0.07, z);
+      // A hub mark, so the spin is visible.
+      const hub = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.09, 0.02), mat(0x888888));
+      w.add(hub);
+      wheels.push(w);
+      root.add(w);
+    }
+    return { root, wheels, wheelRadius: 0.07 };
+  }
+
+  /** A simple 1.6 m humanoid: box torso, head with a visor, swinging limbs. Forward is +z. */
+  _buildHumanoid() {
+    const root = new THREE.Group();
+    const y0 = this._feet();
+    const shell = new THREE.MeshStandardMaterial({ color: 0xdfe3e8, roughness: 0.5 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.6 });
+    const box = (w, h, d, m) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    /** A limb hanging from a pivot, so rotating the pivot swings it. */
+    const limb = (x, y, w, len, m) => {
+      const pivot = new THREE.Group();
+      pivot.position.set(x, y, 0);
+      const seg = box(w, len, w, m);
+      seg.position.y = -len / 2;
+      pivot.add(seg);
+      root.add(pivot);
+      return pivot;
+    };
+    const pelvis = box(0.3, 0.12, 0.18, dark);
+    pelvis.position.y = y0 + 0.86;
+    const torso = box(0.38, 0.5, 0.2, shell);
+    torso.position.y = y0 + 1.17;
+    const neck = box(0.08, 0.06, 0.08, dark);
+    neck.position.y = y0 + 1.45;
+    const head = box(0.2, 0.22, 0.2, shell);
+    head.position.y = y0 + 1.58;
+    const visor = box(0.16, 0.06, 0.02, dark);
+    visor.position.set(0, y0 + 1.6, 0.105);
+    root.add(pelvis, torso, neck, head, visor);
+    const legs = [limb(-0.09, y0 + 0.82, 0.11, 0.8, shell), limb(0.09, y0 + 0.82, 0.11, 0.8, shell)];
+    const arms = [limb(-0.25, y0 + 1.38, 0.08, 0.6, shell), limb(0.25, y0 + 1.38, 0.08, 0.6, shell)];
+    return { root, legs, arms, torso, head, visor, y0 };
+  }
+
+  /**
+   * Walk animation, driven by how fast the visual is moving or turning, so it
+   * fades out when the robot stops. The Go2 trots (diagonal leg pairs in
+   * antiphase, knees bending to lift each foot on its forward swing), the
+   * rover spins its wheels, the humanoid swings its legs and arms.
    */
   _animateGait(dt) {
-    if (!this._legs?.length || !(dt > 0)) return;
-    const g = this._gait;
+    if (!(dt > 0)) return;
+    const g = (this._gait ??= { phase: 0, amp: 0, last: null });
     const pos = this.group.position, yaw = this.group.rotation.y;
-    let speed = 0;
+    let speed = 0, ahead = 0;
     if (g.last) {
       const turn = Math.abs(Math.atan2(Math.sin(yaw - g.last.yaw), Math.cos(yaw - g.last.yaw)));
+      const dx = pos.x - g.last.x, dz = pos.z - g.last.z;
+      ahead = dx * Math.sin(yaw) + dz * Math.cos(yaw); // signed distance along the heading
       // A turn in place steps too; ~0.25 m/s-equivalent per rad/s.
-      speed = (Math.hypot(pos.x - g.last.x, pos.z - g.last.z) + turn * 0.25) / dt;
+      speed = (Math.hypot(dx, dz) + turn * 0.25) / dt;
     }
     g.last = { x: pos.x, z: pos.z, yaw };
-    if (speed > 5) speed = 0; // a teleport, not a walk
+    if (speed > 5) speed = ahead = 0; // a teleport, not a walk
     const target = Math.min(1, speed / 0.6);
     g.amp += (target - g.amp) * Math.min(1, dt * 8);
     g.phase += dt * Math.PI * 2 * (1.6 + 1.4 * Math.min(1, speed / 1.2)); // ~1.6–3 strides/s
 
-    for (const leg of this._legs) {
-      const p = g.phase + leg.phase;
-      const swing = g.amp * 0.32 * Math.sin(p);
-      // Foot moves forward while cos(p) > 0: bend the knee then to lift it.
-      const lift = g.amp * 0.32 * Math.max(0, Math.cos(p));
-      const a = swing - lift, b = 2 * lift;
-      leg.thigh.rotation.z = a;
-      if (leg.thighGuard) leg.thighGuard.rotation.z = a;
-      leg.calf.position.set(leg.hip.x + leg.upper * Math.sin(a), leg.hip.y - leg.upper * Math.cos(a), leg.hip.z);
-      leg.calf.rotation.z = a + b;
-      leg.foot.position.set(leg.calf.position.x + leg.lower * Math.sin(a + b), leg.calf.position.y - leg.lower * Math.cos(a + b), leg.hip.z);
-      leg.foot.rotation.z = a + b;
+    const kind = this._robot ?? "go2";
+    const proc = this._procedural?.[kind];
+    if (kind === "rover" && proc) {
+      // Rolling: spin by distance travelled; turning in place spins the sides apart.
+      const spin = ahead / proc.wheelRadius;
+      const turnSpin = (Math.atan2(Math.sin(yaw - (g.lastYaw ?? yaw)), Math.cos(yaw - (g.lastYaw ?? yaw))) * 0.2) / proc.wheelRadius;
+      proc.wheels.forEach((w) => {
+        // ZXY order: y spins the wheel about its own axle before z lays it on its side.
+        w.rotation.y -= spin + (w.position.x < 0 ? turnSpin : -turnSpin);
+      });
+    } else if (kind === "humanoid" && proc) {
+      const sw = g.amp * 0.45 * Math.sin(g.phase);
+      proc.legs[0].rotation.x = sw;
+      proc.legs[1].rotation.x = -sw;
+      proc.arms[0].rotation.x = -sw * 0.8;
+      proc.arms[1].rotation.x = sw * 0.8;
+      // A small bob, twice per stride.
+      const bob = g.amp * 0.02 * Math.abs(Math.cos(g.phase));
+      for (const m of [proc.torso, proc.head, proc.visor]) m.position.y = (m.userData.y ??= m.position.y) + bob;
+    } else if (this._legs?.length) {
+      for (const leg of this._legs) {
+        const p = g.phase + leg.phase;
+        const swing = g.amp * 0.32 * Math.sin(p);
+        // Foot moves forward while cos(p) > 0: bend the knee then to lift it.
+        const lift = g.amp * 0.32 * Math.max(0, Math.cos(p));
+        const a = swing - lift, b = 2 * lift;
+        leg.thigh.rotation.z = a;
+        if (leg.thighGuard) leg.thighGuard.rotation.z = a;
+        leg.calf.position.set(leg.hip.x + leg.upper * Math.sin(a), leg.hip.y - leg.upper * Math.cos(a), leg.hip.z);
+        leg.calf.rotation.z = a + b;
+        leg.foot.position.set(leg.calf.position.x + leg.lower * Math.sin(a + b), leg.calf.position.y - leg.lower * Math.cos(a + b), leg.hip.z);
+        leg.foot.rotation.z = a + b;
+      }
     }
+    g.lastYaw = yaw;
   }
 
   _syncSpineCollider() {
@@ -368,6 +478,8 @@ export class AiAvatar {
     });
     this.group.add(this.model);
     this._setupGait();
+    // A robot picked before the model finished loading keeps its look.
+    if (this._robot && this._robot !== "go2" && this._procedural?.[this._robot]) this.model.visible = false;
 
     if (gltf.animations?.length) {
       this.mixer = new THREE.AnimationMixer(this.model);

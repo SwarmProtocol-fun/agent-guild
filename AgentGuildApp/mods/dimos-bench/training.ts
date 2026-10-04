@@ -46,6 +46,37 @@ export type Actor = "human" | "agent";
 export type EpisodeStatus = "running" | "success" | "failed" | "stopped";
 export type Driver = "own" | "server";
 
+/**
+ * The robots the DimSim trainer offers (their physical profiles live in the
+ * sim, dimsim/src/agentGuildEmbed.js ROBOTS; the ids must match). Each robot
+ * has its own lessons and learning curves: what works for one says little
+ * about another.
+ */
+export const SIM_ROBOTS = [
+  { id: "go2", label: "Unitree Go2 (quadruped)", about: "a Unitree Go2 quadruped robot, about 0.4 m tall, with its camera 0.3 m off the floor. It fits under table tops." },
+  { id: "rover", label: "Wheeled rover", about: "a small four-wheeled rover, about 0.3 m tall, with its camera 0.24 m off the floor. It fits under table tops." },
+  { id: "humanoid", label: "Humanoid", about: "a 1.6 m humanoid robot with its camera at head height (1.5 m), so it sees over furniture. It can't pass under table tops." },
+] as const;
+export type SimRobot = (typeof SIM_ROBOTS)[number]["id"];
+export const DEFAULT_ROBOT: SimRobot = "go2";
+
+/** A robot id from a request, defaulting to the Go2. */
+export function parseRobot(v: unknown): SimRobot {
+  return SIM_ROBOTS.find((r) => r.id === v)?.id ?? DEFAULT_ROBOT;
+}
+
+/** An episode's robot: older episodes, from before the picker, were all Go2. */
+export function episodeRobot(ep: Pick<Episode, "robot">): SimRobot {
+  return parseRobot(ep.robot);
+}
+
+export function robotInfo(id: SimRobot) {
+  return SIM_ROBOTS.find((r) => r.id === id) ?? SIM_ROBOTS[0];
+}
+
+/** The memory tag a lesson carries for its robot; untagged (older) lessons are the Go2's. */
+export const robotTag = (id: SimRobot) => `robot:${id}`;
+
 /** What the robot sees after a move, as the panel posts it to the drive relay. */
 export interface DriveObservation {
   /** Increments with every observation; the agent's move must name the one it answers. */
@@ -139,6 +170,8 @@ export interface Episode {
    * stand-in on the server. Absent on older episodes, which were all "server".
    */
   driver?: Driver;
+  /** Which robot drove; absent on older episodes, which were all the Go2. */
+  robot?: SimRobot;
   model: string | null;
   status: EpisodeStatus;
   steps: number;
@@ -251,14 +284,19 @@ export interface LessonEntry {
  * then its failures, then what worked on other tasks (where things are in the
  * apartment carries over), then the rest.
  */
-export function rankLessons(entries: LessonEntry[], taskId: string, max = 8): string[] {
+export function rankLessons(entries: LessonEntry[], taskId: string, max = 8, robot: SimRobot = DEFAULT_ROBOT): string[] {
+  /** This robot's lessons only; untagged ones predate the robot picker and are the Go2's. */
+  const forRobot = (e: LessonEntry) => {
+    const tagged = e.tags?.find((t) => t.startsWith("robot:"));
+    return tagged ? tagged === robotTag(robot) : robot === DEFAULT_ROBOT;
+  };
   const rank = (e: LessonEntry) => {
     const mine = e.tags?.includes(taskId) ?? false;
     const ok = e.tags?.includes("success") ?? false;
     return mine ? (ok ? 0 : 1) : ok ? 2 : 3;
   };
   return entries
-    .filter((e) => e.tags?.includes("dimsim"))
+    .filter((e) => e.tags?.includes("dimsim") && forRobot(e))
     .map((e, k) => ({ e, k, r: rank(e) }))
     .sort((a, b) => a.r - b.r || a.k - b.k)
     .slice(0, max)
@@ -312,6 +350,7 @@ export function exportLine(ep: Episode, step: EpisodeStep, withImages: boolean):
     task_id: ep.taskId,
     instruction: ep.task,
     scene: ep.scene,
+    robot: episodeRobot(ep),
     actor: ep.actor,
     model: ep.model,
     outcome: ep.status,

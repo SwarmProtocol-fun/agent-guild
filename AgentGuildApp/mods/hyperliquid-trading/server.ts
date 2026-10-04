@@ -40,9 +40,28 @@ import {
   type DcaParams,
   type GridParams,
   type SniperParams,
+  type AiParams,
   type Strategy,
+  recordAiDecision,
+  getAiDecisions,
+  createAiRequest,
+  getAiRequest,
+  listOpenAiRequests,
+  answerAiRequest,
+  expireAiRequest,
+  type AiRequest,
 } from "@/lib/mods/hyperliquid-store";
 import crypto from "crypto";
+import {
+  buildSnapshot,
+  decisionRequest,
+  decisionToAction,
+  parseDecision,
+  type AiAction,
+  type AiDecision,
+  type AiPosition,
+} from "./ai-trader-core";
+import type { Candle } from "./indicators";
 
 type HlNetwork = "testnet" | "mainnet";
 
@@ -172,6 +191,11 @@ async function getTradingWallet(agentId: string): Promise<{ network: HlNetwork; 
   }
   return { network: wallet.network, address, instant: false };
 }
+
+/** Chart intervals the terminal offers, in Hyperliquid's candleSnapshot naming. */
+const CANDLE_INTERVAL_MS: Record<string, number> = {
+  "1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+};
 
 /** Applied when instant trading is switched on for an agent with no risk limits — the platform signing alone must never be unbounded. */
 const INSTANT_DEFAULT_RISK = { leverage: 3, maxPositionUsd: 100, maxDailyLossUsd: 50 };
@@ -349,6 +373,18 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
     return { status: 400, body: { error: (err as Error).message } };
   }
 
+  if (strategy.type === "ai") {
+    // The action the model chose when the tick flagged this (no fresh model call).
+    const ctx = (strategy.pendingContext ?? {}) as { action?: AiAction; isLong?: boolean; notionalUsd?: number };
+    if (!ctx.action) return { status: 400, body: { error: "Pending AI decision has no action" } };
+    const pos = ctx.isLong != null && ctx.notionalUsd ? { isLong: ctx.isLong, notionalUsd: ctx.notionalUsd } : null;
+    const placed = await placeAiAction(strategy, ctx.action, pos, privateKey, network);
+    if (placed && "error" in placed) return { status: 400, body: placed };
+    await clearStrategyPending(strategy.id, placed?.params);
+    if (!placed) return { status: 400, body: { error: "Nothing to do — the position has already changed" } };
+    return { taskId: placed.taskId };
+  }
+
   // A "new-listing ANY" sniper doesn't know its target coin until the
   // tick evaluator catches one — that's what pendingContext.detectedCoin
   // is for. Every other strategy type just trades its own `coin`.
@@ -376,6 +412,281 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
   return result;
 }
 
+// ── AI Trader ────────────────────────────────────────────────────────────────
+
+const AI_MIN_INTERVAL_MS = 15 * 60_000;
+/** How long the agent has to answer one live round before it's skipped. */
+const AI_ANSWER_WINDOW_MS = 10 * 60_000;
+/** A backtest waits on the agent one bar at a time; each question lives this long. */
+const AI_BACKTEST_ANSWER_MS = 3 * 60_000;
+/** A flip whose close hasn't filled within this long is abandoned. */
+const FLIP_GIVE_UP_MS = 10 * 60_000;
+const AI_SNAPSHOT_HISTORY = 112; // 72 shown + warm-up for SMA40/RSI
+
+/** The largest chart interval no longer than the bot's decision interval. */
+function candleIntervalFor(intervalMs: number): string {
+  const fits = Object.entries(CANDLE_INTERVAL_MS).filter(([, ms]) => ms <= intervalMs);
+  return fits.length ? fits[fits.length - 1][0] : "1m";
+}
+
+async function fetchCandles(coin: string, interval: string, bars: number, network: HlNetwork, endTime = Date.now()): Promise<Candle[]> {
+  const ms = CANDLE_INTERVAL_MS[interval];
+  const raw = await hlInfo<{ t: number; o: string; h: string; l: string; c: string; v: string }[]>(
+    { type: "candleSnapshot", req: { coin, interval, startTime: endTime - ms * bars, endTime } },
+    network,
+  );
+  return raw.map((k) => ({ t: k.t, o: Number(k.o), h: Number(k.h), l: Number(k.l), c: Number(k.c), v: Number(k.v) }));
+}
+
+/** Perps account value plus free spot USDC (unified accounts park idle margin on spot). */
+async function accountEquity(wallet: string, network: HlNetwork) {
+  const [state, spot] = await Promise.all([
+    hlInfo<ClearinghouseState>({ type: "clearinghouseState", user: wallet }, network),
+    hlInfo<{ balances?: { coin: string; total: string; hold: string }[] }>(
+      { type: "spotClearinghouseState", user: wallet }, network,
+    ).catch(() => ({ balances: [] })),
+  ]);
+  const usdc = spot.balances?.find((b) => b.coin === "USDC");
+  const spotUsdc = usdc ? Math.max(0, Number(usdc.total) - Number(usdc.hold)) : 0;
+  const perpsValue = Number(state.marginSummary.accountValue);
+  return { state, perpsValue, spotUsdc, accountValue: perpsValue + spotUsdc };
+}
+
+function positionFor(state: ClearinghouseState, coin: string): { position: AiPosition; notionalUsd: number } | null {
+  const p = state.assetPositions.find((a) => a.position.coin === coin);
+  const size = p ? Number(p.position.szi) : 0;
+  if (!p || size === 0) return null;
+  return {
+    position: { isLong: size > 0, size, entryPx: Number(p.position.entryPx), unrealizedPnl: Number(p.position.unrealizedPnl) },
+    notionalUsd: Math.abs(Number(p.position.positionValue)),
+  };
+}
+
+/**
+ * Sends the order(s) for one AI action. Opens are a fixed sizeUsd; a close
+ * is reduce-only for the whole position. A flip only sends its close here and
+ * records flipTo — the tick opens the new side once the close has filled,
+ * so the two orders can never race each other on the worker.
+ * Returns null when the action no longer applies (e.g. nothing to close).
+ */
+async function placeAiAction(
+  strategy: Strategy,
+  action: AiAction,
+  pos: { isLong: boolean; notionalUsd: number } | null,
+  privateKey: string,
+  network: HlNetwork,
+): Promise<{ taskId: string; params?: AiParams } | { error: string } | null> {
+  const params = strategy.params as AiParams;
+  const base = { orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, privateKey, network };
+  if (action === "open-long" || action === "open-short") {
+    return enforceRiskAndEnqueue({ ...base, isBuy: action === "open-long", sizeUsd: strategy.sizeUsd, leverage: params.leverage });
+  }
+  if (action === "close" || action === "flip-long" || action === "flip-short") {
+    if (!pos) return null;
+    const closed = await enforceRiskAndEnqueue({ ...base, isBuy: !pos.isLong, sizeUsd: pos.notionalUsd, reduceOnly: true });
+    if ("error" in closed || action === "close") return closed;
+    const flipped: AiParams = { ...params, flipTo: action === "flip-long" ? "long" : "short" };
+    await touchStrategyRun(strategy.id, flipped);
+    return { ...closed, params: flipped };
+  }
+  return null;
+}
+
+/** Signs and sends now for an instant-trading agent; otherwise leaves it pending for the agent's passphrase. */
+async function executeOrQueueAiAction(
+  strategy: Strategy,
+  action: AiAction,
+  pos: { isLong: boolean; notionalUsd: number } | null,
+): Promise<{ taskId: string | null; error: string | null }> {
+  try {
+    await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+  } catch (err) {
+    return { taskId: null, error: (err as Error).message };
+  }
+  if (!(await getInstantTrading(strategy.agentId))) {
+    await markStrategyPending(strategy.id, { action, isLong: pos?.isLong ?? null, notionalUsd: pos?.notionalUsd ?? null });
+    return { taskId: null, error: "Waiting for the wallet passphrase to execute" };
+  }
+  const { privateKey, network } = await resolveSigningKey(strategy.agentId);
+  const placed = await placeAiAction(strategy, action, pos, privateKey, network);
+  if (!placed) return { taskId: null, error: null };
+  if ("error" in placed) return { taskId: null, error: placed.error };
+  return { taskId: placed.taskId, error: null };
+}
+
+type AiRecord = Partial<Parameters<typeof recordAiDecision>[1]>;
+function recordFor(strategyId: string) {
+  return (d: AiRecord) => recordAiDecision(strategyId, {
+    decision: null, action: "hold", reasoning: "", model: null, price: null, equity: null, taskId: null, error: null, ...d,
+  });
+}
+
+/**
+ * One AI Trader round for one bot. Never runs a model: it puts the round's
+ * question to the agent as an AiRequest, and the agent's own daemon answers
+ * through POST /ai/requests/:id/answer (applyAiAnswer). A round the agent
+ * doesn't answer within AI_ANSWER_WINDOW_MS is skipped.
+ */
+async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | "skipped" | "error"> {
+  const params = strategy.params as AiParams;
+  const record = recordFor(strategy.id);
+
+  // A round already out with the agent: wait, or skip it once it's expired.
+  if (params.openRequestId) {
+    const open = await getAiRequest(params.openRequestId);
+    if (open?.status === "open" && open.expiresAt.getTime() > Date.now()) return "skipped";
+    if (open?.status === "open") await expireAiRequest(open.id);
+    await touchStrategyRun(strategy.id, { ...params, openRequestId: null });
+    if (open?.status !== "answered") {
+      await record({ error: "The agent didn't answer this round in time — is its daemon (agent-guild daemon) running?" });
+      return "skipped";
+    }
+    return "skipped";
+  }
+
+  const wallet = await getTradingWallet(strategy.agentId);
+  if (!wallet?.address) {
+    await touchStrategyRun(strategy.id);
+    await record({ error: "This agent has no trading wallet yet." });
+    return "error";
+  }
+  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
+  const held = positionFor(state, strategy.coin);
+
+  // Second half of a flip: open the new side once the old one is gone.
+  if (params.flipTo) {
+    const wantLong = params.flipTo === "long";
+    if (held && held.position.isLong === wantLong) {
+      await touchStrategyRun(strategy.id, { ...params, flipTo: null });
+      return "skipped";
+    }
+    if (held) {
+      if (Date.now() - (strategy.lastRunAt?.getTime() ?? 0) > FLIP_GIVE_UP_MS) {
+        await touchStrategyRun(strategy.id, { ...params, flipTo: null });
+        await record({ error: "The flip's close never filled — gave up opening the new side." });
+        return "error";
+      }
+      return "skipped"; // close still in flight
+    }
+    await touchStrategyRun(strategy.id, { ...params, flipTo: null });
+    const action: AiAction = wantLong ? "open-long" : "open-short";
+    const sent = await executeOrQueueAiAction({ ...strategy, params: { ...params, flipTo: null } }, action, null);
+    await record({ action, reasoning: "Second half of the flip — opening the new side.", equity: accountValue, ...sent });
+    return "decided";
+  }
+
+  // Claim the round so an overlapping tick can't ask twice.
+  await touchStrategyRun(strategy.id);
+
+  // Drawdown elimination — permanent, like a blown-up account.
+  const startEquity = params.startEquity ?? (accountValue > 0 ? accountValue : undefined);
+  if (startEquity != null && accountValue <= startEquity * (1 - params.maxDrawdownPct / 100)) {
+    const sent = held
+      ? await executeOrQueueAiAction(strategy, "close", { isLong: held.position.isLong, notionalUsd: held.notionalUsd })
+      : { taskId: null, error: null };
+    await touchStrategyRun(strategy.id, { ...params, startEquity, eliminated: true });
+    await toggleStrategy(strategy.id, false);
+    await record({
+      action: held ? "close" : "hold",
+      reasoning: `Eliminated: equity ${accountValue.toFixed(2)} is ${params.maxDrawdownPct}% or more below the starting ${startEquity.toFixed(2)}.`,
+      equity: accountValue, ...sent,
+    });
+    return "decided";
+  }
+  if (accountValue < 10) {
+    await record({ error: `Wallet holds $${accountValue.toFixed(2)} — fund it with at least $10 on Hyperliquid ${wallet.network} to trade.`, equity: accountValue });
+    return "skipped";
+  }
+
+  const interval = candleIntervalFor(params.intervalMs);
+  const [candles, book, market] = await Promise.all([
+    fetchCandles(strategy.coin, interval, AI_SNAPSHOT_HISTORY, wallet.network),
+    hlInfo<{ levels: { px: string }[][] }>({ type: "l2Book", coin: strategy.coin }, wallet.network).catch(() => null),
+    getMarketOverview(wallet.network).catch(() => []),
+  ]);
+  if (candles.length < 20) {
+    await record({ error: `Not enough ${strategy.coin} price history to decide.` });
+    return "error";
+  }
+  const coinInfo = market.find((m) => m.coin === strategy.coin);
+  const snapshot = buildSnapshot({
+    coin: strategy.coin, candles, interval,
+    bid: book?.levels?.[0]?.[0] ? Number(book.levels[0][0].px) : null,
+    ask: book?.levels?.[1]?.[0] ? Number(book.levels[1][0].px) : null,
+    fundingRatePct: coinInfo?.fundingRatePct ?? null,
+    openInterestUsd: coinInfo?.openInterestUsd ?? null,
+  });
+  const requestId = await createAiRequest({
+    agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id, coin: strategy.coin,
+    ...decisionRequest(strategy.coin, snapshot, held?.position ?? null),
+    expiresAt: new Date(Date.now() + Math.min(AI_ANSWER_WINDOW_MS, params.intervalMs)),
+  });
+  await touchStrategyRun(strategy.id, { ...params, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
+  return "asked";
+}
+
+/**
+ * The agent answered a live round: trade it. The position is re-read now, not
+ * taken from when the question was asked, so e.g. a CLOSE after the owner
+ * already closed by hand does nothing.
+ */
+async function applyAiAnswer(req: AiRequest, decision: AiDecision, reasoning: string): Promise<{ action: AiAction; taskId: string | null; error: string | null }> {
+  const strategy = req.strategyId ? await getStrategy(req.strategyId) : null;
+  if (!strategy || strategy.type !== "ai") return { action: "hold", taskId: null, error: "Bot no longer exists" };
+  const params = strategy.params as AiParams;
+  const record = recordFor(strategy.id);
+  if (params.openRequestId === req.id) await touchStrategyRun(strategy.id, { ...params, openRequestId: null });
+  if (!strategy.enabled) {
+    await record({ decision, action: "hold", reasoning, error: "Bot was stopped before the answer arrived — not traded." });
+    return { action: "hold", taskId: null, error: "Bot is stopped" };
+  }
+
+  const wallet = await getTradingWallet(strategy.agentId);
+  if (!wallet?.address) {
+    await record({ decision, reasoning, error: "This agent has no trading wallet yet." });
+    return { action: "hold", taskId: null, error: "No trading wallet" };
+  }
+  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
+  const held = positionFor(state, strategy.coin);
+  const action = decisionToAction(decision, held?.position ?? null);
+  const sent = action === "hold"
+    ? { taskId: null, error: null }
+    : await executeOrQueueAiAction(strategy, action, held ? { isLong: held.position.isLong, notionalUsd: held.notionalUsd } : null);
+  const price = await getMidPrice(strategy.coin, wallet.network).catch(() => null);
+  await record({ decision, action, reasoning, model: "agent", price, equity: accountValue, ...sent });
+  return { action, ...sent };
+}
+
+/**
+ * Hub tick phase for AI Trader bots: puts a question to every bot whose
+ * interval is up, retires rounds the agent didn't answer, and opens the
+ * second side of any flip. Fast — no model runs here; the agents answer on
+ * their own time.
+ */
+export async function runAiTraderTick(): Promise<{ due: number; asked: number; errors: number }> {
+  const now = Date.now();
+  const due = (await getEnabledStrategies())
+    .filter((s) => s.type === "ai" && !s.pendingSignal)
+    .filter((s) => {
+      const p = s.params as AiParams;
+      if (p.eliminated) return false;
+      if (p.flipTo || p.openRequestId) return true;
+      return now - (s.lastRunAt?.getTime() ?? 0) >= p.intervalMs;
+    });
+
+  const results = await Promise.allSettled(due.map(runAiStrategy));
+  let asked = 0;
+  let errors = 0;
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      errors++;
+      console.error(`[hyperliquid-ai] ${due[i].id} failed:`, r.reason);
+    } else if (r.value === "asked") asked++;
+    else if (r.value === "error") errors++;
+  });
+  return { due: due.length, asked, errors };
+}
+
 /**
  * Evaluated once per Hub tick (see the mod's added phase in
  * `/api/internal/tick/route.ts`). DCA fires on a fixed interval; grid fires
@@ -397,6 +708,7 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
 
   for (const strategy of strategies) {
     if (strategy.pendingSignal) continue; // already waiting on the agent — don't re-trigger
+    if (strategy.type === "ai") continue; // decided by runAiTraderTick
     try {
       if (strategy.type === "dca") {
         const params = strategy.params as DcaParams;
@@ -574,6 +886,28 @@ const AGENT_TOOLS: AgentTool[] = [
     method: "GET",
     path: "history/{agentId}",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "hyperliquid_ai_requests",
+    description: "Questions waiting for you from your AI Trader bots and backtests: each has a system prompt and a market snapshot. Decide each one and answer with hyperliquid_ai_answer before it expires.",
+    method: "GET",
+    path: "ai/requests",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "hyperliquid_ai_answer",
+    description: "Answer one AI Trader question. A live bot's answer is traded immediately from your wallet, within your risk limits.",
+    method: "POST",
+    path: "ai/requests/{id}/answer",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The request id from hyperliquid_ai_requests" },
+        decision: { type: "string", enum: ["LONG", "SHORT", "CLOSE", "NOTHING"] },
+        reasoning: { type: "string", description: "A few sentences on why" },
+      },
+      required: ["id", "decision"],
+    },
   },
 ];
 
@@ -875,6 +1209,39 @@ export default defineServerMod({
       }
     },
 
+    /**
+     * GET /candles/:coin?interval=15m&network=&bars=120&end= — OHLCV candles
+     * for the terminal's chart (default last 120 bars) and the backtester
+     * (up to 1000 bars, optionally ending at `end` ms), from the public Info API.
+     */
+    "GET /candles/:coin": async (req, { params }) => {
+      try {
+        const url = new URL(req.url);
+        const network = (url.searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
+        const interval = url.searchParams.get("interval") ?? "15m";
+        const ms = CANDLE_INTERVAL_MS[interval];
+        if (!ms) return Response.json({ error: `interval must be one of ${Object.keys(CANDLE_INTERVAL_MS).join(", ")}` }, { status: 400 });
+        const bars = Math.min(1000, Math.max(10, Number(url.searchParams.get("bars")) || 120));
+        const endTime = Number(url.searchParams.get("end")) || Date.now();
+        const candles = await fetchCandles(params.coin, interval, bars, network, endTime);
+        return Response.json({ coin: params.coin, interval, candles });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /** GET /book/:coin?network= — top of the L2 order book (bids and asks, best first). */
+    "GET /book/:coin": async (req, { params }) => {
+      try {
+        const network = (new URL(req.url).searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
+        const book = await hlInfo<{ levels: { px: string; sz: string }[][] }>({ type: "l2Book", coin: params.coin }, network);
+        const side = (levels: { px: string; sz: string }[] = []) => levels.slice(0, 12).map((l) => ({ px: Number(l.px), sz: Number(l.sz) }));
+        return Response.json({ coin: params.coin, bids: side(book.levels?.[0]), asks: side(book.levels?.[1]) });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
     /** GET /positions/:wallet?network=testnet|mainnet — open positions, read directly from Hyperliquid's public Info API. */
     "GET /positions/:wallet": async (req, { params }) => {
       try {
@@ -897,9 +1264,14 @@ export default defineServerMod({
     "GET /account/:wallet": async (req, { params }) => {
       try {
         const network = (new URL(req.url).searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
-        const state = await hlInfo<ClearinghouseState>({ type: "clearinghouseState", user: params.wallet }, network);
+        // Unified accounts (Hyperliquid's default for new accounts) keep idle
+        // USDC on the spot side, so perps accountValue alone reads ~$0 for a
+        // freshly funded wallet. Equity = perps value + free spot USDC.
+        const { state, perpsValue, spotUsdc, accountValue } = await accountEquity(params.wallet, network);
         return Response.json({
-          accountValue: Number(state.marginSummary.accountValue),
+          accountValue,
+          perpsValue,
+          spotUsdc,
           marginUsed: Number(state.marginSummary.totalMarginUsed),
           totalPositionValue: Number(state.marginSummary.totalNtlPos),
         });
@@ -1108,10 +1480,12 @@ export default defineServerMod({
     },
 
     /**
-     * POST /strategy — create a DCA, grid, signal, or sniper strategy.
+     * POST /strategy — create a DCA, grid, signal, sniper, or ai strategy.
      * Requires the "hyperliquid-run-strategy" capability. DCA/grid/sniper are
-     * evaluated by the tick phase in /api/internal/tick; signal only fires via
-     * POST /strategy/:id/signal or the public POST /webhook/:id.
+     * evaluated by the tick phase in /api/internal/tick and ai by its AI
+     * Trader phase, which asks the agent's own model each round (params:
+     * intervalMs ≥ 15 min, maxDrawdownPct, leverage?); signal only fires via POST /strategy/:id/signal or the
+     * public POST /webhook/:id.
      * Body: { orgId, agentId, wallet, type, coin, sizeUsd, params }
      * For a sniper strategy, coin may be "ANY" (new-listing mode only, to
      * catch whichever coin lists next rather than a specific one).
@@ -1125,8 +1499,22 @@ export default defineServerMod({
       if (!orgId || !agentId || !wallet || !type || !coin || !sizeUsd) {
         return Response.json({ error: "orgId, agentId, wallet, type, coin, sizeUsd are required" }, { status: 400 });
       }
-      if (!["dca", "grid", "signal", "sniper"].includes(type)) {
-        return Response.json({ error: "type must be dca, grid, signal, or sniper" }, { status: 400 });
+      if (!["dca", "grid", "signal", "sniper", "ai"].includes(type)) {
+        return Response.json({ error: "type must be dca, grid, signal, sniper, or ai" }, { status: 400 });
+      }
+      let storedParams = params ?? {};
+      if (type === "ai") {
+        const intervalMs = Number(params?.intervalMs ?? 3_600_000);
+        const maxDrawdownPct = Number(params?.maxDrawdownPct ?? 50);
+        const leverage = params?.leverage != null ? Number(params.leverage) : undefined;
+        if (!(intervalMs >= AI_MIN_INTERVAL_MS)) {
+          return Response.json({ error: "params.intervalMs must be at least 15 minutes for an ai strategy" }, { status: 400 });
+        }
+        if (!(maxDrawdownPct > 0 && maxDrawdownPct < 100)) {
+          return Response.json({ error: "params.maxDrawdownPct must be between 0 and 100" }, { status: 400 });
+        }
+        if (coin === "ANY") return Response.json({ error: "an ai strategy needs a specific coin" }, { status: 400 });
+        storedParams = { intervalMs, maxDrawdownPct, ...(leverage ? { leverage } : {}), flipTo: null, openRequestId: null } satisfies AiParams;
       }
       if (type === "dca" && !params?.intervalMs) {
         return Response.json({ error: "params.intervalMs is required for a dca strategy" }, { status: 400 });
@@ -1155,8 +1543,111 @@ export default defineServerMod({
         return Response.json({ error: (err as Error).message }, { status: 403 });
       }
 
-      const id = await createStrategy({ orgId, agentId, wallet, type, coin, sizeUsd, enabled: true, params: params ?? {} });
+      const id = await createStrategy({ orgId, agentId, wallet, type, coin, sizeUsd, enabled: true, params: storedParams });
       return Response.json({ id });
+    },
+
+    /** GET /strategy/:id/decisions — an AI Trader bot's decision log, newest first (decision, action, reasoning, outcome). */
+    "GET /strategy/:id/decisions": async (_req, ctx) => {
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const access = await requireAgentOrgAccess(ctx, strategy.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      return Response.json({ decisions: await getAiDecisions(strategy.id) });
+    },
+
+    /**
+     * GET /ai/requests — the questions waiting for this agent's own model
+     * (AI Trader rounds and backtest bars), oldest first. Agent-signed only:
+     * this is the agent's work queue, which its daemon polls.
+     */
+    "GET /ai/requests": async (_req, ctx) => {
+      if (!ctx.agent) return Response.json({ error: "Agent signature or token required" }, { status: 401 });
+      const open = await listOpenAiRequests(ctx.agent.agentId);
+      return Response.json({
+        requests: open.map((r) => ({
+          id: r.id, purpose: r.purpose, coin: r.coin, system: r.system, prompt: r.prompt,
+          expiresAt: r.expiresAt.toISOString(), answer: "POST ai/requests/{id}/answer { decision, reasoning } or { text }",
+        })),
+      });
+    },
+
+    /**
+     * POST /ai/requests/:id/answer — the agent's answer to one question.
+     * Body: { decision: LONG|SHORT|CLOSE|NOTHING, reasoning? } or { text }
+     * (free text from the model — the last decision word in it wins). Only
+     * the agent the question was asked of may answer, once, before it
+     * expires. A live round is traded straight away.
+     */
+    "POST /ai/requests/:id/answer": async (req, ctx) => {
+      if (!ctx.agent) return Response.json({ error: "Agent signature or token required" }, { status: 401 });
+      const request = await getAiRequest(ctx.params.id);
+      if (!request || request.agentId !== ctx.agent.agentId) {
+        return Response.json({ error: "Request not found" }, { status: 404 });
+      }
+      const body = await req.json().catch(() => ({}));
+      const text = typeof body.text === "string" ? body.text : "";
+      const inPosition = /Current position: (LONG|SHORT)/.test(request.prompt);
+      const decision = typeof body.decision === "string" && ["LONG", "SHORT", "CLOSE", "NOTHING"].includes(body.decision.toUpperCase())
+        ? parseDecision(body.decision, inPosition)
+        : parseDecision(text, inPosition);
+      if (!decision) {
+        return Response.json({ error: "No decision found — answer LONG, SHORT, CLOSE or NOTHING" }, { status: 400 });
+      }
+      const reasoning = String(body.reasoning ?? text).trim().slice(0, 2000);
+      const answered = await answerAiRequest(request.id, decision, reasoning);
+      if (!answered) return Response.json({ error: "This question was already answered or has expired" }, { status: 409 });
+      if (answered.purpose !== "live") return Response.json({ ok: true, decision });
+      const outcome = await applyAiAnswer(answered, decision, reasoning);
+      return Response.json({ ok: true, decision, ...outcome });
+    },
+
+    /**
+     * POST /ai/ask — put one backtest bar's question to the agent's own model
+     * (same snapshot and prompt as a live round). Returns { id }; poll
+     * GET /ai/requests/:id for the answer.
+     * Body: { agentId, coin, interval, candles: Candle[] (oldest first, ≤ 200), position? }
+     */
+    "POST /ai/ask": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const agentId: string | undefined = ctx.agent?.agentId ?? body.agentId;
+      if (!agentId) return Response.json({ error: "agentId is required" }, { status: 400 });
+      const access = await requireAgentOrgAccess(ctx, agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+
+      const coin = typeof body.coin === "string" ? body.coin : "";
+      const interval = typeof body.interval === "string" && CANDLE_INTERVAL_MS[body.interval] ? body.interval : null;
+      const raw: unknown[] = Array.isArray(body.candles) ? body.candles : [];
+      const candles: Candle[] = raw.slice(-200).map((k) => {
+        const c = k as Record<string, unknown>;
+        return { t: Number(c.t), o: Number(c.o), h: Number(c.h), l: Number(c.l), c: Number(c.c), v: Number(c.v) };
+      }).filter((c) => [c.t, c.o, c.h, c.l, c.c, c.v].every(Number.isFinite));
+      if (!coin || !interval || candles.length < 20) {
+        return Response.json({ error: "coin, interval and at least 20 candles are required" }, { status: 400 });
+      }
+      const p = body.position as Record<string, unknown> | null | undefined;
+      const position: AiPosition | null = p && Number(p.size)
+        ? { isLong: Number(p.size) > 0, size: Number(p.size), entryPx: Number(p.entryPx), unrealizedPnl: Number(p.unrealizedPnl) || 0 }
+        : null;
+
+      const id = await createAiRequest({
+        agentId, orgId: access.orgId, purpose: "backtest", strategyId: null, coin,
+        ...decisionRequest(coin, buildSnapshot({ coin, candles, interval }), position),
+        expiresAt: new Date(Date.now() + AI_BACKTEST_ANSWER_MS),
+      });
+      return Response.json({ id });
+    },
+
+    /** GET /ai/requests/:id — one question's status and, once answered, the agent's decision and reasoning. */
+    "GET /ai/requests/:id": async (_req, ctx) => {
+      const request = await getAiRequest(ctx.params.id);
+      if (!request) return Response.json({ error: "Request not found" }, { status: 404 });
+      const access = await requireAgentOrgAccess(ctx, request.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const expired = request.status === "expired" || (request.status === "open" && request.expiresAt.getTime() <= Date.now());
+      return Response.json({
+        id: request.id, status: expired ? "expired" : request.status, decision: request.decision, reasoning: request.reasoning,
+      });
     },
 
     /** POST /strategy/:id/toggle — enable/disable a strategy. Body: { enabled } */

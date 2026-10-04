@@ -19,6 +19,9 @@
  *   floorPlan()      occupancy grid + object footprints, for the panel's minimap
  *   randomStart(target, thresholdM)  a collision-free pose reachable from the
  *                    default start and well outside the target's pass distance
+ *   robots()         the selectable robots, [{ id }]; robot() the current one's id
+ *   setRobot(id)     switch the robot (go2, rover, humanoid): its look, camera
+ *                    mount, collision heights, and what counts as walkable
  *
  * Coordinates are DimSim's: y up, forward = (sin yaw, 0, cos yaw).
  */
@@ -26,19 +29,37 @@ import { objectDistance } from "../evals/rubrics.ts";
 
 const STEP_M = 0.05; // collision-checked increments
 const CLEARANCE_M = 0.12; // stop this far from an obstacle
-const RAY_HEIGHTS = [-0.25, -0.1, 0.05]; // relative to the body centre (0.5 m when standing)
+/**
+ * The selectable robots. Only the Go2 has a real model (the GLB); the others
+ * are drawn procedurally (AiAvatar.setRobotVisual). All share the same body
+ * position and moves, so scoring is unchanged; what differs is what the robot
+ * sees and where it fits:
+ *   cameraHeight / cameraForward  POV camera mount (m above the feet / ahead of centre)
+ *   rays          heights (m above the feet) of the forward collision rays
+ *   underTables   can drive under table tops (the floor plan's "u" cells)
+ *   chase         the panel's chase camera framing
+ */
+const ROBOTS = {
+  // The Go2's rays were -0.25/-0.1/+0.05 m around its 0.37 m body centre.
+  go2: { cameraHeight: 0.3, cameraForward: 0.18, rays: [0.12, 0.27, 0.42], underTables: true, chase: { chaseBack: 1.6, chaseUp: 1.1, chaseLook: 0 } },
+  rover: { cameraHeight: 0.24, cameraForward: 0.2, rays: [0.06, 0.18, 0.32], underTables: true, chase: { chaseBack: 1.4, chaseUp: 0.9, chaseLook: -0.1 } },
+  humanoid: { cameraHeight: 1.5, cameraForward: 0.12, rays: [0.12, 0.45, 0.8, 1.15, 1.55], underTables: false, chase: { chaseBack: 2.4, chaseUp: 1.6, chaseLook: 0.5 } },
+};
 const PLAN_CELL_M = 0.2; // floor plan resolution
 const MAX_DRIVE_MPS = 1.5; // real-time drive() limits
 const MAX_DRIVE_DPS = 180;
 const DEFAULT_START = { x: 1.5, z: 3.1 }; // = APARTMENT_START in training.ts; upstream (0, 3) is under the table
 
-export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, captureRgb, getSceneState, setYaw, getYaw, followAgent }) {
+export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, captureRgb, getSceneState, setYaw, getYaw, followAgent, setEmbedView }) {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   const radius = agent.radius || 0.12;
   const bodyY = () => agent.getPosition()[1];
 
-  const feetY = bodyY() - ((agent.halfHeight || 0.25) + radius);
+  const centreAboveFeet = (agent.halfHeight || 0.25) + radius;
+  const feetY = bodyY() - centreAboveFeet;
+  let robotId = "go2";
+  const robot = () => ROBOTS[robotId];
 
   const castFrom = (x, y, z, dir, max) => {
     const hit = rapierWorld.castRay(new RAPIER.Ray({ x, y, z }, dir), max, true, undefined, undefined, ignoreCollider ?? undefined, agent.body);
@@ -60,9 +81,10 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
    * "." walkable floor, "u" under a table top (walkable, like act()'s body-height
    * rays), "f" furniture (something 0.15–1 m up), "#" wall or edge (a body-height
    * probe hits within half a cell), " " no floor. `reach` marks walkable cells
-   * connected to the floor cell nearest the default start.
+   * connected to the floor cell nearest the default start — for the current
+   * robot, since only some fit under tables. Cached per robot.
    */
-  let plan = null;
+  const plans = {};
   const buildPlan = () => {
     const objs = (getSceneState().assets ?? [])
       .filter((a) => a.transform && a._bbox)
@@ -100,7 +122,7 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
       return c >= 0 && c < cols && r >= 0 && r < rows ? r * cols + c : -1;
     };
     // Flood fill over walkable cells from the open floor nearest the default start.
-    const walkable = (k) => cells[k] === "." || cells[k] === "u";
+    const walkable = (k) => cells[k] === "." || (cells[k] === "u" && robot().underTables);
     const reach = new Uint8Array(cols * rows);
     let s0 = -1;
     for (let rad = 0; rad < 10 && s0 < 0; rad++) {
@@ -121,8 +143,8 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
         }
       }
     }
-    plan = { x0, z0, cell: PLAN_CELL_M, cols, rows, cells: cells.join(""), objects: objs, reach, ok: hits > cols * rows * 0.05 };
-    return plan;
+    plans[robotId] = { x0, z0, cell: PLAN_CELL_M, cols, rows, cells: cells.join(""), objects: objs, reach, ok: hits > cols * rows * 0.05 };
+    return plans[robotId];
   };
 
   const pose = () => {
@@ -134,19 +156,33 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
   const applyYaw = (yaw) => setYaw(yaw);
 
   /**
-   * Free distance ahead along `dir`. Rays sit at a Go2's body heights (~0.25–0.55 m
-   * off the floor), so it is stopped by walls and chairs but can pass under table tops.
+   * Free distance ahead along `dir`. Rays sit at the robot's body heights (a
+   * Go2's ~0.1–0.4 m off the floor), so it is stopped by walls and chairs; a
+   * low robot passes under table tops, a tall one doesn't.
    */
   const clearAhead = (dir) => {
     const [x, y, z] = agent.getPosition();
     let free = Infinity;
-    for (const dy of RAY_HEIGHTS) {
-      const ray = new RAPIER.Ray({ x, y: y + dy, z }, { x: dir.x, y: 0, z: dir.z });
+    for (const h of robot().rays) {
+      const ray = new RAPIER.Ray({ x, y: y - centreAboveFeet + h, z }, { x: dir.x, y: 0, z: dir.z });
       // Skip the robot's own body and the (hidden) player capsule.
       const hit = rapierWorld.castRay(ray, 20, true, undefined, undefined, ignoreCollider ?? undefined, agent.body);
       if (hit) free = Math.min(free, hit.timeOfImpact ?? hit.toi);
     }
     return free;
+  };
+
+  /**
+   * Whether a robot that can't fit under tables would run into one at (x, z).
+   * A table top is thin and sits between the collision rays, so the floor
+   * plan's "u" (under a table top) cells stand in for it.
+   */
+  const underTable = (x, z) => {
+    if (robot().underTables) return false;
+    const p = plans[robotId] ?? buildPlan();
+    if (!p.ok) return false;
+    const c = Math.floor((x - p.x0) / p.cell), r = Math.floor((z - p.z0) / p.cell);
+    return c >= 0 && c < p.cols && r >= 0 && r < p.rows && p.cells[r * p.cols + c] === "u";
   };
 
   /** Move `dist` metres along the heading (negative = back) in collision-checked steps. */
@@ -158,11 +194,12 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
     let blocked = false;
     while (moved < Math.abs(dist) - 1e-6) {
       const step = Math.min(STEP_M, Math.abs(dist) - moved);
-      if (clearAhead(dir) < radius + CLEARANCE_M + step) {
+      const [x, y, z] = agent.getPosition();
+      const reach = radius + CLEARANCE_M + step;
+      if (clearAhead(dir) < reach || underTable(x + dir.x * reach, z + dir.z * reach)) {
         blocked = true;
         break;
       }
-      const [x, y, z] = agent.getPosition();
       agent.setPosition(x + dir.x * step, y, z + dir.z * step);
       moved += step;
     }
@@ -195,12 +232,12 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
     },
 
     floorPlan() {
-      const p = plan ?? buildPlan();
+      const p = plans[robotId] ?? buildPlan();
       return { x0: p.x0, z0: p.z0, cell: p.cell, cols: p.cols, rows: p.rows, cells: p.ok ? p.cells : "", objects: p.objects };
     },
 
     randomStart(target, thresholdM) {
-      const p = plan ?? buildPlan();
+      const p = plans[robotId] ?? buildPlan();
       const y = bodyY();
       const state = getSceneState();
       const clear = (k) => {
@@ -252,6 +289,24 @@ export function installEmbedApi({ RAPIER, rapierWorld, agent, ignoreCollider, ca
       applyYaw((yaw * Math.PI) / 180);
       agent.snapVisual?.(getYaw()); // a reset teleports — snap the visual, don't glide
       return pose();
+    },
+
+    robots() {
+      return Object.keys(ROBOTS).map((id) => ({ id }));
+    },
+
+    robot() {
+      return robotId;
+    },
+
+    setRobot(id) {
+      if (!ROBOTS[id]) return robotId;
+      api.drive({});
+      robotId = id;
+      const r = robot();
+      setEmbedView?.({ cameraHeight: r.cameraHeight, cameraForward: r.cameraForward, ...r.chase });
+      agent.setRobotVisual?.(id);
+      return robotId;
     },
 
     score(target, thresholdM) {
