@@ -165,6 +165,15 @@ async function verifyToken(token: string): Promise<SessionPayload | null> {
   }
 }
 
+/** Headers route handlers trust as the verified session — only middleware may set them. */
+const SESSION_HEADERS = ["x-wallet-address", "x-session-address", "x-session-role", "x-session-id"];
+
+function stripSessionHeaders(headers: Headers): Headers {
+  const clean = new Headers(headers);
+  for (const h of SESSION_HEADERS) clean.delete(h);
+  return clean;
+}
+
 /** Apply security headers to a response */
 function withSecurityHeaders(res: NextResponse): NextResponse {
   for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
@@ -178,13 +187,20 @@ const MAX_BODY_BYTES = 2_000_000; // 2MB global limit for API routes
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Skip public assets and Next.js internals
+  // Skip public assets and Next.js internals. API paths never take this
+  // shortcut: a dynamic segment can contain a dot (/api/memory/x/daily/2026.10.05),
+  // and skipping here would hand the route raw client headers — a spoofed
+  // x-wallet-address / x-session-role: platform_admin — with no rate limit.
+  // Session headers are stripped even here, so they can never pass through.
   if (
-    pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon") ||
-    pathname.includes(".")
+    !pathname.startsWith("/api/") &&
+    (pathname.startsWith("/_next") ||
+      pathname.startsWith("/favicon") ||
+      pathname.includes("."))
   ) {
-    return withSecurityHeaders(NextResponse.next());
+    return withSecurityHeaders(
+      NextResponse.next({ request: { headers: stripSessionHeaders(req.headers) } })
+    );
   }
 
   // Enforce body-size limit on API routes
@@ -230,11 +246,7 @@ export async function middleware(req: NextRequest) {
   // authenticate via their own signature scheme) but its route handlers still
   // read these headers for session-based operator auth, so spoofed headers must
   // never reach them.
-  const requestHeaders = new Headers(req.headers);
-  requestHeaders.delete("x-wallet-address");
-  requestHeaders.delete("x-session-address");
-  requestHeaders.delete("x-session-role");
-  requestHeaders.delete("x-session-id");
+  const requestHeaders = stripSessionHeaders(req.headers);
   if (session) {
     requestHeaders.set("x-wallet-address", session.sub);
     requestHeaders.set("x-session-address", session.sub);

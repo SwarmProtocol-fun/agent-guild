@@ -137,9 +137,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         method: "POST",
         credentials: "include",
       });
-      // Clear Firebase Auth session (client-side Firestore access)
-      await firebaseSignOut(auth).catch(() => {});
     } finally {
+      // Clear Firebase Auth session (client-side Firestore access) even if
+      // the logout request failed — otherwise the old uid survives into the
+      // next login.
+      await firebaseSignOut(auth).catch(() => {});
       // Clear persisted wallet state so the wallet doesn't auto-reconnect
       // and re-trigger SIWE on next load.
       clearWalletStorage();

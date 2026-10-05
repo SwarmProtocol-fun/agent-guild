@@ -81,6 +81,19 @@ describe("useAutoSiwe", () => {
       await waitFor(() => expect(s.logout).toHaveBeenCalledTimes(1));
     });
 
+    it("only resets once per address, so a persistent mismatch can't loop wallet prompts", async () => {
+      connect(SOL_REAL, null);
+      s.session = { authenticated: true, address: SOL_REAL, loading: false };
+      s.auth.currentUser = { uid: SOL_REAL.toLowerCase() };
+      const first = renderHook(() => useAutoSiwe());
+      await waitFor(() => expect(s.logout).toHaveBeenCalledTimes(1));
+      first.unmount();
+
+      renderHook(() => useAutoSiwe()); // re-login produced the same bad uid
+      await act(async () => {});
+      expect(s.logout).toHaveBeenCalledTimes(1);
+    });
+
     it("keeps the session when the uid is the exact-case Solana address", async () => {
       connect(SOL_REAL, null);
       s.session = { authenticated: true, address: SOL_REAL, loading: false };

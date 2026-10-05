@@ -38,6 +38,8 @@ export interface AutoLoginStatus {
 // globally-mounted auto-login is doing, instead of an endless spinner.
 let status: AutoLoginStatus = { phase: "idle", error: null };
 let retryNonce = 0;
+// Session addresses already logged out once for a stale Firebase uid.
+const staleUidResets = new Set<string>();
 const listeners = new Set<() => void>();
 function emit() {
   listeners.forEach((l) => l());
@@ -60,6 +62,7 @@ export function useAutoLoginStatus(): AutoLoginStatus {
 /** Retry a failed login for the connected wallet. */
 export function retryAutoLogin() {
   retryNonce += 1;
+  staleUidResets.clear();
   setStatus(IDLE);
 }
 
@@ -192,7 +195,16 @@ export function useAutoSiwe() {
     Promise.resolve(auth.authStateReady?.())
       .then(() => {
         const uid = auth.currentUser?.uid;
-        if (cancelled || !uid || uid === canonicalizeWalletAddress(sessionAddress)) return;
+        const expected = canonicalizeWalletAddress(sessionAddress);
+        if (cancelled || !uid || uid === expected) return;
+        // Once per address: if a fresh login still yields a mismatched uid
+        // (sign-in failed, or a server minting the old format), logging out
+        // again would loop the user through wallet prompts forever.
+        if (staleUidResets.has(expected)) {
+          debug.error("[Agent Guild:autoLogin] Firebase uid still doesn't match session after re-login:", uid);
+          return;
+        }
+        staleUidResets.add(expected);
         debug.log("[Agent Guild:autoLogin] Firebase uid doesn't match session, re-authenticating");
         logout();
       })
