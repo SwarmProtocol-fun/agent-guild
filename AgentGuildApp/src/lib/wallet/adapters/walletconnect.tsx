@@ -14,7 +14,7 @@
 "use client";
 
 import { useMemo, type ReactNode } from "react";
-import { defineChain } from "viem";
+import { defineChain, toHex, type EIP1193Provider } from "viem";
 import { WagmiProvider, useAccount, useSignMessage as useWagmiSignMessage } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiAdapter } from "@reown/appkit-adapter-wagmi";
@@ -140,9 +140,23 @@ function mapAppKitStatus(status: "connected" | "disconnected" | "connecting" | "
 
 // EVM (eip155) takes precedence if somehow both namespaces are connected at
 // once — EVM/SIWE is this app's primary, longer-supported login path.
+//
+// The EVM address comes from AppKit (falling back to wagmi): for the
+// email/social embedded wallet, wagmi can restore a stale account from
+// storage that no longer matches the live wallet session, and signing as that
+// address fails with "Signer mismatch". AppKit's address is the one the
+// embedded wallet actually signs with.
+function useEvmAccount() {
+  const { address: wagmiAddress, chainId, status } = useAccount();
+  const appKitEvm = useAppKitAccount({ namespace: "eip155" });
+  const address = (appKitEvm.isConnected && appKitEvm.address) || wagmiAddress;
+  return { address, chainId, status };
+}
+
 function useWallet(): WalletState {
-  const { address, chainId, status } = useAccount();
+  const { address, chainId, status } = useEvmAccount();
   const solanaAccount = useAppKitAccount({ namespace: "solana" });
+  const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
 
   if (address) {
     // wagmi only sets `address` when status is "connected" or
@@ -155,6 +169,10 @@ function useWallet(): WalletState {
   }
 
   if (solanaAccount.isConnected && solanaAccount.address) {
+    // The account can be reported before its provider is ready (and before
+    // the embedded wallet's EVM account shows up) — report "connecting" so
+    // auto-login doesn't try to sign with no provider.
+    if (!solanaProvider) return { address: null, chainId: null, status: "connecting" };
     return {
       address: solanaAccount.address,
       chainId: 0, // Non-EVM sentinel — matches chains.ts's `solana` entry.
@@ -167,12 +185,21 @@ function useWallet(): WalletState {
 
 function useSignMessage() {
   const { signMessageAsync } = useWagmiSignMessage();
-  const { address: evmAddress } = useAccount();
+  const { address: evmAddress } = useEvmAccount();
+  const { walletProvider: evmProvider } = useAppKitProvider<EIP1193Provider>("eip155");
   const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
 
   return async (message: string) => {
     if (evmAddress) {
-      return signMessageAsync({ message });
+      // Sign through AppKit's provider as AppKit's address so the request
+      // matches the wallet's live signer (see useEvmAccount).
+      if (evmProvider) {
+        return evmProvider.request({
+          method: "personal_sign",
+          params: [toHex(message), evmAddress as `0x${string}`],
+        });
+      }
+      return signMessageAsync({ message, account: evmAddress as `0x${string}` });
     }
     if (!solanaProvider) throw new Error("No wallet connected");
     const signature = await solanaProvider.signMessage(new TextEncoder().encode(message));
