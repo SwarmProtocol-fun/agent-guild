@@ -26,9 +26,14 @@ import { BorrowPanel } from "@/components/lending/borrow-panel";
 import type { Agent } from "@/lib/firestore";
 import type { DepositAsset, LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
 import { poolSharePrice as sharePrice, freeShares, solLamportsForUsd, LAMPORTS_PER_SOL } from "@/lib/lending/math";
-import { useSolanaSender } from "@/lib/wallet";
+import { useSolanaSender, useSolanaMessageSigner } from "@/lib/wallet";
+import { walletLinkMessage } from "@/lib/solana/wallet-link";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { getConnection } from "@/lib/solana/client";
 import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import {
+    createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 
 type Tab = "borrow" | "pools" | "fund" | "offers" | "positions";
 
@@ -542,10 +547,15 @@ function PoolActionDialog({
     const [step, setStep] = useState<"amount" | "send">("amount");
     const [amount, setAmount] = useState("100");
     const [treasury, setTreasury] = useState<string | null>(null);
+    const [usdcMint, setUsdcMint] = useState<string | null>(null);
     // Non-null only on devnet, where native SOL deposits are accepted at this rate.
     const [solUsdRate, setSolUsdRate] = useState<number | null>(null);
     const [asset, setAsset] = useState<DepositAsset>("usdc");
     const solanaSender = useSolanaSender();
+    const messageSigner = useSolanaMessageSigner();
+    // Solana wallet that pays for deposits: the login itself, or (EVM login) the signature-linked one.
+    const [linkedSolana, setLinkedSolana] = useState<string | null | undefined>(undefined);
+    const [linking, setLinking] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [done, setDone] = useState(false);
@@ -578,18 +588,53 @@ function PoolActionDialog({
                 })
                 .then((d) => {
                     setTreasury(d.treasuryAddress);
+                    setUsdcMint(typeof d.usdcMint === "string" ? d.usdcMint : null);
                     setSolUsdRate(typeof d.solUsdRate === "number" ? d.solUsdRate : null);
                 })
                 .catch((err) => setError(err instanceof Error ? err.message : "Failed to load treasury address"));
         }
     }, [mode]);
 
+    useEffect(() => {
+        if (mode !== "deposit" || !walletAddress) return;
+        fetch("/api/v1/solana/link")
+            .then((r) => (r.ok ? r.json() : { solanaAddress: null }))
+            .then((d) => setLinkedSolana(d.solanaAddress ?? null))
+            .catch(() => setLinkedSolana(null));
+    }, [mode, walletAddress]);
+
+    const linkSolanaWallet = async () => {
+        if (!messageSigner || !walletAddress) return;
+        setLinking(true);
+        setError(null);
+        try {
+            const issuedAt = new Date().toISOString();
+            const signature = await messageSigner.signMessage(
+                walletLinkMessage({ account: canonicalizeWalletAddress(walletAddress), solanaAddress: messageSigner.address, issuedAt }),
+            );
+            const res = await fetch("/api/v1/solana/link", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ solanaAddress: messageSigner.address, issuedAt, signature }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.error || "Failed to link Solana wallet");
+            setLinkedSolana(body.solanaAddress);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to link Solana wallet");
+        } finally {
+            setLinking(false);
+        }
+    };
+
     const amountUsd = parseFloat(amount) || 0;
     const lamports = asset === "sol" && solUsdRate ? solLamportsForUsd(amountUsd, solUsdRate) : 0;
     const solAmountLabel = `${(lamports / LAMPORTS_PER_SOL).toLocaleString(undefined, { maximumFractionDigits: 9 })} SOL (devnet)`;
     // Deposits are verified as coming from the signed-in wallet, so it must be a Solana account.
     const signedInWithEvm = !!walletAddress && walletAddress.startsWith("0x");
-    const canWalletSend = !!solanaSender && solanaSender.address === walletAddress;
+    const needsLink = signedInWithEvm && !linkedSolana;
+    const payerAddress = signedInWithEvm ? linkedSolana : walletAddress;
+    const canWalletSend = !!solanaSender && !!payerAddress && solanaSender.address === payerAddress;
 
     const sendSolWithWallet = async (): Promise<string> => {
         if (!solanaSender || !treasury) throw new Error("Connect a Solana wallet first");
@@ -604,6 +649,26 @@ function PoolActionDialog({
         );
         const sig = await solanaSender.sendTransaction(tx, connection);
         // The server only credits finalized transfers.
+        const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
+        if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
+        return sig;
+    };
+
+    const sendUsdcWithWallet = async (): Promise<string> => {
+        if (!solanaSender || !treasury || !usdcMint) throw new Error("Connect a Solana wallet first");
+        const connection = getConnection();
+        const owner = new PublicKey(solanaSender.address);
+        const mint = new PublicKey(usdcMint);
+        const treasuryKey = new PublicKey(treasury);
+        const from = getAssociatedTokenAddressSync(mint, owner);
+        const to = getAssociatedTokenAddressSync(mint, treasuryKey, true);
+        const raw = BigInt(Math.round(amountUsd * 1_000_000));
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+        const tx = new Transaction({ feePayer: owner, blockhash, lastValidBlockHeight }).add(
+            createAssociatedTokenAccountIdempotentInstruction(owner, to, treasuryKey, mint),
+            createTransferCheckedInstruction(from, mint, to, owner, raw, 6),
+        );
+        const sig = await solanaSender.sendTransaction(tx, connection);
         const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
         if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
         return sig;
@@ -697,9 +762,20 @@ function PoolActionDialog({
                             {mode === "deposit" && blockedReason && (
                                 <p className="text-[10px] text-amber-500 mt-1">{blockedReason}</p>
                             )}
-                            {mode === "deposit" && signedInWithEvm && (
-                                <p className="text-[10px] text-amber-500 mt-1">
-                                    You&apos;re signed in with an EVM wallet. Deposits must come from the wallet you&apos;re signed in with, so sign in with a Solana wallet (Phantom, Solflare) to deposit.
+                            {mode === "deposit" && needsLink && (
+                                <div className="mt-2 space-y-1">
+                                    <p className="text-[10px] text-amber-500">
+                                        You&apos;re signed in with an EVM wallet. Pool deposits are paid in Solana USDC, so link your Solana wallet to this account (one signature, no fee).
+                                    </p>
+                                    <Button size="sm" variant="outline" onClick={linkSolanaWallet} disabled={!messageSigner || linking || linkedSolana === undefined} className="w-full h-7 text-xs gap-1">
+                                        {linking && <Loader2 className="h-3 w-3 animate-spin" />}
+                                        {messageSigner ? "Link Solana wallet" : "Connect a Solana wallet (Phantom, Solflare) first"}
+                                    </Button>
+                                </div>
+                            )}
+                            {mode === "deposit" && signedInWithEvm && linkedSolana && (
+                                <p className="text-[10px] text-muted-foreground mt-1">
+                                    Paying from linked Solana wallet {linkedSolana.slice(0, 4)}…{linkedSolana.slice(-4)}.{!canWalletSend && " Connect that wallet to send in one click, or send manually and paste the signature."}
                                 </p>
                             )}
                         </div>
@@ -713,7 +789,7 @@ function PoolActionDialog({
                                 size="sm"
                                 onClick={() => setStep("send")}
                                 disabled={
-                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined || signedInWithEvm
+                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined || needsLink || (signedInWithEvm && linkedSolana === undefined)
                                     || (typeof capacityUsd === "number" && amountUsd > capacityUsd)
                                 }
                                 className="w-full h-8 text-xs gap-1"
@@ -736,7 +812,7 @@ function PoolActionDialog({
                         helperText={asset === "sol"
                             ? `Worth $${fmt(amountUsd)} in the pool. Make sure your wallet is on Devnet. Send with your connected wallet, or send the exact amount yourself and paste the signature.`
                             : undefined}
-                        onSendWithWallet={asset === "sol" && canWalletSend ? sendSolWithWallet : undefined}
+                        onSendWithWallet={canWalletSend ? (asset === "sol" ? sendSolWithWallet : usdcMint ? sendUsdcWithWallet : undefined) : undefined}
                         submitLabel="Verify Deposit"
                         onSubmit={async (txSig) => {
                             if (!walletAddress) throw new Error("Connect a wallet first");

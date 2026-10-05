@@ -20,14 +20,18 @@ import { useEffect, useRef, useCallback } from "react";
 import { signInWithCustomToken } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useSession } from "@/contexts/SessionContext";
-import { useWallet, useWalletSignMessage } from "@/lib/wallet";
+import { useWallet, useWalletSignMessage, useDisconnectWallet } from "@/lib/wallet";
 import { debug } from "@/lib/debug";
 
 export function useAutoSiwe() {
   const { address, chainId, status } = useWallet();
   const signMessage = useWalletSignMessage();
   const { authenticated, loading, refresh, logout } = useSession();
+  const disconnectWallet = useDisconnectWallet();
   const signingRef = useRef(false);
+  // Address whose login attempt failed — don't retry it in a loop; the user
+  // has to reconnect (clears it) before we try again.
+  const failedAddressRef = useRef<string | null>(null);
   const lastAddressRef = useRef<string | null>(null);
 
   const triggerLogin = useCallback(
@@ -87,11 +91,18 @@ export function useAutoSiwe() {
         await refresh();
       } catch (err) {
         debug.error("[Agent Guild:autoLogin] Login failed:", err);
+        failedAddressRef.current = walletAddress.toLowerCase();
+        // "Signer mismatch" (Magic embedded wallet): the remembered wagmi
+        // connection no longer matches the live social-login session.
+        // Drop it so the user can reconnect cleanly.
+        if (/signer mismatch/i.test(String((err as Error)?.message ?? err))) {
+          disconnectWallet();
+        }
       } finally {
         signingRef.current = false;
       }
     },
-    [refresh, signMessage]
+    [refresh, signMessage, disconnectWallet]
   );
 
   useEffect(() => {
@@ -100,6 +111,7 @@ export function useAutoSiwe() {
 
     // Wallet disconnected → log out if we were authenticated
     if (!address) {
+      failedAddressRef.current = null;
       // Don't treat an in-flight reconnect as a disconnect
       if (status === "connecting") return;
       if (lastAddressRef.current && authenticated) {
@@ -120,6 +132,7 @@ export function useAutoSiwe() {
     lastAddressRef.current = currentAddress;
 
     if (authenticated || signingRef.current) return;
+    if (failedAddressRef.current === currentAddress) return;
 
     triggerLogin(address, chainId);
   }, [address, chainId, status, loading, authenticated, triggerLogin, logout]);

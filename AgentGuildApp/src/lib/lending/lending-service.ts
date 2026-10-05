@@ -52,6 +52,7 @@ import {
     computeDefaultRecovery,
     depositCapacityUsd,
 } from "./math";
+import { SOLANA_WALLET_LINKS_COLLECTION, isSolanaAddress } from "@/lib/identity-nft-service";
 import { lendingLimits, assertCanOpenPosition, isWalletAllowed } from "./config";
 import { createPayoutInTxn } from "./payouts";
 import type {
@@ -212,6 +213,19 @@ export async function getDepositCapacity(poolId: string, wallet: string): Promis
 }
 
 /**
+ * The Solana wallet that pays for / receives refunds on behalf of `account`.
+ * A Solana login is its own wallet; an EVM login must have linked one by
+ * signature (POST /api/v1/solana/link).
+ */
+export async function resolvePayerWallet(account: string): Promise<string> {
+    if (!account.startsWith("0x")) return account;
+    const link = await adminDb().collection(SOLANA_WALLET_LINKS_COLLECTION).doc(account).get();
+    const linked = link.data()?.solanaAddress;
+    if (typeof linked === "string" && isSolanaAddress(linked)) return linked;
+    throw new Error("Link your Solana wallet to this account before depositing");
+}
+
+/**
  * Verify a lender actually sent `amountUsd` USDC to the treasury on-chain,
  * then mint pool shares for it. The signature claim, share mint and deposit
  * record commit in one transaction. Throws if the signature doesn't check out
@@ -232,9 +246,10 @@ export async function confirmPoolDeposit(
     if (!(amountUsd > 0)) throw new Error("Deposit amount must be positive");
 
     const treasury = treasuryAddress();
+    const payer = await resolvePayerWallet(wallet);
     const transfer: VerifyTransferInput = {
         txSig,
-        expectedFromWallet: wallet,
+        expectedFromWallet: payer,
         expectedToWallet: treasury,
         expectedAmountUsd: amountUsd,
         purpose: "pool_deposit",
@@ -267,7 +282,7 @@ export async function confirmPoolDeposit(
             createPayoutInTxn(txn, {
                 kind: "deposit_refund",
                 fromWallet: treasury,
-                toWallet: wallet,
+                toWallet: payer,
                 amountUsd: refundedUsd,
                 poolId,
                 reason: (limits.paused
