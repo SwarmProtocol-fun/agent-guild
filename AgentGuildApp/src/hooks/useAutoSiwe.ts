@@ -22,6 +22,7 @@ import { auth } from "@/lib/firebase";
 import { useSession } from "@/contexts/SessionContext";
 import { useWallet, useWalletSignMessage, useDisconnectWallet, clearWalletStorage } from "@/lib/wallet";
 import { debug } from "@/lib/debug";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 
 /** How long to wait for the wallet to return a signature before giving up. */
 export const SIGN_TIMEOUT_MS = 60_000;
@@ -179,6 +180,27 @@ export function useAutoSiwe() {
     },
     [refresh, signMessage, disconnectWallet]
   );
+
+  // A valid server session skips SIWE, so the Firebase Auth user restored
+  // from IndexedDB is never re-minted. If its uid isn't the canonical session
+  // address (e.g. a Solana uid lowercased by an older /api/auth/verify),
+  // isOrgMember() denies every client write with "Missing or insufficient
+  // permissions". Drop the session so auto-login mints a fresh token.
+  useEffect(() => {
+    if (loading || !authenticated || !sessionAddress) return;
+    let cancelled = false;
+    Promise.resolve(auth.authStateReady?.())
+      .then(() => {
+        const uid = auth.currentUser?.uid;
+        if (cancelled || !uid || uid === canonicalizeWalletAddress(sessionAddress)) return;
+        debug.log("[Agent Guild:autoLogin] Firebase uid doesn't match session, re-authenticating");
+        logout();
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, authenticated, sessionAddress, logout]);
 
   useEffect(() => {
     // Wait for session check to complete

@@ -15,6 +15,7 @@ const s = vi.hoisted(() => ({
   disconnect: vi.fn(),
   clearWalletStorage: vi.fn(),
   signInWithCustomToken: vi.fn(),
+  auth: { currentUser: null as { uid: string } | null, authStateReady: async () => {} },
 }));
 
 vi.mock("@/lib/wallet", () => ({
@@ -27,7 +28,7 @@ vi.mock("@/contexts/SessionContext", () => ({
   useSession: () => ({ ...s.session, refresh: s.refresh, logout: s.logout }),
 }));
 vi.mock("firebase/auth", () => ({ signInWithCustomToken: s.signInWithCustomToken }));
-vi.mock("@/lib/firebase", () => ({ auth: {} }));
+vi.mock("@/lib/firebase", () => ({ auth: s.auth }));
 
 import { useAutoSiwe, useAutoLoginStatus, retryAutoLogin, SIGN_TIMEOUT_MS } from "../useAutoSiwe";
 
@@ -59,6 +60,7 @@ beforeEach(() => {
   s.disconnect.mockReset().mockResolvedValue(undefined);
   s.clearWalletStorage.mockReset();
   s.signInWithCustomToken.mockReset().mockResolvedValue({});
+  s.auth.currentUser = null;
   fetchMock.mockReset();
   serverOk();
   vi.stubGlobal("fetch", fetchMock);
@@ -68,6 +70,44 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("useAutoSiwe", () => {
+  describe("stale Firebase Auth uid on an existing session", () => {
+    const SOL_REAL = "Pip4XqCgH5J5j5Ra3BjhFtBj8xY5SsWjKxLdNqG4eNv";
+
+    it("logs out when the restored uid is a lowercased Solana address", async () => {
+      connect(SOL_REAL, null);
+      s.session = { authenticated: true, address: SOL_REAL, loading: false };
+      s.auth.currentUser = { uid: SOL_REAL.toLowerCase() };
+      renderHook(() => useAutoSiwe());
+      await waitFor(() => expect(s.logout).toHaveBeenCalledTimes(1));
+    });
+
+    it("keeps the session when the uid is the exact-case Solana address", async () => {
+      connect(SOL_REAL, null);
+      s.session = { authenticated: true, address: SOL_REAL, loading: false };
+      s.auth.currentUser = { uid: SOL_REAL };
+      renderHook(() => useAutoSiwe());
+      await act(async () => {});
+      expect(s.logout).not.toHaveBeenCalled();
+    });
+
+    it("keeps the session when an EVM uid is the lowercased checksummed address", async () => {
+      connect(EVM, 1);
+      s.session = { authenticated: true, address: EVM, loading: false };
+      s.auth.currentUser = { uid: EVM.toLowerCase() };
+      renderHook(() => useAutoSiwe());
+      await act(async () => {});
+      expect(s.logout).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when there is no Firebase user (avoids a logout loop)", async () => {
+      connect(SOL_REAL, null);
+      s.session = { authenticated: true, address: SOL_REAL, loading: false };
+      renderHook(() => useAutoSiwe());
+      await act(async () => {});
+      expect(s.logout).not.toHaveBeenCalled();
+    });
+  });
+
   it("logs in with an EVM wallet: payload → sign → verify → firebase → refresh", async () => {
     connect(EVM, 1);
     renderHook(() => useAutoSiwe());
@@ -78,7 +118,7 @@ describe("useAutoSiwe", () => {
     expect(fetchMock.mock.calls[1][0]).toBe("/api/auth/verify");
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ payload: { nonce: "n" }, signature: "sig" });
     expect(fetchMock.mock.calls[1][1].credentials).toBe("include");
-    expect(s.signInWithCustomToken).toHaveBeenCalledWith({}, "fb-token");
+    expect(s.signInWithCustomToken).toHaveBeenCalledWith(s.auth, "fb-token");
   });
 
   it("logs in with a Solana wallet using the chainId 0 sentinel", async () => {
