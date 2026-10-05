@@ -20,7 +20,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { signInWithCustomToken } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useSession } from "@/contexts/SessionContext";
-import { useWallet, useWalletSignMessage, useDisconnectWallet } from "@/lib/wallet";
+import { useWallet, useWalletSignMessage, useDisconnectWallet, clearWalletStorage } from "@/lib/wallet";
 import { debug } from "@/lib/debug";
 
 export function useAutoSiwe() {
@@ -94,9 +94,15 @@ export function useAutoSiwe() {
         failedAddressRef.current = walletAddress.toLowerCase();
         // "Signer mismatch" (Magic embedded wallet): the remembered wagmi
         // connection no longer matches the live social-login session.
-        // Drop it so the user can reconnect cleanly.
+        // Drop it (and the persisted connection that would restore it on
+        // reload) so the user can reconnect cleanly.
         if (/signer mismatch/i.test(String((err as Error)?.message ?? err))) {
-          disconnectWallet();
+          try {
+            await disconnectWallet();
+          } catch (disconnectErr) {
+            debug.error("[Agent Guild:autoLogin] Disconnect failed:", disconnectErr);
+          }
+          clearWalletStorage();
         }
       } finally {
         signingRef.current = false;
