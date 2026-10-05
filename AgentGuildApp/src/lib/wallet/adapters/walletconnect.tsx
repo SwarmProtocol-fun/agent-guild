@@ -13,7 +13,7 @@
  */
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { defineChain, toHex, type EIP1193Provider } from "viem";
 import { WagmiProvider, useAccount, useSignMessage as useWagmiSignMessage } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -69,9 +69,29 @@ const evmNetworks = WALLET_EVM_CHAINS
 // nothing here that depends on which devnet RPC is used.
 const networks = [...evmNetworks, solanaDevnet] as unknown as [AppKitNetwork, ...AppKitNetwork[]];
 
-// Solana is the default network — identity NFTs, escrow and lending all
-// settle there. EVM networks stay selectable in the modal.
-const defaultNetwork = solanaDevnet;
+// The chain the user logs in with: whichever namespace is active in AppKit
+// (toggled from the account menu). The choice is remembered under a key that
+// clearWalletStorage doesn't purge, so it survives disconnect/reconnect —
+// embedded (email/social) wallets connect the namespace active at sign-in.
+// Solana is the fallback — identity NFTs, escrow and lending settle there.
+type LoginNamespace = "eip155" | "solana";
+const LOGIN_CHAIN_KEY = "agentguild.loginChain";
+function readLoginChainPref(): LoginNamespace {
+  try {
+    return localStorage.getItem(LOGIN_CHAIN_KEY) === "eip155" ? "eip155" : "solana";
+  } catch {
+    return "solana";
+  }
+}
+function writeLoginChainPref(ns: LoginNamespace) {
+  try {
+    localStorage.setItem(LOGIN_CHAIN_KEY, ns);
+  } catch {
+    // localStorage unavailable — preference just isn't remembered.
+  }
+}
+const networkFor = (ns: LoginNamespace) => (ns === "eip155" ? evmNetworks[0] : solanaDevnet);
+const defaultNetwork = typeof window !== "undefined" ? networkFor(readLoginChainPref()) : solanaDevnet;
 
 // Wallets pinned to the top of the connect modal (e.g. Tangem, which is
 // WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
@@ -122,90 +142,6 @@ if (projectId) {
   );
 }
 
-// Email/social (embedded) wallets only connect the namespace that's active at
-// sign-in — Solana, the default network — but the embedded wallet's EVM
-// account is this app's login identity (see useWallet). So when an embedded
-// wallet connects on Solana, switch to an EVM network once to connect its EVM
-// account, then switch back so Solana stays the active network — each
-// namespace keeps its own account, so both stay connected. While that's
-// pending useWallet reports "connecting" so auto-login doesn't sign in with
-// the Solana address first. If the EVM account can't be connected (or drops
-// on the way back), fall back to Solana.
-type EvmSyncState = "idle" | "pending" | "failed";
-let evmSyncState: EvmSyncState = "idle";
-const evmSyncListeners = new Set<() => void>();
-function setEvmSyncState(next: EvmSyncState) {
-  evmSyncState = next;
-  evmSyncListeners.forEach((l) => l());
-}
-function useEvmSyncState() {
-  return useSyncExternalStore(
-    (l) => {
-      evmSyncListeners.add(l);
-      return () => evmSyncListeners.delete(l);
-    },
-    () => evmSyncState,
-    () => "idle" as EvmSyncState,
-  );
-}
-
-
-function EmbeddedEvmSync() {
-  const evm = useAppKitAccount({ namespace: "eip155" });
-  const solana = useAppKitAccount({ namespace: "solana" });
-  const { switchNetwork, caipNetwork } = useAppKitNetwork();
-  // idle → toEvm (connecting the EVM account) → toSolana (switching back) → done
-  const phaseRef = useRef<"idle" | "toEvm" | "toSolana" | "done">("idle");
-  const embedded = Boolean(
-    (evm.isConnected && evm.embeddedWalletInfo) || (solana.isConnected && solana.embeddedWalletInfo),
-  );
-  const solanaEmbedded = Boolean(solana.embeddedWalletInfo);
-  const activeNamespace = caipNetwork?.chainNamespace;
-
-  useEffect(() => {
-    if (!embedded) {
-      // Disconnected (or not an embedded wallet) — reset so a later sign-in retries.
-      phaseRef.current = "idle";
-      if (evmSyncState !== "idle") setEvmSyncState("idle");
-      return;
-    }
-
-    if (!evm.isConnected) {
-      if (!solanaEmbedded) return;
-      if (phaseRef.current === "idle") {
-        phaseRef.current = "toEvm";
-        setEvmSyncState("pending");
-        switchNetwork(evmNetworks[0]).catch((err) => {
-          console.warn("[wallet] Could not connect embedded EVM account; using Solana:", err);
-          setEvmSyncState("failed");
-        });
-      } else if (phaseRef.current !== "toEvm" && evmSyncState !== "failed") {
-        // EVM account dropped after switching back — don't loop, use Solana.
-        console.warn("[wallet] Embedded EVM account disconnected; using Solana");
-        setEvmSyncState("failed");
-      }
-      return;
-    }
-
-    // Just connected the EVM account, or a restored session reopened on an
-    // EVM network — make Solana the active network (once per session, so a
-    // later deliberate switch to EVM isn't undone).
-    if (phaseRef.current === "toEvm" || (phaseRef.current === "idle" && activeNamespace && activeNamespace !== "solana")) {
-      phaseRef.current = "toSolana";
-      setEvmSyncState("idle");
-      switchNetwork(solanaDevnet)
-        .catch((err) => console.warn("[wallet] Could not switch back to Solana:", err))
-        .finally(() => {
-          phaseRef.current = "done";
-        });
-    } else if (phaseRef.current === "idle" && activeNamespace) {
-      phaseRef.current = "done"; // Already on Solana.
-    }
-  }, [embedded, solanaEmbedded, evm.isConnected, activeNamespace, switchNetwork]);
-
-  return null;
-}
-
 // Solana-program components (agent registration, gig escrow, useAgentGuildWrite)
 // call @solana/wallet-adapter-react hooks directly, which throw without a
 // WalletProvider ancestor — so mount one here too, alongside AppKit.
@@ -217,10 +153,7 @@ function Provider({ children }: { children: ReactNode }) {
       <QueryClientProvider client={queryClient}>
         <ConnectionProvider endpoint={SOLANA_RPC_URL}>
           <SolanaWalletProviderBase wallets={solanaWallets} autoConnect>
-            <WalletModalProvider>
-              {projectId && <EmbeddedEvmSync />}
-              {children}
-            </WalletModalProvider>
+            <WalletModalProvider>{children}</WalletModalProvider>
           </SolanaWalletProviderBase>
         </ConnectionProvider>
       </QueryClientProvider>
@@ -232,72 +165,78 @@ function mapAppKitStatus(status: "connected" | "disconnected" | "connecting" | "
   return status === "connected" ? "connected" : status === "disconnected" || status === undefined ? "disconnected" : "connecting";
 }
 
-// EVM (eip155) takes precedence if somehow both namespaces are connected at
-// once — EVM/SIWE is this app's primary, longer-supported login path.
+// The login account is the active namespace's account, so it's always the
+// account the wallet signs with. Embedded (email/social) wallets sign with the
+// active chain's account only — asking them to sign as the other namespace's
+// address fails with "Signer mismatch".
 //
-// The EVM address comes from AppKit (falling back to wagmi): for the
-// email/social embedded wallet, wagmi can restore a stale account from
-// storage that no longer matches the live wallet session, and signing as that
-// address fails with "Signer mismatch". AppKit's address is the one the
-// embedded wallet actually signs with.
-function useEvmAccount() {
-  const { address: wagmiAddress, chainId, status } = useAccount();
-  const appKitEvm = useAppKitAccount({ namespace: "eip155" });
-  const address = (appKitEvm.isConnected && appKitEvm.address) || wagmiAddress;
-  return { address, chainId, status };
+// The EVM address comes from AppKit, falling back to wagmi only while EVM is
+// active: wagmi can restore a stale account from storage that no longer
+// matches the live embedded-wallet session.
+function useLoginAccount() {
+  const { address: wagmiAddress, chainId: wagmiChainId, status: wagmiStatus } = useAccount();
+  const evm = useAppKitAccount({ namespace: "eip155" });
+  const solana = useAppKitAccount({ namespace: "solana" });
+  const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
+  const { caipNetwork } = useAppKitNetwork();
+  const active = caipNetwork?.chainNamespace;
+
+  const evmAddress = evm.isConnected ? evm.address : undefined;
+  const solanaAddress = solana.isConnected ? solana.address : undefined;
+
+  const evmState = (address: string) => ({
+    namespace: "eip155" as const,
+    address,
+    chainId: wagmiChainId ?? (active === "eip155" ? Number(caipNetwork?.id) || null : null),
+    status: (evm.isConnected ? mapAppKitStatus(evm.status) : wagmiStatus === "connected" ? "connected" : "connecting") as WalletStatus,
+  });
+  // The account can be reported before its provider is ready — report
+  // "connecting" so auto-login doesn't try to sign with no provider.
+  const solanaState = (address: string) =>
+    solanaProvider
+      ? { namespace: "solana" as const, address, chainId: 0, status: mapAppKitStatus(solana.status) }
+      : { namespace: null, address: null, chainId: null, status: "connecting" as WalletStatus };
+  const none = (status: WalletStatus) => ({ namespace: null, address: null, chainId: null, status });
+
+  if (active === "eip155") {
+    const address = evmAddress || wagmiAddress;
+    if (address) return evmState(address);
+    if (evm.status === "connecting" || evm.status === "reconnecting") return none("connecting");
+  } else if (active === "solana") {
+    if (solanaAddress) return solanaState(solanaAddress);
+    if (solana.status === "connecting" || solana.status === "reconnecting") return none("connecting");
+  }
+  // Active namespace has no account (e.g. mid-switch, or a single-namespace
+  // wallet) — use whichever namespace is connected.
+  if (evmAddress) return evmState(evmAddress);
+  if (solanaAddress) return solanaState(solanaAddress);
+  return none("disconnected");
 }
 
 function useWallet(): WalletState {
-  const { address, chainId, status } = useEvmAccount();
-  const solanaAccount = useAppKitAccount({ namespace: "solana" });
-  const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
-  const evmSync = useEvmSyncState();
-  const awaitingEvm = Boolean(solanaAccount.embeddedWalletInfo) && evmSync !== "failed";
-
-  if (address) {
-    // wagmi only sets `address` when status is "connected" or
-    // "reconnecting" — "disconnected" can't occur here.
-    return {
-      address,
-      chainId: chainId ?? null,
-      status: status === "connected" ? "connected" : "connecting", // reconnecting
-    };
-  }
-
-  if (solanaAccount.isConnected && solanaAccount.address) {
-    // The account can be reported before its provider is ready (and before
-    // the embedded wallet's EVM account shows up) — report "connecting" so
-    // auto-login doesn't try to sign with no provider.
-    if (!solanaProvider || awaitingEvm) return { address: null, chainId: null, status: "connecting" };
-    return {
-      address: solanaAccount.address,
-      chainId: 0, // Non-EVM sentinel — matches chains.ts's `solana` entry.
-      status: mapAppKitStatus(solanaAccount.status),
-    };
-  }
-
-  return { address: null, chainId: null, status: "disconnected" };
+  const { address, chainId, status } = useLoginAccount();
+  return { address, chainId, status };
 }
 
 function useSignMessage() {
   const { signMessageAsync } = useWagmiSignMessage();
-  const { address: evmAddress } = useEvmAccount();
+  const { namespace, address } = useLoginAccount();
   const { walletProvider: evmProvider } = useAppKitProvider<EIP1193Provider>("eip155");
   const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
 
   return async (message: string) => {
-    if (evmAddress) {
-      // Sign through AppKit's provider as AppKit's address so the request
-      // matches the wallet's live signer (see useEvmAccount).
+    if (namespace === "eip155" && address) {
+      // Sign through AppKit's provider as the login address so the request
+      // matches the wallet's live signer.
       if (evmProvider) {
         return evmProvider.request({
           method: "personal_sign",
-          params: [toHex(message), evmAddress as `0x${string}`],
+          params: [toHex(message), address as `0x${string}`],
         });
       }
-      return signMessageAsync({ message, account: evmAddress as `0x${string}` });
+      return signMessageAsync({ message, account: address as `0x${string}` });
     }
-    if (!solanaProvider) throw new Error("No wallet connected");
+    if (namespace !== "solana" || !solanaProvider) throw new Error("No wallet connected");
     const signature = await solanaProvider.signMessage(new TextEncoder().encode(message));
     return Buffer.from(signature).toString("base64");
   };
@@ -342,7 +281,7 @@ const shorten = (a: string) => `${a.slice(0, 6)}...${a.slice(-4)}`;
 // Disconnected → AppKit's connect modal.
 function ConfiguredButton({ label = "Connect", className }: ConnectButtonProps) {
   const { open } = useAppKit();
-  const { address } = useWallet();
+  const { address, namespace } = useLoginAccount();
   if (!address) {
     return (
       <Button className={className} onClick={() => open()}>
@@ -350,18 +289,39 @@ function ConfiguredButton({ label = "Connect", className }: ConnectButtonProps) 
       </Button>
     );
   }
-  return <AccountMenu address={address} className={className} />;
+  return <AccountMenu address={address} namespace={namespace!} className={className} />;
 }
 
-function AccountMenu({ address, className }: { address: string; className?: string }) {
+function AccountMenu({ address, namespace, className }: { address: string; namespace: LoginNamespace; className?: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [switching, setSwitching] = useState<LoginNamespace | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const { disconnect } = useAppKitDisconnect();
+  const { switchNetwork } = useAppKitNetwork();
+  const evm = useAppKitAccount({ namespace: "eip155" });
   const solana = useAppKitAccount({ namespace: "solana" });
-  // Embedded wallets also hold a Solana account — show it when it isn't the
-  // login address itself.
-  const solanaAddress = solana.isConnected && solana.address !== address ? solana.address : undefined;
+  const evmAddress = namespace === "eip155" ? address : evm.isConnected ? evm.address : undefined;
+  const solanaAddress = namespace === "solana" ? address : solana.isConnected ? solana.address : undefined;
+  // Embedded (email/social) wallets hold both accounts and connect the other
+  // one on switch; other wallets can only switch to a namespace they're on.
+  const embedded = Boolean(evm.embeddedWalletInfo || solana.embeddedWalletInfo);
+  const canUse = (ns: LoginNamespace) => embedded || (ns === "eip155" ? Boolean(evmAddress) : Boolean(solanaAddress));
+
+  // Switching the active namespace changes the login account; useAutoSiwe
+  // logs out the old session and signs in with the new account.
+  const switchTo = async (ns: LoginNamespace) => {
+    if (ns === namespace || switching) return;
+    writeLoginChainPref(ns);
+    setSwitching(ns);
+    try {
+      await switchNetwork(networkFor(ns));
+    } catch (err) {
+      console.warn("[wallet] Could not switch login chain:", err);
+    } finally {
+      setSwitching(null);
+    }
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -390,8 +350,12 @@ function AccountMenu({ address, className }: { address: string; className?: stri
   };
 
   const rows = [
-    { label: solanaAddress ? "EVM" : "Address", value: address },
+    ...(evmAddress ? [{ label: "EVM", value: evmAddress }] : []),
     ...(solanaAddress ? [{ label: "Solana", value: solanaAddress }] : []),
+  ];
+  const chains: { ns: LoginNamespace; label: string }[] = [
+    { ns: "eip155", label: "EVM" },
+    { ns: "solana", label: "Solana" },
   ];
 
   return (
@@ -411,6 +375,25 @@ function AccountMenu({ address, className }: { address: string; className?: stri
           role="menu"
           className="absolute right-0 top-full mt-1 bg-card border border-border rounded-lg shadow-lg py-1 z-50 min-w-[220px]"
         >
+          <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Signed in with</div>
+          <div className="mx-3 mb-2 grid grid-cols-2 gap-1 rounded-md bg-muted/40 p-1" role="group" aria-label="Login chain">
+            {chains.map(({ ns, label }) => (
+              <button
+                key={ns}
+                type="button"
+                aria-pressed={namespace === ns}
+                disabled={!canUse(ns) || switching !== null}
+                onClick={() => switchTo(ns)}
+                title={canUse(ns) ? `Sign in with your ${label} account` : `This wallet has no ${label} account`}
+                className={`rounded px-2 py-1 text-xs transition-colors disabled:opacity-40 ${
+                  namespace === ns ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {switching === ns ? "Switching…" : label}
+              </button>
+            ))}
+          </div>
+          <div className="my-1 border-t border-border" />
           {rows.map((row) => (
             <button
               key={row.value}
@@ -419,7 +402,10 @@ function AccountMenu({ address, className }: { address: string; className?: stri
               className="w-full flex items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-muted/50"
               title={`Copy ${row.value}`}
             >
-              <span className="text-muted-foreground">{row.label}</span>
+              <span className="text-muted-foreground">
+                {row.label}
+                {row.value === address && " · active"}
+              </span>
               <span className="font-mono">{copied === row.value ? "Copied" : shorten(row.value)}</span>
             </button>
           ))}
