@@ -18,6 +18,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit-firestore";
 import { verifySiwePayload, getDomainFromRequest } from "@/lib/auth/siwe";
 import { recordLogin } from "@/lib/platform-analytics";
 import { emitEvent } from "@/lib/mods/runtime";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 
 export async function POST(req: Request) {
   try {
@@ -164,10 +165,14 @@ export async function POST(req: Request) {
     // request.auth for anything the client reads/writes directly — without
     // this, request.auth is always null and rules can't distinguish a
     // verified wallet from an anonymous visitor.
+    // The uid must be canonicalized the same way org ownerAddress/members are
+    // stored (createOrganization): lowercased for EVM, but exact for Solana —
+    // base58 is case-sensitive, and a lowercased Solana uid never matches the
+    // stored address, so isOrgMember() denies every org-scoped write.
     let firebaseToken: string | undefined;
     try {
       firebaseToken = await adminAuth().createCustomToken(
-        address.toLowerCase(),
+        canonicalizeWalletAddress(address),
         { role }
       );
     } catch (err) {

@@ -18,7 +18,8 @@ service cloud.firestore {
 
     // ── Auth model ──────────────────────────────────────────────────────
     // Login is wallet/SIWE (Thirdweb) verified server-side, then the server
-    // mints a Firebase custom token (uid = lowercased wallet address) so
+    // mints a Firebase custom token (uid = canonical wallet address: lowercased
+    // EVM hex, exact-case Solana base58 — see wallet-address.ts) so
     // the client SDK gets a real `request.auth`. Server-side privileged
     // writes go through the Firebase Admin SDK (src/lib/firebase-admin.ts,
     // src/lib/firestore-admin.ts), which bypasses these rules entirely.
@@ -332,12 +333,15 @@ service cloud.firestore {
         isOrgMember(get(/databases/$(database)/documents/channels/$(resource.data.channelId)).data.orgId) &&
         !request.resource.data.diff(resource.data).affectedKeys()
           .hasAny(['senderId', 'senderAddress', 'senderType', 'channelId', 'content', 'text']);
-      // A human message is sent as the signed-in wallet (auth.uid is the
-      // lowercased address), never as someone else's.
+      // A human message is sent as the signed-in wallet, never as someone
+      // else's. auth.uid is the canonical address: lowercased for EVM (so a
+      // checksummed senderId matches via lower()), exact for case-sensitive
+      // Solana base58 (matches via ==).
       allow create: if request.auth != null &&
         exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId)) &&
         isOrgMember(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data.orgId) &&
         (request.resource.data.get('senderType', '') != 'human' ||
+          string(request.resource.data.get('senderId', '')) == request.auth.uid ||
           string(request.resource.data.get('senderId', '')).lower() == request.auth.uid);
     }
 

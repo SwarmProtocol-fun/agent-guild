@@ -406,8 +406,8 @@ export async function createOrganization(data: Omit<Organization, "id">): Promis
   // No inviteCode here: org docs are readable by every signed-in wallet, so a
   // code stored on one could be read by anyone. Codes are created on demand,
   // server-side, by GET /api/v1/orgs/:orgId/invite-code (useOrgInviteCode).
-  // ownerAddress/members must match Firebase Auth's uid (always
-  // lowercased — see auth/verify/route.ts's createCustomToken call), or
+  // ownerAddress/members must match Firebase Auth's uid (the canonical
+  // address — see auth/verify/route.ts's createCustomToken call), or
   // firestore.rules' isOrgMember() silently locks the owner out of their
   // own org. Wallet connectors hand back checksummed (mixed-case) EIP-55
   // addresses, so canonicalize before writing rather than trusting callers.
