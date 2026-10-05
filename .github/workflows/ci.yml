@@ -236,6 +236,11 @@ jobs:
           avm install 0.31.1
           avm use 0.31.1
       - run: npm ci
+      # Anchor.toml's provider wallet (~/.config/solana/id.json) only pays
+      # for the local test validator, so a throwaway keypair is enough —
+      # no real key or secret belongs in CI for this.
+      - name: Create throwaway test wallet
+        run: solana-keygen new --no-bip39-passphrase --silent --outfile "$HOME/.config/solana/id.json"
       - run: anchor test
         # Spins up a local validator — no devnet/RPC access required.
 
