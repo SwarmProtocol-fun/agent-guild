@@ -3,6 +3,7 @@
  * EVM/Solana login-chain toggle. AppKit/wagmi are mocked; each test drives
  * the mocked hook state through `w`.
  */
+import bs58 from "bs58";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, renderHook, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -239,6 +240,77 @@ describe("useSignMessage", () => {
       new TextEncoder().encode("hello"),
     );
     expect((w.providers.eip155 as ReturnType<typeof evmProvider>).request).not.toHaveBeenCalled();
+  });
+
+  describe("WalletConnect Solana session without the active (Devnet) network", () => {
+    const MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+
+    // Mirrors @reown/appkit-adapter-solana's SolanaWalletConnectProvider:
+    // every method funnels through internalRequest, which resolves the chain
+    // from the active AppKit network — undefined when the session lacks it,
+    // so UniversalProvider falls back to eip155:1.
+    function wcProvider(approved: { id: string }[]) {
+      const request = vi.fn(async ({ method }: { method: string; params?: unknown }, chainId?: string) => {
+        if (!chainId) throw new Error(`The method "${method}" does not exist / is not available.`);
+        return method === "solana_signMessage"
+          ? { signature: bs58.encode(new Uint8Array([9, 8, 7])) }
+          : { signature: bs58.encode(new Uint8Array(64).fill(1)) };
+      });
+      const p = {
+        provider: { request },
+        session: { namespaces: { solana: { accounts: [`${MAINNET}:${SOL}`] } } },
+        chains: approved,
+        getActiveChain: () => SOLANA_DEVNET,
+        internalRequest(method: string, params: unknown) {
+          const chain = this.chains.find((c) => this.getActiveChain()?.id === c.id);
+          return request({ method, params }, chain ? `solana:${chain.id}` : undefined);
+        },
+        async signMessage(message: Uint8Array) {
+          const r = (await this.internalRequest("solana_signMessage", { message: bs58.encode(message), pubkey: SOL })) as { signature: string };
+          return bs58.decode(r.signature);
+        },
+        async sendTransaction(tx: { serialize: () => Uint8Array }, connection: { sendRawTransaction: (b: Uint8Array) => Promise<string> }) {
+          await this.internalRequest("solana_signTransaction", { transaction: "tx" });
+          return connection.sendRawTransaction(tx.serialize());
+        },
+      };
+      return { p, request };
+    }
+
+    it("signs the login message on the session's mainnet chain", async () => {
+      embeddedBoth("solana");
+      const { p, request } = wcProvider([]);
+      w.providers.solana = p;
+      const a = await loadAdapter();
+      const { result } = renderHook(() => a.useSignMessage());
+      await expect(result.current("hello")).resolves.toBe(Buffer.from([9, 8, 7]).toString("base64"));
+      expect(request).toHaveBeenCalledWith(
+        { method: "solana_signMessage", params: { message: bs58.encode(new TextEncoder().encode("hello")), pubkey: SOL } },
+        MAINNET,
+      );
+    });
+
+    it("signs transactions on the session chain and broadcasts via the app's connection", async () => {
+      embeddedBoth("solana");
+      const { p, request } = wcProvider([]);
+      w.providers.solana = p;
+      const a = await loadAdapter();
+      const sender = renderHook(() => a.useSolanaSender!()).result.current!;
+      const connection = { sendRawTransaction: vi.fn(async () => "sig123") };
+      await expect(sender.sendTransaction({ serialize: () => new Uint8Array([1]) } as never, connection as never)).resolves.toBe("sig123");
+      expect(request).toHaveBeenCalledWith({ method: "solana_signTransaction", params: { transaction: "tx" } }, MAINNET);
+      expect(connection.sendRawTransaction).toHaveBeenCalled();
+    });
+
+    it("leaves routing alone when the session approved the active network", async () => {
+      embeddedBoth("solana");
+      const { p, request } = wcProvider([SOLANA_DEVNET]);
+      w.providers.solana = p;
+      const a = await loadAdapter();
+      const { result } = renderHook(() => a.useSignMessage());
+      await result.current("hello");
+      expect(request).toHaveBeenCalledWith(expect.anything(), `solana:${SOLANA_DEVNET.id}`);
+    });
   });
 
   it("throws with no wallet connected", async () => {

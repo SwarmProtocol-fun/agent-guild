@@ -161,6 +161,49 @@ function Provider({ children }: { children: ReactNode }) {
   );
 }
 
+// Shape of AppKit's Solana WalletConnect provider internals we rely on.
+interface WalletConnectSolanaProvider {
+  session?: { namespaces?: Record<string, { accounts?: string[] }> };
+  provider?: { request: (args: { method: string; params: unknown }, chainId?: string) => Promise<unknown> };
+  chains?: { id: string | number }[];
+  getActiveChain?: () => { id: string | number } | undefined;
+  internalRequest?: (method: string, params: unknown) => Promise<unknown>;
+}
+
+const routedProviders = new WeakSet<object>();
+
+/**
+ * AppKit's Solana WalletConnect provider sends every request (signMessage,
+ * signTransaction, sendTransaction, …) to the *active* AppKit Solana network
+ * — Devnet here. Mobile wallets usually approve only mainnet, so Devnet isn't
+ * in the session, the chain resolves to undefined, and WalletConnect falls
+ * back to its default eip155:1: "solana_signMessage does not exist".
+ *
+ * Signatures are cluster-agnostic (ed25519 over the message / tx bytes, and
+ * sendTransaction broadcasts through the app's own devnet Connection), so
+ * when the active network isn't approved, route to the session's Solana
+ * chain instead. Non-WalletConnect providers are returned untouched.
+ */
+export function routeSolanaToSessionChain<T>(provider: T): T {
+  const wc = provider as unknown as WalletConnectSolanaProvider;
+  if (!wc || typeof wc.internalRequest !== "function" || !wc.provider || routedProviders.has(wc)) return provider;
+  const original = wc.internalRequest.bind(wc);
+  wc.internalRequest = (method, params) => {
+    const active = wc.getActiveChain?.();
+    if (active && wc.chains?.some((c) => c.id === active.id)) return original(method, params);
+    const account = wc.session?.namespaces?.solana?.accounts?.[0];
+    if (!account) return original(method, params);
+    return wc.provider!.request({ method, params }, account.split(":").slice(0, 2).join(":"));
+  };
+  routedProviders.add(wc);
+  return provider;
+}
+
+async function signSolanaMessage(provider: SolanaProvider, message: string): Promise<string> {
+  const signature = await routeSolanaToSessionChain(provider).signMessage(new TextEncoder().encode(message));
+  return Buffer.from(signature).toString("base64");
+}
+
 function mapAppKitStatus(status: "connected" | "disconnected" | "connecting" | "reconnecting" | undefined): WalletStatus {
   return status === "connected" ? "connected" : status === "disconnected" || status === undefined ? "disconnected" : "connecting";
 }
@@ -237,8 +280,7 @@ function useSignMessage() {
       return signMessageAsync({ message, account: address as `0x${string}` });
     }
     if (namespace !== "solana" || !solanaProvider) throw new Error("No wallet connected");
-    const signature = await solanaProvider.signMessage(new TextEncoder().encode(message));
-    return Buffer.from(signature).toString("base64");
+    return signSolanaMessage(solanaProvider, message);
   };
 }
 
@@ -246,7 +288,10 @@ function useSolanaSender(): SolanaSender | null {
   const { address, isConnected } = useAppKitAccount({ namespace: "solana" });
   const { walletProvider } = useAppKitProvider<SolanaProvider>("solana");
   if (!isConnected || !address || !walletProvider) return null;
-  return { address, sendTransaction: (tx, connection) => walletProvider.sendTransaction(tx, connection) };
+  return {
+    address,
+    sendTransaction: (tx, connection) => routeSolanaToSessionChain(walletProvider).sendTransaction(tx, connection),
+  };
 }
 
 // Email/social sign-in gives the user a Solana account alongside the EVM
@@ -257,10 +302,7 @@ function useSolanaMessageSigner(): SolanaMessageSigner | null {
   if (!isConnected || !address || !walletProvider) return null;
   return {
     address,
-    signMessage: async (message) => {
-      const signature = await walletProvider.signMessage(new TextEncoder().encode(message));
-      return Buffer.from(signature).toString("base64");
-    },
+    signMessage: (message) => signSolanaMessage(walletProvider, message),
   };
 }
 
