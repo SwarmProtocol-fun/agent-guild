@@ -26,7 +26,7 @@ import { debug } from "@/lib/debug";
 export function useAutoSiwe() {
   const { address, chainId, status } = useWallet();
   const signMessage = useWalletSignMessage();
-  const { authenticated, loading, refresh, logout } = useSession();
+  const { authenticated, address: sessionAddress, loading, refresh, logout } = useSession();
   const disconnectWallet = useDisconnectWallet();
   const signingRef = useRef(false);
   // Address whose login attempt failed — don't retry it in a loop; the user
@@ -137,9 +137,18 @@ export function useAutoSiwe() {
     }
     lastAddressRef.current = currentAddress;
 
+    // Session belongs to a different address than the connected wallet (e.g.
+    // an embedded wallet signed in with its Solana account before its EVM
+    // account connected) — replace it with one for the current wallet.
+    if (authenticated && sessionAddress && sessionAddress.toLowerCase() !== currentAddress) {
+      debug.log("[Agent Guild:autoLogin] Session address differs from wallet, re-authenticating");
+      logout();
+      return;
+    }
+
     if (authenticated || signingRef.current) return;
     if (failedAddressRef.current === currentAddress) return;
 
     triggerLogin(address, chainId);
-  }, [address, chainId, status, loading, authenticated, triggerLogin, logout]);
+  }, [address, chainId, status, loading, authenticated, sessionAddress, triggerLogin, logout]);
 }
