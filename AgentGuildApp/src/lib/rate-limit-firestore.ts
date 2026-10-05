@@ -14,6 +14,7 @@
 
 import { adminDb } from "./firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
+import { getClientIp as clientIpFromHeaders } from "./client-ip";
 
 const RATE_LIMIT_COLLECTION = "rateLimits";
 
@@ -182,22 +183,5 @@ function hashKey(key: string): string {
  * Handles proxied requests (Cloudflare, nginx, ALB).
  */
 export function getClientIp(req: Request): string {
-  // Try various headers in order of preference
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    return forwarded.split(",")[0].trim();
-  }
-
-  const realIp = req.headers.get("x-real-ip");
-  if (realIp) {
-    return realIp;
-  }
-
-  const cfConnectingIp = req.headers.get("cf-connecting-ip");
-  if (cfConnectingIp) {
-    return cfConnectingIp;
-  }
-
-  // Fallback (will rate limit all requests together - not ideal for production)
-  return "unknown";
+  return clientIpFromHeaders(req);
 }

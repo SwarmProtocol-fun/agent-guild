@@ -99,7 +99,15 @@ service cloud.firestore {
       // are readable by every signed-in wallet, so a code stored here could be
       // read by anyone, and a client-planted code would be honored by the
       // legacy-code migration in resolveOrgInviteCode.
-      allow create: if request.auth != null && !request.resource.data.keys().hasAny(['inviteCode']);
+      // The creator must be the owner and the only initial member — otherwise
+      // anyone could create an org "owned" by, or listing, someone else's
+      // wallet, planting it in that wallet's org list. The owner adds members
+      // afterwards via update.
+      allow create: if request.auth != null &&
+        request.resource.data.ownerAddress == request.auth.uid &&
+        request.resource.data.members is list &&
+        request.resource.data.members.hasOnly([request.auth.uid]) &&
+        !request.resource.data.keys().hasAny(['inviteCode']);
       // Owner or an EXISTING member can update — but only the owner may
       // touch `ownerAddress` or `members`. Membership is checked only
       // against the document already stored (resource.data) — never

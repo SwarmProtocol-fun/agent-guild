@@ -14,12 +14,13 @@ import { getTriggerPolicy, checkCooldownFor, checkIdempotencyFor } from "@/lib/w
 import { startRun } from "@/lib/workflow/executor";
 import type { WebhookTriggerConfig } from "@/lib/workflow/triggers";
 import crypto from "crypto";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ policyId: string }> },
 ) {
-  const ip = req.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(req);
   const limited = await rateLimit(`wf-webhook:${ip}`);
   if (limited) return limited;
 

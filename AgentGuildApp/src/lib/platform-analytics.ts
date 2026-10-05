@@ -14,6 +14,7 @@
 import { adminDb } from "./firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
 import { canonicalizeWalletAddress } from "./wallet-address";
+import { getClientIp } from "./client-ip";
 
 // ── Types ──
 
@@ -103,9 +104,7 @@ export async function recordLogin(
   // Extract request metadata
   const ua = req.headers.get("user-agent");
   const referrer = req.headers.get("referer") || req.headers.get("referrer") || undefined;
-  const forwarded = req.headers.get("x-forwarded-for");
-  const realIp = req.headers.get("x-real-ip");
-  const rawIp = forwarded?.split(",")[0].trim() || realIp || "unknown";
+  const rawIp = getClientIp(req);
   const ipHash = await hashIp(rawIp);
 
   // Create session record

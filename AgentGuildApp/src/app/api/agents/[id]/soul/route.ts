@@ -12,13 +12,14 @@ import { adminDb } from "@/lib/firebase-admin";
 import type { Agent } from "@/lib/firestore";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: agentId } = await params;
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`soul:${ip}`);
   if (limited) return limited;
 
@@ -72,7 +73,7 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id: agentId } = await params;
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`soul:${ip}`);
   if (limited) return limited;
 

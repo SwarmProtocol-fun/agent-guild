@@ -7,9 +7,10 @@ import { NextRequest } from "next/server";
 import { enrollRuntime } from "@/lib/vault/runtimes";
 import { vaultErrorResponse, readJson } from "@/lib/vault/http";
 import { rateLimit } from "../../rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function POST(req: NextRequest) {
-  const limited = await rateLimit(`runtime-enroll:${req.headers.get("x-forwarded-for") || "anon"}`);
+  const limited = await rateLimit(`runtime-enroll:${getClientIp(req)}`);
   if (limited) return limited;
   const body = await readJson(req);
   if (!body?.code) return Response.json({ error: "code is required" }, { status: 400 });

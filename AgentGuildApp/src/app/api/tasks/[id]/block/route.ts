@@ -10,13 +10,14 @@ import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`block:${ip}`);
   if (limited) return limited;
 

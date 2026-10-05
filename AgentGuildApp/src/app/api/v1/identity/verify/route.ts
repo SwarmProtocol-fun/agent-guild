@@ -9,9 +9,10 @@
 import { NextRequest } from "next/server";
 import { verifyIdentityToken } from "@/lib/agent-identity";
 import { rateLimit } from "../../rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function POST(req: NextRequest) {
-  const limited = await rateLimit(`identity-verify:${req.headers.get("x-forwarded-for") || "anon"}`);
+  const limited = await rateLimit(`identity-verify:${getClientIp(req)}`);
   if (limited) return limited;
   let body: { token?: string; audience?: string };
   try {

@@ -32,6 +32,11 @@ export interface AutoLoginStatus {
   phase: AutoLoginPhase;
   /** Last failure message, when phase is "failed". */
   error: string | null;
+  /**
+   * Logged in, but no Firebase Auth session — client Firestore reads/writes
+   * will fail with "Missing or insufficient permissions" until re-login.
+   */
+  warning?: string | null;
 }
 
 // Module-level so the landing page (and anything else) can show what the
@@ -53,6 +58,8 @@ function subscribe(l: () => void) {
   return () => listeners.delete(l);
 }
 const IDLE: AutoLoginStatus = { phase: "idle", error: null };
+const FIREBASE_WARNING =
+  "You're signed in, but the database connection couldn't be established, so some actions will fail. Sign in again to fix it.";
 
 /** Current auto-login phase and last error. */
 export function useAutoLoginStatus(): AutoLoginStatus {
@@ -149,18 +156,26 @@ export function useAutoSiwe() {
 
         // 4. Establish a real Firebase Auth session (uid = wallet address)
         // so the client SDK's Firestore rules checks (request.auth) work.
+        // Failure here doesn't fail the login (the session cookie still
+        // serves server-side routes), but it's surfaced: without it every
+        // client Firestore call is denied.
         const { firebaseToken } = await verifyRes.json().catch(() => ({}));
-        if (firebaseToken) {
+        let warning: string | null = null;
+        if (!firebaseToken) {
+          warning = FIREBASE_WARNING;
+          debug.error("[Agent Guild:autoLogin] Server returned no Firebase token");
+        } else {
           try {
             await signInWithCustomToken(auth, firebaseToken);
           } catch (err) {
+            warning = FIREBASE_WARNING;
             debug.error("[Agent Guild:autoLogin] Firebase sign-in failed:", err);
           }
         }
 
         // 5. Refresh session context to pick up the new cookie
         await refresh();
-        setStatus(IDLE);
+        setStatus({ ...IDLE, warning });
       } catch (err) {
         debug.error("[Agent Guild:autoLogin] Login failed:", err);
         failedAddressRef.current = walletAddress.toLowerCase();

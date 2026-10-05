@@ -15,6 +15,7 @@ import { cookies } from "next/headers";
 import { adminDb } from "./firebase-admin";
 import { Timestamp, FieldValue } from "firebase-admin/firestore";
 import { canonicalizeWalletAddress } from "./wallet-address";
+import { revokeSessionId } from "./session-revocation";
 
 // ─── Constants ──────────────────────────────────────────
 
@@ -119,6 +120,10 @@ export async function getSessionRecord(
 
 export async function deleteSession(sessionId: string): Promise<void> {
   await adminDb().collection("sessions").doc(sessionId).delete();
+  // The Edge middleware can't see the Firestore record — tell it too.
+  await revokeSessionId(sessionId).catch((err) => {
+    console.warn("[session] revocation list write failed:", err);
+  });
 }
 
 // ─── JWT ────────────────────────────────────────────────

@@ -334,11 +334,22 @@ describe("useAutoSiwe", () => {
     expect(s.refresh).not.toHaveBeenCalled();
   });
 
-  it("still refreshes the session if Firebase sign-in fails", async () => {
+  it("still refreshes the session if Firebase sign-in fails, but surfaces a warning", async () => {
     connect(EVM, 1);
     s.signInWithCustomToken.mockRejectedValue(new Error("firebase down"));
     renderHook(() => useAutoSiwe());
+    const status = renderHook(() => useAutoLoginStatus());
     await waitFor(() => expect(s.refresh).toHaveBeenCalled());
+    await waitFor(() => expect(status.result.current.warning).toMatch(/database connection/));
+    expect(status.result.current.phase).toBe("idle");
+  });
+
+  it("has no warning after a clean login", async () => {
+    connect(EVM, 1);
+    renderHook(() => useAutoSiwe());
+    const status = renderHook(() => useAutoLoginStatus());
+    await waitFor(() => expect(s.refresh).toHaveBeenCalled());
+    expect(status.result.current.warning ?? null).toBeNull();
   });
 
   it("skips Firebase sign-in when the server returns no token", async () => {
@@ -347,8 +358,10 @@ describe("useAutoSiwe", () => {
       url === "/api/auth/payload" ? ok({ payload: {}, message: "m" }) : ok({}),
     );
     renderHook(() => useAutoSiwe());
+    const status = renderHook(() => useAutoLoginStatus());
     await waitFor(() => expect(s.refresh).toHaveBeenCalled());
     expect(s.signInWithCustomToken).not.toHaveBeenCalled();
+    await waitFor(() => expect(status.result.current.warning).toMatch(/database connection/));
   });
 
   it("only signs once while a login is in flight", async () => {

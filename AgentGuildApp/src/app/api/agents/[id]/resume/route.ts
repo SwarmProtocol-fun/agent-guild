@@ -9,13 +9,14 @@ import { NextRequest } from "next/server";
 import { resumeAgent } from "@/lib/heartbeat";
 import { requireOrgMember, getWalletAddress, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`resume:${ip}`);
   if (limited) return limited;
 

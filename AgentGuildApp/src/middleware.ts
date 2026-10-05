@@ -12,6 +12,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { getClientIp } from "@/lib/client-ip";
+import { isSessionRevoked } from "@/lib/session-revocation";
 
 const SESSION_COOKIE = "agent_guild_session";
 
@@ -55,12 +57,6 @@ function checkMemoryRateLimit(key: string): boolean {
     }
   }
   return entry.count <= RATE_LIMIT_MAX;
-}
-
-function getClientIP(req: NextRequest): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  return req.headers.get("x-real-ip") || "unknown";
 }
 
 // ── Security Headers ──────────────────────────────────────
@@ -224,7 +220,7 @@ export async function middleware(req: NextRequest) {
     (pathname.startsWith("/api/v1") || pathname.startsWith("/api/mods")) &&
     ["POST", "PUT", "PATCH", "DELETE"].includes(req.method)
   ) {
-    const ip = getClientIP(req);
+    const ip = getClientIp(req);
     const allowed = ratelimit
       ? (await ratelimit.limit(`${ip}:${pathname}`)).success
       : checkMemoryRateLimit(`${ip}:${pathname}`);
@@ -237,7 +233,9 @@ export async function middleware(req: NextRequest) {
 
   // Read session cookie
   const token = req.cookies.get(SESSION_COOKIE)?.value;
-  const session = token ? await verifyToken(token) : null;
+  const verified = token ? await verifyToken(token) : null;
+  // A logged-out session's JWT still verifies until it expires.
+  const session = verified && !(await isSessionRevoked(verified.sid)) ? verified : null;
 
   // Inject session headers into the REQUEST so API route handlers can read them.
   // Strip any client-supplied values first — otherwise an unauthenticated caller

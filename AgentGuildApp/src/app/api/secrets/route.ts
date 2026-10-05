@@ -10,9 +10,10 @@ import { NextRequest } from "next/server";
 import { getSecrets, storeSecret } from "@/lib/secrets";
 import { requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
+import { getClientIp } from "@/lib/client-ip";
 
 export async function GET(request: NextRequest) {
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`secrets:${ip}`);
   if (limited) return limited;
 
@@ -60,7 +61,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const ip = request.headers.get("x-forwarded-for") || "unknown";
+  const ip = getClientIp(request);
   const limited = await rateLimit(`secrets:${ip}`);
   if (limited) return limited;
 
