@@ -4,7 +4,7 @@
 
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { ConnectWalletButton, useWalletAccount } from "@/lib/wallet";
+import { ConnectWalletButton, useWalletAccount, useDisconnectWallet, clearWalletStorage } from "@/lib/wallet";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, Suspense } from "react";
 import Image from "next/image";
@@ -13,6 +13,7 @@ import { useTheme } from "next-themes";
 import { useSession } from "@/contexts/SessionContext";
 import { debug } from "@/lib/debug";
 import { useFeatured } from "@/hooks/useFeatured";
+import { useAutoLoginStatus, retryAutoLogin } from "@/hooks/useAutoSiwe";
 
 interface PreviewGig {
   id: string;
@@ -101,22 +102,11 @@ function LandingPageContent() {
   return (
     <main className="min-h-screen relative overflow-hidden bg-background text-foreground selection:bg-primary/20">
       
-      {/* Show a full-screen loading state while SIWE completes in the background (e.g. after Google OAuth popup closes but before redirect to /dashboard). 
-          This overlays the page rather than replacing it, keeping ConnectButton mounted. */}
-      {isAuthenticating && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background">
-          <div className="flex flex-col items-center gap-6 p-4">
-            <Loader2 className="w-12 h-12 animate-spin text-primary" />
-            <div className="space-y-2 text-center">
-              <h2 className="text-xl font-semibold text-foreground/80 tracking-tight">Authenticating...</h2>
-              <p className="text-sm text-muted-foreground max-w-sm mx-auto">
-                Please wait while we verify your session securely.
-              </p>
-            </div>
-          </div>
-          <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-b from-transparent to-primary/5 pointer-events-none" />
-        </div>
-      )}
+      {/* Full-screen state while SIWE completes in the background (e.g. after
+          Google OAuth closes, before the redirect to /dashboard). Overlays the
+          page rather than replacing it, keeping ConnectButton mounted. Shows
+          the real step, and on failure/stall the error plus a way out. */}
+      {isAuthenticating && <AuthenticatingOverlay />}
 
       <div className="flex flex-col min-h-screen overflow-x-hidden">
       <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl">
@@ -311,6 +301,63 @@ function LandingPageContent() {
       </footer>
     </div>
     </main>
+  );
+}
+
+const PHASE_TEXT: Record<string, { title: string; body: string }> = {
+  idle: { title: "Connecting wallet…", body: "Waiting for your wallet to finish connecting." },
+  signing: { title: "Approve the sign-in", body: "Confirm the sign-in message in your wallet. It doesn't cost gas." },
+  verifying: { title: "Signing you in…", body: "Verifying your signature." },
+};
+
+// After this long without finishing, offer a way out even if nothing failed.
+const STALL_MS = 15_000;
+
+function AuthenticatingOverlay() {
+  const { phase, error } = useAutoLoginStatus();
+  const disconnect = useDisconnectWallet();
+  const [stalled, setStalled] = useState(false);
+
+  useEffect(() => {
+    setStalled(false);
+    if (phase === "failed") return;
+    const t = setTimeout(() => setStalled(true), STALL_MS);
+    return () => clearTimeout(t);
+  }, [phase]);
+
+  const cancel = async () => {
+    try {
+      await disconnect();
+    } catch (err) {
+      debug.error("[Agent Guild:Landing] Disconnect failed:", err);
+    }
+    clearWalletStorage();
+  };
+
+  const failed = phase === "failed";
+  const text = PHASE_TEXT[phase] ?? PHASE_TEXT.idle;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background" role="status" aria-live="polite">
+      <div className="flex flex-col items-center gap-6 p-4">
+        {!failed && <Loader2 className="w-12 h-12 animate-spin text-primary" />}
+        <div className="space-y-2 text-center">
+          <h2 className="text-xl font-semibold text-foreground/80 tracking-tight">
+            {failed ? "Sign-in failed" : text.title}
+          </h2>
+          <p className="text-sm text-muted-foreground max-w-sm mx-auto">{failed ? error : text.body}</p>
+        </div>
+        {(failed || stalled) && (
+          <div className="flex gap-3">
+            {failed && <Button onClick={retryAutoLogin}>Try again</Button>}
+            <Button variant="outline" onClick={cancel}>
+              {failed ? "Disconnect" : "Cancel"}
+            </Button>
+          </div>
+        )}
+      </div>
+      <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-b from-transparent to-primary/5 pointer-events-none" />
+    </div>
   );
 }
 

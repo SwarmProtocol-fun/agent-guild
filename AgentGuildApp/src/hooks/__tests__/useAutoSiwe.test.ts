@@ -4,7 +4,7 @@
  * "Signer mismatch" recovery path.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { renderHook, waitFor, act } from "@testing-library/react";
 
 const s = vi.hoisted(() => ({
   wallet: { address: null as string | null, chainId: null as number | null, status: "disconnected" },
@@ -29,7 +29,7 @@ vi.mock("@/contexts/SessionContext", () => ({
 vi.mock("firebase/auth", () => ({ signInWithCustomToken: s.signInWithCustomToken }));
 vi.mock("@/lib/firebase", () => ({ auth: {} }));
 
-import { useAutoSiwe } from "../useAutoSiwe";
+import { useAutoSiwe, useAutoLoginStatus, retryAutoLogin, SIGN_TIMEOUT_MS } from "../useAutoSiwe";
 
 const EVM = "0xAbC0000000000000000000000000000000000001";
 const SOL = "So1anaAddre55So1anaAddre55So1anaAddre55xyz";
@@ -62,6 +62,7 @@ beforeEach(() => {
   fetchMock.mockReset();
   serverOk();
   vi.stubGlobal("fetch", fetchMock);
+  act(() => retryAutoLogin()); // reset module-level status between tests
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -310,3 +311,107 @@ describe("useAutoSiwe", () => {
     expect(s.signMessage).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("auto-login status", () => {
+  const useBoth = () => ({ status: useAutoLoginStatus(), _: useAutoSiwe() });
+
+  it("starts idle", () => {
+    const { result } = renderHook(() => useAutoLoginStatus());
+    expect(result.current).toEqual({ phase: "idle", error: null });
+  });
+
+  it("goes signing → verifying → idle on success", async () => {
+    connect(EVM, 1);
+    let release!: (v: string) => void;
+    s.signMessage.mockReturnValue(new Promise<string>((r) => (release = r)));
+    const phases: string[] = [];
+    const { result } = renderHook(() => {
+      const r = useBoth();
+      phases.push(r.status.phase);
+      return r;
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe("signing"));
+    await act(async () => release("sig"));
+    await waitFor(() => expect(s.refresh).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.status.phase).toBe("idle"));
+    expect(phases).toContain("verifying");
+  });
+
+  it("reports the server's error message on failure", async () => {
+    connect(EVM, 1);
+    fetchMock.mockImplementation(async (url: string) =>
+      url === "/api/auth/payload" ? ok({ payload: {}, message: "m" }) : fail(401, "Invalid signature"),
+    );
+    const { result } = renderHook(useBoth);
+    await waitFor(() => expect(result.current.status).toEqual({ phase: "failed", error: "Invalid signature" }));
+  });
+
+  it("reports a wallet rejection", async () => {
+    connect(EVM, 1);
+    s.signMessage.mockRejectedValue(new Error("User rejected the request"));
+    const { result } = renderHook(useBoth);
+    await waitFor(() => expect(result.current.status.phase).toBe("failed"));
+    expect(result.current.status.error).toBe("User rejected the request");
+  });
+
+  it("times out a signature that never comes back instead of hanging", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      connect(EVM, 1);
+      s.signMessage.mockReturnValue(new Promise<string>(() => {}));
+      const { result } = renderHook(useBoth);
+      await waitFor(() => expect(result.current.status.phase).toBe("signing"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SIGN_TIMEOUT_MS + 10);
+      });
+      await waitFor(() => expect(result.current.status.phase).toBe("failed"));
+      expect(result.current.status.error).toMatch(/didn't return a signature/);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // never reached verify
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not time out a signature that arrives in time", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      connect(EVM, 1);
+      let release!: (v: string) => void;
+      s.signMessage.mockReturnValue(new Promise<string>((r) => (release = r)));
+      const { result } = renderHook(useBoth);
+      await waitFor(() => expect(result.current.status.phase).toBe("signing"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SIGN_TIMEOUT_MS - 1000);
+        release("sig");
+      });
+      await waitFor(() => expect(s.refresh).toHaveBeenCalled());
+      expect(result.current.status.phase).not.toBe("failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retryAutoLogin signs in again for the same wallet", async () => {
+    connect(EVM, 1);
+    s.signMessage.mockRejectedValueOnce(new Error("User rejected the request"));
+    const { result } = renderHook(useBoth);
+    await waitFor(() => expect(result.current.status.phase).toBe("failed"));
+    expect(s.signMessage).toHaveBeenCalledTimes(1);
+
+    act(() => retryAutoLogin());
+    await waitFor(() => expect(s.refresh).toHaveBeenCalled());
+    expect(s.signMessage).toHaveBeenCalledTimes(2);
+    expect(result.current.status.phase).toBe("idle");
+  });
+
+  it("clears a failure when the wallet disconnects", async () => {
+    connect(EVM, 1);
+    s.signMessage.mockRejectedValue(new Error("nope"));
+    const { result, rerender } = renderHook(useBoth);
+    await waitFor(() => expect(result.current.status.phase).toBe("failed"));
+    connect(null, null);
+    rerender();
+    await waitFor(() => expect(result.current.status.phase).toBe("idle"));
+  });
+});
+
