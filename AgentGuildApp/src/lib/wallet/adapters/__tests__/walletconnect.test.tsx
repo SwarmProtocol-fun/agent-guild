@@ -494,21 +494,21 @@ describe("module setup", () => {
     w.createAppKit.mockClear();
   });
 
-  it("defaults AppKit to Solana with no saved preference", async () => {
-    await loadAdapter();
-    expect(w.createAppKit).toHaveBeenCalledWith(expect.objectContaining({ defaultNetwork: SOLANA_DEVNET }));
-  });
-
-  it("defaults AppKit to EVM when EVM was chosen before", async () => {
-    localStorage.setItem("agentguild.loginChain", "eip155");
+  it("defaults AppKit to Ethereum with no saved preference", async () => {
     await loadAdapter();
     expect(w.createAppKit.mock.calls[0][0].defaultNetwork).toMatchObject({ id: 1 });
+  });
+
+  it("defaults AppKit to Solana when Solana was chosen before", async () => {
+    localStorage.setItem("agentguild.loginChain", "solana");
+    await loadAdapter();
+    expect(w.createAppKit).toHaveBeenCalledWith(expect.objectContaining({ defaultNetwork: SOLANA_DEVNET }));
   });
 
   it("ignores a garbage preference", async () => {
     localStorage.setItem("agentguild.loginChain", "dogechain");
     await loadAdapter();
-    expect(w.createAppKit).toHaveBeenCalledWith(expect.objectContaining({ defaultNetwork: SOLANA_DEVNET }));
+    expect(w.createAppKit.mock.calls[0][0].defaultNetwork).toMatchObject({ id: 1 });
   });
 
   it("only exposes Ethereum, Hyperliquid and Solana Devnet in the modal", async () => {

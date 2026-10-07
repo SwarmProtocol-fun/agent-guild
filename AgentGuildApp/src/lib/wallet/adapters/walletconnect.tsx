@@ -73,14 +73,16 @@ const networks = [...evmNetworks, solanaDevnet] as unknown as [AppKitNetwork, ..
 // (toggled from the account menu). The choice is remembered under a key that
 // clearWalletStorage doesn't purge, so it survives disconnect/reconnect —
 // embedded (email/social) wallets connect the namespace active at sign-in.
-// Solana is the fallback — identity NFTs, escrow and lending settle there.
+// EVM is the fallback — Ethereum login is the most reliable across wallets;
+// users can switch to Solana from the account menu (identity NFTs, escrow and
+// lending still settle there via the Solana account).
 type LoginNamespace = "eip155" | "solana";
 const LOGIN_CHAIN_KEY = "agentguild.loginChain";
 function readLoginChainPref(): LoginNamespace {
   try {
-    return localStorage.getItem(LOGIN_CHAIN_KEY) === "eip155" ? "eip155" : "solana";
+    return localStorage.getItem(LOGIN_CHAIN_KEY) === "solana" ? "solana" : "eip155";
   } catch {
-    return "solana";
+    return "eip155";
   }
 }
 function writeLoginChainPref(ns: LoginNamespace) {
@@ -91,7 +93,7 @@ function writeLoginChainPref(ns: LoginNamespace) {
   }
 }
 const networkFor = (ns: LoginNamespace) => (ns === "eip155" ? evmNetworks[0] : solanaDevnet);
-const defaultNetwork = typeof window !== "undefined" ? networkFor(readLoginChainPref()) : solanaDevnet;
+const defaultNetwork = networkFor(typeof window !== "undefined" ? readLoginChainPref() : "eip155");
 
 // Wallets pinned to the top of the connect modal (e.g. Tangem, which is
 // WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
