@@ -1,7 +1,10 @@
 /**
  * Lending sweep — the scheduled housekeeping job (POST /api/cron/lending-sweep).
  *
- *   1. Default active loans that are past dueAt + LENDING_DEFAULT_GRACE_DAYS.
+ *   1. Default active loans that are past dueAt + LENDING_DEFAULT_GRACE_DAYS
+ *      (collateral-market loans are liquidated instead).
+ *   1b. Liquidate collateral-market loans whose loan-to-value reached their
+ *      market's liquidation threshold at live prices.
  *   2. Cancel trust loans still awaiting collateral after
  *      LENDING_PENDING_EXPIRY_DAYS, releasing any pool liquidity they reserved.
  *   3. Reconcile every pool's interest accrual against its active loans.
@@ -13,8 +16,9 @@
 import { adminDb } from "@/lib/firebase-admin";
 import { lendingLimits } from "./config";
 import { accrue } from "./math";
-import { cancelLoan, listPools, markLoanDefaulted } from "./lending-service";
+import { cancelLoan, listPools, markLoanDefaulted, currentLoanToValue, startLiquidation } from "./lending-service";
 import type { LendingPool, Loan } from "./types";
+import { normalizeLegacy, healLegacyInTxn } from "./legacy-fields";
 
 const LOANS = "loans";
 const POOLS = "lendingPools";
@@ -23,8 +27,10 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 
 export interface SweepResult {
     defaulted: string[];
+    /** Collateral-market loans moved to "liquidating" (overdue or under-collateralized). */
+    liquidating: string[];
     expired: string[];
-    poolsReconciled: Array<{ poolId: string; activeLoans: number; accruingUsdPerYear: number; interestReceivableUsd: number }>;
+    poolsReconciled: Array<{ poolId: string; activeLoans: number; accruingPerYear: number; interestReceivable: number }>;
     errors: string[];
 }
 
@@ -34,38 +40,39 @@ export interface SweepResult {
  * tracking existed (marking them tracked so later repayments/defaults adjust
  * the totals incrementally).
  */
-export async function reconcilePoolAccrual(poolId: string): Promise<{ activeLoans: number; accruingUsdPerYear: number; interestReceivableUsd: number }> {
+export async function reconcilePoolAccrual(poolId: string): Promise<{ activeLoans: number; accruingPerYear: number; interestReceivable: number }> {
     const poolRef = adminDb().collection(POOLS).doc(poolId);
     const activeQuery = adminDb().collection(LOANS).where("poolId", "==", poolId).where("status", "==", "active");
 
     return adminDb().runTransaction(async (txn) => {
         const [poolSnap, loansSnap] = await Promise.all([txn.get(poolRef), txn.get(activeQuery)]);
         if (!poolSnap.exists) throw new Error("Pool not found");
+        healLegacyInTxn(txn, poolRef, "lendingPools", poolSnap.data());
 
         const at = nowSec();
-        let accruingUsdPerYear = 0;
-        let interestReceivableUsd = 0;
+        let accruingPerYear = 0;
+        let interestReceivable = 0;
         for (const doc of loansSnap.docs) {
-            const loan = accrue({ id: doc.id, ...doc.data() } as Loan, at);
-            accruingUsdPerYear += loan.principalRemainingUsd * (loan.interestRateBps / 10_000);
-            interestReceivableUsd += loan.interestAccruedUsd;
+            const loan = accrue({ id: doc.id, ...normalizeLegacy("loans", doc.data()) } as Loan, at);
+            accruingPerYear += loan.principalRemaining * (loan.interestRateBps / 10_000);
+            interestReceivable += loan.interestAccrued;
             if (!loan.poolAccrualTracked) txn.update(doc.ref, { poolAccrualTracked: true });
         }
 
         txn.update(poolRef, {
-            accruingUsdPerYear,
-            interestReceivableUsd,
+            accruingPerYear,
+            interestReceivable,
             interestAccrualAt: at,
         } satisfies Partial<LendingPool>);
 
-        return { activeLoans: loansSnap.size, accruingUsdPerYear, interestReceivableUsd };
+        return { activeLoans: loansSnap.size, accruingPerYear, interestReceivable };
     });
 }
 
 export async function sweepLending(): Promise<SweepResult> {
     const limits = lendingLimits();
     const now = nowSec();
-    const result: SweepResult = { defaulted: [], expired: [], poolsReconciled: [], errors: [] };
+    const result: SweepResult = { defaulted: [], liquidating: [], expired: [], poolsReconciled: [], errors: [] };
 
     const overdue = await adminDb().collection(LOANS)
         .where("status", "==", "active")
@@ -73,10 +80,26 @@ export async function sweepLending(): Promise<SweepResult> {
         .get();
     for (const doc of overdue.docs) {
         try {
-            await markLoanDefaulted(doc.id, { graceDays: limits.defaultGraceDays });
-            result.defaulted.push(doc.id);
+            const loan = await markLoanDefaulted(doc.id, { graceDays: limits.defaultGraceDays });
+            (loan.status === "liquidating" ? result.liquidating : result.defaulted).push(doc.id);
         } catch (err) {
             result.errors.push(`default ${doc.id}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
+    // Under-collateralized market loans. A price outage skips them (fail closed) and is reported.
+    const active = await adminDb().collection(LOANS).where("status", "==", "active").get();
+    for (const doc of active.docs) {
+        const loan = { id: doc.id, ...normalizeLegacy("loans", doc.data()) } as Loan;
+        if (!loan.collateralAsset || !loan.liquidationLtvBps || result.liquidating.includes(loan.id)) continue;
+        try {
+            const ltv = await currentLoanToValue(loan, now);
+            if (ltv * 10_000 >= loan.liquidationLtvBps) {
+                await startLiquidation(loan.id, "ltv");
+                result.liquidating.push(loan.id);
+            }
+        } catch (err) {
+            result.errors.push(`liquidation check ${loan.id}: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 

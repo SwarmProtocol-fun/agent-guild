@@ -30,7 +30,7 @@ const input = (over: Partial<Parameters<typeof verifyEthTransfer>[0]> = {}) => (
     txSig: HASH,
     expectedFromWallet: ALICE,
     expectedToWallet: TREASURY,
-    expectedAmountUsd: 1.5,
+    expectedAmount: 1.5,
     purpose: "pool_deposit",
     refId: "pool",
     ...over,
@@ -49,11 +49,11 @@ beforeEach(() => {
 describe("verifyEthTransfer", () => {
     it("accepts a finalized plain transfer of at least the amount (address case doesn't matter)", async () => {
         const res = await verifyEthTransfer(input({ expectedFromWallet: ALICE.toUpperCase().replace("0X", "0x"), txSig: HASH.toUpperCase().replace("0X", "0x") }));
-        expect(res).toEqual({ txSig: HASH, receivedUsd: 1.5 });
+        expect(res).toEqual({ txSig: HASH, received: 1.5 });
     });
 
     it("rejects too little ETH, the wrong sender, reverts and unfinalized blocks", async () => {
-        await expect(verifyEthTransfer(input({ expectedAmountUsd: 2 }))).rejects.toThrow(/at least 2 ETH/);
+        await expect(verifyEthTransfer(input({ expectedAmount: 2 }))).rejects.toThrow(/at least 2 ETH/);
         await expect(verifyEthTransfer(input({ expectedFromWallet: "0x4444444444444444444444444444444444444444" }))).rejects.toThrow(/isn't an ETH transfer/);
         rpc.getTransactionReceipt.mockResolvedValueOnce({ status: "reverted", blockNumber: BigInt(100) });
         await expect(verifyEthTransfer(input())).rejects.toThrow(/reverted/);
@@ -70,8 +70,8 @@ describe("verifyEthTransfer", () => {
             return after ? ETH : ETH * BigInt(3);
         });
         const res = await verifyEthTransfer(input({ expectedFromWallet: TREASURY, expectedToWallet: ALICE }));
-        expect(res.receivedUsd).toBe(1.5);
-        await expect(verifyEthTransfer(input({ expectedFromWallet: TREASURY, expectedToWallet: ALICE, expectedAmountUsd: 1.6 }))).rejects.toThrow(/to arrive/);
+        expect(res.received).toBe(1.5);
+        await expect(verifyEthTransfer(input({ expectedFromWallet: TREASURY, expectedToWallet: ALICE, expectedAmount: 1.6 }))).rejects.toThrow(/to arrive/);
     });
 
     it("refuses a hash already claimed, under any casing", async () => {

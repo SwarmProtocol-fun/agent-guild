@@ -23,16 +23,17 @@ interface RepayLoanDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     loan: Loan;
-    payoffUsd: number;
+    /** Live-estimated payoff in the loan's asset. */
+    payoffEstimate: number;
     onRepaid: () => void;
 }
 
-export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid }: RepayLoanDialogProps) {
+export function RepayLoanDialog({ open, onOpenChange, loan, payoffEstimate, onRepaid }: RepayLoanDialogProps) {
     const { address: sessionAddress } = useSession();
     const [step, setStep] = useState<"amount" | "send">("amount");
     const asset = assetOf(loan);
     // Quoted rounded up to ledger precision so paying the quote always clears the balance.
-    const payoff = ceilAmount(asset, payoffUsd);
+    const payoff = ceilAmount(asset, payoffEstimate);
     const [amount, setAmount] = useState(String(payoff));
     const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
     const recipient = loan.source === "solo" ? loan.lenderWalletAddress || null : treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null;
@@ -48,7 +49,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
         onOpenChange(false);
     };
 
-    const amountUsd = roundAmount(asset, parseFloat(amount) || 0);
+    const amountValue = roundAmount(asset, parseFloat(amount) || 0);
 
     return (
         <Dialog open={open} onOpenChange={handleClose}>
@@ -83,7 +84,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
                         <Button
                             size="sm"
                             onClick={() => setStep("send")}
-                            disabled={!(amountUsd > 0) || !recipient}
+                            disabled={!(amountValue > 0) || !recipient}
                             className="w-full h-8 text-xs gap-1"
                         >
                             {!recipient && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -93,7 +94,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
                 ) : (
                     <OnChainSendStep
                         recipientAddress={recipient!}
-                        amountUsd={amountUsd}
+                        amount={amountValue}
                         assetLabel={sendAssetLabel(treasuryInfo, asset)}
                         chain={assetInfo(asset).chain}
                         helperText={`Send from the ${loan.borrowerOrgId} org's wallet, then paste the signature.`}
@@ -102,7 +103,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
                             const res = await fetch(`/api/v1/lending/loans/${loan.id}/repay`, {
                                 method: "POST",
                                 headers: { "Content-Type": "application/json", "x-wallet-address": sessionAddress || "" },
-                                body: JSON.stringify({ amountUsd, txSig }),
+                                body: JSON.stringify({ amount: amountValue, txSig }),
                             });
                             if (!res.ok) {
                                 const body = await res.json().catch(() => ({}));

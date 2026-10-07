@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     try {
         const result = await sweepLending();
         console.log(
-            `[lending-sweep] defaulted=${result.defaulted.length} expired=${result.expired.length} ` +
+            `[lending-sweep] defaulted=${result.defaulted.length} liquidating=${result.liquidating.length} expired=${result.expired.length} ` +
             `pools=${result.poolsReconciled.length} errors=${result.errors.length}`,
         );
         return NextResponse.json(result, { status: result.errors.length > 0 ? 207 : 200 });

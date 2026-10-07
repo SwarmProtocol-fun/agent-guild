@@ -1,10 +1,9 @@
 /**
  * POST /api/v1/lending/loans/[id]/default
- * Platform admin only. Force-closes an overdue active loan into "defaulted",
- * writes off the remaining principal against the pool (collateral is not
- * actually collected, so nothing is recovered), and applies the credit score
- * penalty. There is no cron sweep for overdue loans in this codebase — this is
- * the only way a loan becomes defaulted.
+ * Platform admin only. Closes an overdue active loan as "defaulted": held
+ * collateral is applied to the balance and the rest is written off against
+ * the pool (see markLoanDefaulted). A collateral-market loan is moved to
+ * "liquidating" instead. The hourly sweep does the same after the grace period.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformAdmin, forbidden } from "@/lib/auth-guard";

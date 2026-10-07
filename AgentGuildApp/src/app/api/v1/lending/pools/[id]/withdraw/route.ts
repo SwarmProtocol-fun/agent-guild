@@ -1,6 +1,6 @@
 /**
  * POST /api/v1/lending/pools/[id]/withdraw
- * Body: { amountUsd: number }
+ * Body: { amount: number }
  * Requires x-wallet-address header. Locks in the amount and shares to burn at
  * today's share price, reserves them so they can't be requested twice or lent
  * out, and opens a pending payout request (cancellable via
@@ -17,20 +17,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const wallet = getWalletAddress(req);
     if (!wallet) return unauthorized("Missing x-wallet-address header");
 
-    let body: { amountUsd?: number };
+    let body: { amount?: number; /** @deprecated use `amount` */ amountUsd?: number };
     try {
         body = await req.json();
     } catch {
         return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const amountUsd = Number(body.amountUsd);
-    if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
-        return NextResponse.json({ error: "amountUsd must be a positive number" }, { status: 400 });
+    const amount = Number(body.amount ?? body.amountUsd);
+    if (!Number.isFinite(amount) || amount <= 0) {
+        return NextResponse.json({ error: "amount must be a positive number" }, { status: 400 });
     }
 
     try {
-        const request = await requestPoolWithdrawal(id, wallet, amountUsd);
+        const request = await requestPoolWithdrawal(id, wallet, amount);
         return NextResponse.json({ request }, { status: 201 });
     } catch (error) {
         console.error("[lending/pools/withdraw] error:", error);

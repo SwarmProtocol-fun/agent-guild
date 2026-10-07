@@ -16,8 +16,9 @@ import type { LendingAsset } from "./assets";
 export type { LendingAsset };
 
 /*
- * Amount fields named `...Usd` hold amounts in the record's `asset` units
- * (USDC, SOL or ETH); a record without `asset` is USDC. See assets.ts.
+ * Amount fields (principal, availableLiquidity, amount, ...) are in the
+ * record's `asset` units (USDC, SOL or ETH); a record without `asset` is USDC.
+ * Fields ending in `Usd` (principalUsdValue, tier limits) are real dollars.
  */
 
 export type LoanKind = "trust" | "unsecured";
@@ -31,8 +32,14 @@ export type LoanSource = "pool" | "solo";
  * equivalent: posted to the marketplace, awaiting a lender to send funds
  * directly and confirm. "cancelled" — withdrawn or expired before it was
  * ever funded.
+ * "liquidating" — a collateral-market loan whose loan-to-value crossed the
+ * liquidation threshold (or that went overdue): its collateral is seized and
+ * awaits sale. "liquidated" — the sale's proceeds covered the debt (any
+ * shortfall makes it "defaulted" instead).
  */
-export type LoanStatus = "pending_collateral" | "pending" | "pending_disbursement" | "active" | "repaid" | "defaulted" | "cancelled";
+export type LoanStatus =
+    | "pending_collateral" | "pending" | "pending_disbursement" | "active" | "repaid" | "defaulted" | "cancelled"
+    | "liquidating" | "liquidated";
 
 /**
  * Lifecycle of a trust loan's collateral, which is held in the lending
@@ -55,35 +62,48 @@ export interface Loan {
     poolId?: string;
     /** What was lent — the pool's asset. Solo loans are always USDC. Absent = USDC. */
     asset?: LendingAsset;
+    /** Collateral-market loans: the asset `collateral` is posted in. Absent = same as `asset`. */
+    collateralAsset?: LendingAsset;
+    /** Collateral-market loans: liquidation threshold copied from the pool at request time. */
+    liquidationLtvBps?: number;
+    liquidationStartedAt?: number;
+    /** Collateral price (USD) and loan-to-value when liquidation started. */
+    liquidationPriceUsd?: number;
+    liquidationLtvAtStart?: number;
+    liquidationReason?: "ltv" | "overdue" | "admin";
+    /** USDC the seized collateral sold for, and the transfer that delivered it. */
+    liquidationProceeds?: number;
+    liquidationTxSig?: string;
+    liquidatedAt?: number;
     /** USD value of the principal at request time (non-USDC loans), for limits and credit history. */
     principalUsdValue?: number;
     /** Set once a solo loan is funded (source === "solo") */
     lenderWalletAddress?: string;
     status: LoanStatus;
 
-    principalUsd: number;
-    principalRemainingUsd: number;
-    principalPaidUsd: number;
+    principal: number;
+    principalRemaining: number;
+    principalPaid: number;
     interestRateBps: number;
-    interestAccruedUsd: number;
-    interestPaidUsd: number;
+    interestAccrued: number;
+    interestPaid: number;
     /**
      * Collateral a "trust" loan requires, derived from the borrower's escrow
      * ratio (0 for unsecured). Posted to the treasury before funding and
      * tracked by collateralStatus. Loans created before collateral collection
      * existed have no collateralStatus and never held any.
      */
-    collateralUsd: number;
+    collateral: number;
     collateralStatus?: CollateralStatus;
     collateralTxSig?: string;
     /** Wallet that posted the collateral — where it is returned. */
     collateralPostedByWallet?: string;
-    /** True once this pool loan's principal/interest is included in the pool's accruingUsdPerYear / interestReceivableUsd. */
+    /** True once this pool loan's principal/interest is included in the pool's accruingPerYear / interestReceivable. */
     poolAccrualTracked?: boolean;
     cancelReason?: string;
     cancelledAt?: number;
     /** USDC the borrower sent beyond the total owed — owed back to them. */
-    overpaymentOwedUsd?: number;
+    overpaymentOwed?: number;
 
     termDays: number;
     requestedAt: number;
@@ -107,16 +127,16 @@ export interface Loan {
 export interface LoanRepayment {
     id: string;
     loanId: string;
-    amountUsd: number;
-    principalPortionUsd: number;
-    interestPortionUsd: number;
-    remainingBalanceUsd: number;
+    amount: number;
+    principalPortion: number;
+    interestPortion: number;
+    remainingBalance: number;
     paidAt: number;
     paidByWallet?: string;
     /** On-chain signature verified for this repayment. */
     txSig?: string;
     /** Portion of the on-chain transfer beyond what was owed; needs a manual refund. */
-    excessUsd?: number;
+    excess?: number;
     refundStatus?: "pending" | "refunded";
 }
 
@@ -126,25 +146,33 @@ export interface LendingPool {
     description?: string;
     /** The single asset this pool takes, lends and pays out. Absent = USDC. */
     asset?: LendingAsset;
-    /** Vault-style share accounting — sharePrice = (availableLiquidityUsd + totalLentUsd) / (totalShares - pendingWithdrawalShares) */
+    /**
+     * Set on collateral markets (e.g. USDC/ETH): borrowers lock this asset and
+     * borrow `asset` against it, up to maxLtvBps of its value; the sweep starts
+     * liquidation at liquidationLtvBps.
+     */
+    collateralAsset?: LendingAsset;
+    maxLtvBps?: number;
+    liquidationLtvBps?: number;
+    /** Vault-style share accounting — sharePrice = (availableLiquidity + totalLent) / (totalShares - pendingWithdrawalShares) */
     totalShares: number;
-    availableLiquidityUsd: number;
-    totalLentUsd: number;
-    totalDepositedUsd: number;
-    totalInterestEarnedUsd: number;
-    totalDefaultedUsd: number;
-    /** USD moved out of availableLiquidityUsd for withdrawals awaiting a confirmed payout. */
-    pendingWithdrawalUsd?: number;
+    availableLiquidity: number;
+    totalLent: number;
+    totalDeposited: number;
+    totalInterestEarned: number;
+    totalDefaulted: number;
+    /** USD moved out of availableLiquidity for withdrawals awaiting a confirmed payout. */
+    pendingWithdrawal?: number;
     /** Shares still in totalShares but already promised to pending withdrawals. */
     pendingWithdrawalShares?: number;
     /**
      * Interest accounting for active pool loans, so the share price reflects
      * interest as it accrues rather than jumping when it's repaid:
-     * accruingUsdPerYear = Σ principalRemaining × APR over active loans,
-     * interestReceivableUsd = accrued-but-unpaid interest as of interestAccrualAt.
+     * accruingPerYear = Σ principalRemaining × APR over active loans,
+     * interestReceivable = accrued-but-unpaid interest as of interestAccrualAt.
      */
-    accruingUsdPerYear?: number;
-    interestReceivableUsd?: number;
+    accruingPerYear?: number;
+    interestReceivable?: number;
     interestAccrualAt?: number;
     createdAt: unknown;
     createdBy?: string;
@@ -155,8 +183,8 @@ export interface PoolPosition {
     poolId: string;
     walletAddress: string;
     shares: number;
-    principalDepositedUsd: number;
-    principalWithdrawnUsd: number;
+    principalDeposited: number;
+    principalWithdrawn: number;
     /** Shares locked in this wallet's pending withdrawal requests. */
     pendingWithdrawalShares?: number;
     createdAt: unknown;
@@ -180,7 +208,7 @@ export interface PoolWithdrawalRequest {
     payoutWalletAddress?: string;
     /** The pool's asset, copied for display. Absent = USDC. */
     asset?: LendingAsset;
-    amountUsd: number;
+    amount: number;
     sharesToBurn: number;
     status: PoolWithdrawalStatus;
     requestedAt: number;
@@ -200,13 +228,13 @@ export interface PoolDepositRecord {
     id: string;
     poolId: string;
     walletAddress: string;
-    amountUsd: number;
+    amount: number;
     /** The pool's asset; omitted for USDC. */
     asset?: LendingAsset;
     /** Legacy: devnet SOL credited into the USDC pool at a fixed rate, before per-asset pools. */
     lamports?: number;
     /** Part of the transfer that wasn't credited (beta cap / paused / not allowlisted) and was queued for refund. */
-    refundedUsd?: number;
+    refunded?: number;
     txSig: string;
     depositedAt: number;
 }
@@ -225,7 +253,7 @@ export interface LoanOffer {
     lenderWalletAddress: string;
     kind: LoanKind;
     /** Maximum principal the lender will fund at these terms. */
-    amountUsd: number;
+    amount: number;
     rateBps: number;
     termDays: number;
     note?: string;
@@ -261,7 +289,8 @@ export type LendingPayoutKind =
     | "overpayment_refund"     // lender/treasury → borrower: paid beyond the balance
     | "repayment_refund"       // lender/treasury → payer: repayment that arrived after the loan closed
     | "deposit_refund"         // treasury → lender: deposit beyond the beta caps / while paused
-    | "funding_refund";        // borrower → lender: solo funding that arrived after the loan was already funded or cancelled
+    | "funding_refund"         // borrower → lender: solo funding that arrived after the loan was already funded or cancelled
+    | "liquidation_surplus";   // treasury → borrower: liquidation proceeds beyond the debt
 
 /**
  * A money movement the lending ledger owes but can't execute itself (no
@@ -275,7 +304,7 @@ export interface LendingPayout {
     kind: LendingPayoutKind;
     fromWallet: string;
     toWallet: string;
-    amountUsd: number;
+    amount: number;
     /** Asset to send (and verify). Absent = USDC. */
     asset?: LendingAsset;
     status: "pending" | "paid";

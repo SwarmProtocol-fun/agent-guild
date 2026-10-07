@@ -13,7 +13,8 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-agent-guild-rules 'vitest run src/test/rules'"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
@@ -92,6 +93,7 @@
     "protobufjs": "^7.6.5"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@netlify/plugin-nextjs": "^5.15.9",
     "@tailwindcss/postcss": "^4",
     "@testing-library/dom": "^10.4.0",

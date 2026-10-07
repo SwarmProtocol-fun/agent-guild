@@ -1,6 +1,6 @@
 /**
  * POST /api/v1/lending/offers/[id]/accept
- * Body: { agentId, orgId, amountUsd? }
+ * Body: { agentId, orgId, amount? }
  * Borrower accepts a lender's standing offer, creating a pending solo loan on
  * the offer's terms reserved for that lender to fund. Still subject to the
  * accepting agent's own eligibility gate (amount/rate band).
@@ -13,7 +13,7 @@ import { acceptLoanOffer } from "@/lib/lending/lending-service";
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
     const { id } = await params;
 
-    let body: { agentId?: string; orgId?: string; amountUsd?: number };
+    let body: { agentId?: string; orgId?: string; amount?: number; /** @deprecated use `amount` */ amountUsd?: number };
     try {
         body = await req.json();
     } catch {
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             offerId: id,
             agentId,
             orgId,
-            amountUsd: body.amountUsd,
+            amount: body.amount ?? body.amountUsd,
             requestedByWallet: getWalletAddress(req) || undefined,
         });
         return NextResponse.json({ loan }, { status: 201 });

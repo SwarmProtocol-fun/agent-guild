@@ -2,7 +2,7 @@
  * GET  /api/v1/lending/offers?open=1        — open loan offers (marketplace browse)
  * GET  /api/v1/lending/offers?lenderWallet=X — a lender's own offers (any status)
  * POST /api/v1/lending/offers                — post a new standing loan offer
- *   Body: { kind: "trust"|"unsecured", amountUsd, rateBps, termDays?, note? }
+ *   Body: { kind: "trust"|"unsecured", amount, rateBps, termDays?, note? }
  *   Requires x-wallet-address header — the offer is funded by that wallet once accepted.
  */
 import { NextRequest, NextResponse } from "next/server";
@@ -43,16 +43,17 @@ export async function POST(req: NextRequest) {
     const wallet = getWalletAddress(req);
     if (!wallet) return unauthorized("Missing x-wallet-address header");
 
-    let body: { kind?: LoanKind; amountUsd?: number; rateBps?: number; termDays?: number; note?: string };
+    let body: { kind?: LoanKind; amount?: number; /** @deprecated use `amount` */ amountUsd?: number; rateBps?: number; termDays?: number; note?: string };
     try {
         body = await req.json();
     } catch {
         return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { kind, amountUsd, rateBps } = body;
-    if (!kind || !Number.isFinite(amountUsd) || !Number.isFinite(rateBps)) {
-        return NextResponse.json({ error: "kind, amountUsd, and rateBps are required" }, { status: 400 });
+    const { kind, rateBps } = body;
+    const amount = body.amount ?? body.amountUsd;
+    if (!kind || !Number.isFinite(amount) || !Number.isFinite(rateBps)) {
+        return NextResponse.json({ error: "kind, amount, and rateBps are required" }, { status: 400 });
     }
     if (kind !== "trust" && kind !== "unsecured") {
         return NextResponse.json({ error: 'kind must be "trust" or "unsecured"' }, { status: 400 });
@@ -62,7 +63,7 @@ export async function POST(req: NextRequest) {
         const offer = await createLoanOffer({
             lenderWalletAddress: wallet,
             kind,
-            amountUsd: amountUsd as number,
+            amount: amount as number,
             rateBps: rateBps as number,
             termDays: body.termDays,
             note: body.note,

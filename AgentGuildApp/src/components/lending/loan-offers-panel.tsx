@@ -52,7 +52,7 @@ export function LoanOffersPanel({ agentId, orgId, walletAddress, onAccepted }: L
         if (!eligibility) return [];
         return offers.filter((offer) => {
             const gate = offer.kind === "trust" ? eligibility.trust : eligibility.unsecured;
-            if (!gate.eligible || offer.amountUsd > gate.maxAmountUsd) return false;
+            if (!gate.eligible || offer.amount > gate.maxAmountUsd) return false;
             const band = soloRateBand(gate.rateBps);
             return offer.rateBps >= band.minBps && offer.rateBps <= band.maxBps;
         });
@@ -112,7 +112,7 @@ export function LoanOffersPanel({ agentId, orgId, walletAddress, onAccepted }: L
                                 )}
                                 <div>
                                     <div className="text-xs font-medium">
-                                        ${offer.amountUsd.toLocaleString()} &middot; {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d
+                                        ${offer.amount.toLocaleString()} &middot; {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d
                                     </div>
                                     {offer.note && <div className="text-[10px] text-muted-foreground">{offer.note}</div>}
                                 </div>

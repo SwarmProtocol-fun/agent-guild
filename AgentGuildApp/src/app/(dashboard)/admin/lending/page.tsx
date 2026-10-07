@@ -7,7 +7,8 @@
  * asset (Solana for USDC and SOL, Ethereum for ETH — a Safe is fine), then
  * confirmed here with the resulting signature, which the backend verifies
  * on-chain before touching the ledger. Also hosts a manual trigger for the
- * lending sweep (normally hourly).
+ * lending sweep (normally hourly), and the liquidation queue: seized
+ * collateral-market collateral to sell, then record the proceeds.
  *
  * Route: /admin/lending
  */
@@ -22,7 +23,9 @@ import { useSession } from "@/contexts/SessionContext";
 import { isPlatformAdmin } from "@/lib/platform-admins";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import type { LendingPayout, Loan, PoolWithdrawalRequest } from "@/lib/lending/types";
-import { assetOf, assetInfo, formatAssetAmount, type LendingAsset } from "@/lib/lending/assets";
+import { assetOf, assetInfo, collateralAssetOf, formatAssetAmount, poolLabel, type LendingAsset } from "@/lib/lending/assets";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 export default function AdminLendingPage() {
@@ -38,6 +41,9 @@ export default function AdminLendingPage() {
     const [payoutLoan, setPayoutLoan] = useState<Loan | null>(null);
     const [payoutWithdrawal, setPayoutWithdrawal] = useState<PoolWithdrawalRequest | null>(null);
     const [payouts, setPayouts] = useState<LendingPayout[]>([]);
+    const [liquidations, setLiquidations] = useState<Loan[]>([]);
+    const [settlingLoan, setSettlingLoan] = useState<Loan | null>(null);
+    const [proceeds, setProceeds] = useState("");
     const [activePayout, setActivePayout] = useState<LendingPayout | null>(null);
     const [sweeping, setSweeping] = useState(false);
     const [sweepSummary, setSweepSummary] = useState<string | null>(null);
@@ -50,7 +56,7 @@ export default function AdminLendingPage() {
             const data = await res.json().catch(() => ({}));
             if (!res.ok && res.status !== 207) throw new Error(data.error || "Sweep failed");
             setSweepSummary(
-                `Defaulted ${data.defaulted?.length ?? 0} · expired ${data.expired?.length ?? 0} · reconciled ${data.poolsReconciled?.length ?? 0} pool(s)`
+                `Defaulted ${data.defaulted?.length ?? 0} · liquidating ${data.liquidating?.length ?? 0} · expired ${data.expired?.length ?? 0} · reconciled ${data.poolsReconciled?.length ?? 0} pool(s)`
                 + (data.errors?.length ? ` · ${data.errors.length} error(s): ${data.errors.join("; ")}` : ""),
             );
             load();
@@ -64,16 +70,18 @@ export default function AdminLendingPage() {
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const [treasury, loansRes, withdrawalsRes, payoutsRes] = await Promise.all([
+            const [treasury, loansRes, withdrawalsRes, payoutsRes, liquidationsRes] = await Promise.all([
                 fetchLendingTreasury().catch(() => null),
                 fetch("/api/v1/lending/loans?open=pending_disbursement"),
                 fetch("/api/v1/lending/pools/withdrawals"),
                 fetch("/api/v1/lending/payouts"),
+                fetch("/api/v1/lending/loans?open=liquidating"),
             ]);
             setTreasuryInfo(treasury);
             if (loansRes.ok) setDisbursements((await loansRes.json()).loans || []);
             if (withdrawalsRes.ok) setWithdrawals((await withdrawalsRes.json()).requests || []);
             if (payoutsRes.ok) setPayouts((await payoutsRes.json()).payouts || []);
+            if (liquidationsRes.ok) setLiquidations((await liquidationsRes.json()).loans || []);
         } finally {
             setLoading(false);
         }
@@ -137,7 +145,7 @@ export default function AdminLendingPage() {
                                     <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                         <div>
                                             <div className="font-mono">{loan.borrowerWalletAddress}</div>
-                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(loan), loan.principalUsd)} &middot; {loan.kind} &middot; agent {loan.borrowerAgentId}</div>
+                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(loan), loan.principal)} &middot; {loan.kind} &middot; agent {loan.borrowerAgentId}</div>
                                         </div>
                                         <div className="flex gap-1.5">
                                             <Button
@@ -174,11 +182,41 @@ export default function AdminLendingPage() {
                                     <div key={req.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                         <div>
                                             <div className="font-mono">{req.payoutWalletAddress ?? req.walletAddress}</div>
-                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(req), req.amountUsd)} from pool {req.poolId}</div>
+                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(req), req.amount)} from pool {req.poolId}</div>
                                         </div>
                                         <Button size="sm" className="h-7 text-xs gap-1" onClick={() => setPayoutWithdrawal(req)}>
                                             <ArrowUpFromLine className="h-3 w-3" /> Mark Paid
                                         </Button>
+                                    </div>
+                                ))
+                            )}
+                        </CardContent>
+                    </Card>
+
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="text-base">Liquidations ({liquidations.length})</CardTitle>
+                            <CardDescription>
+                                Collateral-market loans whose collateral was seized (loan-to-value past the market&apos;s threshold, or overdue).
+                                Sell the collateral from its treasury, send the USDC proceeds to the Solana treasury, then record them here.
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent className="space-y-2">
+                            {liquidations.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">Nothing pending.</p>
+                            ) : (
+                                liquidations.map((loan) => (
+                                    <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
+                                        <div>
+                                            <div>
+                                                {poolLabel(loan)} &middot; sell {formatAssetAmount(collateralAssetOf(loan), loan.collateral)} &middot; owed {formatAssetAmount(assetOf(loan), loan.principalRemaining + loan.interestAccrued)}
+                                            </div>
+                                            <div className="text-muted-foreground">
+                                                {loan.liquidationReason === "overdue" ? "Overdue" : loan.liquidationReason === "admin" ? "Started by an admin" : `LTV ${((loan.liquidationLtvAtStart ?? 0) * 100).toFixed(0)}%`}
+                                                {loan.liquidationPriceUsd !== undefined && ` at $${loan.liquidationPriceUsd.toLocaleString()}/${assetInfo(collateralAssetOf(loan)).symbol}`} &middot; agent {loan.borrowerAgentId}
+                                            </div>
+                                        </div>
+                                        <Button size="sm" className="h-7 text-xs" onClick={() => { setProceeds(""); setSettlingLoan(loan); }}>Record Proceeds</Button>
                                     </div>
                                 ))
                             )}
@@ -204,7 +242,7 @@ export default function AdminLendingPage() {
                                             <div>
                                                 <div className="font-mono">{p.toWallet}</div>
                                                 <div className="text-muted-foreground">
-                                                    {formatAssetAmount(assetOf(p), p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")} &middot; {p.reason}
+                                                    {formatAssetAmount(assetOf(p), p.amount)} &middot; {p.kind.replace(/_/g, " ")} &middot; {p.reason}
                                                     {!fromTreasury && <> &middot; owed by <span className="font-mono">{p.fromWallet.slice(0, 6)}…</span></>}
                                                 </div>
                                             </div>
@@ -226,7 +264,7 @@ export default function AdminLendingPage() {
                         <DialogHeader><DialogTitle>Confirm Payout</DialogTitle></DialogHeader>
                         <OnChainSendStep
                             recipientAddress={activePayout.toWallet}
-                            amountUsd={activePayout.amountUsd}
+                            amount={activePayout.amount}
                             {...sendProps(assetOf(activePayout))}
                             helperText={`${activePayout.reason}. Send exactly this amount from ${activePayout.fromWallet === treasuryOf(assetOf(activePayout)) ? "the treasury" : activePayout.fromWallet}, then paste the signature.`}
                             submitLabel="Confirm Payout"
@@ -245,13 +283,49 @@ export default function AdminLendingPage() {
                 </Dialog>
             )}
 
+            {settlingLoan && (
+                <Dialog open onOpenChange={(open) => !open && setSettlingLoan(null)}>
+                    <DialogContent className="max-w-sm">
+                        <DialogHeader><DialogTitle>Record Liquidation Proceeds</DialogTitle></DialogHeader>
+                        <div className="space-y-3">
+                            <div>
+                                <Label className="text-xs">Proceeds ({assetInfo(assetOf(settlingLoan)).symbol})</Label>
+                                <Input type="number" value={proceeds} onChange={(e) => setProceeds(e.target.value)} className="mt-1" placeholder="What the collateral sold for" />
+                                <p className="text-[10px] text-muted-foreground mt-1">
+                                    Owed: {formatAssetAmount(assetOf(settlingLoan), settlingLoan.principalRemaining + settlingLoan.interestAccrued)}. Any surplus is queued back to the borrower; a shortfall is written off as a default.
+                                </p>
+                            </div>
+                            {parseFloat(proceeds) > 0 && treasuryOf(assetOf(settlingLoan)) && (
+                                <OnChainSendStep
+                                    recipientAddress={treasuryOf(assetOf(settlingLoan))!}
+                                    amount={parseFloat(proceeds)}
+                                    {...sendProps(assetOf(settlingLoan))}
+                                    helperText="Send the sale proceeds to the treasury from anywhere (an exchange withdrawal, or a swap inside the treasury), then paste that transaction."
+                                    submitLabel="Verify & Settle"
+                                    onSubmit={async (txSig) => {
+                                        const res = await fetch(`/api/v1/lending/loans/${settlingLoan.id}/liquidation-proceeds`, {
+                                            method: "POST",
+                                            headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ amount: parseFloat(proceeds), txSig }),
+                                        });
+                                        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to settle");
+                                        setSettlingLoan(null);
+                                        load();
+                                    }}
+                                />
+                            )}
+                        </div>
+                    </DialogContent>
+                </Dialog>
+            )}
+
             {payoutLoan && (
                 <Dialog open onOpenChange={(open) => !open && setPayoutLoan(null)}>
                     <DialogContent className="max-w-sm">
                         <DialogHeader><DialogTitle>Confirm Loan Disbursement</DialogTitle></DialogHeader>
                         <OnChainSendStep
                             recipientAddress={payoutLoan.borrowerWalletAddress!}
-                            amountUsd={payoutLoan.principalUsd}
+                            amount={payoutLoan.principal}
                             {...sendProps(assetOf(payoutLoan))}
                             helperText="Send the principal from the treasury to this borrower, then paste the signature."
                             submitLabel="Confirm Disbursement"
@@ -276,7 +350,7 @@ export default function AdminLendingPage() {
                         <DialogHeader><DialogTitle>Confirm Pool Withdrawal</DialogTitle></DialogHeader>
                         <OnChainSendStep
                             recipientAddress={payoutWithdrawal.payoutWalletAddress ?? payoutWithdrawal.walletAddress}
-                            amountUsd={payoutWithdrawal.amountUsd}
+                            amount={payoutWithdrawal.amount}
                             {...sendProps(assetOf(payoutWithdrawal))}
                             helperText="Send the locked-in amount from the treasury to this lender, then paste the signature."
                             submitLabel="Confirm Payout"

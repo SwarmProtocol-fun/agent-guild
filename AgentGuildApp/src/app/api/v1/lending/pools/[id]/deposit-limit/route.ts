@@ -3,7 +3,7 @@
  * Requires x-wallet-address header. How much the caller may deposit right now
  * under the lending beta guards — call this BEFORE sending USDC. Anything sent
  * beyond it is credited as nothing and refunded through the payout queue.
- * Returns { capacityUsd: number | null (null = uncapped), paused, allowed }.
+ * Returns { capacity: number | null (null = uncapped), paused, allowed }.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { getWalletAddress, unauthorized } from "@/lib/auth-guard";

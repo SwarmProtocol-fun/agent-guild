@@ -2,11 +2,12 @@
  * GET  /api/v1/lending/loans?agentId=X             — an agent's loan history
  * GET  /api/v1/lending/loans?open=solo             — open solo loan requests (marketplace browse)
  * GET  /api/v1/lending/loans?open=pending_disbursement — platform admin: pool loans awaiting real payout
+ * GET  /api/v1/lending/loans?open=liquidating       — platform admin: market loans whose collateral awaits sale
  * GET  /api/v1/lending/loans?lenderWallet=X        — loans funded by a given wallet
  * POST /api/v1/lending/loans                       — request a new loan for an agent
  *   Body: { agentId, orgId, kind: "trust"|"unsecured", source: "pool"|"solo",
- *           amountUsd, termDays?, poolId?, asset?, purpose?, requestedRateBps? }
- *   Pool loans are in the pool's asset (amountUsd is in that asset's units);
+ *           amount, termDays?, poolId?, asset?, purpose?, requestedRateBps? }
+ *   Pool loans are in the pool's asset (amount is in that asset's units);
  *   `asset` picks that asset's default pool when poolId is omitted.
  *   requestedRateBps only applies to source: "solo" — pool loans are always
  *   priced at the fixed tier rate. Solo rates still must fall within a band
@@ -22,6 +23,7 @@ import {
     listLoansFundedByWallet,
     listPendingDisbursements,
     requestLoan,
+    listLiquidatingLoans,
 } from "@/lib/lending/lending-service";
 import type { LoanKind, LoanSource } from "@/lib/lending/types";
 
@@ -45,11 +47,17 @@ export async function GET(req: NextRequest) {
             const loans = await listPendingDisbursements();
             return NextResponse.json({ loans });
         }
+        if (open === "liquidating") {
+            const admin = requirePlatformAdmin(req);
+            if (!admin.ok) return forbidden(admin.error || "Platform admin required");
+            const loans = await listLiquidatingLoans();
+            return NextResponse.json({ loans });
+        }
         if (lenderWallet) {
             const loans = await listLoansFundedByWallet(lenderWallet);
             return NextResponse.json({ loans });
         }
-        return NextResponse.json({ error: "Provide agentId, open=solo, open=pending_disbursement, or lenderWallet" }, { status: 400 });
+        return NextResponse.json({ error: "Provide agentId, open=solo, open=pending_disbursement, open=liquidating, or lenderWallet" }, { status: 400 });
     } catch (error) {
         console.error("[lending/loans] GET error:", error);
         return NextResponse.json({ error: "Failed to load loans" }, { status: 500 });
@@ -62,7 +70,8 @@ export async function POST(req: NextRequest) {
         orgId?: string;
         kind?: LoanKind;
         source?: LoanSource;
-        amountUsd?: number;
+        amount?: number;
+        /** @deprecated use `amount` */ amountUsd?: number;
         termDays?: number;
         poolId?: string;
         asset?: string;
@@ -75,9 +84,10 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { agentId, orgId, kind, source, amountUsd } = body;
-    if (!agentId || !orgId || !kind || !source || !Number.isFinite(amountUsd)) {
-        return NextResponse.json({ error: "agentId, orgId, kind, source, and amountUsd are required" }, { status: 400 });
+    const { agentId, orgId, kind, source } = body;
+    const amount = body.amount ?? body.amountUsd;
+    if (!agentId || !orgId || !kind || !source || !Number.isFinite(amount)) {
+        return NextResponse.json({ error: "agentId, orgId, kind, source, and amount are required" }, { status: 400 });
     }
     if (kind !== "trust" && kind !== "unsecured") {
         return NextResponse.json({ error: 'kind must be "trust" or "unsecured"' }, { status: 400 });
@@ -112,7 +122,7 @@ export async function POST(req: NextRequest) {
             orgId,
             kind,
             source,
-            amountUsd: amountUsd as number,
+            amount: amount as number,
             termDays: body.termDays,
             poolId: body.poolId,
             asset: isLendingAsset(body.asset) ? body.asset : undefined,

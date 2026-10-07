@@ -19,11 +19,11 @@ import { Label } from "@/components/ui/label";
 
 interface OnChainSendStepProps {
     recipientAddress: string;
-    amountUsd: number;
+    amount: number;
     assetLabel?: string;
     helperText?: string;
     submitLabel?: string;
-    /** Overrides the "Send" row's value (default: `${amountUsd} ${assetLabel}`). */
+    /** Overrides the "Send" row's value (default: `${amount} ${assetLabel}`). */
     amountLabel?: string;
     /** Ethereum transfers are identified by a tx hash and need ~15 min to finalize before they verify. */
     chain?: "solana" | "ethereum";
@@ -37,7 +37,7 @@ const DEFAULT_ASSET_LABEL = process.env.NEXT_PUBLIC_SOLANA_CLUSTER === "mainnet-
 
 export function OnChainSendStep({
     recipientAddress,
-    amountUsd,
+    amount,
     assetLabel = DEFAULT_ASSET_LABEL,
     helperText,
     submitLabel = "Verify & Continue",
@@ -102,7 +102,7 @@ export function OnChainSendStep({
             <div className="rounded-lg border border-border p-3 space-y-2">
                 <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Send</span>
-                    <span className="font-bold">{amountLabel ?? `${amountUsd} ${assetLabel}`}</span>
+                    <span className="font-bold">{amountLabel ?? `${amount} ${assetLabel}`}</span>
                 </div>
                 <div className="flex justify-between text-sm items-center">
                     <span className="text-muted-foreground">To</span>

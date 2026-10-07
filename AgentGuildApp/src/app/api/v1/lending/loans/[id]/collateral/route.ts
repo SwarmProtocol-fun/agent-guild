@@ -2,7 +2,7 @@
  * POST /api/v1/lending/loans/[id]/collateral
  * Body: { txSig: string }
  * A member of the borrowing org posts a trust loan's collateral. They must
- * have already sent exactly `loan.collateralUsd` USDC from their own wallet
+ * have already sent exactly `loan.collateral` USDC from their own wallet
  * to the lending treasury (GET /api/v1/lending/treasury); this verifies it
  * on-chain, marks the collateral held, and moves the loan on to funding.
  * The collateral is returned to the same wallet once the loan is repaid.

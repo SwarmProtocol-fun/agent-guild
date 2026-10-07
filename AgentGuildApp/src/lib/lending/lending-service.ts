@@ -35,8 +35,9 @@ import { ingestCreditEvent } from "@/lib/credit-events/ingest";
 import type { CreditEventType } from "@/lib/credit-events/types";
 import { recomputeAndSync } from "@/lib/scoring-engine";
 import { verifyLendingTransfer, claimLendingTransferInTxn, treasuryFor, normalizeTxSig, type VerifyTransferInput } from "./verify";
-import { assetOf, roundAmount, floorAmount, formatAssetAmount, LENDING_ASSETS, type LendingAsset } from "./assets";
+import { assetOf, collateralAssetOf, poolLabel, roundAmount, floorAmount, ceilAmount, formatAssetAmount, LENDING_ASSETS, type LendingAsset } from "./assets";
 import { getUsdPrice } from "./prices";
+import { normalizeLegacy, healLegacyInTxn } from "./legacy-fields";
 import { isAddress } from "viem";
 import {
     MIN_LOAN_USD,
@@ -55,7 +56,8 @@ import {
     poolSettlementDeltas,
     accruePoolInterest,
     computeDefaultRecovery,
-    depositCapacityUsd,
+    depositCapacity,
+    loanToValue,
 } from "./math";
 import { SOLANA_WALLET_LINKS_COLLECTION, isSolanaAddress } from "@/lib/identity-nft-service";
 import { lendingLimits, assertCanOpenPosition, isWalletAllowed } from "./config";
@@ -83,18 +85,45 @@ const OFFERS = "loanOffers";
 /** Loose sanity bounds on a lender-proposed rate — actual eligibility banding happens per-borrower at acceptance time. */
 const OFFER_MIN_RATE_BPS = 100;
 const OFFER_MAX_RATE_BPS = 10_000;
-const ACTIVE_LOAN_STATUSES: string[] = ["pending_collateral", "pending", "pending_disbursement", "active"];
+const ACTIVE_LOAN_STATUSES: string[] = ["pending_collateral", "pending", "pending_disbursement", "active", "liquidating"];
 
-/** One community pool per asset. USDC keeps its original auto-id doc; SOL and ETH get fixed ids so seeding is idempotent. */
-const DEFAULT_POOLS: Record<LendingAsset, { id: string | null; name: string; description: string }> = {
-    usdc: { id: null, name: "Community Lending Pool", description: "Diversified community pool — lower risk, funds agents automatically as they qualify." },
-    sol: { id: "community-sol", name: "SOL Lending Pool", description: "Lend SOL, earn SOL. Loans from this pool are paid out and repaid in SOL." },
-    eth: { id: "community-eth", name: "ETH Lending Pool", description: "Lend ETH on Ethereum, earn ETH. Loans from this pool are paid out and repaid in ETH." },
+/**
+ * The pools lending offers. Single-asset pools lend and take back one asset.
+ * Collateral markets ("usdc/eth", "usdc/sol") lend USDC against locked
+ * ETH/SOL. The original USDC pool keeps its auto-id document; the rest get
+ * fixed ids so seeding is idempotent.
+ */
+type PoolKey = "usdc" | "sol" | "eth" | "usdc/eth" | "usdc/sol";
+interface PoolDefinition {
+    id: string | null;
+    asset: LendingAsset;
+    collateralAsset?: LendingAsset;
+    maxLtvBps?: number;
+    liquidationLtvBps?: number;
+    name: string;
+    description: string;
+}
+const DEFAULT_POOLS: Record<PoolKey, PoolDefinition> = {
+    usdc: { id: null, asset: "usdc", name: "Community Lending Pool", description: "Diversified community pool — lower risk, funds agents automatically as they qualify." },
+    sol: { id: "community-sol", asset: "sol", name: "SOL Lending Pool", description: "Lend SOL, earn SOL. Loans from this pool are paid out and repaid in SOL." },
+    eth: { id: "community-eth", asset: "eth", name: "ETH Lending Pool", description: "Lend ETH on Ethereum, earn ETH. Loans from this pool are paid out and repaid in ETH." },
+    "usdc/eth": {
+        id: "market-usdc-eth", asset: "usdc", collateralAsset: "eth", maxLtvBps: 6500, liquidationLtvBps: 8000,
+        name: "USDC/ETH Market", description: "Lend USDC, earn USDC. Borrowers lock ETH worth at least 1.5× the loan; liquidated if the loan reaches 80% of the ETH's value.",
+    },
+    "usdc/sol": {
+        id: "market-usdc-sol", asset: "usdc", collateralAsset: "sol", maxLtvBps: 5500, liquidationLtvBps: 7500,
+        name: "USDC/SOL Market", description: "Lend USDC, earn USDC. Borrowers lock SOL worth at least 1.8× the loan; liquidated if the loan reaches 75% of the SOL's value.",
+    },
 };
 
-/** ETH is offered only once its treasury is configured; USDC and SOL share the Solana treasury. */
-function enabledAssets(): LendingAsset[] {
-    return process.env.ETH_LENDING_TREASURY_ADDRESS ? ["usdc", "sol", "eth"] : ["usdc", "sol"];
+function poolKey(pool: Pick<LendingPool, "asset" | "collateralAsset">): string {
+    return pool.collateralAsset ? `${assetOf(pool)}/${pool.collateralAsset}` : assetOf(pool);
+}
+
+/** ETH and USDC/ETH need the Ethereum treasury configured; the rest use the Solana treasury. */
+function enabledPools(): PoolKey[] {
+    return process.env.ETH_LENDING_TREASURY_ADDRESS ? ["usdc", "sol", "eth", "usdc/eth", "usdc/sol"] : ["usdc", "sol", "usdc/sol"];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -109,11 +138,19 @@ function withoutUndefined<T extends object>(obj: T): T {
 }
 
 function toLoan(id: string, data: FirebaseFirestore.DocumentData): Loan {
-    return { id, ...data } as Loan;
+    return { id, ...normalizeLegacy("loans", data) } as Loan;
 }
 
 function toPool(id: string, data: FirebaseFirestore.DocumentData): LendingPool {
-    return { id, ...data } as LendingPool;
+    return { id, ...normalizeLegacy("lendingPools", data) } as LendingPool;
+}
+
+function toPosition(id: string, data: FirebaseFirestore.DocumentData): PoolPosition {
+    return { id, ...normalizeLegacy("lendingPoolPositions", data) } as PoolPosition;
+}
+
+function toWithdrawal(id: string, data: FirebaseFirestore.DocumentData): PoolWithdrawalRequest {
+    return { id, ...normalizeLegacy("lendingPoolWithdrawals", data) } as PoolWithdrawalRequest;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -121,19 +158,19 @@ function toPool(id: string, data: FirebaseFirestore.DocumentData): LendingPool {
 // ═══════════════════════════════════════════════════════════════
 
 export interface PoolLoanChange {
-    principalReturnedUsd?: number;
-    interestReturnedUsd?: number;
-    lossUsd?: number;
+    principalReturned?: number;
+    interestReturned?: number;
+    loss?: number;
     /** Change in Σ principal × APR of accruing loans (positive on disbursement, negative on repayment/default). */
-    accruingDeltaUsdPerYear?: number;
+    accruingDeltaPerYear?: number;
     /** Change in accrued-but-unpaid interest (negative when interest is paid or written off). */
-    receivableDeltaUsd?: number;
+    receivableDelta?: number;
 }
 
 /**
  * Apply a loan event to its pool inside a transaction. The caller must have
  * read `pool` in the same transaction: interest accrual is brought up to `at`
- * before accruingUsdPerYear changes, so the pool's receivable always equals
+ * before accruingPerYear changes, so the pool's receivable always equals
  * the sum of its tracked loans' accrued interest.
  */
 function applyPoolLoanChangeInTxn(
@@ -142,40 +179,40 @@ function applyPoolLoanChangeInTxn(
     at: number,
     change: PoolLoanChange,
 ): void {
-    const d = poolSettlementDeltas(change.principalReturnedUsd ?? 0, change.interestReturnedUsd ?? 0, change.lossUsd ?? 0);
+    const d = poolSettlementDeltas(change.principalReturned ?? 0, change.interestReturned ?? 0, change.loss ?? 0);
     const accrued = accruePoolInterest(pool, at);
     txn.update(adminDb().collection(POOLS).doc(pool.id), {
-        availableLiquidityUsd: FieldValue.increment(d.availableLiquidityUsd),
-        totalLentUsd: FieldValue.increment(d.totalLentUsd),
-        totalInterestEarnedUsd: FieldValue.increment(d.totalInterestEarnedUsd),
-        totalDefaultedUsd: FieldValue.increment(d.totalDefaultedUsd),
-        accruingUsdPerYear: Math.max(0, (pool.accruingUsdPerYear ?? 0) + (change.accruingDeltaUsdPerYear ?? 0)),
-        interestReceivableUsd: Math.max(0, accrued.interestReceivableUsd + (change.receivableDeltaUsd ?? 0)),
+        availableLiquidity: FieldValue.increment(d.availableLiquidity),
+        totalLent: FieldValue.increment(d.totalLent),
+        totalInterestEarned: FieldValue.increment(d.totalInterestEarned),
+        totalDefaulted: FieldValue.increment(d.totalDefaulted),
+        accruingPerYear: Math.max(0, (pool.accruingPerYear ?? 0) + (change.accruingDeltaPerYear ?? 0)),
+        interestReceivable: Math.max(0, accrued.interestReceivable + (change.receivableDelta ?? 0)),
         interestAccrualAt: accrued.interestAccrualAt,
     });
 }
 
 /** Annual interest a loan contributes to its pool's accrual at its current remaining principal. */
-function loanAccruingUsdPerYear(loan: Pick<Loan, "principalRemainingUsd" | "interestRateBps">, principalUsd = loan.principalRemainingUsd): number {
-    return principalUsd * (loan.interestRateBps / 10_000);
+function loanAccruingPerYear(loan: Pick<Loan, "principalRemaining" | "interestRateBps">, principal = loan.principalRemaining): number {
+    return principal * (loan.interestRateBps / 10_000);
 }
 
-/** Idempotently ensures a community pool exists for every enabled asset, and returns all pools (oldest first). */
+/** Idempotently ensures every enabled pool exists, and returns all pools (oldest first). */
 export async function listPools(): Promise<LendingPool[]> {
     const snap = await adminDb().collection(POOLS).orderBy("createdAt", "asc").get();
     const pools = snap.docs.map((d) => toPool(d.id, d.data()));
-    const have = new Set(pools.map((p) => assetOf(p)));
-    for (const asset of enabledAssets()) {
-        if (have.has(asset)) continue;
-        const def = DEFAULT_POOLS[asset];
-        pools.push(await createPool({ name: def.name, description: def.description, asset, id: def.id ?? undefined }));
+    const have = new Set(pools.map(poolKey));
+    for (const key of enabledPools()) {
+        if (have.has(key)) continue;
+        const { id, ...def } = DEFAULT_POOLS[key];
+        pools.push(await createPool({ ...def, id: id ?? undefined }));
     }
     return pools;
 }
 
-/** The oldest pool for `asset` — where a pool loan goes when no poolId is given. */
+/** The oldest single-asset pool for `asset` — where a pool loan goes when no poolId is given. */
 async function defaultPoolFor(asset: LendingAsset): Promise<LendingPool> {
-    const pool = (await listPools()).find((p) => assetOf(p) === asset);
+    const pool = (await listPools()).find((p) => assetOf(p) === asset && !p.collateralAsset);
     if (!pool) throw new Error(`No ${LENDING_ASSETS[asset].symbol} pool is available`);
     return pool;
 }
@@ -185,22 +222,35 @@ export async function getPool(poolId: string): Promise<LendingPool | null> {
     return snap.exists ? toPool(snap.id, snap.data()!) : null;
 }
 
-export async function createPool(input: { name: string; description?: string; createdBy?: string; asset?: LendingAsset; id?: string }): Promise<LendingPool> {
+export async function createPool(input: {
+    name: string;
+    description?: string;
+    createdBy?: string;
+    asset?: LendingAsset;
+    collateralAsset?: LendingAsset;
+    maxLtvBps?: number;
+    liquidationLtvBps?: number;
+    id?: string;
+}): Promise<LendingPool> {
     const asset = input.asset ?? "usdc";
+    if (input.collateralAsset && !(input.maxLtvBps && input.liquidationLtvBps && input.maxLtvBps < input.liquidationLtvBps && input.liquidationLtvBps < 10_000)) {
+        throw new Error("A collateral market needs 0 < maxLtvBps < liquidationLtvBps < 10000");
+    }
     const doc = {
         name: input.name,
         description: input.description || "",
         ...(asset === "usdc" ? {} : { asset }),
+        ...(input.collateralAsset ? { collateralAsset: input.collateralAsset, maxLtvBps: input.maxLtvBps, liquidationLtvBps: input.liquidationLtvBps } : {}),
         totalShares: 0,
-        availableLiquidityUsd: 0,
-        totalLentUsd: 0,
-        totalDepositedUsd: 0,
-        totalInterestEarnedUsd: 0,
-        totalDefaultedUsd: 0,
-        pendingWithdrawalUsd: 0,
+        availableLiquidity: 0,
+        totalLent: 0,
+        totalDeposited: 0,
+        totalInterestEarned: 0,
+        totalDefaulted: 0,
+        pendingWithdrawal: 0,
         pendingWithdrawalShares: 0,
-        accruingUsdPerYear: 0,
-        interestReceivableUsd: 0,
+        accruingPerYear: 0,
+        interestReceivable: 0,
         interestAccrualAt: nowSec(),
         createdAt: FieldValue.serverTimestamp(),
         createdBy: input.createdBy || null,
@@ -226,17 +276,17 @@ export async function createPool(input: { name: string; description?: string; cr
 export async function getPoolPosition(poolId: string, wallet: string): Promise<PoolPosition | null> {
     const id = `${poolId}_${wallet}`;
     const snap = await adminDb().collection(POSITIONS).doc(id).get();
-    return snap.exists ? ({ id: snap.id, ...snap.data() } as PoolPosition) : null;
+    return snap.exists ? toPosition(snap.id, snap.data()!) : null;
 }
 
 export async function listPositionsForWallet(wallet: string): Promise<PoolPosition[]> {
     const snap = await adminDb().collection(POSITIONS).where("walletAddress", "==", wallet).get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as PoolPosition);
+    return snap.docs.map((d) => toPosition(d.id, d.data()));
 }
 
 export interface DepositCapacity {
     /** null = uncapped. */
-    capacityUsd: number | null;
+    capacity: number | null;
     paused: boolean;
     allowed: boolean;
 }
@@ -247,10 +297,10 @@ export async function getDepositCapacity(poolId: string, wallet: string): Promis
     const [pool, position] = await Promise.all([getPool(poolId), getPoolPosition(poolId, wallet)]);
     if (!pool) throw new Error("Pool not found");
     const allowed = isWalletAllowed(limits, wallet);
-    if (limits.paused || !allowed) return { capacityUsd: 0, paused: limits.paused, allowed };
+    if (limits.paused || !allowed) return { capacity: 0, paused: limits.paused, allowed };
     const asset = assetOf(pool);
-    const cap = depositCapacityUsd(pool, position, await capsInAssetUnits(limits, asset));
-    return { capacityUsd: Number.isFinite(cap) ? floorAmount(asset, cap) : null, paused: false, allowed };
+    const cap = depositCapacity(pool, position, await capsInAssetUnits(limits, asset));
+    return { capacity: Number.isFinite(cap) ? floorAmount(asset, cap) : null, paused: false, allowed };
 }
 
 /** The beta's USD caps expressed in `asset` units at the current price (no price needed for USDC or when uncapped). */
@@ -299,7 +349,7 @@ async function resolveBorrowerWallet(agentWallet: string | undefined, requestedB
 }
 
 /**
- * Verify a lender actually sent `amountUsd` (in the pool's asset) to that
+ * Verify a lender actually sent `amount` (in the pool's asset) to that
  * asset's treasury on-chain, then mint pool shares for it. The signature claim, share mint and deposit
  * record commit in one transaction. Throws if the signature doesn't check out
  * or has already been used.
@@ -312,14 +362,14 @@ async function resolveBorrowerWallet(agentWallet: string | undefined, requestedB
 export async function confirmPoolDeposit(
     poolId: string,
     wallet: string,
-    amountUsd: number,
+    amount: number,
     txSig: string,
-): Promise<{ pool: LendingPool; position: PoolPosition | null; creditedUsd: number; refundedUsd: number }> {
+): Promise<{ pool: LendingPool; position: PoolPosition | null; credited: number; refunded: number }> {
     const target = await getPool(poolId);
     if (!target) throw new Error("Pool not found");
     const asset = assetOf(target);
-    amountUsd = roundAmount(asset, amountUsd);
-    if (!(amountUsd > 0)) throw new Error("Deposit amount must be positive");
+    amount = roundAmount(asset, amount);
+    if (!(amount > 0)) throw new Error("Deposit amount must be positive");
 
     const treasury = treasuryFor(asset);
     const payer = await resolvePayerWallet(wallet, asset);
@@ -327,7 +377,7 @@ export async function confirmPoolDeposit(
         txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: payer,
         expectedToWallet: treasury,
-        expectedAmountUsd: amountUsd,
+        expectedAmount: amount,
         purpose: "pool_deposit",
         refId: poolId,
     };
@@ -345,21 +395,23 @@ export async function confirmPoolDeposit(
         const [poolSnap, posSnap] = await Promise.all([txn.get(poolRef), txn.get(positionRef)]);
         if (!poolSnap.exists) throw new Error("Pool not found");
         const pool = toPool(poolSnap.id, poolSnap.data()!);
-        const existing = posSnap.exists ? (posSnap.data() as PoolPosition) : null;
+        const existing = posSnap.exists ? toPosition(posSnap.id, posSnap.data()!) : null;
+        healLegacyInTxn(txn, poolRef, "lendingPools", poolSnap.data());
+        healLegacyInTxn(txn, positionRef, "lendingPoolPositions", posSnap.data());
 
         const at = nowSec();
-        const capacity = limits.paused || !isWalletAllowed(limits, wallet) ? 0 : depositCapacityUsd(pool, existing, caps, at);
-        const creditedUsd = floorAmount(asset, Math.min(amountUsd, capacity));
-        const refundedUsd = roundAmount(asset, amountUsd - creditedUsd);
+        const capacity = limits.paused || !isWalletAllowed(limits, wallet) ? 0 : depositCapacity(pool, existing, caps, at);
+        const credited = floorAmount(asset, Math.min(amount, capacity));
+        const refunded = roundAmount(asset, amount - credited);
 
         claimLendingTransferInTxn(asset, txn, transfer);
 
-        if (refundedUsd > 0) {
+        if (refunded > 0) {
             createPayoutInTxn(txn, {
                 kind: "deposit_refund",
                 fromWallet: treasury,
                 toWallet: payer,
-                amountUsd: refundedUsd,
+                amount: refunded,
                 asset,
                 poolId,
                 reason: (limits.paused
@@ -373,29 +425,29 @@ export async function confirmPoolDeposit(
         txn.set(depositRef, withoutUndefined({
             poolId,
             walletAddress: wallet,
-            amountUsd: creditedUsd,
-            refundedUsd: refundedUsd > 0 ? refundedUsd : undefined,
+            amount: credited,
+            refunded: refunded > 0 ? refunded : undefined,
             asset: asset === "usdc" ? undefined : asset,
             txSig: transfer.txSig,
             depositedAt: at,
         }));
 
-        if (creditedUsd <= 0) {
-            return { pool, position: existing ? { ...existing, id: positionRef.id } : null, creditedUsd: 0, refundedUsd };
+        if (credited <= 0) {
+            return { pool, position: existing ? { ...existing, id: positionRef.id } : null, credited: 0, refunded };
         }
 
-        const sharesToMint = sharesForDeposit(pool, creditedUsd, at);
+        const sharesToMint = sharesForDeposit(pool, credited, at);
 
         txn.update(poolRef, {
             totalShares: FieldValue.increment(sharesToMint),
-            availableLiquidityUsd: FieldValue.increment(creditedUsd),
-            totalDepositedUsd: FieldValue.increment(creditedUsd),
+            availableLiquidity: FieldValue.increment(credited),
+            totalDeposited: FieldValue.increment(credited),
         });
 
         if (existing) {
             txn.update(positionRef, {
                 shares: FieldValue.increment(sharesToMint),
-                principalDepositedUsd: FieldValue.increment(creditedUsd),
+                principalDeposited: FieldValue.increment(credited),
                 updatedAt: FieldValue.serverTimestamp(),
             });
         } else {
@@ -403,8 +455,8 @@ export async function confirmPoolDeposit(
                 poolId,
                 walletAddress: wallet,
                 shares: sharesToMint,
-                principalDepositedUsd: creditedUsd,
-                principalWithdrawnUsd: 0,
+                principalDeposited: credited,
+                principalWithdrawn: 0,
                 pendingWithdrawalShares: 0,
                 createdAt: FieldValue.serverTimestamp(),
                 updatedAt: FieldValue.serverTimestamp(),
@@ -415,22 +467,22 @@ export async function confirmPoolDeposit(
             pool: {
                 ...pool,
                 totalShares: pool.totalShares + sharesToMint,
-                availableLiquidityUsd: pool.availableLiquidityUsd + creditedUsd,
-                totalDepositedUsd: pool.totalDepositedUsd + creditedUsd,
+                availableLiquidity: pool.availableLiquidity + credited,
+                totalDeposited: pool.totalDeposited + credited,
             },
             position: {
                 id: positionRef.id,
                 poolId,
                 walletAddress: wallet,
                 shares: (existing?.shares || 0) + sharesToMint,
-                principalDepositedUsd: (existing?.principalDepositedUsd || 0) + creditedUsd,
-                principalWithdrawnUsd: existing?.principalWithdrawnUsd || 0,
+                principalDeposited: (existing?.principalDeposited || 0) + credited,
+                principalWithdrawn: existing?.principalWithdrawn || 0,
                 pendingWithdrawalShares: existing?.pendingWithdrawalShares || 0,
                 createdAt: existing?.createdAt ?? Timestamp.now(),
                 updatedAt: Timestamp.now(),
             },
-            creditedUsd,
-            refundedUsd,
+            credited,
+            refunded,
         };
     });
 }
@@ -444,8 +496,8 @@ export async function confirmPoolDeposit(
  * lender can't stack requests beyond their position and a new loan can't take
  * liquidity that's already promised to a withdrawal.
  */
-export async function requestPoolWithdrawal(poolId: string, wallet: string, amountUsd: number): Promise<PoolWithdrawalRequest> {
-    if (!(amountUsd > 0)) throw new Error("Withdrawal amount must be positive");
+export async function requestPoolWithdrawal(poolId: string, wallet: string, amount: number): Promise<PoolWithdrawalRequest> {
+    if (!(amount > 0)) throw new Error("Withdrawal amount must be positive");
 
     const poolRef = adminDb().collection(POOLS).doc(poolId);
     const positionRef = adminDb().collection(POSITIONS).doc(`${poolId}_${wallet}`);
@@ -453,7 +505,7 @@ export async function requestPoolWithdrawal(poolId: string, wallet: string, amou
     const target = await getPool(poolId);
     if (!target) throw new Error("Pool not found");
     const asset = assetOf(target);
-    amountUsd = roundAmount(asset, amountUsd);
+    amount = roundAmount(asset, amount);
     const payoutWalletAddress = await resolvePayerWallet(wallet, asset);
 
     return adminDb().runTransaction(async (txn) => {
@@ -461,16 +513,18 @@ export async function requestPoolWithdrawal(poolId: string, wallet: string, amou
         if (!poolSnap.exists) throw new Error("Pool not found");
         if (!posSnap.exists) throw new Error("No position in this pool");
         const pool = toPool(poolSnap.id, poolSnap.data()!);
-        const position = posSnap.data() as PoolPosition;
+        const position = toPosition(posSnap.id, posSnap.data()!);
+        healLegacyInTxn(txn, poolRef, "lendingPools", poolSnap.data());
+        healLegacyInTxn(txn, positionRef, "lendingPoolPositions", posSnap.data());
 
-        const { sharesToBurn } = planWithdrawal(pool, position, amountUsd);
+        const { sharesToBurn } = planWithdrawal(pool, position, amount);
 
         const request: Omit<PoolWithdrawalRequest, "id"> = {
             poolId,
             walletAddress: wallet,
             payoutWalletAddress,
             ...(asset === "usdc" ? {} : { asset }),
-            amountUsd,
+            amount,
             sharesToBurn,
             status: "pending_payout",
             requestedAt: nowSec(),
@@ -478,8 +532,8 @@ export async function requestPoolWithdrawal(poolId: string, wallet: string, amou
         };
         txn.set(requestRef, request);
         txn.update(poolRef, {
-            availableLiquidityUsd: FieldValue.increment(-amountUsd),
-            pendingWithdrawalUsd: FieldValue.increment(amountUsd),
+            availableLiquidity: FieldValue.increment(-amount),
+            pendingWithdrawal: FieldValue.increment(amount),
             pendingWithdrawalShares: FieldValue.increment(sharesToBurn),
         });
         txn.update(positionRef, {
@@ -500,16 +554,21 @@ export async function cancelPoolWithdrawal(requestId: string): Promise<PoolWithd
     return adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(requestRef);
         if (!snap.exists) throw new Error("Withdrawal request not found");
-        const request = { id: snap.id, ...snap.data() } as PoolWithdrawalRequest;
+        const request = toWithdrawal(snap.id, snap.data()!);
         if (request.status !== "pending_payout") throw new Error(`Withdrawal is not pending (status: ${request.status})`);
 
         if (request.reserved) {
-            txn.update(adminDb().collection(POOLS).doc(request.poolId), {
-                availableLiquidityUsd: FieldValue.increment(request.amountUsd),
-                pendingWithdrawalUsd: FieldValue.increment(-request.amountUsd),
+            const poolRef = adminDb().collection(POOLS).doc(request.poolId);
+            const positionRef = adminDb().collection(POSITIONS).doc(`${request.poolId}_${request.walletAddress}`);
+            const [poolSnap, posSnap] = await Promise.all([txn.get(poolRef), txn.get(positionRef)]);
+            healLegacyInTxn(txn, poolRef, "lendingPools", poolSnap.data());
+            healLegacyInTxn(txn, positionRef, "lendingPoolPositions", posSnap.data());
+            txn.update(poolRef, {
+                availableLiquidity: FieldValue.increment(request.amount),
+                pendingWithdrawal: FieldValue.increment(-request.amount),
                 pendingWithdrawalShares: FieldValue.increment(-request.sharesToBurn),
             });
-            txn.update(adminDb().collection(POSITIONS).doc(`${request.poolId}_${request.walletAddress}`), {
+            txn.update(positionRef, {
                 pendingWithdrawalShares: FieldValue.increment(-request.sharesToBurn),
                 updatedAt: FieldValue.serverTimestamp(),
             });
@@ -522,17 +581,17 @@ export async function cancelPoolWithdrawal(requestId: string): Promise<PoolWithd
 
 export async function getPoolWithdrawalRequest(requestId: string): Promise<PoolWithdrawalRequest | null> {
     const snap = await adminDb().collection(WITHDRAWALS).doc(requestId).get();
-    return snap.exists ? ({ id: snap.id, ...snap.data() } as PoolWithdrawalRequest) : null;
+    return snap.exists ? toWithdrawal(snap.id, snap.data()!) : null;
 }
 
 export async function listPendingPoolWithdrawals(): Promise<PoolWithdrawalRequest[]> {
     const snap = await adminDb().collection(WITHDRAWALS).where("status", "==", "pending_payout").orderBy("requestedAt", "asc").get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as PoolWithdrawalRequest);
+    return snap.docs.map((d) => toWithdrawal(d.id, d.data()));
 }
 
 export async function listPoolWithdrawalsForWallet(wallet: string): Promise<PoolWithdrawalRequest[]> {
     const snap = await adminDb().collection(WITHDRAWALS).where("walletAddress", "==", wallet).orderBy("requestedAt", "desc").get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as PoolWithdrawalRequest);
+    return snap.docs.map((d) => toWithdrawal(d.id, d.data()));
 }
 
 /** Platform-admin action: verify the treasury really paid the lender, then burn the locked-in shares. */
@@ -540,7 +599,7 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
     const requestRef = adminDb().collection(WITHDRAWALS).doc(requestId);
     const requestSnap = await requestRef.get();
     if (!requestSnap.exists) throw new Error("Withdrawal request not found");
-    const request = requestSnap.data() as PoolWithdrawalRequest;
+    const request = toWithdrawal(requestSnap.id, requestSnap.data()!);
     if (request.status !== "pending_payout") throw new Error(`Withdrawal is not pending (status: ${request.status})`);
     const asset = assetOf(await getPool(request.poolId));
     txSig = normalizeTxSig(asset, txSig);
@@ -549,7 +608,7 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
         txSig,
         expectedFromWallet: treasuryFor(asset),
         expectedToWallet: request.payoutWalletAddress ?? request.walletAddress,
-        expectedAmountUsd: request.amountUsd,
+        expectedAmount: request.amount,
         purpose: "pool_withdrawal",
         refId: requestId,
     };
@@ -561,28 +620,30 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
     return adminDb().runTransaction(async (txn) => {
         const [reqSnap, poolSnap, posSnap] = await Promise.all([txn.get(requestRef), txn.get(poolRef), txn.get(positionRef)]);
         if (!reqSnap.exists) throw new Error("Withdrawal request not found");
-        const current = reqSnap.data() as PoolWithdrawalRequest;
+        const current = toWithdrawal(reqSnap.id, reqSnap.data()!);
         if (current.status !== "pending_payout") throw new Error(`Withdrawal is not pending (status: ${current.status})`);
         if (!poolSnap.exists) throw new Error("Pool not found");
         if (!posSnap.exists) throw new Error("Position not found");
         const pool = toPool(poolSnap.id, poolSnap.data()!);
-        const position = posSnap.data() as PoolPosition;
+        const position = toPosition(posSnap.id, posSnap.data()!);
 
         claimLendingTransferInTxn(asset, txn, transfer);
+        healLegacyInTxn(txn, poolRef, "lendingPools", poolSnap.data());
+        healLegacyInTxn(txn, positionRef, "lendingPoolPositions", posSnap.data());
 
-        const depositedDecrement = -Math.min(current.amountUsd, pool.totalDepositedUsd);
+        const depositedDecrement = -Math.min(current.amount, pool.totalDeposited);
         if (current.reserved) {
-            // Liquidity already left availableLiquidityUsd at request time.
+            // Liquidity already left availableLiquidity at request time.
             txn.update(poolRef, {
                 totalShares: FieldValue.increment(-current.sharesToBurn),
-                pendingWithdrawalUsd: FieldValue.increment(-current.amountUsd),
+                pendingWithdrawal: FieldValue.increment(-current.amount),
                 pendingWithdrawalShares: FieldValue.increment(-current.sharesToBurn),
-                totalDepositedUsd: FieldValue.increment(depositedDecrement),
+                totalDeposited: FieldValue.increment(depositedDecrement),
             });
             txn.update(positionRef, {
                 shares: FieldValue.increment(-current.sharesToBurn),
                 pendingWithdrawalShares: FieldValue.increment(-current.sharesToBurn),
-                principalWithdrawnUsd: FieldValue.increment(current.amountUsd),
+                principalWithdrawn: FieldValue.increment(current.amount),
                 updatedAt: FieldValue.serverTimestamp(),
             });
         } else {
@@ -592,12 +653,12 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
             }
             txn.update(poolRef, {
                 totalShares: FieldValue.increment(-current.sharesToBurn),
-                availableLiquidityUsd: FieldValue.increment(-current.amountUsd),
-                totalDepositedUsd: FieldValue.increment(depositedDecrement),
+                availableLiquidity: FieldValue.increment(-current.amount),
+                totalDeposited: FieldValue.increment(depositedDecrement),
             });
             txn.update(positionRef, {
                 shares: FieldValue.increment(-current.sharesToBurn),
-                principalWithdrawnUsd: FieldValue.increment(current.amountUsd),
+                principalWithdrawn: FieldValue.increment(current.amount),
                 updatedAt: FieldValue.serverTimestamp(),
             });
         }
@@ -607,15 +668,15 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
             pool: {
                 ...pool,
                 totalShares: pool.totalShares - current.sharesToBurn,
-                availableLiquidityUsd: current.reserved ? pool.availableLiquidityUsd : pool.availableLiquidityUsd - current.amountUsd,
-                pendingWithdrawalUsd: (pool.pendingWithdrawalUsd ?? 0) - (current.reserved ? current.amountUsd : 0),
+                availableLiquidity: current.reserved ? pool.availableLiquidity : pool.availableLiquidity - current.amount,
+                pendingWithdrawal: (pool.pendingWithdrawal ?? 0) - (current.reserved ? current.amount : 0),
                 pendingWithdrawalShares: (pool.pendingWithdrawalShares ?? 0) - (current.reserved ? current.sharesToBurn : 0),
             },
             position: {
                 ...position,
                 shares: position.shares - current.sharesToBurn,
                 pendingWithdrawalShares: (position.pendingWithdrawalShares ?? 0) - (current.reserved ? current.sharesToBurn : 0),
-                principalWithdrawnUsd: position.principalWithdrawnUsd + current.amountUsd,
+                principalWithdrawn: position.principalWithdrawn + current.amount,
             },
         };
     });
@@ -660,7 +721,7 @@ export interface RequestLoanInput {
     orgId: string;
     kind: LoanKind;
     source: LoanSource;
-    amountUsd: number;
+    amount: number;
     termDays?: number;
     poolId?: string;
     /** Pool loans without a poolId: borrow from this asset's default pool (default USDC). The amount is in this asset. */
@@ -685,16 +746,20 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         if (!pool) throw new Error("Pool not found");
     }
     const asset = assetOf(pool);
-    const amountUsd = roundAmount(asset, input.amountUsd);
+    const market = pool?.collateralAsset ? pool : null;
+    if (market && kind !== "trust") {
+        throw new Error(`${poolLabel(market)} loans are collateralized — request kind "trust"`);
+    }
+    const amount = roundAmount(asset, input.amount);
 
     const limits = lendingLimits();
     assertCanOpenPosition(limits, requestedByWallet);
 
     // Every dollar rule (minimum, beta cap, tier limit) applies to the loan's USD value.
-    const usdValue = amountUsd * (await getUsdPrice(asset));
-    const asAsset = (usd: number) => (asset === "usdc" ? "" : ` (≈ ${formatAssetAmount(asset, usd / (usdValue / amountUsd))})`);
-    if (!(amountUsd > 0) || !(usdValue >= MIN_LOAN_USD)) {
-        throw new Error(`Loan amount must be worth at least $${MIN_LOAN_USD}${amountUsd > 0 ? asAsset(MIN_LOAN_USD) : ""}`);
+    const usdValue = amount * (await getUsdPrice(asset));
+    const asAsset = (usd: number) => (asset === "usdc" ? "" : ` (≈ ${formatAssetAmount(asset, usd / (usdValue / amount))})`);
+    if (!(amount > 0) || !(usdValue >= MIN_LOAN_USD)) {
+        throw new Error(`Loan amount must be worth at least $${MIN_LOAN_USD}${amount > 0 ? asAsset(MIN_LOAN_USD) : ""}`);
     }
     if (limits.maxLoanUsd !== null && usdValue > limits.maxLoanUsd) {
         throw new Error(`Loans are capped at $${limits.maxLoanUsd.toLocaleString()}${asAsset(limits.maxLoanUsd)} during the lending beta`);
@@ -731,10 +796,17 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         interestRateBps = Math.round(input.requestedRateBps);
     }
 
-    // Collateral is posted in the loan's own asset.
-    const collateralUsd = kind === "trust"
-        ? roundAmount(asset, calculateRequiredEscrow(policy, amountUsd).escrowAmount)
-        : 0;
+    // Trust loans post collateral in the loan's own asset, sized by the credit
+    // tier's escrow ratio. Collateral-market loans post the market's
+    // collateral asset, sized so the loan starts at the market's max LTV.
+    let collateral = 0;
+    if (market) {
+        const collateralAsset = market.collateralAsset!;
+        const collateralUsd = usdValue / (market.maxLtvBps! / 10_000);
+        collateral = ceilAmount(collateralAsset, collateralUsd / (await getUsdPrice(collateralAsset)));
+    } else if (kind === "trust") {
+        collateral = roundAmount(asset, calculateRequiredEscrow(policy, amount).escrowAmount);
+    }
 
     const borrowerWalletAddress = await resolveBorrowerWallet((agentData.walletAddress as string) || undefined, requestedByWallet, asset);
 
@@ -746,22 +818,24 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         kind,
         source,
         asset: asset === "usdc" ? undefined : asset,
+        collateralAsset: market?.collateralAsset,
+        liquidationLtvBps: market?.liquidationLtvBps,
         principalUsdValue: asset === "usdc" ? undefined : Math.round(usdValue * 100) / 100,
-        principalUsd: amountUsd,
-        principalRemainingUsd: amountUsd,
-        principalPaidUsd: 0,
+        principal: amount,
+        principalRemaining: amount,
+        principalPaid: 0,
         interestRateBps,
-        interestAccruedUsd: 0,
-        interestPaidUsd: 0,
-        collateralUsd,
+        interestAccrued: 0,
+        interestPaid: 0,
+        collateral,
         // Trust loans can't be funded until their collateral is verified on-chain (see postLoanCollateral).
-        collateralStatus: collateralUsd > 0 ? "awaiting" : "none",
+        collateralStatus: collateral > 0 ? "awaiting" : "none",
         termDays,
         requestedAt: nowSec(),
         policyTierAtOrigination: policy.name,
         creditScoreAtOrigination: creditScore,
         purpose,
-        status: collateralUsd > 0 ? "pending_collateral" : "pending",
+        status: collateral > 0 ? "pending_collateral" : "pending",
     } satisfies Omit<Loan, "id">);
 
     if (input.offerId) base.offerId = input.offerId;
@@ -785,6 +859,7 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
     const created = await adminDb().runTransaction(async (txn) => {
         const activeSnap = await txn.get(activeQuery);
         const poolSnap = poolRef ? await txn.get(poolRef) : null;
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
 
         if (activeSnap.size >= MAX_CONCURRENT_LOANS) {
             throw new Error(`Maximum of ${MAX_CONCURRENT_LOANS} concurrent loans reached`);
@@ -801,19 +876,19 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         // sweep releases it if collateral never arrives (see cancelLoan).
         if (!poolSnap.exists) throw new Error("Pool not found");
         const pool = toPool(poolSnap.id, poolSnap.data()!);
-        if (pool.availableLiquidityUsd < amountUsd) {
+        if (pool.availableLiquidity < amount) {
             throw new Error("The pool does not have enough available liquidity for this loan right now");
         }
 
         const loan: Omit<Loan, "id"> = {
             ...base,
-            status: collateralUsd > 0 ? "pending_collateral" : "pending_disbursement",
+            status: collateral > 0 ? "pending_collateral" : "pending_disbursement",
             poolId,
         };
         txn.set(loanRef, loan);
         txn.update(poolRef, {
-            availableLiquidityUsd: FieldValue.increment(-amountUsd),
-            totalLentUsd: FieldValue.increment(amountUsd),
+            availableLiquidity: FieldValue.increment(-amount),
+            totalLent: FieldValue.increment(amount),
         });
         return { id: loanRef.id, ...loan };
     });
@@ -842,7 +917,7 @@ export async function fundLoanSolo(loanId: string, lenderAccount: string, txSig:
         txSig: normalizeTxSig("usdc", txSig),
         expectedFromWallet: lenderWallet,
         expectedToWallet: loan.borrowerWalletAddress,
-        expectedAmountUsd: loan.principalUsd,
+        expectedAmount: loan.principal,
         purpose: "solo_loan_fund",
         refId: loanId,
     };
@@ -852,6 +927,7 @@ export async function fundLoanSolo(loanId: string, lenderAccount: string, txSig:
         const snap = await txn.get(loanRef);
         if (!snap.exists) throw new Error("Loan not found");
         const current = toLoan(snap.id, snap.data()!);
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
 
         claimLendingTransferInTxn("usdc", txn, transfer);
 
@@ -864,7 +940,7 @@ export async function fundLoanSolo(loanId: string, lenderAccount: string, txSig:
                 kind: "funding_refund",
                 fromWallet: current.borrowerWalletAddress!,
                 toWallet: lenderWallet,
-                amountUsd: current.principalUsd,
+                amount: current.principal,
                 loanId,
                 reason: reservedForOther
                     ? "Funding sent for a loan reserved for a different lender's offer"
@@ -907,9 +983,10 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
     const loanRef = adminDb().collection(LOANS).doc(loanId);
     const loan = await getLoan(loanId);
     if (!loan) throw new Error("Loan not found");
-    if (!(loan.collateralUsd > 0)) throw new Error("This loan doesn't require collateral");
+    if (!(loan.collateral > 0)) throw new Error("This loan doesn't require collateral");
     if (loan.collateralStatus && loan.collateralStatus !== "awaiting") throw new Error(`Collateral already ${loan.collateralStatus.replace("_", " ")}`);
-    const asset = assetOf(loan);
+    // A collateral-market loan's collateral is a different asset (and maybe chain) from its principal.
+    const asset = collateralAssetOf(loan);
     const wallet = await resolvePayerWallet(account, asset);
 
     const treasury = treasuryFor(asset);
@@ -917,7 +994,7 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
         txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: wallet,
         expectedToWallet: treasury,
-        expectedAmountUsd: loan.collateralUsd,
+        expectedAmount: loan.collateral,
         purpose: "loan_collateral",
         refId: loanId,
     };
@@ -927,6 +1004,7 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
         const snap = await txn.get(loanRef);
         if (!snap.exists) throw new Error("Loan not found");
         const current = toLoan(snap.id, snap.data()!);
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
 
         claimLendingTransferInTxn(asset, txn, transfer);
 
@@ -935,7 +1013,7 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
                 kind: "collateral_return",
                 fromWallet: treasury,
                 toWallet: wallet,
-                amountUsd: current.collateralUsd,
+                amount: current.collateral,
                 asset,
                 loanId,
                 reason: `Collateral arrived after the loan was no longer awaiting it (status: ${current.status})`,
@@ -986,16 +1064,20 @@ export async function cancelLoan(loanId: string, opts: { byAdmin: boolean; reaso
                     : "Once a loan is open to lenders or awaiting disbursement only a platform admin can cancel it",
             );
         }
+        const poolRef = current.source === "pool" && current.poolId ? adminDb().collection(POOLS).doc(current.poolId) : null;
+        const poolSnap = poolRef ? await txn.get(poolRef) : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
 
         const update: Partial<Loan> = { status: "cancelled", cancelledAt: nowSec(), cancelReason: opts.reason };
 
         if (current.collateralStatus === "held" && current.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
-                fromWallet: treasuryFor(assetOf(current)),
+                fromWallet: treasuryFor(collateralAssetOf(current)),
                 toWallet: current.collateralPostedByWallet,
-                amountUsd: current.collateralUsd,
-                asset: assetOf(current),
+                amount: current.collateral,
+                asset: collateralAssetOf(current),
                 loanId,
                 reason: `Loan cancelled: ${opts.reason}`,
             });
@@ -1003,10 +1085,10 @@ export async function cancelLoan(loanId: string, opts: { byAdmin: boolean; reaso
         }
 
         // Pool loans reserved their principal at request time.
-        if (current.source === "pool" && current.poolId) {
-            txn.update(adminDb().collection(POOLS).doc(current.poolId), {
-                availableLiquidityUsd: FieldValue.increment(current.principalUsd),
-                totalLentUsd: FieldValue.increment(-current.principalUsd),
+        if (poolRef) {
+            txn.update(poolRef, {
+                availableLiquidity: FieldValue.increment(current.principal),
+                totalLent: FieldValue.increment(-current.principal),
             });
         }
 
@@ -1022,13 +1104,13 @@ export async function cancelLoan(loanId: string, opts: { byAdmin: boolean; reaso
 // ═══════════════════════════════════════════════════════════════
 
 function toOffer(id: string, data: FirebaseFirestore.DocumentData): LoanOffer {
-    return { id, ...data } as LoanOffer;
+    return { id, ...normalizeLegacy("loanOffers", data) } as LoanOffer;
 }
 
 export interface CreateLoanOfferInput {
     lenderWalletAddress: string;
     kind: LoanKind;
-    amountUsd: number;
+    amount: number;
     rateBps: number;
     termDays?: number;
     note?: string;
@@ -1039,11 +1121,11 @@ export async function createLoanOffer(input: CreateLoanOfferInput): Promise<Loan
     assertCanOpenPosition(limits, input.lenderWalletAddress);
     // The offer stays owned by the signed-in account, but it must be fundable on Solana.
     await resolvePayerWallet(input.lenderWalletAddress);
-    const amountUsd = Math.round(input.amountUsd * 100) / 100;
-    if (limits.maxLoanUsd !== null && amountUsd > limits.maxLoanUsd) {
+    const amount = Math.round(input.amount * 100) / 100;
+    if (limits.maxLoanUsd !== null && amount > limits.maxLoanUsd) {
         throw new Error(`Offers are capped at $${limits.maxLoanUsd.toLocaleString()} during the lending beta`);
     }
-    if (!(amountUsd >= MIN_LOAN_USD)) {
+    if (!(amount >= MIN_LOAN_USD)) {
         throw new Error(`Offer amount must be at least $${MIN_LOAN_USD}`);
     }
     const rateBps = Math.round(input.rateBps);
@@ -1054,7 +1136,7 @@ export async function createLoanOffer(input: CreateLoanOfferInput): Promise<Loan
     const offer: Omit<LoanOffer, "id"> = withoutUndefined({
         lenderWalletAddress: input.lenderWalletAddress,
         kind: input.kind,
-        amountUsd,
+        amount,
         rateBps,
         termDays: clampTermDays(input.termDays ?? 30),
         note: input.note,
@@ -1099,7 +1181,7 @@ export interface AcceptLoanOfferInput {
     agentId: string;
     orgId: string;
     /** Defaults to the offer's full amount; must not exceed it. */
-    amountUsd?: number;
+    amount?: number;
     requestedByWallet?: string;
 }
 
@@ -1122,10 +1204,10 @@ export async function acceptLoanOffer(input: AcceptLoanOfferInput): Promise<Loan
         return current;
     });
 
-    const amountUsd = input.amountUsd !== undefined ? Math.round(input.amountUsd * 100) / 100 : offer.amountUsd;
-    if (amountUsd > offer.amountUsd) {
+    const amount = input.amount !== undefined ? Math.round(input.amount * 100) / 100 : offer.amount;
+    if (amount > offer.amount) {
         await offerRef.update({ status: "open" });
-        throw new Error(`Amount exceeds the offer's maximum of $${offer.amountUsd.toLocaleString()}`);
+        throw new Error(`Amount exceeds the offer's maximum of $${offer.amount.toLocaleString()}`);
     }
 
     try {
@@ -1134,7 +1216,7 @@ export async function acceptLoanOffer(input: AcceptLoanOfferInput): Promise<Loan
             orgId: input.orgId,
             kind: offer.kind,
             source: "solo",
-            amountUsd,
+            amount,
             termDays: offer.termDays,
             requestedByWallet: input.requestedByWallet,
             requestedRateBps: offer.rateBps,
@@ -1171,7 +1253,7 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
         txSig,
         expectedFromWallet: treasuryFor(asset),
         expectedToWallet: loan.borrowerWalletAddress,
-        expectedAmountUsd: loan.principalUsd,
+        expectedAmount: loan.principal,
         purpose: "loan_disbursement",
         refId: loanId,
     };
@@ -1183,6 +1265,8 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
         const current = toLoan(snap.id, snap.data()!);
         if (current.status !== "pending_disbursement") throw new Error(`Loan is not awaiting disbursement (status: ${current.status})`);
         const poolSnap = current.poolId ? await txn.get(adminDb().collection(POOLS).doc(current.poolId)) : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
 
         claimLendingTransferInTxn(asset, txn, transfer);
 
@@ -1199,7 +1283,7 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
         // Interest starts accruing now — fold this loan into the pool's accrual.
         if (poolSnap?.exists) {
             applyPoolLoanChangeInTxn(txn, toPool(poolSnap.id, poolSnap.data()!), originatedAt, {
-                accruingDeltaUsdPerYear: loanAccruingUsdPerYear(current, current.principalUsd),
+                accruingDeltaPerYear: loanAccruingPerYear(current, current.principal),
             });
         }
         return { ...current, ...update };
@@ -1253,7 +1337,8 @@ async function applyLoanCreditEvent(
     // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
     // Scoring Engine's settlement sub-score reads loan outcomes from here.
     const asn = (data.asn as string) || "";
-    const canonicalType: CreditEventType = eventType === "loan_defaulted" ? "payment.failed" : "payment.settled";
+    // A liquidation means the borrower let their collateral run short, even when it covered the debt.
+    const canonicalType: CreditEventType = eventType === "loan_defaulted" || eventType === "loan_liquidated" ? "payment.failed" : "payment.settled";
     ingestCreditEvent({
         eventType: canonicalType,
         agentId,
@@ -1286,8 +1371,8 @@ async function applyLoanCreditEvent(
  * in the meantime), the transfer is still claimed and refunded in full via a
  * repayment_refund payout rather than dropped.
  */
-export async function repayLoan(loanId: string, amountUsd: number, paidByAccount: string, txSig: string): Promise<{ loan: Loan; repayment: LoanRepayment }> {
-    if (!(amountUsd > 0)) throw new Error("Repayment amount must be positive");
+export async function repayLoan(loanId: string, amount: number, paidByAccount: string, txSig: string): Promise<{ loan: Loan; repayment: LoanRepayment }> {
+    if (!(amount > 0)) throw new Error("Repayment amount must be positive");
     const loanRef = adminDb().collection(LOANS).doc(loanId);
 
     const existing = await getLoan(loanId);
@@ -1297,8 +1382,8 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
     }
 
     const asset = assetOf(existing);
-    amountUsd = roundAmount(asset, amountUsd);
-    if (!(amountUsd > 0)) throw new Error("Repayment amount must be positive");
+    amount = roundAmount(asset, amount);
+    if (!(amount > 0)) throw new Error("Repayment amount must be positive");
     const paidByWallet = await resolvePayerWallet(paidByAccount, asset);
     const recipientWallet = existing.source === "pool" ? treasuryFor(asset) : existing.lenderWalletAddress;
     if (!recipientWallet) throw new Error("No lender wallet on file to verify repayment against");
@@ -1307,7 +1392,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
         txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: paidByWallet,
         expectedToWallet: recipientWallet,
-        expectedAmountUsd: amountUsd,
+        expectedAmount: amount,
         purpose: "loan_repayment",
         refId: loanId,
     };
@@ -1320,6 +1405,8 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
         const poolSnap = loan.status === "active" && loan.poolId
             ? await txn.get(adminDb().collection(POOLS).doc(loan.poolId))
             : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
 
         claimLendingTransferInTxn(asset, txn, transfer);
 
@@ -1328,7 +1415,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
                 kind: "repayment_refund",
                 fromWallet: recipientWallet,
                 toWallet: paidByWallet,
-                amountUsd,
+                amount,
                 asset,
                 loanId,
                 reason: `Repayment arrived after the loan was closed (status: ${loan.status})`,
@@ -1340,41 +1427,41 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
         loan = accrue(loan, at);
 
         const {
-            loan: paidLoan, appliedUsd, principalPortionUsd, interestPortionUsd, remainingBalanceUsd, excessUsd, finalStatus,
-        } = applyPayment(loan, amountUsd, at);
+            loan: paidLoan, applied, principalPortion, interestPortion, remainingBalance, excess, finalStatus,
+        } = applyPayment(loan, amount, at);
 
         const update: Partial<Loan> = {
-            principalRemainingUsd: paidLoan.principalRemainingUsd,
-            principalPaidUsd: paidLoan.principalPaidUsd,
-            interestAccruedUsd: paidLoan.interestAccruedUsd,
-            interestPaidUsd: paidLoan.interestPaidUsd,
+            principalRemaining: paidLoan.principalRemaining,
+            principalPaid: paidLoan.principalPaid,
+            interestAccrued: paidLoan.interestAccrued,
+            interestPaid: paidLoan.interestPaid,
             lastAccrualAt: loan.lastAccrualAt,
             status: finalStatus,
         };
         if (finalStatus === "repaid") update.repaidAt = at;
-        if (excessUsd > 0) update.overpaymentOwedUsd = (loan.overpaymentOwedUsd ?? 0) + excessUsd;
+        if (excess > 0) update.overpaymentOwed = (loan.overpaymentOwed ?? 0) + excess;
 
         const repaymentRef = adminDb().collection(REPAYMENTS).doc();
         const repayment: LoanRepayment = {
             id: repaymentRef.id,
             loanId,
-            amountUsd: appliedUsd,
-            principalPortionUsd,
-            interestPortionUsd,
-            remainingBalanceUsd,
+            amount: applied,
+            principalPortion,
+            interestPortion,
+            remainingBalance,
             paidAt: at,
             paidByWallet,
             txSig: transfer.txSig,
-            ...(excessUsd > 0 ? { excessUsd, refundStatus: "pending" as const } : {}),
+            ...(excess > 0 ? { excess, refundStatus: "pending" as const } : {}),
         };
         txn.set(repaymentRef, repayment);
 
-        if (excessUsd > 0) {
+        if (excess > 0) {
             createPayoutInTxn(txn, {
                 kind: "overpayment_refund",
                 fromWallet: recipientWallet,
                 toWallet: paidByWallet,
-                amountUsd: excessUsd,
+                amount: excess,
                 asset,
                 loanId,
                 repaymentId: repaymentRef.id,
@@ -1385,10 +1472,10 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
         if (finalStatus === "repaid" && loan.collateralStatus === "held" && loan.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
-                fromWallet: treasuryFor(asset),
+                fromWallet: treasuryFor(collateralAssetOf(loan)),
                 toWallet: loan.collateralPostedByWallet,
-                amountUsd: loan.collateralUsd,
-                asset,
+                amount: loan.collateral,
+                asset: collateralAssetOf(loan),
                 loanId,
                 reason: "Loan repaid in full",
             });
@@ -1400,10 +1487,10 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
         if (poolSnap?.exists) {
             const tracked = !!loan.poolAccrualTracked;
             applyPoolLoanChangeInTxn(txn, toPool(poolSnap.id, poolSnap.data()!), at, {
-                principalReturnedUsd: principalPortionUsd,
-                interestReturnedUsd: interestPortionUsd,
-                accruingDeltaUsdPerYear: tracked ? -loanAccruingUsdPerYear(loan, principalPortionUsd) : 0,
-                receivableDeltaUsd: tracked ? -interestPortionUsd : 0,
+                principalReturned: principalPortion,
+                interestReturned: interestPortion,
+                accruingDeltaPerYear: tracked ? -loanAccruingPerYear(loan, principalPortion) : 0,
+                receivableDelta: tracked ? -interestPortion : 0,
             });
         }
 
@@ -1421,9 +1508,9 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByAccount
             result.loan.borrowerAgentId,
             credit,
             trust,
-            `Repaid ${result.loan.kind} loan in full (${formatAssetAmount(asset, result.loan.principalUsd)})`,
+            `Repaid ${result.loan.kind} loan in full (${formatAssetAmount(asset, result.loan.principal)})`,
             "loan_repaid",
-            { loanId, kind: result.loan.kind, principalUsd: result.loan.principalUsd },
+            { loanId, kind: result.loan.kind, principal: result.loan.principal },
         );
     }
 
@@ -1445,6 +1532,16 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
     const graceSec = Math.max(0, opts.graceDays ?? 0) * 86400;
     const loanRef = adminDb().collection(LOANS).doc(loanId);
 
+    // A collateral-market loan's collateral is another asset: it can't be
+    // applied to the balance directly, so an overdue one is liquidated instead.
+    const pre = await getLoan(loanId);
+    if (pre?.collateralAsset && pre.status === "active") {
+        if (!pre.dueAt || nowSec() <= pre.dueAt + graceSec) {
+            throw new Error(graceSec > 0 ? "Loan is not past its due date plus grace period yet" : "Loan is not past its due date yet");
+        }
+        return startLiquidation(loanId, "overdue");
+    }
+
     const { loan, recovery } = await adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(loanRef);
         if (!snap.exists) throw new Error("Loan not found");
@@ -1454,17 +1551,19 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
             throw new Error(graceSec > 0 ? "Loan is not past its due date plus grace period yet" : "Loan is not past its due date yet");
         }
         const poolSnap = current.poolId ? await txn.get(adminDb().collection(POOLS).doc(current.poolId)) : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
 
         const at = nowSec();
         current = accrue(current, at);
         const asset = assetOf(current);
 
-        const collateralHeld = current.collateralStatus === "held" ? current.collateralUsd : 0;
-        const rec = computeDefaultRecovery(current.principalRemainingUsd, current.interestAccruedUsd, collateralHeld);
-        const recoveredUsd = rec.recoveredPrincipalUsd + rec.recoveredInterestUsd;
+        const collateralHeld = current.collateralStatus === "held" ? current.collateral : 0;
+        const rec = computeDefaultRecovery(current.principalRemaining, current.interestAccrued, collateralHeld);
+        const recovered = rec.recoveredPrincipal + rec.recoveredInterest;
 
         const update: Partial<Loan> = {
-            interestAccruedUsd: current.interestAccruedUsd,
+            interestAccrued: current.interestAccrued,
             lastAccrualAt: current.lastAccrualAt,
             status: "defaulted",
             defaultedAt: at,
@@ -1475,30 +1574,30 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
         if (poolSnap?.exists) {
             const tracked = !!current.poolAccrualTracked;
             applyPoolLoanChangeInTxn(txn, toPool(poolSnap.id, poolSnap.data()!), at, {
-                principalReturnedUsd: rec.recoveredPrincipalUsd,
-                interestReturnedUsd: rec.recoveredInterestUsd,
-                lossUsd: rec.principalLossUsd,
-                accruingDeltaUsdPerYear: tracked ? -loanAccruingUsdPerYear(current) : 0,
-                receivableDeltaUsd: tracked ? -current.interestAccruedUsd : 0,
+                principalReturned: rec.recoveredPrincipal,
+                interestReturned: rec.recoveredInterest,
+                loss: rec.principalLoss,
+                accruingDeltaPerYear: tracked ? -loanAccruingPerYear(current) : 0,
+                receivableDelta: tracked ? -current.interestAccrued : 0,
             });
-        } else if (recoveredUsd > 0 && current.lenderWalletAddress) {
+        } else if (recovered > 0 && current.lenderWalletAddress) {
             createPayoutInTxn(txn, {
                 kind: "collateral_to_lender",
                 fromWallet: treasuryFor(asset),
                 toWallet: current.lenderWalletAddress,
-                amountUsd: recoveredUsd,
+                amount: recovered,
                 asset,
                 loanId,
                 reason: "Seized collateral from a defaulted solo loan",
             });
         }
 
-        if (rec.collateralExcessUsd > 0 && current.collateralPostedByWallet) {
+        if (rec.collateralExcess > 0 && current.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
                 fromWallet: treasuryFor(asset),
                 toWallet: current.collateralPostedByWallet,
-                amountUsd: rec.collateralExcessUsd,
+                amount: rec.collateralExcess,
                 asset,
                 loanId,
                 reason: "Collateral left over after covering the defaulted balance",
@@ -1508,23 +1607,179 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
         return { loan: { ...current, ...update } as Loan, recovery: rec };
     });
 
-    const recoveryRatio = loan.principalRemainingUsd > 0 ? clamp(recovery.recoveredPrincipalUsd / loan.principalRemainingUsd, 0, 1) : 1;
+    const recoveryRatio = loan.principalRemaining > 0 ? clamp(recovery.recoveredPrincipal / loan.principalRemaining, 0, 1) : 1;
     const baseCredit = loan.kind === "unsecured" ? -55 : -25;
     const baseTrust = loan.kind === "unsecured" ? -20 : -8;
     await applyLoanCreditEvent(
         loan.borrowerAgentId,
         Math.round(baseCredit * (1 - recoveryRatio * 0.5)),
         Math.round(baseTrust * (1 - recoveryRatio * 0.5)),
-        `Defaulted on ${loan.kind} loan (${formatAssetAmount(assetOf(loan), loan.principalRemainingUsd)} outstanding)`,
+        `Defaulted on ${loan.kind} loan (${formatAssetAmount(assetOf(loan), loan.principalRemaining)} outstanding)`,
         "loan_defaulted",
         {
             loanId: loan.id,
             kind: loan.kind,
-            outstandingUsd: loan.principalRemainingUsd,
-            recoveredUsd: recovery.recoveredPrincipalUsd + recovery.recoveredInterestUsd,
+            outstanding: loan.principalRemaining,
+            recovered: recovery.recoveredPrincipal + recovery.recoveredInterest,
         },
     );
     return loan;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Collateral markets — liquidation
+// ═══════════════════════════════════════════════════════════════
+
+/** Current loan-to-value of an active collateral-market loan, at live prices. */
+export async function currentLoanToValue(loan: Loan, at: number = nowSec()): Promise<number> {
+    if (!loan.collateralAsset) throw new Error("Not a collateral-market loan");
+    const accrued = accrue(loan, at);
+    const [debtPrice, collateralPrice] = await Promise.all([getUsdPrice(assetOf(loan)), getUsdPrice(loan.collateralAsset)]);
+    return loanToValue(accrued.principalRemaining + accrued.interestAccrued, debtPrice, loan.collateral, collateralPrice);
+}
+
+/**
+ * Seize an active collateral-market loan's collateral for sale: the loan
+ * stops accruing and moves to "liquidating", and the pool stops counting its
+ * interest as receivable (whatever the sale recovers is credited at
+ * settlement). The collateral is already in its treasury; a platform admin
+ * sells it and records the proceeds with settleLiquidation().
+ */
+export async function startLiquidation(loanId: string, reason: "ltv" | "overdue" | "admin"): Promise<Loan> {
+    const loanRef = adminDb().collection(LOANS).doc(loanId);
+    const existing = await getLoan(loanId);
+    if (!existing) throw new Error("Loan not found");
+    if (!existing.collateralAsset) throw new Error("Only collateral-market loans are liquidated — other loans default instead");
+    const [debtPrice, collateralPrice] = await Promise.all([getUsdPrice(assetOf(existing)), getUsdPrice(existing.collateralAsset)]);
+
+    const loan = await adminDb().runTransaction(async (txn) => {
+        const snap = await txn.get(loanRef);
+        if (!snap.exists) throw new Error("Loan not found");
+        let current = toLoan(snap.id, snap.data()!);
+        if (current.status !== "active") throw new Error(`Loan is not active (status: ${current.status})`);
+        const poolSnap = current.poolId ? await txn.get(adminDb().collection(POOLS).doc(current.poolId)) : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
+
+        const at = nowSec();
+        current = accrue(current, at);
+        const ltv = loanToValue(current.principalRemaining + current.interestAccrued, debtPrice, current.collateral, collateralPrice);
+        const update: Partial<Loan> = {
+            status: "liquidating",
+            collateralStatus: "seized",
+            interestAccrued: current.interestAccrued,
+            lastAccrualAt: current.lastAccrualAt,
+            liquidationStartedAt: at,
+            liquidationPriceUsd: collateralPrice,
+            liquidationLtvAtStart: Math.round(ltv * 10_000) / 10_000,
+            liquidationReason: reason,
+            // Its accrual leaves the pool now; settlement must not remove it again.
+            poolAccrualTracked: false,
+        };
+        txn.update(loanRef, update as FirebaseFirestore.UpdateData<Loan>);
+        if (poolSnap?.exists && current.poolAccrualTracked) {
+            applyPoolLoanChangeInTxn(txn, toPool(poolSnap.id, poolSnap.data()!), at, {
+                accruingDeltaPerYear: -loanAccruingPerYear(current),
+                receivableDelta: -current.interestAccrued,
+            });
+        }
+        return { ...current, ...update } as Loan;
+    });
+    invalidateCache(`credit:${loan.borrowerAgentId}`);
+    return loan;
+}
+
+/**
+ * Record the sale of a liquidated loan's collateral: verify `proceeds` of the
+ * loan's asset reached its treasury (from any sender — an exchange withdrawal
+ * or a swap inside the treasury both count), then apply them to principal,
+ * then interest. A shortfall is written off and the loan becomes "defaulted";
+ * otherwise it's "liquidated" and any surplus is queued back to the borrower.
+ */
+export async function settleLiquidation(loanId: string, proceeds: number, txSig: string): Promise<Loan> {
+    const loanRef = adminDb().collection(LOANS).doc(loanId);
+    const existing = await getLoan(loanId);
+    if (!existing) throw new Error("Loan not found");
+    if (existing.status !== "liquidating") throw new Error(`Loan is not being liquidated (status: ${existing.status})`);
+    const asset = assetOf(existing);
+    proceeds = roundAmount(asset, proceeds);
+    if (!(proceeds > 0)) throw new Error("Proceeds must be positive");
+
+    const transfer: VerifyTransferInput = {
+        txSig: normalizeTxSig(asset, txSig),
+        expectedFromWallet: null,
+        expectedToWallet: treasuryFor(asset),
+        expectedAmount: proceeds,
+        purpose: "liquidation_proceeds",
+        refId: loanId,
+    };
+    await verifyLendingTransfer(asset, transfer);
+
+    const { loan, recovery } = await adminDb().runTransaction(async (txn) => {
+        const snap = await txn.get(loanRef);
+        if (!snap.exists) throw new Error("Loan not found");
+        const current = toLoan(snap.id, snap.data()!);
+        if (current.status !== "liquidating") throw new Error(`Loan is not being liquidated (status: ${current.status})`);
+        const poolSnap = current.poolId ? await txn.get(adminDb().collection(POOLS).doc(current.poolId)) : null;
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+        if (poolSnap?.exists) healLegacyInTxn(txn, poolSnap.ref, "lendingPools", poolSnap.data());
+
+        claimLendingTransferInTxn(asset, txn, transfer);
+
+        const at = nowSec();
+        const rec = computeDefaultRecovery(current.principalRemaining, current.interestAccrued, proceeds);
+        const shortfall = rec.principalLoss > 0;
+        const update: Partial<Loan> = {
+            status: shortfall ? "defaulted" : "liquidated",
+            principalRemaining: rec.principalLoss,
+            principalPaid: current.principalPaid + rec.recoveredPrincipal,
+            interestAccrued: rec.unrecoveredInterest,
+            interestPaid: current.interestPaid + rec.recoveredInterest,
+            liquidationProceeds: proceeds,
+            liquidationTxSig: transfer.txSig,
+            liquidatedAt: at,
+            ...(shortfall ? { defaultedAt: at } : {}),
+        };
+        txn.update(loanRef, update as FirebaseFirestore.UpdateData<Loan>);
+
+        if (poolSnap?.exists) {
+            applyPoolLoanChangeInTxn(txn, toPool(poolSnap.id, poolSnap.data()!), at, {
+                principalReturned: rec.recoveredPrincipal,
+                interestReturned: rec.recoveredInterest,
+                loss: rec.principalLoss,
+            });
+        }
+        if (rec.collateralExcess > 0 && current.borrowerWalletAddress) {
+            createPayoutInTxn(txn, {
+                kind: "liquidation_surplus",
+                fromWallet: treasuryFor(asset),
+                toWallet: current.borrowerWalletAddress,
+                amount: rec.collateralExcess,
+                asset,
+                loanId,
+                reason: "Liquidation proceeds beyond what the loan owed",
+            });
+        }
+        return { loan: { ...current, ...update } as Loan, recovery: rec };
+    });
+
+    const outstanding = recovery.principalLoss;
+    await applyLoanCreditEvent(
+        loan.borrowerAgentId,
+        outstanding > 0 ? -40 : -10,
+        outstanding > 0 ? -15 : -3,
+        outstanding > 0
+            ? `Collateral liquidated with ${formatAssetAmount(asset, outstanding)} of principal unrecovered`
+            : `Collateral liquidated (${poolLabel(loan)} loan, debt fully covered)`,
+        "loan_liquidated",
+        { loanId: loan.id, proceeds, principalLoss: outstanding, collateralAsset: loan.collateralAsset },
+    );
+    return loan;
+}
+
+export async function listLiquidatingLoans(): Promise<Loan[]> {
+    const snap = await adminDb().collection(LOANS).where("status", "==", "liquidating").get();
+    return snap.docs.map((d) => toLoan(d.id, d.data()));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1553,5 +1808,5 @@ export async function listLoansFundedByWallet(wallet: string): Promise<Loan[]> {
 
 export async function listRepaymentsForLoan(loanId: string): Promise<LoanRepayment[]> {
     const snap = await adminDb().collection(REPAYMENTS).where("loanId", "==", loanId).orderBy("paidAt", "desc").get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as LoanRepayment);
+    return snap.docs.map((d) => ({ id: d.id, ...normalizeLegacy("loanRepayments", d.data()) }) as LoanRepayment);
 }

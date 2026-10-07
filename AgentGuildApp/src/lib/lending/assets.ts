@@ -4,10 +4,10 @@
  * and pays lenders back in SOL, so the treasury never holds one asset against
  * a liability in another.
  *
- * Historical naming: ledger amount fields end in `Usd` (principalUsd,
- * availableLiquidityUsd, amountUsd, ...) because lending started USDC-only.
- * They hold amounts in the record's `asset` units — for USDC that is dollars,
- * for SOL it is SOL, for ETH it is ETH. Records without `asset` are USDC.
+ * Ledger amount fields (principal, availableLiquidity, amount, ...) hold
+ * amounts in the record's `asset` units; records without `asset` are USDC.
+ * Older documents used `...Usd` names for the same fields — migrate them with
+ * scripts/migrate-lending-fields.ts (legacy-fields.ts also reads them).
  * USD values for limits and credit decisions come from prices.ts.
  */
 
@@ -39,6 +39,17 @@ export function isLendingAsset(value: unknown): value is LendingAsset {
 /** A record's asset — anything stored before multi-asset pools is USDC. */
 export function assetOf(record: { asset?: LendingAsset | null } | null | undefined): LendingAsset {
     return record?.asset ?? "usdc";
+}
+
+/** The asset a loan's collateral is in — its own asset unless it's a collateral-market loan. */
+export function collateralAssetOf(record: { asset?: LendingAsset | null; collateralAsset?: LendingAsset | null }): LendingAsset {
+    return record.collateralAsset ?? assetOf(record);
+}
+
+/** "USDC/ETH" for a collateral market, else the symbol. */
+export function poolLabel(pool: { asset?: LendingAsset | null; collateralAsset?: LendingAsset | null }): string {
+    const lend = LENDING_ASSETS[assetOf(pool)].symbol;
+    return pool.collateralAsset ? `${lend}/${LENDING_ASSETS[pool.collateralAsset].symbol}` : lend;
 }
 
 export function assetInfo(asset: LendingAsset): AssetInfo {

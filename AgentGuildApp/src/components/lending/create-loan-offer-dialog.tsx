@@ -48,8 +48,8 @@ export function CreateLoanOfferDialog({ open, onOpenChange, walletAddress, onCre
             setError("Connect a wallet first");
             return;
         }
-        const amountUsd = parseFloat(amount);
-        if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+        const amountValue = parseFloat(amount);
+        if (!Number.isFinite(amountValue) || amountValue <= 0) {
             setError("Enter a valid amount");
             return;
         }
@@ -65,7 +65,7 @@ export function CreateLoanOfferDialog({ open, onOpenChange, walletAddress, onCre
                 method: "POST",
                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
                 body: JSON.stringify({
-                    kind, amountUsd, rateBps, termDays: parseInt(termDays, 10),
+                    kind, amount: amountValue, rateBps, termDays: parseInt(termDays, 10),
                     note: note || undefined,
                 }),
             });

@@ -5,17 +5,19 @@
  * transactions whose writes are buffered and only applied if the callback
  * resolves — so a throw after claimUsdcTransferInTxn() really rolls the claim
  * back, like Firestore does. FieldValue.increment / serverTimestamp are
- * represented by sentinels (see fakeFieldValue).
+ * / delete are represented by sentinels (see fakeFieldValue).
  */
 
 type Data = Record<string, unknown>;
 
 const INC = Symbol("increment");
 const TS = Symbol("serverTimestamp");
+const DEL = Symbol("delete");
 
 export const fakeFieldValue = {
     increment: (n: number) => ({ [INC]: n }),
     serverTimestamp: () => ({ [TS]: true }),
+    delete: () => ({ [DEL]: true }),
 };
 
 export const fakeTimestamp = {
@@ -32,7 +34,10 @@ function resolveValue(current: unknown, v: unknown): unknown {
 
 function applyFields(base: Data, fields: Data): Data {
     const out = { ...base };
-    for (const [k, v] of Object.entries(fields)) out[k] = resolveValue(base[k], v);
+    for (const [k, v] of Object.entries(fields)) {
+        if (v && typeof v === "object" && DEL in (v as object)) delete out[k];
+        else out[k] = resolveValue(out[k], v);
+    }
     return out;
 }
 

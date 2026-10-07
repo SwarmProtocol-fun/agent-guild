@@ -14,22 +14,22 @@ export function accrue(loan: Loan, asOf: number): Loan {
     const daysElapsed = Math.max(0, (asOf - last) / 86400);
     if (daysElapsed <= 0) return loan;
     const dailyRate = loan.interestRateBps / 10_000 / 365;
-    const newInterest = loan.principalRemainingUsd * dailyRate * daysElapsed;
+    const newInterest = loan.principalRemaining * dailyRate * daysElapsed;
     return {
         ...loan,
-        interestAccruedUsd: loan.interestAccruedUsd + newInterest,
+        interestAccrued: loan.interestAccrued + newInterest,
         lastAccrualAt: asOf,
     };
 }
 
 export interface PaymentResult {
     loan: Loan;
-    appliedUsd: number;
-    principalPortionUsd: number;
-    interestPortionUsd: number;
-    remainingBalanceUsd: number;
+    applied: number;
+    principalPortion: number;
+    interestPortion: number;
+    remainingBalance: number;
     /** Part of the payment beyond the total owed — already sent on-chain, so it must be refunded, not dropped. */
-    excessUsd: number;
+    excess: number;
     isOverdue: boolean;
     finalStatus: Loan["status"];
 }
@@ -40,27 +40,27 @@ export interface PaymentResult {
  * `dueAt`. A late partial payment must not close the loan out from under a borrower
  * who is trying to pay; only an explicit default (markLoanDefaulted) does that.
  */
-export function applyPayment(loan: Loan, amountUsd: number, asOf: number): PaymentResult {
-    const totalOwed = loan.principalRemainingUsd + loan.interestAccruedUsd;
-    const appliedUsd = Math.min(amountUsd, totalOwed);
-    const excessUsd = Math.max(0, amountUsd - appliedUsd);
-    const interestPortionUsd = Math.min(appliedUsd, loan.interestAccruedUsd);
-    const principalPortionUsd = appliedUsd - interestPortionUsd;
+export function applyPayment(loan: Loan, amount: number, asOf: number): PaymentResult {
+    const totalOwed = loan.principalRemaining + loan.interestAccrued;
+    const applied = Math.min(amount, totalOwed);
+    const excess = Math.max(0, amount - applied);
+    const interestPortion = Math.min(applied, loan.interestAccrued);
+    const principalPortion = applied - interestPortion;
 
     const updated: Loan = {
         ...loan,
-        interestAccruedUsd: Math.max(0, loan.interestAccruedUsd - interestPortionUsd),
-        interestPaidUsd: loan.interestPaidUsd + interestPortionUsd,
-        principalRemainingUsd: Math.max(0, loan.principalRemainingUsd - principalPortionUsd),
-        principalPaidUsd: loan.principalPaidUsd + principalPortionUsd,
+        interestAccrued: Math.max(0, loan.interestAccrued - interestPortion),
+        interestPaid: loan.interestPaid + interestPortion,
+        principalRemaining: Math.max(0, loan.principalRemaining - principalPortion),
+        principalPaid: loan.principalPaid + principalPortion,
     };
 
-    const remainingBalanceUsd = Math.max(0, updated.principalRemainingUsd + updated.interestAccruedUsd);
+    const remainingBalance = Math.max(0, updated.principalRemaining + updated.interestAccrued);
     const isOverdue = !!loan.dueAt && asOf > loan.dueAt;
 
-    const finalStatus: Loan["status"] = remainingBalanceUsd <= 0.01 ? "repaid" : "active";
+    const finalStatus: Loan["status"] = remainingBalance <= 0.01 ? "repaid" : "active";
 
-    return { loan: updated, appliedUsd, principalPortionUsd, interestPortionUsd, remainingBalanceUsd, excessUsd, isOverdue, finalStatus };
+    return { loan: updated, applied, principalPortion, interestPortion, remainingBalance, excess, isOverdue, finalStatus };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -75,33 +75,33 @@ const nowSec = () => Math.floor(Date.now() / 1000);
  * Accrued-but-unpaid interest on the pool's active loans as of `asOf`.
  * Loans accrue simple interest on remaining principal (see accrue()), which
  * is linear in time, so the pool-wide total is exactly
- * receivable + Σ(principal × APR) × elapsed — as long as accruingUsdPerYear
+ * receivable + Σ(principal × APR) × elapsed — as long as accruingPerYear
  * is updated at every principal change (disbursement, repayment, default).
  */
-export function poolInterestReceivableUsd(pool: LendingPool, asOf: number = nowSec()): number {
-    const base = pool.interestReceivableUsd ?? 0;
-    const rate = pool.accruingUsdPerYear ?? 0;
+export function poolInterestReceivable(pool: LendingPool, asOf: number = nowSec()): number {
+    const base = pool.interestReceivable ?? 0;
+    const rate = pool.accruingPerYear ?? 0;
     const since = pool.interestAccrualAt ?? asOf;
     return base + rate * (Math.max(0, asOf - since) / SECONDS_PER_YEAR);
 }
 
 /**
  * Pool fields to write when bringing interest accrual up to `asOf`, before
- * changing accruingUsdPerYear. Always write both together.
+ * changing accruingPerYear. Always write both together.
  */
-export function accruePoolInterest(pool: LendingPool, asOf: number): { interestReceivableUsd: number; interestAccrualAt: number } {
-    return { interestReceivableUsd: poolInterestReceivableUsd(pool, asOf), interestAccrualAt: asOf };
+export function accruePoolInterest(pool: LendingPool, asOf: number): { interestReceivable: number; interestAccrualAt: number } {
+    return { interestReceivable: poolInterestReceivable(pool, asOf), interestAccrualAt: asOf };
 }
 
 /**
  * Pool value = free cash + outstanding principal (at par) + accrued interest.
  * A pending withdrawal is a fixed liability: its USD has already been moved
- * out of availableLiquidityUsd (into pendingWithdrawalUsd) and its shares are
+ * out of availableLiquidity (into pendingWithdrawal) and its shares are
  * still in totalShares until the payout is confirmed. Both are excluded, so
  * the remaining lenders' share price is unaffected by the reservation.
  */
-export function poolValueUsd(pool: LendingPool, asOf: number = nowSec()): number {
-    return pool.availableLiquidityUsd + pool.totalLentUsd + poolInterestReceivableUsd(pool, asOf);
+export function poolValue(pool: LendingPool, asOf: number = nowSec()): number {
+    return pool.availableLiquidity + pool.totalLent + poolInterestReceivable(pool, asOf);
 }
 
 export function effectiveShares(pool: LendingPool): number {
@@ -111,7 +111,7 @@ export function effectiveShares(pool: LendingPool): number {
 export function poolSharePrice(pool: LendingPool, asOf: number = nowSec()): number {
     const shares = effectiveShares(pool);
     if (shares <= 0) return 1;
-    return poolValueUsd(pool, asOf) / shares;
+    return poolValue(pool, asOf) / shares;
 }
 
 /** Shares a lender can still withdraw — owned shares minus those already locked in pending requests. */
@@ -129,93 +129,103 @@ const SHARE_EPSILON = 1e-9;
 export function planWithdrawal(
     pool: LendingPool,
     position: Pick<PoolPosition, "shares" | "pendingWithdrawalShares">,
-    amountUsd: number,
+    amount: number,
     asOf: number = nowSec(),
 ): { sharesToBurn: number; price: number } {
-    if (!(amountUsd > 0)) throw new Error("Withdrawal amount must be positive");
+    if (!(amount > 0)) throw new Error("Withdrawal amount must be positive");
     const price = poolSharePrice(pool, asOf);
     const available = freeShares(position);
-    let sharesToBurn = amountUsd / price;
+    let sharesToBurn = amount / price;
     if (sharesToBurn > available) {
         // Tolerate float dust when withdrawing an entire position.
         if (sharesToBurn - available > SHARE_EPSILON * Math.max(1, available) && (sharesToBurn - available) * price > 0.01) {
-            const valueUsd = available * price;
-            throw new Error(`Requested amount exceeds your withdrawable position value ($${valueUsd.toFixed(2)}, excluding pending withdrawals)`);
+            const positionValue = available * price;
+            throw new Error(`Requested amount exceeds your withdrawable position value ($${positionValue.toFixed(2)}, excluding pending withdrawals)`);
         }
         sharesToBurn = available;
     }
-    if (amountUsd > pool.availableLiquidityUsd + 0.01) {
+    if (amount > pool.availableLiquidity + 0.01) {
         throw new Error("Pool does not have enough free liquidity right now — some capital is out on loan or reserved for other withdrawals. Try a smaller amount or wait for repayments.");
     }
     return { sharesToBurn, price };
 }
 
 /** Shares minted for a deposit at the current price (1:1 into an empty pool). */
-export function sharesForDeposit(pool: LendingPool, amountUsd: number, asOf: number = nowSec()): number {
-    return effectiveShares(pool) <= 0 ? amountUsd : amountUsd / poolSharePrice(pool, asOf);
+export function sharesForDeposit(pool: LendingPool, amount: number, asOf: number = nowSec()): number {
+    return effectiveShares(pool) <= 0 ? amount : amount / poolSharePrice(pool, asOf);
 }
 
 /**
  * How much more a wallet may deposit into a pool under the beta caps
  * (Infinity when uncapped). Net deposits = deposited − withdrawn principal.
  */
-export function depositCapacityUsd(
+export function depositCapacity(
     pool: LendingPool,
-    position: Pick<PoolPosition, "principalDepositedUsd" | "principalWithdrawnUsd"> | null,
+    position: Pick<PoolPosition, "principalDeposited" | "principalWithdrawn"> | null,
     caps: { maxPoolTvlUsd: number | null; maxDepositPerWalletUsd: number | null },
     asOf: number = nowSec(),
 ): number {
     let capacity = Infinity;
     if (caps.maxPoolTvlUsd !== null) {
-        capacity = Math.min(capacity, caps.maxPoolTvlUsd - poolValueUsd(pool, asOf));
+        capacity = Math.min(capacity, caps.maxPoolTvlUsd - poolValue(pool, asOf));
     }
     if (caps.maxDepositPerWalletUsd !== null) {
-        const net = (position?.principalDepositedUsd ?? 0) - (position?.principalWithdrawnUsd ?? 0);
+        const net = (position?.principalDeposited ?? 0) - (position?.principalWithdrawn ?? 0);
         capacity = Math.min(capacity, caps.maxDepositPerWalletUsd - net);
     }
     return Math.max(0, capacity);
 }
 
 export interface DefaultRecovery {
-    recoveredPrincipalUsd: number;
-    recoveredInterestUsd: number;
-    principalLossUsd: number;
-    unrecoveredInterestUsd: number;
+    recoveredPrincipal: number;
+    recoveredInterest: number;
+    principalLoss: number;
+    unrecoveredInterest: number;
     /** Collateral left over after covering principal and interest — returned to the borrower. */
-    collateralExcessUsd: number;
+    collateralExcess: number;
 }
 
 /** Apply held collateral to a defaulted balance: principal first, then accrued interest; any excess goes back to the borrower. */
-export function computeDefaultRecovery(principalRemainingUsd: number, interestAccruedUsd: number, collateralHeldUsd: number): DefaultRecovery {
-    const collateral = Math.max(0, collateralHeldUsd);
-    const recoveredPrincipalUsd = Math.min(collateral, principalRemainingUsd);
-    const recoveredInterestUsd = Math.min(collateral - recoveredPrincipalUsd, interestAccruedUsd);
+export function computeDefaultRecovery(principalRemaining: number, interestAccrued: number, collateralHeld: number): DefaultRecovery {
+    const collateral = Math.max(0, collateralHeld);
+    const recoveredPrincipal = Math.min(collateral, principalRemaining);
+    const recoveredInterest = Math.min(collateral - recoveredPrincipal, interestAccrued);
     return {
-        recoveredPrincipalUsd,
-        recoveredInterestUsd,
-        principalLossUsd: principalRemainingUsd - recoveredPrincipalUsd,
-        unrecoveredInterestUsd: interestAccruedUsd - recoveredInterestUsd,
-        collateralExcessUsd: collateral - recoveredPrincipalUsd - recoveredInterestUsd,
+        recoveredPrincipal,
+        recoveredInterest,
+        principalLoss: principalRemaining - recoveredPrincipal,
+        unrecoveredInterest: interestAccrued - recoveredInterest,
+        collateralExcess: collateral - recoveredPrincipal - recoveredInterest,
     };
 }
 
 /**
  * Pool field deltas for money coming back from (or written off on) a loan.
  * Returned principal and interest become liquid again; principal leaves
- * totalLentUsd whether it came back or was lost.
+ * totalLent whether it came back or was lost.
  */
-export function poolSettlementDeltas(principalReturnedUsd: number, interestReturnedUsd: number, lossUsd: number): {
-    availableLiquidityUsd: number;
-    totalLentUsd: number;
-    totalInterestEarnedUsd: number;
-    totalDefaultedUsd: number;
+export function poolSettlementDeltas(principalReturned: number, interestReturned: number, loss: number): {
+    availableLiquidity: number;
+    totalLent: number;
+    totalInterestEarned: number;
+    totalDefaulted: number;
 } {
     return {
-        availableLiquidityUsd: principalReturnedUsd + interestReturnedUsd,
-        totalLentUsd: -(principalReturnedUsd + lossUsd),
-        totalInterestEarnedUsd: interestReturnedUsd,
-        totalDefaultedUsd: lossUsd,
+        availableLiquidity: principalReturned + interestReturned,
+        totalLent: -(principalReturned + loss),
+        totalInterestEarned: interestReturned,
+        totalDefaulted: loss,
     };
+}
+
+/**
+ * Loan-to-value of a collateral-market loan: what's owed (principal + accrued
+ * interest) over what the collateral is worth, both in USD. Infinity with no
+ * collateral value.
+ */
+export function loanToValue(debt: number, debtPriceUsd: number, collateral: number, collateralPriceUsd: number): number {
+    const collateralUsd = collateral * collateralPriceUsd;
+    return collateralUsd > 0 ? (debt * debtPriceUsd) / collateralUsd : Infinity;
 }
 
 export function clamp(value: number, min: number, max: number): number {

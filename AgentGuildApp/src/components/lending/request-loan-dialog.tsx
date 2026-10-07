@@ -1,8 +1,9 @@
 /**
- * Request Loan Dialog — pick a source (pool vs solo), the asset (pool loans
- * can be USDC, SOL or ETH — repaid in the same asset; solo loans are USDC),
- * amount, and term for a trust (collateralized) or unsecured loan, then
- * submit the request. Tier limits are in USD and converted at the live price.
+ * Request Loan Dialog — pick a source (pool vs solo), the pool (USDC, SOL or
+ * ETH — repaid in the same asset — or, for collateralized loans, a USDC/ETH or
+ * USDC/SOL market that lends USDC against locked ETH/SOL; solo loans are
+ * USDC), amount, and term, then submit the request. Tier limits are in USD and
+ * converted at the live price.
  */
 "use client";
 
@@ -17,8 +18,8 @@ import {
     Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { soloRateBand } from "@/lib/lending/eligibility";
-import type { KindEligibility, LoanKind, LoanSource } from "@/lib/lending/types";
-import { assetInfo, formatAssetAmount, type LendingAsset } from "@/lib/lending/assets";
+import type { KindEligibility, LendingPool, LoanKind, LoanSource } from "@/lib/lending/types";
+import { assetInfo, assetOf, formatAssetAmount, poolLabel, type LendingAsset } from "@/lib/lending/assets";
 import { fetchLendingTreasury, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface RequestLoanDialogProps {
@@ -39,14 +40,24 @@ export function RequestLoanDialog({
 }: RequestLoanDialogProps) {
     const [amount, setAmount] = useState(String(Math.min(gate.maxAmountUsd, 500)));
     const [source, setSource] = useState<LoanSource>("pool");
-    const [poolAsset, setPoolAsset] = useState<LendingAsset>("usdc");
+    const [pools, setPools] = useState<LendingPool[]>([]);
+    const [poolId, setPoolId] = useState<string | null>(null);
     const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
-    const asset: LendingAsset = source === "pool" ? poolAsset : "usdc";
+    // Collateral markets only make loans of the collateralized ("trust") kind.
+    const choices = pools.filter((p) => kind === "trust" || !p.collateralAsset);
+    const pool = choices.find((p) => p.id === poolId) ?? choices.find((p) => assetOf(p) === "usdc" && !p.collateralAsset) ?? null;
+    const asset: LendingAsset = source === "pool" && pool ? assetOf(pool) : "usdc";
     const priceUsd = asset === "usdc" ? 1 : treasuryInfo?.pricesUsd[asset] ?? null;
-    const availableAssets: LendingAsset[] = treasuryInfo?.assets.eth ? ["usdc", "sol", "eth"] : ["usdc", "sol"];
+    const market = source === "pool" && pool?.collateralAsset ? pool : null;
+    const collateralPrice = market ? treasuryInfo?.pricesUsd[market.collateralAsset!] ?? null : null;
 
     useEffect(() => {
-        if (open) fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
+        if (!open) return;
+        fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
+        fetch("/api/v1/lending/pools")
+            .then((r) => (r.ok ? r.json() : { pools: [] }))
+            .then((d) => setPools(d.pools ?? []))
+            .catch(() => setPools([]));
     }, [open]);
     const band = soloRateBand(gate.rateBps);
     const [ratePercent, setRatePercent] = useState(String(gate.rateBps / 100));
@@ -64,13 +75,13 @@ export function RequestLoanDialog({
     };
 
     const handleSubmit = async () => {
-        // In the loan's asset (the API field is named amountUsd for history's sake).
-        const amountUsd = parseFloat(amount);
-        if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+        // In the loan's asset.
+        const amountValue = parseFloat(amount);
+        if (!Number.isFinite(amountValue) || amountValue <= 0) {
             setError("Enter a valid amount");
             return;
         }
-        if (priceUsd !== null && amountUsd * priceUsd > gate.maxAmountUsd) {
+        if (priceUsd !== null && amountValue * priceUsd > gate.maxAmountUsd) {
             setError(`Amount exceeds the maximum of $${gate.maxAmountUsd.toLocaleString()}`);
             return;
         }
@@ -90,8 +101,8 @@ export function RequestLoanDialog({
                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress || "" },
                 body: JSON.stringify({
                     agentId, orgId, kind, source,
-                    asset: source === "pool" ? poolAsset : undefined,
-                    amountUsd, termDays: parseInt(termDays, 10),
+                    poolId: source === "pool" ? pool?.id : undefined,
+                    amount: amountValue, termDays: parseInt(termDays, 10),
                     purpose: purpose || undefined,
                     requestedRateBps,
                 }),
@@ -138,27 +149,31 @@ export function RequestLoanDialog({
                     </div>
                 ) : (
                     <div className="space-y-4">
-                        {source === "pool" && (
+                        {source === "pool" && choices.length > 0 && (
                             <div>
-                                <Label className="text-xs">Borrow</Label>
-                                <div className="mt-1 grid gap-1 rounded-lg border border-border p-1" style={{ gridTemplateColumns: `repeat(${availableAssets.length}, minmax(0, 1fr))` }}>
-                                    {availableAssets.map((a) => (
+                                <Label className="text-xs">Pool</Label>
+                                <div className="mt-1 grid grid-cols-3 gap-1 rounded-lg border border-border p-1">
+                                    {choices.map((p) => (
                                         <button
-                                            key={a}
+                                            key={p.id}
                                             type="button"
                                             onClick={() => {
-                                                if (a !== poolAsset) setAmount(a === "usdc" ? String(Math.min(gate.maxAmountUsd, 500)) : "");
-                                                setPoolAsset(a);
+                                                if (p.id !== pool?.id && assetOf(p) !== asset) setAmount(assetOf(p) === "usdc" ? String(Math.min(gate.maxAmountUsd, 500)) : "");
+                                                setPoolId(p.id);
                                             }}
-                                            className={`h-7 rounded-md text-xs font-medium transition-colors ${poolAsset === a ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"}`}
+                                            className={`h-7 rounded-md text-xs font-medium transition-colors ${pool?.id === p.id ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"}`}
                                         >
-                                            {assetInfo(a).symbol}
+                                            {poolLabel(p)}
                                         </button>
                                     ))}
                                 </div>
-                                {poolAsset !== "usdc" && (
+                                {market ? (
                                     <p className="text-[10px] text-muted-foreground mt-1">
-                                        Paid out in {assetInfo(poolAsset).symbol}{poolAsset === "eth" ? " on Ethereum" : ""}, repaid in {assetInfo(poolAsset).symbol}{kind === "trust" ? ", collateral posted in " + assetInfo(poolAsset).symbol : ""}.
+                                        Borrow USDC against {assetInfo(market.collateralAsset!).symbol}{market.collateralAsset === "eth" ? " (posted on Ethereum)" : ""}: lock {((10_000 / market.maxLtvBps!)).toFixed(2)}× the loan&apos;s value. If the loan reaches {(market.liquidationLtvBps! / 100).toFixed(0)}% of the collateral&apos;s value it&apos;s liquidated.
+                                    </p>
+                                ) : asset !== "usdc" && (
+                                    <p className="text-[10px] text-muted-foreground mt-1">
+                                        Paid out in {assetInfo(asset).symbol}{asset === "eth" ? " on Ethereum" : ""}, repaid in {assetInfo(asset).symbol}{kind === "trust" ? ", collateral posted in " + assetInfo(asset).symbol : ""}.
                                     </p>
                                 )}
                             </div>
@@ -174,6 +189,9 @@ export function RequestLoanDialog({
                             />
                             <p className="text-[10px] text-muted-foreground mt-1">
                                 Max ${gate.maxAmountUsd.toLocaleString()}{asset !== "usdc" && priceUsd !== null && ` (≈ ${formatAssetAmount(asset, gate.maxAmountUsd / priceUsd)})`} at {(gate.rateBps / 100).toFixed(1)}% APR
+                                {market && collateralPrice !== null && parseFloat(amount) > 0 && (
+                                    <> · collateral ≈ {formatAssetAmount(market.collateralAsset!, parseFloat(amount) / (market.maxLtvBps! / 10_000) / collateralPrice)}</>
+                                )}
                             </p>
                         </div>
 
@@ -246,7 +264,7 @@ export function RequestLoanDialog({
 
                         {kind === "trust" && (
                             <p className="text-[11px] text-muted-foreground">
-                                Trust loans are collateralized: after requesting, you&apos;ll post collateral (sized by your credit tier) to the lending treasury. It&apos;s returned to your wallet when the loan is repaid, or applied to the balance on default.
+                                Trust loans are collateralized: after requesting, you&apos;ll post collateral ({market ? "sized by the market's loan-to-value" : "sized by your credit tier"}) to the lending treasury. It&apos;s returned to your wallet when the loan is repaid, or applied to the balance on default.
                             </p>
                         )}
 

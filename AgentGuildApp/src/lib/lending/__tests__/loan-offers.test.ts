@@ -7,14 +7,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeFirestore, fakeFieldValue, fakeTimestamp, type FakeTxn } from "./fake-firestore";
 
 const db = new FakeFirestore();
-const verifyUsdcTransfer = vi.fn(async (input: { txSig: string; expectedAmountUsd: number }) => ({ txSig: input.txSig, receivedUsd: input.expectedAmountUsd }));
-const verifySolTransfer = vi.fn(async (input: { txSig: string; expectedAmountUsd: number }) => ({ txSig: input.txSig, receivedUsd: input.expectedAmountUsd, lamports: 2_000_000_000 }));
+const verifyUsdcTransfer = vi.fn(async (input: { txSig: string; expectedAmount: number }) => ({ txSig: input.txSig, received: input.expectedAmount }));
+const verifySolTransfer = vi.fn(async (input: { txSig: string; expectedAmount: number }) => ({ txSig: input.txSig, received: input.expectedAmount, lamports: 2_000_000_000 }));
 
 vi.mock("@/lib/firebase-admin", () => ({ adminDb: () => db }));
 vi.mock("firebase-admin/firestore", () => ({ FieldValue: fakeFieldValue, Timestamp: fakeTimestamp }));
 vi.mock("@/lib/solana/lending-verify", () => ({
-    verifyUsdcTransfer: (input: { txSig: string; expectedAmountUsd: number }) => verifyUsdcTransfer(input),
-    verifySolTransfer: (input: { txSig: string; expectedAmountUsd: number }) => verifySolTransfer(input),
+    verifyUsdcTransfer: (input: { txSig: string; expectedAmount: number }) => verifyUsdcTransfer(input),
+    verifySolTransfer: (input: { txSig: string; expectedAmount: number }) => verifySolTransfer(input),
     claimUsdcTransferInTxn: (txn: FakeTxn, input: { txSig: string; purpose: string }) =>
         txn.create(db.collection("lendingOnChainTxs").doc(input.txSig), { purpose: input.purpose }),
     treasuryAddress: () => "TREASURY",
@@ -70,9 +70,9 @@ function payouts(kind?: string): LendingPayout[] {
     return (db.all("lendingPayouts") as unknown as LendingPayout[]).filter((p) => !kind || p.kind === kind);
 }
 
-const offerInput = { lenderWalletAddress: "LENDER_A", kind: "unsecured" as const, amountUsd: 500, rateBps: 1200, termDays: 45 };
-const accept = (offerId: string, amountUsd?: number) =>
-    acceptLoanOffer({ offerId, agentId: "agent1", orgId: "org1", amountUsd, requestedByWallet: "BORROWER" });
+const offerInput = { lenderWalletAddress: "LENDER_A", kind: "unsecured" as const, amount: 500, rateBps: 1200, termDays: 45 };
+const accept = (offerId: string, amount?: number) =>
+    acceptLoanOffer({ offerId, agentId: "agent1", orgId: "org1", amount, requestedByWallet: "BORROWER" });
 
 beforeEach(() => {
     db.store.clear();
@@ -89,13 +89,13 @@ afterEach(() => {
 
 describe("posting offers", () => {
     it("stores an open offer with rounded amount and clamped term", async () => {
-        const offer = await createLoanOffer({ ...offerInput, amountUsd: 500.456, termDays: 400 });
-        expect(offer).toMatchObject({ status: "open", amountUsd: 500.46, rateBps: 1200, termDays: 90 });
+        const offer = await createLoanOffer({ ...offerInput, amount: 500.456, termDays: 400 });
+        expect(offer).toMatchObject({ status: "open", amount: 500.46, rateBps: 1200, termDays: 90 });
         expect(await getLoanOffer(offer.id)).toMatchObject({ id: offer.id, status: "open" });
     });
 
     it("rejects amounts under the minimum and rates outside 1%–100% APR", async () => {
-        await expect(createLoanOffer({ ...offerInput, amountUsd: 10 })).rejects.toThrow(/at least/);
+        await expect(createLoanOffer({ ...offerInput, amount: 10 })).rejects.toThrow(/at least/);
         await expect(createLoanOffer({ ...offerInput, rateBps: 50 })).rejects.toThrow(/Rate must be/);
         await expect(createLoanOffer({ ...offerInput, rateBps: 20_000 })).rejects.toThrow(/Rate must be/);
         await expect(createLoanOffer({ ...offerInput, rateBps: Number.NaN })).rejects.toThrow(/Rate must be/);
@@ -147,7 +147,7 @@ describe("accepting offers", () => {
             source: "solo",
             kind: "unsecured",
             status: "pending",
-            principalUsd: 500,
+            principal: 500,
             interestRateBps: 1200,
             termDays: 45,
             offerId: offer.id,
@@ -158,7 +158,7 @@ describe("accepting offers", () => {
 
     it("accepts a smaller amount than offered", async () => {
         const offer = await createLoanOffer(offerInput);
-        expect((await accept(offer.id, 200)).principalUsd).toBe(200);
+        expect((await accept(offer.id, 200)).principal).toBe(200);
     });
 
     it("can't be accepted twice", async () => {
@@ -193,13 +193,13 @@ describe("offer-backed loan lifecycle", () => {
         const offer = await createLoanOffer(offerInput);
         const loan = await accept(offer.id);
         await expect(fundLoanSolo(loan.id, "LENDER_B", nextSig())).rejects.toThrow(/reserved for a different lender/);
-        expect(payouts("funding_refund")).toMatchObject([{ fromWallet: "BORROWER", toWallet: "LENDER_B", amountUsd: 500 }]);
+        expect(payouts("funding_refund")).toMatchObject([{ fromWallet: "BORROWER", toWallet: "LENDER_B", amount: 500 }]);
         expect((await getLoan(loan.id))!.status).toBe("pending");
 
         const funded = await fundLoanSolo(loan.id, "LENDER_A", nextSig());
         expect(funded).toMatchObject({ status: "active", lenderWalletAddress: "LENDER_A" });
         expect(verifyUsdcTransfer).toHaveBeenLastCalledWith(
-            expect.objectContaining({ expectedFromWallet: "LENDER_A", expectedToWallet: "BORROWER", expectedAmountUsd: 500 }),
+            expect.objectContaining({ expectedFromWallet: "LENDER_A", expectedToWallet: "BORROWER", expectedAmount: 500 }),
         );
     });
 
@@ -211,14 +211,14 @@ describe("offer-backed loan lifecycle", () => {
         const owed = 500 + 500 * 0.12 * (45 / 365);
         const { loan: after } = await repayLoan(loan.id, Math.ceil(owed * 100) / 100, "BORROWER", nextSig());
         expect(after.status).toBe("repaid");
-        expect(after.interestPaidUsd).toBeCloseTo(500 * 0.12 * (45 / 365), 2);
+        expect(after.interestPaid).toBeCloseTo(500 * 0.12 * (45 / 365), 2);
         expect(verifyUsdcTransfer).toHaveBeenLastCalledWith(expect.objectContaining({ expectedFromWallet: "BORROWER", expectedToWallet: "LENDER_A" }));
     });
 
     it("a trust offer needs collateral before the lender can fund it", async () => {
         const offer = await createLoanOffer({ ...offerInput, kind: "trust" });
         const loan = await accept(offer.id, 300);
-        expect(loan).toMatchObject({ status: "pending_collateral", collateralUsd: 150, reservedLenderWallet: "LENDER_A" });
+        expect(loan).toMatchObject({ status: "pending_collateral", collateral: 150, reservedLenderWallet: "LENDER_A" });
         await postLoanCollateral(loan.id, "BORROWER", nextSig());
         expect((await getLoan(loan.id))!.status).toBe("pending");
         expect((await fundLoanSolo(loan.id, "LENDER_A", nextSig())).status).toBe("active");

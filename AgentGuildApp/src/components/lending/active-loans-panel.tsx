@@ -16,7 +16,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RepayLoanDialog } from "./repay-loan-dialog";
 import type { Loan } from "@/lib/lending/types";
-import { assetOf, assetInfo, formatAssetAmount } from "@/lib/lending/assets";
+import { assetOf, assetInfo, collateralAssetOf, formatAssetAmount, poolLabel } from "@/lib/lending/assets";
+import { loanToValue } from "@/lib/lending/math";
 import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface ActiveLoansPanelProps {
@@ -32,14 +33,16 @@ const STATUS_STYLES: Record<Loan["status"], string> = {
     active: "bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-950/50 dark:text-blue-300 dark:border-blue-700",
     repaid: "bg-emerald-100 text-emerald-700 border-emerald-300 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-700",
     defaulted: "bg-red-100 text-red-700 border-red-300 dark:bg-red-950/50 dark:text-red-300 dark:border-red-700",
+    liquidating: "bg-orange-100 text-orange-700 border-orange-300 dark:bg-orange-950/50 dark:text-orange-300 dark:border-orange-700",
+    liquidated: "bg-slate-100 text-slate-600 border-slate-300 dark:bg-slate-800/50 dark:text-slate-300 dark:border-slate-600",
 };
 
 function estimatePayoff(loan: Loan): number {
     const asOfSec = loan.lastAccrualAt ?? loan.originatedAt ?? Math.floor(Date.now() / 1000);
     const daysElapsed = Math.max(0, Date.now() / 1000 - asOfSec) / 86400;
     const dailyRate = loan.interestRateBps / 10_000 / 365;
-    const projectedInterest = loan.interestAccruedUsd + loan.principalRemainingUsd * dailyRate * daysElapsed;
-    return loan.principalRemainingUsd + projectedInterest;
+    const projectedInterest = loan.interestAccrued + loan.principalRemaining * dailyRate * daysElapsed;
+    return loan.principalRemaining + projectedInterest;
 }
 
 export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps) {
@@ -64,8 +67,8 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 return;
             }
         }
-        if (!treasuryAddressFor(info, assetOf(loan))) {
-            setActionError(`The ${assetInfo(assetOf(loan)).symbol} treasury is not configured`);
+        if (!treasuryAddressFor(info, collateralAssetOf(loan))) {
+            setActionError(`The ${assetInfo(collateralAssetOf(loan)).symbol} treasury is not configured`);
             return;
         }
         setCollateralLoan(loan);
@@ -104,6 +107,11 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
         load();
     }, [load, refreshKey]);
 
+    // Prices for market loans' live loan-to-value (best-effort; the panel works without them).
+    useEffect(() => {
+        fetchLendingTreasury().then(setTreasuryInfo).catch(() => undefined);
+    }, [refreshKey]);
+
     if (loading) {
         return (
             <Card>
@@ -139,9 +147,15 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                     </div>
                 )}
                 {loans.map((loan) => {
-                    const payoff = loan.status === "active" ? estimatePayoff(loan) : loan.principalRemainingUsd + loan.interestAccruedUsd;
+                    const payoff = loan.status === "active" ? estimatePayoff(loan) : loan.principalRemaining + loan.interestAccrued;
                     const asset = assetOf(loan);
                     const amt = (n: number) => formatAssetAmount(asset, n);
+                    const coll = (n: number) => formatAssetAmount(collateralAssetOf(loan), n);
+                    const collPrice = loan.collateralAsset ? treasuryInfo?.pricesUsd[loan.collateralAsset] ?? null : null;
+                    const debtPrice = treasuryInfo?.pricesUsd[asset] ?? null;
+                    const ltv = loan.status === "active" && collPrice !== null && debtPrice !== null
+                        ? loanToValue(payoff, debtPrice, loan.collateral, collPrice)
+                        : null;
                     return (
                         <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border">
                             <div className="flex items-center gap-2">
@@ -152,21 +166,24 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                                 )}
                                 <div>
                                     <div className="text-xs font-medium">
-                                        {amt(loan.principalUsd)} &middot; {(loan.interestRateBps / 100).toFixed(1)}% &middot; {loan.source === "pool" ? "Pool" : "Solo"}
+                                        {amt(loan.principal)} &middot; {(loan.interestRateBps / 100).toFixed(1)}% &middot; {loan.source === "pool" ? (loan.collateralAsset ? `${poolLabel(loan)} market` : "Pool") : "Solo"}
                                     </div>
                                     <div className="text-[10px] text-muted-foreground">
                                         {loan.status === "active" && `Payoff: ${amt(payoff)}`}
-                                        {loan.status === "pending_collateral" && `Post ${amt(loan.collateralUsd)} collateral to continue`}
+                                        {loan.status === "pending_collateral" && `Post ${coll(loan.collateral)} collateral to continue`}
+                                        {ltv !== null && loan.liquidationLtvBps && ` · LTV ${(ltv * 100).toFixed(0)}% (liquidates at ${(loan.liquidationLtvBps / 100).toFixed(0)}%)`}
+                                        {loan.status === "liquidating" && `Collateral (${coll(loan.collateral)}) seized for sale — ${amt(loan.principalRemaining + loan.interestAccrued)} owed`}
+                                        {loan.status === "liquidated" && `Collateral sold for ${amt(loan.liquidationProceeds ?? 0)}; loan closed`}
                                         {loan.status === "cancelled" && (loan.cancelReason || "Cancelled before funding")}
                                         {loan.status === "pending" && "Awaiting a solo lender"}
                                         {loan.status === "pending_disbursement" && `Approved — awaiting real ${assetInfo(asset).symbol} disbursement`}
                                         {loan.status === "repaid" && "Repaid in full"}
-                                        {loan.status === "defaulted" && `Defaulted — ${amt(loan.principalRemainingUsd)} outstanding`}
-                                        {loan.collateralStatus === "held" && ` · ${amt(loan.collateralUsd)} collateral held`}
+                                        {loan.status === "defaulted" && `Defaulted — ${amt(loan.principalRemaining)} outstanding`}
+                                        {loan.collateralStatus === "held" && ` · ${coll(loan.collateral)} collateral held`}
                                         {loan.collateralStatus === "return_pending" && ` · collateral return queued`}
                                         {loan.collateralStatus === "returned" && ` · collateral returned`}
                                         {loan.collateralStatus === "seized" && ` · collateral seized`}
-                                        {!!loan.overpaymentOwedUsd && loan.overpaymentOwedUsd >= assetInfo(asset).dust && ` · ${amt(loan.overpaymentOwedUsd)} overpayment refund queued`}
+                                        {!!loan.overpaymentOwed && loan.overpaymentOwed >= assetInfo(asset).dust && ` · ${amt(loan.overpaymentOwed)} overpayment refund queued`}
                                     </div>
                                 </div>
                             </div>
@@ -201,15 +218,15 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 })}
             </CardContent>
 
-            {collateralLoan && treasuryInfo && treasuryAddressFor(treasuryInfo, assetOf(collateralLoan)) && (
+            {collateralLoan && treasuryInfo && treasuryAddressFor(treasuryInfo, collateralAssetOf(collateralLoan)) && (
                 <Dialog open onOpenChange={(open) => !open && setCollateralLoan(null)}>
                     <DialogContent className="max-w-sm">
                         <DialogHeader><DialogTitle>Post Collateral</DialogTitle></DialogHeader>
                         <OnChainSendStep
-                            recipientAddress={treasuryAddressFor(treasuryInfo, assetOf(collateralLoan))!}
-                            amountUsd={collateralLoan.collateralUsd}
-                            assetLabel={sendAssetLabel(treasuryInfo, assetOf(collateralLoan))}
-                            chain={assetInfo(assetOf(collateralLoan)).chain}
+                            recipientAddress={treasuryAddressFor(treasuryInfo, collateralAssetOf(collateralLoan))!}
+                            amount={collateralLoan.collateral}
+                            assetLabel={sendAssetLabel(treasuryInfo, collateralAssetOf(collateralLoan))}
+                            chain={assetInfo(collateralAssetOf(collateralLoan)).chain}
                             helperText="Send exactly this amount from your own wallet to the lending treasury. It's held for the life of the loan and returned to the same wallet when you repay — or applied to the balance if the loan defaults."
                             submitLabel="Verify Collateral"
                             onSubmit={async (txSig) => {
@@ -232,7 +249,7 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                     open={!!repayLoan}
                     onOpenChange={(open) => !open && setRepayLoan(null)}
                     loan={repayLoan}
-                    payoffUsd={estimatePayoff(repayLoan)}
+                    payoffEstimate={estimatePayoff(repayLoan)}
                     onRepaid={() => {
                         setRepayLoan(null);
                         load();

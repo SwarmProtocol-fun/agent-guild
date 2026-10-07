@@ -26,7 +26,7 @@ import { BorrowPanel } from "@/components/lending/borrow-panel";
 import type { Agent } from "@/lib/firestore";
 import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
 import { poolSharePrice as sharePrice, freeShares } from "@/lib/lending/math";
-import { assetOf, assetInfo, formatAssetAmount, roundAmount, toBaseUnits } from "@/lib/lending/assets";
+import { assetOf, assetInfo, formatAssetAmount, poolLabel, roundAmount, toBaseUnits } from "@/lib/lending/assets";
 import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, ETH_CHAIN_IDS, type LendingTreasuryInfo } from "@/lib/lending/client";
 import { useSolanaSender, useSolanaMessageSigner, useEvmSender } from "@/lib/wallet";
 import { walletLinkMessage } from "@/lib/solana/wallet-link";
@@ -155,7 +155,7 @@ export default function LendingMarketplacePage() {
                     Lending Marketplace
                 </h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                    Apply for a loan for one of your agents, fund a community pool (USDC, SOL or ETH — you earn in the asset you deposit) for diversified, lower-risk returns, or back a single agent&apos;s loan directly in USDC for a higher rate.
+                    Apply for a loan for one of your agents, fund a community pool (USDC, SOL or ETH — you earn in the asset you deposit — or a USDC/ETH or USDC/SOL market, where borrowers lock ETH or SOL against USDC loans), or back a single agent&apos;s loan directly in USDC for a higher rate.
                 </p>
             </div>
 
@@ -199,7 +199,7 @@ export default function LendingMarketplacePage() {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {pools.map((pool) => {
                                 const price = sharePrice(pool);
-                                const yieldPct = pool.totalDepositedUsd > 0 ? (pool.totalInterestEarnedUsd / pool.totalDepositedUsd) * 100 : 0;
+                                const yieldPct = pool.totalDeposited > 0 ? (pool.totalInterestEarned / pool.totalDeposited) * 100 : 0;
                                 const position = positions[pool.id];
                                 const positionValue = position ? freeShares(position) * price : 0;
                                 return (
@@ -208,19 +208,24 @@ export default function LendingMarketplacePage() {
                                             <div className="flex items-center gap-2">
                                                 <Users className="h-4 w-4 text-emerald-500" />
                                                 <CardTitle className="text-base">{pool.name}</CardTitle>
-                                                <Badge variant="outline" className="text-[10px] ml-auto">{assetInfo(assetOf(pool)).symbol}</Badge>
+                                                <Badge variant="outline" className="text-[10px] ml-auto">{poolLabel(pool)}</Badge>
                                             </div>
                                             {pool.description && <CardDescription>{pool.description}</CardDescription>}
+                                            {pool.collateralAsset && (
+                                                <p className="text-[11px] text-muted-foreground">
+                                                    Collateral: {assetInfo(pool.collateralAsset).symbol} &middot; max LTV {((pool.maxLtvBps ?? 0) / 100).toFixed(0)}% &middot; liquidation at {((pool.liquidationLtvBps ?? 0) / 100).toFixed(0)}%
+                                                </p>
+                                            )}
                                         </CardHeader>
                                         <CardContent className="space-y-3">
                                             <div className="grid grid-cols-3 gap-2 text-center">
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Available</p>
-                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.availableLiquidityUsd)}</p>
+                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.availableLiquidity)}</p>
                                                 </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Out on Loan</p>
-                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.totalLentUsd)}</p>
+                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.totalLent)}</p>
                                                 </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Lifetime Yield</p>
@@ -265,11 +270,11 @@ export default function LendingMarketplacePage() {
                                             <div>
                                                 <div className="text-sm font-medium">
                                                     {agentNames[loan.borrowerAgentId] || loan.borrowerAgentId}
-                                                    <span className="text-muted-foreground font-normal"> &middot; ${loan.principalUsd.toLocaleString()}</span>
+                                                    <span className="text-muted-foreground font-normal"> &middot; ${loan.principal.toLocaleString()}</span>
                                                 </div>
                                                 <div className="text-xs text-muted-foreground">
                                                     {(loan.interestRateBps / 100).toFixed(1)}% APR &middot; {loan.termDays}d term
-                                                    {loan.kind === "trust" && ` · $${loan.collateralUsd.toFixed(0)} escrow`}
+                                                    {loan.kind === "trust" && ` · $${loan.collateral.toFixed(0)} escrow`}
                                                     {loan.purpose && ` · ${loan.purpose}`}
                                                     {loan.reservedLenderWallet && " · from your offer"}
                                                 </div>
@@ -305,7 +310,7 @@ export default function LendingMarketplacePage() {
                                                 )}
                                                 <div>
                                                     <div className="text-sm font-medium">
-                                                        Up to ${offer.amountUsd.toLocaleString()}
+                                                        Up to ${offer.amount.toLocaleString()}
                                                         <span className="text-muted-foreground font-normal"> &middot; {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d</span>
                                                     </div>
                                                     <div className="text-xs text-muted-foreground">
@@ -353,7 +358,7 @@ export default function LendingMarketplacePage() {
                                         <div className="space-y-2">
                                             {pendingWithdrawals.filter((w) => w.status === "pending_payout").map((w) => (
                                                 <div key={w.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
-                                                    <span>{formatAssetAmount(assetOf(w), w.amountUsd)} requested</span>
+                                                    <span>{formatAssetAmount(assetOf(w), w.amount)} requested</span>
                                                     <div className="flex items-center gap-2">
                                                         <Badge variant="outline" className="text-[10px]">awaiting admin payout</Badge>
                                                         <Button
@@ -387,7 +392,7 @@ export default function LendingMarketplacePage() {
                                             {payouts.owedByYou.filter((p) => p.status === "pending").map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-amber-500/30 text-xs">
                                                     <div>
-                                                        <div>{formatAssetAmount(assetOf(p), p.amountUsd)} to <span className="font-mono">{p.toWallet.slice(0, 6)}…{p.toWallet.slice(-4)}</span></div>
+                                                        <div>{formatAssetAmount(assetOf(p), p.amount)} to <span className="font-mono">{p.toWallet.slice(0, 6)}…{p.toWallet.slice(-4)}</span></div>
                                                         <div className="text-[10px] text-muted-foreground">{p.reason}</div>
                                                     </div>
                                                     <Button size="sm" className="h-6 text-[10px] px-2" onClick={() => setSettlingPayout(p)}>Send Refund</Button>
@@ -403,7 +408,7 @@ export default function LendingMarketplacePage() {
                                             {payouts.owedToYou.map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <div>
-                                                        <div>{formatAssetAmount(assetOf(p), p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")}</div>
+                                                        <div>{formatAssetAmount(assetOf(p), p.amount)} &middot; {p.kind.replace(/_/g, " ")}</div>
                                                         <div className="text-[10px] text-muted-foreground">{p.reason}</div>
                                                     </div>
                                                     <Badge variant="outline" className="text-[10px]">{p.status === "paid" ? "paid" : "queued"}</Badge>
@@ -421,7 +426,7 @@ export default function LendingMarketplacePage() {
                                             {myOffers.map((offer) => (
                                                 <div key={offer.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <span>
-                                                        ${offer.amountUsd.toLocaleString()} at {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d
+                                                        ${offer.amount.toLocaleString()} at {(offer.rateBps / 100).toFixed(1)}% APR &middot; {offer.termDays}d
                                                     </span>
                                                     <div className="flex items-center gap-2">
                                                         <Badge variant="outline" className="text-[10px]">{offer.status}</Badge>
@@ -456,7 +461,7 @@ export default function LendingMarketplacePage() {
                                         <div className="space-y-2">
                                             {fundedLoans.map((l) => (
                                                 <div key={l.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
-                                                    <span>{agentNames[l.borrowerAgentId] || l.borrowerAgentId} &middot; ${l.principalUsd.toLocaleString()}</span>
+                                                    <span>{agentNames[l.borrowerAgentId] || l.borrowerAgentId} &middot; ${l.principal.toLocaleString()}</span>
                                                     <Badge variant="outline" className="text-[10px]">{l.status}</Badge>
                                                 </div>
                                             ))}
@@ -502,7 +507,7 @@ export default function LendingMarketplacePage() {
                         <DialogHeader><DialogTitle>Send Refund</DialogTitle></DialogHeader>
                         <OnChainSendStep
                             recipientAddress={settlingPayout.toWallet}
-                            amountUsd={settlingPayout.amountUsd}
+                            amount={settlingPayout.amount}
                             assetLabel={sendAssetLabel(null, assetOf(settlingPayout))}
                             chain={assetInfo(assetOf(settlingPayout)).chain}
                             helperText={`${settlingPayout.reason}. Send exactly this amount from your wallet, then paste the signature.`}
@@ -574,10 +579,10 @@ function PoolActionDialog({
             fetch(`/api/v1/lending/pools/${pool.id}/deposit-limit`)
                 .then((r) => r.json())
                 .then((d) => {
-                    setCapacity(d.capacityUsd ?? null);
+                    setCapacity(d.capacity ?? null);
                     if (d.paused) setBlockedReason("Lending is paused — deposits are temporarily closed.");
                     else if (d.allowed === false) setBlockedReason("Lending is in a closed beta and this wallet isn't on the allowlist yet.");
-                    else if (d.capacityUsd === 0) setBlockedReason("This pool (or your wallet) has reached its beta deposit cap.");
+                    else if (d.capacity === 0) setBlockedReason("This pool (or your wallet) has reached its beta deposit cap.");
                     else if (d.error) setBlockedReason(d.error);
                 })
                 .catch(() => setCapacity(null));
@@ -684,7 +689,7 @@ function PoolActionDialog({
             const res = await fetch(`/api/v1/lending/pools/${pool.id}/withdraw`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
-                body: JSON.stringify({ amountUsd: amountValue }),
+                body: JSON.stringify({ amount: amountValue }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -787,7 +792,7 @@ function PoolActionDialog({
                 ) : (
                     <OnChainSendStep
                         recipientAddress={treasury!}
-                        amountUsd={amountValue}
+                        amount={amountValue}
                         assetLabel={sendAssetLabel(treasuryInfo, asset)}
                         chain={chain}
                         onSendWithWallet={canWalletSend ? sendWithWallet : undefined}
@@ -797,11 +802,11 @@ function PoolActionDialog({
                             const res = await fetch(`/api/v1/lending/pools/${pool.id}/deposit`, {
                                 method: "POST",
                                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
-                                body: JSON.stringify({ amountUsd: amountValue, txSig, asset }),
+                                body: JSON.stringify({ amount: amountValue, txSig, asset }),
                             });
                             const body = await res.json().catch(() => ({}));
                             if (!res.ok) throw new Error(body.error || "Deposit verification failed");
-                            setRefundedAmount(body.refundedUsd || 0);
+                            setRefundedAmount(body.refunded || 0);
                             setDone(true);
                         }}
                     />
@@ -846,11 +851,11 @@ function FundLoanDialog({
                     <div className="space-y-4">
                         <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-1.5 text-xs">
                             <div className="flex justify-between"><span className="text-muted-foreground">Borrower</span><span>{borrowerName}</span></div>
-                            <div className="flex justify-between"><span className="text-muted-foreground">Principal</span><span className="font-mono">${loan.principalUsd.toLocaleString()}</span></div>
+                            <div className="flex justify-between"><span className="text-muted-foreground">Principal</span><span className="font-mono">${loan.principal.toLocaleString()}</span></div>
                             <div className="flex justify-between"><span className="text-muted-foreground">Rate</span><span>{(loan.interestRateBps / 100).toFixed(1)}% APR</span></div>
                             <div className="flex justify-between"><span className="text-muted-foreground">Term</span><span>{loan.termDays} days</span></div>
                             {loan.kind === "trust" && (
-                                <div className="flex justify-between"><span className="text-muted-foreground">Escrow</span><span className="font-mono">${loan.collateralUsd.toFixed(0)}</span></div>
+                                <div className="flex justify-between"><span className="text-muted-foreground">Escrow</span><span className="font-mono">${loan.collateral.toFixed(0)}</span></div>
                             )}
                         </div>
                         <p className="text-[11px] text-muted-foreground">
@@ -868,7 +873,7 @@ function FundLoanDialog({
                 ) : (
                     <OnChainSendStep
                         recipientAddress={loan.borrowerWalletAddress!}
-                        amountUsd={loan.principalUsd}
+                        amount={loan.principal}
                         helperText="Send the principal directly to the borrower's wallet, then paste the signature."
                         submitLabel="Verify & Fund"
                         onSubmit={async (txSig) => {

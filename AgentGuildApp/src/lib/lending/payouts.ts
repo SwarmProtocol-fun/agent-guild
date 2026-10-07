@@ -19,6 +19,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { verifyLendingTransfer, claimLendingTransferInTxn, treasuryFor, normalizeTxSig, type VerifyTransferInput } from "./verify";
 import { assetOf, assetInfo, roundAmount } from "./assets";
 import type { LendingPayout, Loan } from "./types";
+import { normalizeLegacy, healLegacyInTxn } from "./legacy-fields";
 
 const PAYOUTS = "lendingPayouts";
 const LOANS = "loans";
@@ -31,12 +32,12 @@ export type NewPayout = Omit<LendingPayout, "id" | "status" | "createdAt" | "pai
 /** Queue a payout as part of the caller's transaction. Returns its id. Skips dust (see assets.ts). */
 export function createPayoutInTxn(txn: FirebaseFirestore.Transaction, payout: NewPayout): string | null {
     const asset = assetOf(payout);
-    if (!(payout.amountUsd >= assetInfo(asset).dust)) return null;
+    if (!(payout.amount >= assetInfo(asset).dust)) return null;
     const ref = adminDb().collection(PAYOUTS).doc();
     const doc: Omit<LendingPayout, "id"> = {
         ...payout,
         asset: asset === "usdc" ? undefined : asset,
-        amountUsd: roundAmount(asset, payout.amountUsd),
+        amount: roundAmount(asset, payout.amount),
         status: "pending",
         createdAt: nowSec(),
     };
@@ -45,7 +46,7 @@ export function createPayoutInTxn(txn: FirebaseFirestore.Transaction, payout: Ne
 }
 
 function toPayout(id: string, data: FirebaseFirestore.DocumentData): LendingPayout {
-    return { id, ...data } as LendingPayout;
+    return { id, ...normalizeLegacy("lendingPayouts", data) } as LendingPayout;
 }
 
 export async function getPayout(payoutId: string): Promise<LendingPayout | null> {
@@ -101,7 +102,7 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
         txSig,
         expectedFromWallet: existing.fromWallet,
         expectedToWallet: existing.toWallet,
-        expectedAmountUsd: existing.amountUsd,
+        expectedAmount: existing.amount,
         purpose: `payout_${existing.kind}`,
         refId: payoutId,
     };
@@ -115,7 +116,8 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
 
         const loanRef = payout.loanId ? adminDb().collection(LOANS).doc(payout.loanId) : null;
         const loanSnap = loanRef ? await txn.get(loanRef) : null;
-        const loan = loanSnap?.exists ? (loanSnap.data() as Loan) : null;
+        const loan = loanSnap?.exists ? (normalizeLegacy("loans", loanSnap.data()!) as Loan) : null;
+        if (loanRef && loanSnap?.exists) healLegacyInTxn(txn, loanRef, "loans", loanSnap.data());
 
         claimLendingTransferInTxn(asset, txn, transfer);
 
@@ -127,7 +129,7 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
                 txn.update(loanRef, { collateralStatus: "returned" });
             }
             if (payout.kind === "overpayment_refund" && payout.repaymentId) {
-                txn.update(loanRef, { overpaymentOwedUsd: FieldValue.increment(-payout.amountUsd) });
+                txn.update(loanRef, { overpaymentOwed: FieldValue.increment(-payout.amount) });
             }
         }
         if (payout.kind === "overpayment_refund" && payout.repaymentId) {

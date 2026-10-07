@@ -76,6 +76,7 @@ export function ethExplorerTxUrl(hash: string): string {
 
 export async function verifyEthTransfer(input: VerifyTransferInput): Promise<VerifiedTransfer> {
     const hash = normalizeEthTxHash(input.txSig) as Hash;
+    if (input.expectedFromWallet === null) throw new Error("ETH transfers need a known sender");
     const from = input.expectedFromWallet.toLowerCase();
     const to = input.expectedToWallet.toLowerCase();
     if (!isAddress(from, { strict: false }) || !isAddress(to, { strict: false })) {
@@ -98,13 +99,13 @@ export async function verifyEthTransfer(input: VerifyTransferInput): Promise<Ver
         throw new Error("Transaction isn't finalized yet — Ethereum takes about 15 minutes; retry then");
     }
 
-    const required = toBaseUnits("eth", input.expectedAmountUsd);
+    const required = toBaseUnits("eth", input.expectedAmount);
     const txTo = tx.to?.toLowerCase();
     let received: bigint;
 
     if (txTo === to && tx.from.toLowerCase() === from) {
         received = tx.value;
-        if (received < required) throw new Error(`Expected at least ${input.expectedAmountUsd} ETH, transaction sent ${fromBaseUnits("eth", received)}`);
+        if (received < required) throw new Error(`Expected at least ${input.expectedAmount} ETH, transaction sent ${fromBaseUnits("eth", received)}`);
     } else if (txTo === from) {
         // Contract wallet (e.g. Safe) executed the send — check balance movement across the block.
         const before = receipt.blockNumber - BigInt(1);
@@ -122,13 +123,13 @@ export async function verifyEthTransfer(input: VerifyTransferInput): Promise<Ver
         }
         received = toAfter - toBefore;
         const sent = fromBefore - fromAfter;
-        if (received < required) throw new Error(`Expected at least ${input.expectedAmountUsd} ETH to arrive at ${to}, found ${fromBaseUnits("eth", received)}`);
-        if (sent < required) throw new Error(`Expected ${from} to send at least ${input.expectedAmountUsd} ETH`);
+        if (received < required) throw new Error(`Expected at least ${input.expectedAmount} ETH to arrive at ${to}, found ${fromBaseUnits("eth", received)}`);
+        if (sent < required) throw new Error(`Expected ${from} to send at least ${input.expectedAmount} ETH`);
     } else {
         throw new Error(`Transaction isn't an ETH transfer from ${from} to ${to}`);
     }
 
-    return { txSig: hash, receivedUsd: fromBaseUnits("eth", received) };
+    return { txSig: hash, received: fromBaseUnits("eth", received) };
 }
 
 export function claimEthTransferInTxn(txn: FirebaseFirestore.Transaction, input: VerifyTransferInput): void {
@@ -136,9 +137,9 @@ export function claimEthTransferInTxn(txn: FirebaseFirestore.Transaction, input:
     txn.create(adminDb().collection(ONCHAIN_TX_COLLECTION).doc(hash), {
         purpose: input.purpose,
         refId: input.refId,
-        fromWallet: input.expectedFromWallet.toLowerCase(),
+        fromWallet: input.expectedFromWallet?.toLowerCase() ?? null,
         toWallet: input.expectedToWallet.toLowerCase(),
-        amount: input.expectedAmountUsd,
+        amount: input.expectedAmount,
         asset: "eth",
         claimedAt: Date.now(),
     });

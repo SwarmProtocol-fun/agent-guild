@@ -108,12 +108,16 @@ export function tokenBalanceDelta(
 
 export interface VerifyTransferInput {
     txSig: string;
-    /** Wallet that must have sent the funds (its balance must drop by >= the amount). */
-    expectedFromWallet: string;
+    /**
+     * Wallet that must have sent the funds (its balance must drop by >= the
+     * amount). null = receive-only check, USDC only — for liquidation proceeds,
+     * which may come from an exchange or a swap inside the treasury.
+     */
+    expectedFromWallet: string | null;
     /** Wallet that must have received the funds. */
     expectedToWallet: string;
-    /** In the transfer's asset units (USDC, SOL or ETH — see lending/assets.ts on the `Usd` naming). */
-    expectedAmountUsd: number;
+    /** In the transfer's asset units (USDC, SOL or ETH). */
+    expectedAmount: number;
     /** Replay-guard bookkeeping, stored alongside the claim. */
     purpose: string;
     refId: string;
@@ -122,18 +126,18 @@ export interface VerifyTransferInput {
 export interface VerifiedTransfer {
     txSig: string;
     /** Amount that actually arrived at expectedToWallet, in asset units (may exceed the expected amount). */
-    receivedUsd: number;
+    received: number;
 }
 
 /**
- * Verify a submitted signature transferred >= expectedAmountUsd of USDC from
+ * Verify a submitted signature transferred >= expectedAmount of USDC from
  * expectedFromWallet to expectedToWallet at finalized commitment. Read-only —
  * does NOT claim the signature; the caller must call claimUsdcTransferInTxn()
  * inside the transaction that credits it. Throws with a user-facing reason on
  * any failure. Also rejects early if the signature is already claimed.
  */
 export async function verifyUsdcTransfer(input: VerifyTransferInput): Promise<VerifiedTransfer> {
-    const { txSig, expectedFromWallet, expectedToWallet, expectedAmountUsd } = input;
+    const { txSig, expectedFromWallet, expectedToWallet, expectedAmount } = input;
 
     const claimed = await adminDb().collection(ONCHAIN_TX_COLLECTION).doc(txSig).get();
     if (claimed.exists) throw new Error("This transaction signature has already been used for a different credit");
@@ -146,17 +150,17 @@ export async function verifyUsdcTransfer(input: VerifyTransferInput): Promise<Ve
     const pre = tx.meta?.preTokenBalances;
     const post = tx.meta?.postTokenBalances;
 
-    const receivedUsd = tokenBalanceDelta(pre, post, expectedToWallet, mint);
-    if (receivedUsd + 1e-9 < expectedAmountUsd) {
-        throw new Error(`Expected at least ${expectedAmountUsd} USDC to arrive at ${expectedToWallet}, found ${receivedUsd}`);
+    const received = tokenBalanceDelta(pre, post, expectedToWallet, mint);
+    if (received + 1e-9 < expectedAmount) {
+        throw new Error(`Expected at least ${expectedAmount} USDC to arrive at ${expectedToWallet}, found ${received}`);
     }
 
-    const sentUsd = -tokenBalanceDelta(pre, post, expectedFromWallet, mint);
-    if (sentUsd + 1e-9 < expectedAmountUsd) {
-        throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${expectedAmountUsd} USDC`);
+    const sent = expectedFromWallet === null ? Infinity : -tokenBalanceDelta(pre, post, expectedFromWallet, mint);
+    if (sent + 1e-9 < expectedAmount) {
+        throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${expectedAmount} USDC`);
     }
 
-    return { txSig, receivedUsd };
+    return { txSig, received };
 }
 
 /**
@@ -174,14 +178,15 @@ export interface VerifiedSolTransfer extends VerifiedTransfer {
 
 /**
  * Native-SOL counterpart of verifyUsdcTransfer(), for the SOL pool — the
- * amount (expectedAmountUsd) is in SOL. Checks the recipient's lamports rose
+ * amount (expectedAmount) is in SOL. Checks the recipient's lamports rose
  * by at least that much and the sender's fell by at least as much (the
  * sender's drop also includes the network fee when they paid it, so it's >=,
  * never ==). Same contract: read-only, the caller claims the signature with
  * claimUsdcTransferInTxn() inside the crediting transaction.
  */
 export async function verifySolTransfer(input: VerifyTransferInput): Promise<VerifiedSolTransfer> {
-    const { txSig, expectedFromWallet, expectedToWallet, expectedAmountUsd: expectedSol } = input;
+    const { txSig, expectedFromWallet, expectedToWallet, expectedAmount: expectedSol } = input;
+    if (expectedFromWallet === null) throw new Error("SOL transfers need a known sender");
 
     const claimed = await adminDb().collection(ONCHAIN_TX_COLLECTION).doc(txSig).get();
     if (claimed.exists) throw new Error("This transaction signature has already been used for a different credit");
@@ -205,7 +210,7 @@ export async function verifySolTransfer(input: VerifyTransferInput): Promise<Ver
         throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${expectedSol} SOL`);
     }
 
-    return { txSig, receivedUsd: received / LAMPORTS_PER_SOL, lamports: received };
+    return { txSig, received: received / LAMPORTS_PER_SOL, lamports: received };
 }
 
 /**
@@ -221,7 +226,7 @@ export function claimUsdcTransferInTxn(txn: FirebaseFirestore.Transaction, input
         refId: input.refId,
         fromWallet: input.expectedFromWallet,
         toWallet: input.expectedToWallet,
-        amountUsd: input.expectedAmountUsd,
+        amount: input.expectedAmount,
         claimedAt: Date.now(),
     });
 }
