@@ -18,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Gavel } from "lucide-react";
 import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
-import { recordEscrowResolved, type GigEscrow } from "@/lib/firestore";
+import type { GigEscrow } from "@/lib/firestore";
 
 interface AdminResolveEscrowDisputeProps {
   jobId: string;
@@ -45,8 +45,15 @@ export function AdminResolveEscrowDispute({ jobId, escrow, onResolved }: AdminRe
     try {
       const sig = await resolveDispute(escrow.taskId, escrow.posterSolanaAddress, escrow.claimantSolanaAddress, bps);
       if (!sig) throw new Error(state.error || "Failed to resolve on-chain (are you connected as the program authority?)");
-      await recordEscrowResolved(jobId, sig, bps);
-      onResolved(sig, bps);
+      // The server verifies the signature on-chain and records the split it finds there.
+      const res = await fetch(`/api/admin/jobs/${encodeURIComponent(jobId)}/escrow-resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolveTxSig: sig }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`Resolved on-chain (${sig.slice(0, 8)}…) but recording failed: ${data.error || res.status}`);
+      onResolved(sig, data.agentBps ?? bps);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to resolve on-chain");
     } finally {

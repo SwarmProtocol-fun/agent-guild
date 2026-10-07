@@ -250,7 +250,9 @@ export type JobEventType =
   | "disputed"
   | "escrow_claimed"
   | "escrow_delivered"
-  | "escrow_released";
+  | "escrow_released"
+  | "escrow_resolved"
+  | "unassigned";
 
 export interface JobActor {
   type: "user" | "agent" | "system";

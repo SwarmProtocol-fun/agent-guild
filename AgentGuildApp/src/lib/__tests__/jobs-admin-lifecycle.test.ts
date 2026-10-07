@@ -116,6 +116,8 @@ import {
   cancelJob,
   claimJob,
   createJob,
+  dispatchJob,
+  reopenJob,
   getJob,
   hireApplicant,
   reviewDelivery,
@@ -141,7 +143,12 @@ beforeEach(() => {
   db.cols.clear();
   col("agents").set("agentA", { data: { name: "Ada", orgId: "org1", tasksCompleted: 2 }, v: 1 });
   col("agents").set("agentB", { data: { name: "Bob", orgId: "org1" }, v: 1 });
+  col("agents").set("agentC", { data: { name: "Cy", orgId: "org1" }, v: 1 });
+  col("agents").set("outsider", { data: { name: "Eve", orgId: "org2" }, v: 1 });
 });
+
+const input = { title: "Ship it", description: "d", requiredSkills: [], priority: "high" as const, projectId: "p1", hiringMode: "instant" as const };
+const tasksFor = (jobId: string) => [...col("tasks").values()].filter((t) => t.data.jobId === jobId).map((t) => t.data);
 
 describe("jobs-admin lifecycle", () => {
   it("runs post → claim → deliver → send back → redeliver → approve, with a full audit trail", async () => {
@@ -246,5 +253,63 @@ describe("jobs-admin lifecycle", () => {
     expect((await getJobApplications(jobId)).map((a) => [a.agentId, a.status]).sort()).toEqual([["agentA", "accepted"], ["agentB", "rejected"]]);
     const hired = (await getJobEvents(jobId)).find((e) => e.type === "hired");
     expect(hired).toMatchObject({ actor: user, details: { agentId: "agentA" } });
+  });
+
+  it("dispatches a team: first agent leads and holds the job, the rest collaborate", async () => {
+    const { jobId, taskIds } = await dispatchJob(input, { orgId: "org1", postedByAddress: "0xposter" }, ["agentA", "agentB", "agentC", "agentB"], user);
+    expect(taskIds).toHaveLength(3);
+    expect(await getJob(jobId)).toMatchObject({ status: "in_progress", takenByAgentId: "agentA", collaboratorAgentIds: ["agentB", "agentC"] });
+    expect(tasksFor(jobId).map((t) => t.assigneeAgentId).sort()).toEqual(["agentA", "agentB", "agentC"]);
+    const trail = await getJobEvents(jobId);
+    expect(trail.map((e) => [e.type, e.details?.agentId ?? null, e.details?.role ?? null])).toEqual([
+      ["created", null, null],
+      ["hired", "agentA", null],
+      ["hired", "agentB", "collaborator"],
+      ["hired", "agentC", "collaborator"],
+    ]);
+
+    // Approval closes every task on the job, but only the lead is credited.
+    await submitJobDelivery(jobId, { deliveryNotes: "done", completedByAgentName: "Ada" });
+    await reviewDelivery(jobId, { approve: true, notes: "" }, user);
+    expect(tasksFor(jobId).every((t) => t.status === "done")).toBe(true);
+    expect(col("agents").get("agentA")?.data.tasksCompleted).toBe(3);
+    expect(col("agents").get("agentB")?.data.tasksCompleted).toBeUndefined();
+  });
+
+  it("refuses to dispatch to agents outside the org, before creating anything", async () => {
+    await expect(dispatchJob(input, { orgId: "org1", postedByAddress: "0xposter" }, ["agentA", "outsider"], user))
+      .rejects.toMatchObject({ status: 404 });
+    await expect(dispatchJob(input, { orgId: "org1", postedByAddress: "0xposter" }, [], user)).rejects.toMatchObject({ status: 400 });
+    expect(col("jobs").size).toBe(0);
+  });
+
+  it("reopens an in-progress job: unassigns everyone, closes their tasks, keeps history", async () => {
+    const { jobId } = await dispatchJob(input, { orgId: "org1", postedByAddress: "0xposter" }, ["agentA", "agentB"], user);
+    await submitJobDelivery(jobId, { deliveryNotes: "v1", completedByAgentName: "Ada" });
+    await reviewDelivery(jobId, { approve: false, notes: "redo" }, user);
+    await reopenJob(jobId, "agent stalled", user);
+
+    const job = await getJob(jobId);
+    expect(job).toMatchObject({ status: "open", reviewStatus: "rejected" });
+    expect(job?.takenByAgentId).toBeUndefined();
+    expect(job?.collaboratorAgentIds).toBeUndefined();
+    expect(job?.deliveryHistory).toHaveLength(1);
+    expect(tasksFor(jobId).every((t) => t.status === "done" && t.cancelled === true)).toBe(true);
+    expect((await getJobEvents(jobId)).at(-1)).toMatchObject({ type: "unassigned", details: { agentId: "agentA", reason: "agent stalled" } });
+
+    // Back on the board — a new agent can claim it.
+    await claimJob(jobId, "agentC", "org1", "p1", "Cy");
+    expect((await getJob(jobId))?.takenByAgentId).toBe("agentC");
+  });
+
+  it("won't reopen open, delivered or gig jobs", async () => {
+    const open = await postJob();
+    await expect(reopenJob(open, "", user)).rejects.toMatchObject({ status: 409 });
+    await claimJob(open, "agentA", "org1", "p1", "Ada");
+    await submitJobDelivery(open, { deliveryNotes: "v1", completedByAgentName: "Ada" });
+    await expect(reopenJob(open, "", user)).rejects.toMatchObject({ status: 409 });
+
+    col("jobs").set("gig1", { data: { orgId: "org1", status: "in_progress", gigId: "g", takenByAgentId: "agentA" }, v: 1 });
+    await expect(reopenJob("gig1", "", user)).rejects.toMatchObject({ status: 409 });
   });
 });

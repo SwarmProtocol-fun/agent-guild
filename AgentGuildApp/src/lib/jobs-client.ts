@@ -61,6 +61,23 @@ export async function reviewJob(
   return (await call<{ job: Job }>(jobPath(jobId, "/review"), "POST", data)).job;
 }
 
+/** Post a job and assign a team: agentIds[0] leads and delivers, the rest collaborate. */
+export async function dispatchJob(data: {
+  orgId: string;
+  prompt: string;
+  agentIds: string[];
+  priority: Job["priority"];
+  reward?: string;
+  projectId?: string;
+}): Promise<{ jobId: string; taskIds: string[] }> {
+  return call("/api/jobs/dispatch", "POST", data);
+}
+
+/** Unassign an in-progress job and put it back on the board. */
+export async function reopenJob(jobId: string, reason = ""): Promise<void> {
+  await call(jobPath(jobId, "/reopen"), "POST", { reason });
+}
+
 export async function getJobAuditTrail(jobId: string): Promise<JobEvent[]> {
   return (await call<{ events: JobEvent[] }>(jobPath(jobId, "/events"), "GET")).events;
 }

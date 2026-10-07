@@ -35,6 +35,14 @@ export interface SolanaSender {
   sendTransaction(tx: Transaction, connection: Connection): Promise<string>;
 }
 
+/** A connected EVM wallet that can send native ETH. */
+export interface EvmSender {
+  /** 0x address of the EVM account that will sign. */
+  address: string;
+  /** Switches the wallet to `chainId` if needed, sends `valueWei` to `to`, and resolves to the tx hash once broadcast (not mined). */
+  sendNativeTransfer(input: { to: string; valueWei: bigint; chainId: number }): Promise<string>;
+}
+
 /** The user's Solana account, able to sign arbitrary messages (e.g. wallet-link proofs). */
 export interface SolanaMessageSigner {
   /** Base58 address of the Solana account. */
@@ -58,6 +66,8 @@ export interface WalletAdapter {
   useSolanaSender?(): SolanaSender | null;
   /** The user's Solana account as a message signer — even when they signed in with EVM — or null. Omit if the adapter has no Solana support. */
   useSolanaMessageSigner?(): SolanaMessageSigner | null;
+  /** The connected EVM wallet's sender, or null when none is connected. Omit if the adapter has no EVM support. */
+  useEvmSender?(): EvmSender | null;
   /** localStorage key prefixes to purge on logout so the wallet doesn't auto-reconnect. */
   storagePrefixes: string[];
 }

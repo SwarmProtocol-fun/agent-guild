@@ -18,12 +18,11 @@ import {
   getAgentsByOrg,
   getJobsByOrg,
   getOrganization,
-  createJob,
-  claimJob,
   type Task,
   type Agent,
   type Job,
 } from "@/lib/firestore";
+import { dispatchJob, assignJob } from "@/lib/jobs-client";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { getActivityFeed, type ActivityEvent } from "@/lib/activity";
@@ -281,23 +280,16 @@ export default function DashboardPage() {
       setError(null);
 
       // 1. Create the job (org-wide, no single project)
-      const jobId = await createJob({
+      // Server-side: validates, assigns agentIds[0] as lead and the rest as
+      // collaborators, and records it all in the job's audit trail.
+      const { jobId } = await dispatchJob({
         orgId: currentOrg.id,
         projectId: "",
-        title: prompt.slice(0, 120) + (prompt.length > 120 ? "…" : ""),
-        description: prompt,
-        status: "open",
-        reward: reward || undefined,
-        requiredSkills: [],
-        postedByAddress: userAddress || "unknown",
+        prompt,
+        agentIds,
         priority,
-        createdAt: new Date(),
+        reward: reward || undefined,
       });
-
-      // 2. Assign each selected agent
-      for (const agentId of agentIds) {
-        await claimJob(jobId, agentId, currentOrg.id, "");
-      }
 
       // 3. Log to agentComms
       try {
@@ -331,7 +323,7 @@ export default function DashboardPage() {
       setDispatching(true);
       setError(null);
       for (const a of assignments) {
-        await claimJob(a.jobId, a.agentId, currentOrg.id, "");
+        await assignJob(a.jobId, a.agentId);
       }
       await loadDashboardData();
     } catch (err) {

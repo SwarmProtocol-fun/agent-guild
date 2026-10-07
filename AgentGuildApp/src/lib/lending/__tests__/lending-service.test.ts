@@ -64,6 +64,8 @@ import {
     fundLoanSolo,
     cancelLoan,
     getLoan,
+    createLoanOffer,
+    acceptLoanOffer,
 } from "../lending-service";
 import { confirmPayout } from "../payouts";
 import { reconcilePoolAccrual } from "../sweep";
@@ -133,17 +135,6 @@ describe("pool deposits", () => {
         expect(res.refundedUsd).toBe(200);
         expect((await getPool(pool.id))!.availableLiquidityUsd).toBe(300);
         expect(payouts("deposit_refund")).toMatchObject([{ fromWallet: "TREASURY", toWallet: "LENDER1", amountUsd: 200, status: "pending" }]);
-    });
-
-    it("credits a native SOL deposit in USD and records the lamports received", async () => {
-        verifyUsdcTransfer.mockClear();
-        const [pool] = await listPools();
-        const res = await confirmPoolDeposit(pool.id, "LENDER1", 300, nextSig(), "sol");
-        expect(verifySolTransfer).toHaveBeenCalledWith(expect.objectContaining({ expectedAmountUsd: 300, expectedToWallet: "TREASURY" }));
-        expect(verifyUsdcTransfer).not.toHaveBeenCalled();
-        expect(res.creditedUsd).toBe(300);
-        expect((await getPool(pool.id))!.availableLiquidityUsd).toBe(300);
-        expect(db.all("lendingPoolDeposits")).toMatchObject([{ amountUsd: 300, asset: "sol", lamports: 2_000_000_000 }]);
     });
 
     it("credits nothing and refunds everything while paused", async () => {
@@ -352,5 +343,72 @@ describe("reconcilePoolAccrual", () => {
         expect(r.accruingUsdPerYear).toBeCloseTo(40, 9);
         expect(r.interestReceivableUsd).toBeCloseTo(8, 6);
         expect((await getLoan(loan.id))!.poolAccrualTracked).toBe(true);
+    });
+});
+
+describe("EVM-login accounts use their linked Solana wallet on-chain", () => {
+    const EVM = "0xf35c7725406e572a5f9e743a4f75b1d81d2f3d5a";
+    const SOL = "So11111111111111111111111111111111111111112";
+    const link = () => db.col("solanaWalletLinks").set(EVM, { solanaAddress: SOL });
+    const lastTransfer = () => verifyUsdcTransfer.mock.lastCall![0] as unknown as { expectedFromWallet: string; expectedToWallet: string };
+
+    it("withdrawals stay keyed to the account but pay the linked wallet", async () => {
+        link();
+        const [pool] = await listPools();
+        await confirmPoolDeposit(pool.id, EVM, 500, nextSig());
+        const req = await requestPoolWithdrawal(pool.id, EVM, 200);
+        expect(req).toMatchObject({ walletAddress: EVM, payoutWalletAddress: SOL });
+        await confirmPoolWithdrawal(req.id, nextSig());
+        expect(lastTransfer()).toMatchObject({ expectedFromWallet: "TREASURY", expectedToWallet: SOL });
+    });
+
+    it("an unlinked EVM account can't request a withdrawal it could never be paid for", async () => {
+        link();
+        const [pool] = await listPools();
+        await confirmPoolDeposit(pool.id, EVM, 500, nextSig());
+        db.col("solanaWalletLinks").set(EVM, {});
+        await expect(requestPoolWithdrawal(pool.id, EVM, 200)).rejects.toThrow(/Link a Solana wallet/);
+    });
+
+    it("offers from an EVM lender: must be linked to post, then fundable from the linked wallet", async () => {
+        await expect(createLoanOffer({ lenderWalletAddress: EVM, kind: "unsecured", amountUsd: 300, rateBps: 1000 })).rejects.toThrow(/Link a Solana wallet/);
+        link();
+        const offer = await createLoanOffer({ lenderWalletAddress: EVM, kind: "unsecured", amountUsd: 300, rateBps: 1000 });
+        const loan = await acceptLoanOffer({ offerId: offer.id, agentId: "agent1", orgId: "org1", requestedByWallet: "BORROWER" });
+        const funded = await fundLoanSolo(loan.id, EVM, nextSig());
+        expect(lastTransfer()).toMatchObject({ expectedFromWallet: SOL, expectedToWallet: "BORROWER" });
+        // Repayments go to the wallet that actually sent the money.
+        expect(funded.lenderWalletAddress).toBe(SOL);
+    });
+
+    it("an offer reserved under an EVM account is still fundable after the account links later", async () => {
+        // Offers posted before this fix stored the raw 0x account.
+        const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "unsecured", source: "solo", amountUsd: 300, requestedByWallet: "BORROWER", reservedLenderWallet: EVM, offerId: "legacy" });
+        link();
+        expect((await fundLoanSolo(loan.id, EVM, nextSig())).status).toBe("active");
+    });
+
+    it("EVM borrowers post collateral and repay from the linked wallet; refunds go there too", async () => {
+        link();
+        db.col("agents").set("agent1", { walletAddress: EVM, creditScore: 700, trustScore: 50, orgId: "org1", asn: "asn1" });
+        await seedPool(1000);
+        const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "trust", source: "pool", amountUsd: 400, requestedByWallet: EVM });
+        expect(loan.borrowerWalletAddress).toBe(SOL);
+        await postLoanCollateral(loan.id, EVM, nextSig());
+        expect(lastTransfer()).toMatchObject({ expectedFromWallet: SOL, expectedToWallet: "TREASURY" });
+        await confirmLoanDisbursement(loan.id, nextSig());
+        const { loan: after } = await repayLoan(loan.id, 500, EVM, nextSig());
+        expect(lastTransfer()).toMatchObject({ expectedFromWallet: SOL, expectedToWallet: "TREASURY" });
+        expect(after.status).toBe("repaid");
+        expect(payouts("overpayment_refund")[0].toWallet).toBe(SOL);
+        expect(payouts("collateral_return")[0].toWallet).toBe(SOL);
+    });
+
+    it("refuses a loan for an EVM-owned agent with no linked Solana wallet", async () => {
+        db.col("agents").set("agent1", { walletAddress: EVM, creditScore: 700, trustScore: 50, orgId: "org1", asn: "asn1" });
+        await seedPool(1000);
+        await expect(
+            requestLoan({ agentId: "agent1", orgId: "org1", kind: "unsecured", source: "pool", amountUsd: 100, requestedByWallet: EVM }),
+        ).rejects.toThrow(/no Solana wallet/);
     });
 });

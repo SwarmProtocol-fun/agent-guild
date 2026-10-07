@@ -1,7 +1,7 @@
 /**
  * Shared "send the real transfer yourself, then paste the signature" step —
  * same shape as marketplace/crypto-checkout-dialog's Solana flow, reused for
- * every lending action that needs a verified on-chain USDC transfer (deposit,
+ * every lending action that needs a verified on-chain transfer (USDC, SOL or ETH: deposit,
  * solo loan funding, repayment, admin payouts). This component never signs
  * anything; it just collects the signature after the user sends it
  * themselves, and hands it to the caller's onSubmit to verify server-side.
@@ -25,7 +25,9 @@ interface OnChainSendStepProps {
     submitLabel?: string;
     /** Overrides the "Send" row's value (default: `${amountUsd} ${assetLabel}`). */
     amountLabel?: string;
-    /** Signs and sends the transfer from the connected wallet; resolves to a finalized signature. */
+    /** Ethereum transfers are identified by a tx hash and need ~15 min to finalize before they verify. */
+    chain?: "solana" | "ethereum";
+    /** Signs and sends the transfer from the connected wallet; resolves to its signature/hash. */
     onSendWithWallet?: () => Promise<string>;
     onSubmit: (txSig: string) => Promise<void>;
 }
@@ -40,9 +42,11 @@ export function OnChainSendStep({
     helperText,
     submitLabel = "Verify & Continue",
     amountLabel,
+    chain = "solana",
     onSendWithWallet,
     onSubmit,
 }: OnChainSendStepProps) {
+    const sigNoun = chain === "ethereum" ? "transaction hash" : "transaction signature";
     const [txSig, setTxSig] = useState("");
     const [copied, setCopied] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -115,20 +119,21 @@ export function OnChainSendStep({
             {onSendWithWallet && (
                 <Button size="sm" onClick={handleSendWithWallet} disabled={sending || loading} className="w-full h-8 text-xs gap-1">
                     {sending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wallet className="h-3 w-3" />}
-                    {sending ? "Waiting for wallet & finalization…" : "Send with wallet"}
+                    {sending ? (chain === "ethereum" ? "Waiting for wallet…" : "Waiting for wallet & finalization…") : "Send with wallet"}
                 </Button>
             )}
 
             <p className="text-xs text-muted-foreground">
-                {helperText || "Send the exact amount above from your own wallet, then paste the transaction signature below."}
+                {helperText || `Send the exact amount above from your own wallet, then paste the ${sigNoun} below.`}
+                {chain === "ethereum" && " Ethereum transfers verify once finalized (about 15 minutes) — keep this hash; if verification says it isn't final yet, retry later."}
             </p>
 
             <div>
-                <Label className="text-xs">Transaction Signature</Label>
+                <Label className="text-xs">{chain === "ethereum" ? "Transaction Hash" : "Transaction Signature"}</Label>
                 <Input
                     value={txSig}
                     onChange={(e) => setTxSig(e.target.value)}
-                    placeholder="Paste the transaction signature..."
+                    placeholder={`Paste the ${sigNoun}...`}
                     className="mt-1 font-mono text-xs"
                 />
             </div>

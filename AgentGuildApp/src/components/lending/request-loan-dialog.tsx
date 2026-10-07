@@ -1,10 +1,12 @@
 /**
- * Request Loan Dialog — pick a source (pool vs solo), amount, and term for a
- * trust (collateralized) or unsecured loan, then submit the request.
+ * Request Loan Dialog — pick a source (pool vs solo), the asset (pool loans
+ * can be USDC, SOL or ETH — repaid in the same asset; solo loans are USDC),
+ * amount, and term for a trust (collateralized) or unsecured loan, then
+ * submit the request. Tier limits are in USD and converted at the live price.
  */
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, AlertCircle, CheckCircle2, Users, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +18,8 @@ import {
 } from "@/components/ui/select";
 import { soloRateBand } from "@/lib/lending/eligibility";
 import type { KindEligibility, LoanKind, LoanSource } from "@/lib/lending/types";
+import { assetInfo, formatAssetAmount, type LendingAsset } from "@/lib/lending/assets";
+import { fetchLendingTreasury, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface RequestLoanDialogProps {
     open: boolean;
@@ -35,6 +39,15 @@ export function RequestLoanDialog({
 }: RequestLoanDialogProps) {
     const [amount, setAmount] = useState(String(Math.min(gate.maxAmountUsd, 500)));
     const [source, setSource] = useState<LoanSource>("pool");
+    const [poolAsset, setPoolAsset] = useState<LendingAsset>("usdc");
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
+    const asset: LendingAsset = source === "pool" ? poolAsset : "usdc";
+    const priceUsd = asset === "usdc" ? 1 : treasuryInfo?.pricesUsd[asset] ?? null;
+    const availableAssets: LendingAsset[] = treasuryInfo?.assets.eth ? ["usdc", "sol", "eth"] : ["usdc", "sol"];
+
+    useEffect(() => {
+        if (open) fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
+    }, [open]);
     const band = soloRateBand(gate.rateBps);
     const [ratePercent, setRatePercent] = useState(String(gate.rateBps / 100));
     const [termDays, setTermDays] = useState("30");
@@ -51,12 +64,13 @@ export function RequestLoanDialog({
     };
 
     const handleSubmit = async () => {
+        // In the loan's asset (the API field is named amountUsd for history's sake).
         const amountUsd = parseFloat(amount);
         if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
             setError("Enter a valid amount");
             return;
         }
-        if (amountUsd > gate.maxAmountUsd) {
+        if (priceUsd !== null && amountUsd * priceUsd > gate.maxAmountUsd) {
             setError(`Amount exceeds the maximum of $${gate.maxAmountUsd.toLocaleString()}`);
             return;
         }
@@ -76,6 +90,7 @@ export function RequestLoanDialog({
                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress || "" },
                 body: JSON.stringify({
                     agentId, orgId, kind, source,
+                    asset: source === "pool" ? poolAsset : undefined,
                     amountUsd, termDays: parseInt(termDays, 10),
                     purpose: purpose || undefined,
                     requestedRateBps,
@@ -111,20 +126,46 @@ export function RequestLoanDialog({
                         </div>
                         <p className="text-xs text-muted-foreground">
                             {kind === "trust"
-                                ? "Next: post the collateral from the Loans panel (a USDC transfer to the lending treasury). "
+                                ? `Next: post the collateral from the Loans panel (a ${assetInfo(asset).symbol} transfer to the lending treasury). `
                                     + (source === "pool"
                                         ? "Once it's verified, a platform admin sends the disbursement and the loan activates."
                                         : "Once it's verified, the request goes live on the marketplace for a solo lender to fund.")
                                 : source === "pool"
-                                    ? "The pool reserved the liquidity. A platform admin will send the real USDC disbursement shortly — the loan activates once that's confirmed on-chain."
+                                    ? `The pool reserved the liquidity. A platform admin will send the real ${assetInfo(asset).symbol} disbursement shortly — the loan activates once that's confirmed on-chain.`
                                     : "This request is now visible on the lending marketplace for a solo lender to fund."}
                         </p>
                         <Button size="sm" onClick={handleClose} className="w-full h-8 text-xs">Done</Button>
                     </div>
                 ) : (
                     <div className="space-y-4">
+                        {source === "pool" && (
+                            <div>
+                                <Label className="text-xs">Borrow</Label>
+                                <div className="mt-1 grid gap-1 rounded-lg border border-border p-1" style={{ gridTemplateColumns: `repeat(${availableAssets.length}, minmax(0, 1fr))` }}>
+                                    {availableAssets.map((a) => (
+                                        <button
+                                            key={a}
+                                            type="button"
+                                            onClick={() => {
+                                                if (a !== poolAsset) setAmount(a === "usdc" ? String(Math.min(gate.maxAmountUsd, 500)) : "");
+                                                setPoolAsset(a);
+                                            }}
+                                            className={`h-7 rounded-md text-xs font-medium transition-colors ${poolAsset === a ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"}`}
+                                        >
+                                            {assetInfo(a).symbol}
+                                        </button>
+                                    ))}
+                                </div>
+                                {poolAsset !== "usdc" && (
+                                    <p className="text-[10px] text-muted-foreground mt-1">
+                                        Paid out in {assetInfo(poolAsset).symbol}{poolAsset === "eth" ? " on Ethereum" : ""}, repaid in {assetInfo(poolAsset).symbol}{kind === "trust" ? ", collateral posted in " + assetInfo(poolAsset).symbol : ""}.
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
                         <div>
-                            <Label className="text-xs">Amount (USD)</Label>
+                            <Label className="text-xs">Amount ({assetInfo(asset).symbol})</Label>
                             <Input
                                 type="number"
                                 value={amount}
@@ -132,7 +173,7 @@ export function RequestLoanDialog({
                                 className="mt-1"
                             />
                             <p className="text-[10px] text-muted-foreground mt-1">
-                                Max ${gate.maxAmountUsd.toLocaleString()} at {(gate.rateBps / 100).toFixed(1)}% APR
+                                Max ${gate.maxAmountUsd.toLocaleString()}{asset !== "usdc" && priceUsd !== null && ` (≈ ${formatAssetAmount(asset, gate.maxAmountUsd / priceUsd)})`} at {(gate.rateBps / 100).toFixed(1)}% APR
                             </p>
                         </div>
 

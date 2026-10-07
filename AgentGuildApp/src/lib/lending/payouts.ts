@@ -7,7 +7,7 @@
  *
  * Payouts are created inside the same Firestore transaction as the ledger
  * change that owes them, so an obligation is never recorded without its
- * cause or vice versa. Whoever controls `fromWallet` sends the USDC and
+ * cause or vice versa. Whoever controls `fromWallet` sends the funds and
  * confirms with the signature — verified on-chain like every other lending
  * transfer before the payout is marked paid.
  *
@@ -16,7 +16,8 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { verifyUsdcTransfer, claimUsdcTransferInTxn, treasuryAddress, type VerifyTransferInput } from "@/lib/solana/lending-verify";
+import { verifyLendingTransfer, claimLendingTransferInTxn, treasuryFor, normalizeTxSig, type VerifyTransferInput } from "./verify";
+import { assetOf, assetInfo, roundAmount } from "./assets";
 import type { LendingPayout, Loan } from "./types";
 
 const PAYOUTS = "lendingPayouts";
@@ -27,13 +28,15 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 
 export type NewPayout = Omit<LendingPayout, "id" | "status" | "createdAt" | "paidAt" | "txSig">;
 
-/** Queue a payout as part of the caller's transaction. Returns its id. Skips dust (< 1 cent). */
+/** Queue a payout as part of the caller's transaction. Returns its id. Skips dust (see assets.ts). */
 export function createPayoutInTxn(txn: FirebaseFirestore.Transaction, payout: NewPayout): string | null {
-    if (!(payout.amountUsd >= 0.01)) return null;
+    const asset = assetOf(payout);
+    if (!(payout.amountUsd >= assetInfo(asset).dust)) return null;
     const ref = adminDb().collection(PAYOUTS).doc();
     const doc: Omit<LendingPayout, "id"> = {
         ...payout,
-        amountUsd: Math.round(payout.amountUsd * 1_000_000) / 1_000_000,
+        asset: asset === "usdc" ? undefined : asset,
+        amountUsd: roundAmount(asset, payout.amountUsd),
         status: "pending",
         createdAt: nowSec(),
     };
@@ -73,7 +76,7 @@ export function canConfirmPayout(payout: LendingPayout, callerWallet: string | n
     if (isAdmin) return true;
     let treasury: string | null = null;
     try {
-        treasury = treasuryAddress();
+        treasury = treasuryFor(assetOf(payout));
     } catch {
         treasury = null;
     }
@@ -92,6 +95,8 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
     if (!existing) throw new Error("Payout not found");
     if (existing.status !== "pending") throw new Error("Payout is already paid");
 
+    const asset = assetOf(existing);
+    txSig = normalizeTxSig(asset, txSig);
     const transfer: VerifyTransferInput = {
         txSig,
         expectedFromWallet: existing.fromWallet,
@@ -100,7 +105,7 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
         purpose: `payout_${existing.kind}`,
         refId: payoutId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     return adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(payoutRef);
@@ -112,7 +117,7 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
         const loanSnap = loanRef ? await txn.get(loanRef) : null;
         const loan = loanSnap?.exists ? (loanSnap.data() as Loan) : null;
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         const paidAt = nowSec();
         txn.update(payoutRef, { status: "paid", txSig, paidAt });

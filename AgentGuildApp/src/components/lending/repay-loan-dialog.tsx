@@ -1,6 +1,6 @@
 /**
  * Repay Loan Dialog — pay down or fully pay off an active loan with a real,
- * verified on-chain USDC transfer: pick an amount, send it yourself to the
+ * verified on-chain transfer in the loan's asset: pick an amount, send it yourself to the
  * right recipient (the treasury for pool loans, the lender directly for solo
  * loans), then paste the signature for the backend to verify before it
  * applies the payment.
@@ -16,6 +16,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { useSession } from "@/contexts/SessionContext";
 import { OnChainSendStep } from "./onchain-send-step";
 import type { Loan } from "@/lib/lending/types";
+import { assetOf, assetInfo, ceilAmount, formatAssetAmount, roundAmount } from "@/lib/lending/assets";
+import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface RepayLoanDialogProps {
     open: boolean;
@@ -28,15 +30,17 @@ interface RepayLoanDialogProps {
 export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid }: RepayLoanDialogProps) {
     const { address: sessionAddress } = useSession();
     const [step, setStep] = useState<"amount" | "send">("amount");
-    const [amount, setAmount] = useState(payoffUsd.toFixed(2));
-    const [recipient, setRecipient] = useState<string | null>(loan.source === "solo" ? loan.lenderWalletAddress || null : null);
+    const asset = assetOf(loan);
+    // Quoted rounded up to ledger precision so paying the quote always clears the balance.
+    const payoff = ceilAmount(asset, payoffUsd);
+    const [amount, setAmount] = useState(String(payoff));
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
+    const recipient = loan.source === "solo" ? loan.lenderWalletAddress || null : treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null;
     const [done, setDone] = useState(false);
 
     useEffect(() => {
-        if (loan.source === "pool" && !recipient) {
-            fetch("/api/v1/lending/treasury").then((r) => r.ok && r.json()).then((d) => d && setRecipient(d.treasuryAddress));
-        }
-    }, [loan.source, recipient]);
+        fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
+    }, []);
 
     const handleClose = () => {
         setStep("amount");
@@ -44,7 +48,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
         onOpenChange(false);
     };
 
-    const amountUsd = parseFloat(amount) || 0;
+    const amountUsd = roundAmount(asset, parseFloat(amount) || 0);
 
     return (
         <Dialog open={open} onOpenChange={handleClose}>
@@ -63,15 +67,15 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
                 ) : step === "amount" ? (
                     <div className="space-y-4">
                         <p className="text-xs text-muted-foreground">
-                            Current payoff (principal + accrued interest): <span className="font-mono text-foreground">${payoffUsd.toFixed(2)}</span>
+                            Current payoff (principal + accrued interest): <span className="font-mono text-foreground">{formatAssetAmount(asset, payoff)}</span>
                         </p>
                         <div>
-                            <Label className="text-xs">Amount (USD)</Label>
+                            <Label className="text-xs">Amount ({assetInfo(asset).symbol})</Label>
                             <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="mt-1" />
                             <button
                                 type="button"
                                 className="text-[10px] text-emerald-500 hover:underline mt-1"
-                                onClick={() => setAmount(payoffUsd.toFixed(2))}
+                                onClick={() => setAmount(String(payoff))}
                             >
                                 Pay full balance
                             </button>
@@ -90,6 +94,8 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffUsd, onRepaid 
                     <OnChainSendStep
                         recipientAddress={recipient!}
                         amountUsd={amountUsd}
+                        assetLabel={sendAssetLabel(treasuryInfo, asset)}
+                        chain={assetInfo(asset).chain}
                         helperText={`Send from the ${loan.borrowerOrgId} org's wallet, then paste the signature.`}
                         submitLabel="Verify Payment"
                         onSubmit={async (txSig) => {

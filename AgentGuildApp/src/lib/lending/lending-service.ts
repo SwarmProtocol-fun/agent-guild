@@ -1,6 +1,8 @@
 /**
  * Lending Service — Firestore-backed loan and pool ledger, backed by real
- * on-chain devnet USDC transfers.
+ * on-chain transfers. Each pool lends one asset (USDC or SOL on Solana, ETH
+ * on Ethereum) and is accounted in that asset's units — see assets.ts.
+ * Solo loans and offers are USDC.
  *
  * Every balance-changing action requires a verified on-chain transfer before
  * Firestore is updated, and the signature's replay-guard claim is written in
@@ -8,8 +10,8 @@
  * burn a signature the user really paid with: a human sends USDC from their own wallet (deposit,
  * solo loan funding, repayment) or a platform admin manually pays out from
  * the treasury and confirms (pool withdrawal, pool-funded loan disbursement).
- * This module never holds a signing key — see lib/solana/lending-verify.ts
- * for the read-only verification it calls before crediting anything.
+ * This module never holds a signing key — see verify.ts for the read-only
+ * verification it calls before crediting anything.
  *
  * Trust loans require collateral, posted to the treasury and verified
  * on-chain before funding; it is returned on repayment and seized on
@@ -32,7 +34,10 @@ import { invalidateCache } from "@/lib/credit-cache";
 import { ingestCreditEvent } from "@/lib/credit-events/ingest";
 import type { CreditEventType } from "@/lib/credit-events/types";
 import { recomputeAndSync } from "@/lib/scoring-engine";
-import { verifyUsdcTransfer, verifySolTransfer, claimUsdcTransferInTxn, treasuryAddress, type VerifyTransferInput } from "@/lib/solana/lending-verify";
+import { verifyLendingTransfer, claimLendingTransferInTxn, treasuryFor, normalizeTxSig, type VerifyTransferInput } from "./verify";
+import { assetOf, roundAmount, floorAmount, formatAssetAmount, LENDING_ASSETS, type LendingAsset } from "./assets";
+import { getUsdPrice } from "./prices";
+import { isAddress } from "viem";
 import {
     MIN_LOAN_USD,
     MAX_CONCURRENT_LOANS,
@@ -65,7 +70,6 @@ import type {
     PoolWithdrawalRequest,
     EligibilitySummary,
     LoanOffer,
-    DepositAsset,
 } from "./types";
 
 const POOLS = "lendingPools";
@@ -81,7 +85,17 @@ const OFFER_MIN_RATE_BPS = 100;
 const OFFER_MAX_RATE_BPS = 10_000;
 const ACTIVE_LOAN_STATUSES: string[] = ["pending_collateral", "pending", "pending_disbursement", "active"];
 
-const DEFAULT_POOL_NAME = "Community Lending Pool";
+/** One community pool per asset. USDC keeps its original auto-id doc; SOL and ETH get fixed ids so seeding is idempotent. */
+const DEFAULT_POOLS: Record<LendingAsset, { id: string | null; name: string; description: string }> = {
+    usdc: { id: null, name: "Community Lending Pool", description: "Diversified community pool — lower risk, funds agents automatically as they qualify." },
+    sol: { id: "community-sol", name: "SOL Lending Pool", description: "Lend SOL, earn SOL. Loans from this pool are paid out and repaid in SOL." },
+    eth: { id: "community-eth", name: "ETH Lending Pool", description: "Lend ETH on Ethereum, earn ETH. Loans from this pool are paid out and repaid in ETH." },
+};
+
+/** ETH is offered only once its treasury is configured; USDC and SOL share the Solana treasury. */
+function enabledAssets(): LendingAsset[] {
+    return process.env.ETH_LENDING_TREASURY_ADDRESS ? ["usdc", "sol", "eth"] : ["usdc", "sol"];
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Time helpers
@@ -146,14 +160,24 @@ function loanAccruingUsdPerYear(loan: Pick<Loan, "principalRemainingUsd" | "inte
     return principalUsd * (loan.interestRateBps / 10_000);
 }
 
-/** Idempotently ensures at least one community pool exists, and returns all pools. */
+/** Idempotently ensures a community pool exists for every enabled asset, and returns all pools (oldest first). */
 export async function listPools(): Promise<LendingPool[]> {
     const snap = await adminDb().collection(POOLS).orderBy("createdAt", "asc").get();
-    if (!snap.empty) {
-        return snap.docs.map((d) => toPool(d.id, d.data()));
+    const pools = snap.docs.map((d) => toPool(d.id, d.data()));
+    const have = new Set(pools.map((p) => assetOf(p)));
+    for (const asset of enabledAssets()) {
+        if (have.has(asset)) continue;
+        const def = DEFAULT_POOLS[asset];
+        pools.push(await createPool({ name: def.name, description: def.description, asset, id: def.id ?? undefined }));
     }
-    const created = await createPool({ name: DEFAULT_POOL_NAME, description: "Diversified community pool — lower risk, funds agents automatically as they qualify." });
-    return [created];
+    return pools;
+}
+
+/** The oldest pool for `asset` — where a pool loan goes when no poolId is given. */
+async function defaultPoolFor(asset: LendingAsset): Promise<LendingPool> {
+    const pool = (await listPools()).find((p) => assetOf(p) === asset);
+    if (!pool) throw new Error(`No ${LENDING_ASSETS[asset].symbol} pool is available`);
+    return pool;
 }
 
 export async function getPool(poolId: string): Promise<LendingPool | null> {
@@ -161,10 +185,12 @@ export async function getPool(poolId: string): Promise<LendingPool | null> {
     return snap.exists ? toPool(snap.id, snap.data()!) : null;
 }
 
-export async function createPool(input: { name: string; description?: string; createdBy?: string }): Promise<LendingPool> {
+export async function createPool(input: { name: string; description?: string; createdBy?: string; asset?: LendingAsset; id?: string }): Promise<LendingPool> {
+    const asset = input.asset ?? "usdc";
     const doc = {
         name: input.name,
         description: input.description || "",
+        ...(asset === "usdc" ? {} : { asset }),
         totalShares: 0,
         availableLiquidityUsd: 0,
         totalLentUsd: 0,
@@ -179,8 +205,22 @@ export async function createPool(input: { name: string; description?: string; cr
         createdAt: FieldValue.serverTimestamp(),
         createdBy: input.createdBy || null,
     };
-    const ref = await adminDb().collection(POOLS).add(doc);
-    return { id: ref.id, ...doc, createdAt: Timestamp.now() } as unknown as LendingPool;
+    let id: string;
+    if (input.id) {
+        // Fixed id: a concurrent seeder may have created it first — then use theirs.
+        const ref = adminDb().collection(POOLS).doc(input.id);
+        try {
+            await ref.create(doc);
+        } catch (err) {
+            const existing = await ref.get();
+            if (!existing.exists) throw err;
+            return toPool(existing.id, existing.data()!);
+        }
+        id = input.id;
+    } else {
+        id = (await adminDb().collection(POOLS).add(doc)).id;
+    }
+    return { id, ...doc, createdAt: Timestamp.now() } as unknown as LendingPool;
 }
 
 export async function getPoolPosition(poolId: string, wallet: string): Promise<PoolPosition | null> {
@@ -208,26 +248,59 @@ export async function getDepositCapacity(poolId: string, wallet: string): Promis
     if (!pool) throw new Error("Pool not found");
     const allowed = isWalletAllowed(limits, wallet);
     if (limits.paused || !allowed) return { capacityUsd: 0, paused: limits.paused, allowed };
-    const cap = depositCapacityUsd(pool, position, limits);
-    return { capacityUsd: Number.isFinite(cap) ? Math.floor(cap * 100) / 100 : null, paused: false, allowed };
+    const asset = assetOf(pool);
+    const cap = depositCapacityUsd(pool, position, await capsInAssetUnits(limits, asset));
+    return { capacityUsd: Number.isFinite(cap) ? floorAmount(asset, cap) : null, paused: false, allowed };
+}
+
+/** The beta's USD caps expressed in `asset` units at the current price (no price needed for USDC or when uncapped). */
+async function capsInAssetUnits(
+    limits: { maxPoolTvlUsd: number | null; maxDepositPerWalletUsd: number | null },
+    asset: LendingAsset,
+): Promise<{ maxPoolTvlUsd: number | null; maxDepositPerWalletUsd: number | null }> {
+    if (asset === "usdc" || (limits.maxPoolTvlUsd === null && limits.maxDepositPerWalletUsd === null)) return limits;
+    const price = await getUsdPrice(asset);
+    return {
+        maxPoolTvlUsd: limits.maxPoolTvlUsd === null ? null : limits.maxPoolTvlUsd / price,
+        maxDepositPerWalletUsd: limits.maxDepositPerWalletUsd === null ? null : limits.maxDepositPerWalletUsd / price,
+    };
 }
 
 /**
- * The Solana wallet that pays for / receives refunds on behalf of `account`.
- * A Solana login is its own wallet; an EVM login must have linked one by
- * signature (POST /api/v1/solana/link).
+ * The wallet that sends or receives `asset` on-chain for `account`, the
+ * signed-in identity. Solana assets: a Solana login is its own wallet; an
+ * EVM login must have linked one by signature (POST /api/v1/solana/link).
+ * ETH: the account must be an Ethereum address. Ledger records stay keyed by
+ * `account`; only transfers and payouts use the result.
  */
-export async function resolvePayerWallet(account: string): Promise<string> {
+export async function resolvePayerWallet(account: string, asset: LendingAsset = "usdc"): Promise<string> {
+    if (LENDING_ASSETS[asset].chain === "ethereum") {
+        if (isAddress(account, { strict: false })) return account.toLowerCase();
+        throw new Error("The ETH pool needs an Ethereum wallet — sign in with one to use it");
+    }
     if (!account.startsWith("0x")) return account;
     const link = await adminDb().collection(SOLANA_WALLET_LINKS_COLLECTION).doc(account).get();
     const linked = link.data()?.solanaAddress;
     if (typeof linked === "string" && isSolanaAddress(linked)) return linked;
-    throw new Error("Link your Solana wallet to this account before depositing");
+    throw new Error("Link a Solana wallet to this account first — lending moves USDC on Solana");
 }
 
 /**
- * Verify a lender actually sent `amountUsd` USDC to the treasury on-chain,
- * then mint pool shares for it. The signature claim, share mint and deposit
+ * Where a borrower's loan is paid out. On Solana: the agent's wallet, or its
+ * EVM owner's linked Solana wallet. On Ethereum: the agent's wallet if it's
+ * an Ethereum address, otherwise the requesting member's.
+ */
+async function resolveBorrowerWallet(agentWallet: string | undefined, requestedByWallet: string | undefined, asset: LendingAsset): Promise<string | undefined> {
+    if (LENDING_ASSETS[asset].chain === "ethereum") {
+        const evm = [agentWallet, requestedByWallet].find((w) => !!w && isAddress(w, { strict: false }));
+        return evm?.toLowerCase();
+    }
+    return agentWallet ? resolvePayerWallet(agentWallet).catch(() => undefined) : undefined;
+}
+
+/**
+ * Verify a lender actually sent `amountUsd` (in the pool's asset) to that
+ * asset's treasury on-chain, then mint pool shares for it. The signature claim, share mint and deposit
  * record commit in one transaction. Throws if the signature doesn't check out
  * or has already been used.
  *
@@ -241,26 +314,29 @@ export async function confirmPoolDeposit(
     wallet: string,
     amountUsd: number,
     txSig: string,
-    asset: DepositAsset = "usdc",
 ): Promise<{ pool: LendingPool; position: PoolPosition | null; creditedUsd: number; refundedUsd: number }> {
+    const target = await getPool(poolId);
+    if (!target) throw new Error("Pool not found");
+    const asset = assetOf(target);
+    amountUsd = roundAmount(asset, amountUsd);
     if (!(amountUsd > 0)) throw new Error("Deposit amount must be positive");
 
-    const treasury = treasuryAddress();
-    const payer = await resolvePayerWallet(wallet);
+    const treasury = treasuryFor(asset);
+    const payer = await resolvePayerWallet(wallet, asset);
     const transfer: VerifyTransferInput = {
-        txSig,
+        txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: payer,
         expectedToWallet: treasury,
         expectedAmountUsd: amountUsd,
         purpose: "pool_deposit",
         refId: poolId,
     };
-    // Native SOL is devnet-only test liquidity, credited at a fixed USD rate;
-    // the pool ledger (and every payout out of it) stays in USD.
-    const lamports = asset === "sol" ? (await verifySolTransfer(transfer)).lamports : undefined;
-    if (asset !== "sol") await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     const limits = lendingLimits();
+    // Priced before the transaction: if no trustworthy price is available the
+    // deposit fails here, unclaimed, and the same signature can be retried.
+    const caps = await capsInAssetUnits(limits, asset);
     const poolRef = adminDb().collection(POOLS).doc(poolId);
     const positionRef = adminDb().collection(POSITIONS).doc(`${poolId}_${wallet}`);
     const depositRef = adminDb().collection(DEPOSITS).doc();
@@ -272,11 +348,11 @@ export async function confirmPoolDeposit(
         const existing = posSnap.exists ? (posSnap.data() as PoolPosition) : null;
 
         const at = nowSec();
-        const capacity = limits.paused || !isWalletAllowed(limits, wallet) ? 0 : depositCapacityUsd(pool, existing, limits, at);
-        const creditedUsd = Math.floor(Math.min(amountUsd, capacity) * 1_000_000) / 1_000_000;
-        const refundedUsd = Math.round((amountUsd - creditedUsd) * 1_000_000) / 1_000_000;
+        const capacity = limits.paused || !isWalletAllowed(limits, wallet) ? 0 : depositCapacityUsd(pool, existing, caps, at);
+        const creditedUsd = floorAmount(asset, Math.min(amountUsd, capacity));
+        const refundedUsd = roundAmount(asset, amountUsd - creditedUsd);
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         if (refundedUsd > 0) {
             createPayoutInTxn(txn, {
@@ -284,13 +360,13 @@ export async function confirmPoolDeposit(
                 fromWallet: treasury,
                 toWallet: payer,
                 amountUsd: refundedUsd,
+                asset,
                 poolId,
                 reason: (limits.paused
                     ? "Deposit arrived while lending was paused"
                     : !isWalletAllowed(limits, wallet)
                         ? "Wallet is not on the lending beta allowlist"
-                        : "Deposit exceeded the pool or per-wallet beta cap")
-                    + (asset === "sol" ? " (deposited as devnet SOL)" : ""),
+                        : "Deposit exceeded the pool or per-wallet beta cap"),
             });
         }
 
@@ -299,9 +375,8 @@ export async function confirmPoolDeposit(
             walletAddress: wallet,
             amountUsd: creditedUsd,
             refundedUsd: refundedUsd > 0 ? refundedUsd : undefined,
-            asset: asset === "sol" ? "sol" : undefined,
-            lamports,
-            txSig,
+            asset: asset === "usdc" ? undefined : asset,
+            txSig: transfer.txSig,
             depositedAt: at,
         }));
 
@@ -375,6 +450,11 @@ export async function requestPoolWithdrawal(poolId: string, wallet: string, amou
     const poolRef = adminDb().collection(POOLS).doc(poolId);
     const positionRef = adminDb().collection(POSITIONS).doc(`${poolId}_${wallet}`);
     const requestRef = adminDb().collection(WITHDRAWALS).doc();
+    const target = await getPool(poolId);
+    if (!target) throw new Error("Pool not found");
+    const asset = assetOf(target);
+    amountUsd = roundAmount(asset, amountUsd);
+    const payoutWalletAddress = await resolvePayerWallet(wallet, asset);
 
     return adminDb().runTransaction(async (txn) => {
         const [poolSnap, posSnap] = await Promise.all([txn.get(poolRef), txn.get(positionRef)]);
@@ -388,6 +468,8 @@ export async function requestPoolWithdrawal(poolId: string, wallet: string, amou
         const request: Omit<PoolWithdrawalRequest, "id"> = {
             poolId,
             walletAddress: wallet,
+            payoutWalletAddress,
+            ...(asset === "usdc" ? {} : { asset }),
             amountUsd,
             sharesToBurn,
             status: "pending_payout",
@@ -460,16 +542,18 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
     if (!requestSnap.exists) throw new Error("Withdrawal request not found");
     const request = requestSnap.data() as PoolWithdrawalRequest;
     if (request.status !== "pending_payout") throw new Error(`Withdrawal is not pending (status: ${request.status})`);
+    const asset = assetOf(await getPool(request.poolId));
+    txSig = normalizeTxSig(asset, txSig);
 
     const transfer: VerifyTransferInput = {
         txSig,
-        expectedFromWallet: treasuryAddress(),
-        expectedToWallet: request.walletAddress,
+        expectedFromWallet: treasuryFor(asset),
+        expectedToWallet: request.payoutWalletAddress ?? request.walletAddress,
         expectedAmountUsd: request.amountUsd,
         purpose: "pool_withdrawal",
         refId: requestId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     const poolRef = adminDb().collection(POOLS).doc(request.poolId);
     const positionRef = adminDb().collection(POSITIONS).doc(`${request.poolId}_${request.walletAddress}`);
@@ -484,7 +568,7 @@ export async function confirmPoolWithdrawal(requestId: string, txSig: string): P
         const pool = toPool(poolSnap.id, poolSnap.data()!);
         const position = posSnap.data() as PoolPosition;
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         const depositedDecrement = -Math.min(current.amountUsd, pool.totalDepositedUsd);
         if (current.reserved) {
@@ -579,6 +663,8 @@ export interface RequestLoanInput {
     amountUsd: number;
     termDays?: number;
     poolId?: string;
+    /** Pool loans without a poolId: borrow from this asset's default pool (default USDC). The amount is in this asset. */
+    asset?: LendingAsset;
     purpose?: string;
     requestedByWallet?: string;
     /** Solo loans only — the rate the borrower is offering, negotiated between the two parties within a band around the tier's algorithmic rate. Ignored for pool loans, which always use the fixed tier rate. */
@@ -590,17 +676,28 @@ export interface RequestLoanInput {
 
 export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
     const { agentId, orgId, kind, source, purpose, requestedByWallet } = input;
-    const amountUsd = Math.round(input.amountUsd * 100) / 100;
     const termDays = clampTermDays(input.termDays ?? 30);
 
-    if (!(amountUsd >= MIN_LOAN_USD)) {
-        throw new Error(`Loan amount must be at least $${MIN_LOAN_USD}`);
+    // Solo loans (and offers) are USDC; a pool loan is in its pool's asset.
+    let pool: LendingPool | null = null;
+    if (source === "pool") {
+        pool = input.poolId ? await getPool(input.poolId) : await defaultPoolFor(input.asset ?? "usdc");
+        if (!pool) throw new Error("Pool not found");
     }
+    const asset = assetOf(pool);
+    const amountUsd = roundAmount(asset, input.amountUsd);
 
     const limits = lendingLimits();
     assertCanOpenPosition(limits, requestedByWallet);
-    if (limits.maxLoanUsd !== null && amountUsd > limits.maxLoanUsd) {
-        throw new Error(`Loans are capped at $${limits.maxLoanUsd.toLocaleString()} during the lending beta`);
+
+    // Every dollar rule (minimum, beta cap, tier limit) applies to the loan's USD value.
+    const usdValue = amountUsd * (await getUsdPrice(asset));
+    const asAsset = (usd: number) => (asset === "usdc" ? "" : ` (≈ ${formatAssetAmount(asset, usd / (usdValue / amountUsd))})`);
+    if (!(amountUsd > 0) || !(usdValue >= MIN_LOAN_USD)) {
+        throw new Error(`Loan amount must be worth at least $${MIN_LOAN_USD}${amountUsd > 0 ? asAsset(MIN_LOAN_USD) : ""}`);
+    }
+    if (limits.maxLoanUsd !== null && usdValue > limits.maxLoanUsd) {
+        throw new Error(`Loans are capped at $${limits.maxLoanUsd.toLocaleString()}${asAsset(limits.maxLoanUsd)} during the lending beta`);
     }
 
     const policyResult = await resolveAgentPolicy(agentId, adminPolicyLoaders);
@@ -619,8 +716,8 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
     if (!gate.eligible) {
         throw new Error(gate.reason || "Not eligible for this loan type");
     }
-    if (amountUsd > gate.maxAmountUsd) {
-        throw new Error(`Amount exceeds the maximum for this loan type ($${gate.maxAmountUsd.toLocaleString()})`);
+    if (usdValue > gate.maxAmountUsd) {
+        throw new Error(`Amount exceeds the maximum for this loan type ($${gate.maxAmountUsd.toLocaleString()}${asAsset(gate.maxAmountUsd)})`);
     }
 
     // Pool loans are always priced at the fixed, algorithmic tier rate — no
@@ -634,17 +731,22 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
         interestRateBps = Math.round(input.requestedRateBps);
     }
 
+    // Collateral is posted in the loan's own asset.
     const collateralUsd = kind === "trust"
-        ? Math.round(calculateRequiredEscrow(policy, amountUsd).escrowAmount * 100) / 100
+        ? roundAmount(asset, calculateRequiredEscrow(policy, amountUsd).escrowAmount)
         : 0;
+
+    const borrowerWalletAddress = await resolveBorrowerWallet((agentData.walletAddress as string) || undefined, requestedByWallet, asset);
 
     const base: Omit<Loan, "id"> = withoutUndefined({
         borrowerAgentId: agentId,
         borrowerOrgId: orgId,
-        borrowerWalletAddress: (agentData.walletAddress as string) || undefined,
+        borrowerWalletAddress,
         requestedByWallet,
         kind,
         source,
+        asset: asset === "usdc" ? undefined : asset,
+        principalUsdValue: asset === "usdc" ? undefined : Math.round(usdValue * 100) / 100,
         principalUsd: amountUsd,
         principalRemainingUsd: amountUsd,
         principalPaidUsd: 0,
@@ -666,10 +768,12 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
     if (input.reservedLenderWallet) base.reservedLenderWallet = input.reservedLenderWallet;
 
     if (!base.borrowerWalletAddress) {
-        throw new Error("Agent has no wallet address on file — cannot receive a real loan disbursement");
+        throw new Error(asset === "eth"
+            ? "The ETH pool pays out on Ethereum — the agent's wallet or yours must be an Ethereum address"
+            : "Agent has no Solana wallet on file (link one to its EVM owner wallet) — cannot receive a real loan disbursement");
     }
 
-    const poolId = source === "pool" ? (input.poolId || (await listPools())[0].id) : undefined;
+    const poolId = pool?.id;
     const poolRef = poolId ? adminDb().collection(POOLS).doc(poolId) : null;
     const loanRef = adminDb().collection(LOANS).doc();
     // Re-count active loans inside the transaction so parallel requests can't
@@ -726,31 +830,35 @@ export async function requestLoan(input: RequestLoanInput): Promise<Loan> {
  * claimed and a funding_refund payout is queued from the borrower back to
  * the lender, instead of leaving the money unaccounted for.
  */
-export async function fundLoanSolo(loanId: string, lenderWallet: string, txSig: string): Promise<Loan> {
+export async function fundLoanSolo(loanId: string, lenderAccount: string, txSig: string): Promise<Loan> {
     const loanRef = adminDb().collection(LOANS).doc(loanId);
     const loan = await getLoan(loanId);
     if (!loan) throw new Error("Loan not found");
     if (loan.source !== "solo") throw new Error("Only solo loan requests can be funded directly");
     if (!loan.borrowerWalletAddress) throw new Error("Borrower has no wallet address on file");
+    const lenderWallet = await resolvePayerWallet(lenderAccount);
 
     const transfer: VerifyTransferInput = {
-        txSig,
+        txSig: normalizeTxSig("usdc", txSig),
         expectedFromWallet: lenderWallet,
         expectedToWallet: loan.borrowerWalletAddress,
         expectedAmountUsd: loan.principalUsd,
         purpose: "solo_loan_fund",
         refId: loanId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer("usdc", transfer);
 
     const result = await adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(loanRef);
         if (!snap.exists) throw new Error("Loan not found");
         const current = toLoan(snap.id, snap.data()!);
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn("usdc", txn, transfer);
 
-        const reservedForOther = !!current.reservedLenderWallet && current.reservedLenderWallet !== lenderWallet;
+        // Offers record the lender's signed-in account; match either it or its Solana wallet.
+        const reservedForOther = !!current.reservedLenderWallet
+            && current.reservedLenderWallet !== lenderAccount
+            && current.reservedLenderWallet !== lenderWallet;
         if (current.status !== "pending" || reservedForOther) {
             createPayoutInTxn(txn, {
                 kind: "funding_refund",
@@ -795,30 +903,32 @@ export async function fundLoanSolo(loanId: string, lenderWallet: string, txSig: 
  * for pool). If the loan was cancelled or expired in the meantime, the
  * collateral is still recorded and queued straight back to the poster.
  */
-export async function postLoanCollateral(loanId: string, wallet: string, txSig: string): Promise<Loan> {
+export async function postLoanCollateral(loanId: string, account: string, txSig: string): Promise<Loan> {
     const loanRef = adminDb().collection(LOANS).doc(loanId);
     const loan = await getLoan(loanId);
     if (!loan) throw new Error("Loan not found");
     if (!(loan.collateralUsd > 0)) throw new Error("This loan doesn't require collateral");
     if (loan.collateralStatus && loan.collateralStatus !== "awaiting") throw new Error(`Collateral already ${loan.collateralStatus.replace("_", " ")}`);
+    const asset = assetOf(loan);
+    const wallet = await resolvePayerWallet(account, asset);
 
-    const treasury = treasuryAddress();
+    const treasury = treasuryFor(asset);
     const transfer: VerifyTransferInput = {
-        txSig,
+        txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: wallet,
         expectedToWallet: treasury,
         expectedAmountUsd: loan.collateralUsd,
         purpose: "loan_collateral",
         refId: loanId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     const result = await adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(loanRef);
         if (!snap.exists) throw new Error("Loan not found");
         const current = toLoan(snap.id, snap.data()!);
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         if (current.status !== "pending_collateral" || (current.collateralStatus && current.collateralStatus !== "awaiting")) {
             createPayoutInTxn(txn, {
@@ -826,6 +936,7 @@ export async function postLoanCollateral(loanId: string, wallet: string, txSig: 
                 fromWallet: treasury,
                 toWallet: wallet,
                 amountUsd: current.collateralUsd,
+                asset,
                 loanId,
                 reason: `Collateral arrived after the loan was no longer awaiting it (status: ${current.status})`,
             });
@@ -835,7 +946,7 @@ export async function postLoanCollateral(loanId: string, wallet: string, txSig: 
         const update = {
             status: current.source === "pool" ? ("pending_disbursement" as const) : ("pending" as const),
             collateralStatus: "held" as const,
-            collateralTxSig: txSig,
+            collateralTxSig: transfer.txSig,
             collateralPostedByWallet: wallet,
         };
         txn.update(loanRef, update);
@@ -881,9 +992,10 @@ export async function cancelLoan(loanId: string, opts: { byAdmin: boolean; reaso
         if (current.collateralStatus === "held" && current.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
-                fromWallet: treasuryAddress(),
+                fromWallet: treasuryFor(assetOf(current)),
                 toWallet: current.collateralPostedByWallet,
                 amountUsd: current.collateralUsd,
+                asset: assetOf(current),
                 loanId,
                 reason: `Loan cancelled: ${opts.reason}`,
             });
@@ -925,6 +1037,8 @@ export interface CreateLoanOfferInput {
 export async function createLoanOffer(input: CreateLoanOfferInput): Promise<LoanOffer> {
     const limits = lendingLimits();
     assertCanOpenPosition(limits, input.lenderWalletAddress);
+    // The offer stays owned by the signed-in account, but it must be fundable on Solana.
+    await resolvePayerWallet(input.lenderWalletAddress);
     const amountUsd = Math.round(input.amountUsd * 100) / 100;
     if (limits.maxLoanUsd !== null && amountUsd > limits.maxLoanUsd) {
         throw new Error(`Offers are capped at $${limits.maxLoanUsd.toLocaleString()} during the lending beta`);
@@ -1050,16 +1164,18 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
 
     if (loan.status !== "pending_disbursement") throw new Error(`Loan is not awaiting disbursement (status: ${loan.status})`);
     if (!loan.borrowerWalletAddress) throw new Error("Borrower has no wallet address on file");
+    const asset = assetOf(loan);
+    txSig = normalizeTxSig(asset, txSig);
 
     const transfer: VerifyTransferInput = {
         txSig,
-        expectedFromWallet: treasuryAddress(),
+        expectedFromWallet: treasuryFor(asset),
         expectedToWallet: loan.borrowerWalletAddress,
         expectedAmountUsd: loan.principalUsd,
         purpose: "loan_disbursement",
         refId: loanId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     return adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(loanRef);
@@ -1068,7 +1184,7 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
         if (current.status !== "pending_disbursement") throw new Error(`Loan is not awaiting disbursement (status: ${current.status})`);
         const poolSnap = current.poolId ? await txn.get(adminDb().collection(POOLS).doc(current.poolId)) : null;
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         const originatedAt = nowSec();
         const update = {
@@ -1170,7 +1286,7 @@ async function applyLoanCreditEvent(
  * in the meantime), the transfer is still claimed and refunded in full via a
  * repayment_refund payout rather than dropped.
  */
-export async function repayLoan(loanId: string, amountUsd: number, paidByWallet: string, txSig: string): Promise<{ loan: Loan; repayment: LoanRepayment }> {
+export async function repayLoan(loanId: string, amountUsd: number, paidByAccount: string, txSig: string): Promise<{ loan: Loan; repayment: LoanRepayment }> {
     if (!(amountUsd > 0)) throw new Error("Repayment amount must be positive");
     const loanRef = adminDb().collection(LOANS).doc(loanId);
 
@@ -1180,18 +1296,22 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
         throw new Error(`Loan hasn't been funded yet (status: ${existing.status})`);
     }
 
-    const recipientWallet = existing.source === "pool" ? treasuryAddress() : existing.lenderWalletAddress;
+    const asset = assetOf(existing);
+    amountUsd = roundAmount(asset, amountUsd);
+    if (!(amountUsd > 0)) throw new Error("Repayment amount must be positive");
+    const paidByWallet = await resolvePayerWallet(paidByAccount, asset);
+    const recipientWallet = existing.source === "pool" ? treasuryFor(asset) : existing.lenderWalletAddress;
     if (!recipientWallet) throw new Error("No lender wallet on file to verify repayment against");
 
     const transfer: VerifyTransferInput = {
-        txSig,
+        txSig: normalizeTxSig(asset, txSig),
         expectedFromWallet: paidByWallet,
         expectedToWallet: recipientWallet,
         expectedAmountUsd: amountUsd,
         purpose: "loan_repayment",
         refId: loanId,
     };
-    await verifyUsdcTransfer(transfer);
+    await verifyLendingTransfer(asset, transfer);
 
     const result = await adminDb().runTransaction(async (txn) => {
         const snap = await txn.get(loanRef);
@@ -1201,7 +1321,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
             ? await txn.get(adminDb().collection(POOLS).doc(loan.poolId))
             : null;
 
-        claimUsdcTransferInTxn(txn, transfer);
+        claimLendingTransferInTxn(asset, txn, transfer);
 
         if (loan.status !== "active") {
             createPayoutInTxn(txn, {
@@ -1209,6 +1329,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
                 fromWallet: recipientWallet,
                 toWallet: paidByWallet,
                 amountUsd,
+                asset,
                 loanId,
                 reason: `Repayment arrived after the loan was closed (status: ${loan.status})`,
             });
@@ -1243,7 +1364,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
             remainingBalanceUsd,
             paidAt: at,
             paidByWallet,
-            txSig,
+            txSig: transfer.txSig,
             ...(excessUsd > 0 ? { excessUsd, refundStatus: "pending" as const } : {}),
         };
         txn.set(repaymentRef, repayment);
@@ -1254,6 +1375,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
                 fromWallet: recipientWallet,
                 toWallet: paidByWallet,
                 amountUsd: excessUsd,
+                asset,
                 loanId,
                 repaymentId: repaymentRef.id,
                 reason: "Repayment exceeded the remaining balance",
@@ -1263,9 +1385,10 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
         if (finalStatus === "repaid" && loan.collateralStatus === "held" && loan.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
-                fromWallet: treasuryAddress(),
+                fromWallet: treasuryFor(asset),
                 toWallet: loan.collateralPostedByWallet,
                 amountUsd: loan.collateralUsd,
+                asset,
                 loanId,
                 reason: "Loan repaid in full",
             });
@@ -1298,7 +1421,7 @@ export async function repayLoan(loanId: string, amountUsd: number, paidByWallet:
             result.loan.borrowerAgentId,
             credit,
             trust,
-            `Repaid ${result.loan.kind} loan in full ($${result.loan.principalUsd.toLocaleString()})`,
+            `Repaid ${result.loan.kind} loan in full (${formatAssetAmount(asset, result.loan.principalUsd)})`,
             "loan_repaid",
             { loanId, kind: result.loan.kind, principalUsd: result.loan.principalUsd },
         );
@@ -1334,6 +1457,7 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
 
         const at = nowSec();
         current = accrue(current, at);
+        const asset = assetOf(current);
 
         const collateralHeld = current.collateralStatus === "held" ? current.collateralUsd : 0;
         const rec = computeDefaultRecovery(current.principalRemainingUsd, current.interestAccruedUsd, collateralHeld);
@@ -1360,9 +1484,10 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
         } else if (recoveredUsd > 0 && current.lenderWalletAddress) {
             createPayoutInTxn(txn, {
                 kind: "collateral_to_lender",
-                fromWallet: treasuryAddress(),
+                fromWallet: treasuryFor(asset),
                 toWallet: current.lenderWalletAddress,
                 amountUsd: recoveredUsd,
+                asset,
                 loanId,
                 reason: "Seized collateral from a defaulted solo loan",
             });
@@ -1371,9 +1496,10 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
         if (rec.collateralExcessUsd > 0 && current.collateralPostedByWallet) {
             createPayoutInTxn(txn, {
                 kind: "collateral_return",
-                fromWallet: treasuryAddress(),
+                fromWallet: treasuryFor(asset),
                 toWallet: current.collateralPostedByWallet,
                 amountUsd: rec.collateralExcessUsd,
+                asset,
                 loanId,
                 reason: "Collateral left over after covering the defaulted balance",
             });
@@ -1389,7 +1515,7 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
         loan.borrowerAgentId,
         Math.round(baseCredit * (1 - recoveryRatio * 0.5)),
         Math.round(baseTrust * (1 - recoveryRatio * 0.5)),
-        `Defaulted on ${loan.kind} loan ($${loan.principalRemainingUsd.toLocaleString()} outstanding)`,
+        `Defaulted on ${loan.kind} loan (${formatAssetAmount(assetOf(loan), loan.principalRemainingUsd)} outstanding)`,
         "loan_defaulted",
         {
             loanId: loan.id,

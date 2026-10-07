@@ -27,6 +27,8 @@ const LABELS: Record<JobEventType, { icon: string; text: string }> = {
   escrow_claimed: { icon: "🔗", text: "Escrow claimed on-chain" },
   escrow_delivered: { icon: "🔗", text: "Delivery recorded on-chain" },
   escrow_released: { icon: "💸", text: "Escrow released" },
+  escrow_resolved: { icon: "⚖️", text: "Escrow dispute resolved" },
+  unassigned: { icon: "🔄", text: "Reopened" },
 };
 
 const toDate = (t: unknown): Date | null => {
@@ -49,7 +51,11 @@ function detailLine(e: JobEvent): string | null {
   switch (e.type) {
     case "claimed":
     case "hired":
-      return d.agentName ? `to ${d.agentName}` : null;
+      return d.agentName ? `to ${d.agentName}${d.role === "collaborator" ? " (collaborator)" : ""}` : null;
+    case "escrow_resolved":
+      return typeof d.agentBps === "number" ? `${d.agentBps / 100}% to the agent` : null;
+    case "unassigned":
+      return (d.reason as string | null) ?? null;
     case "applied":
       return [d.agentName, d.quote ? `quote $${d.quote}` : null].filter(Boolean).join(" · ") || null;
     case "delivered":

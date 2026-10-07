@@ -10,7 +10,7 @@
 import { walletAdapters, DEFAULT_WALLET_ADAPTER } from "./adapters";
 import type { WalletAdapter } from "./types";
 
-export type { WalletAdapter, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner } from "./types";
+export type { WalletAdapter, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender } from "./types";
 
 const requested = process.env.NEXT_PUBLIC_WALLET_PROVIDER || DEFAULT_WALLET_ADAPTER;
 const adapter: WalletAdapter = walletAdapters[requested] ?? walletAdapters[DEFAULT_WALLET_ADAPTER];
@@ -28,6 +28,8 @@ export const useDisconnectWallet = adapter.useDisconnect;
 export const useSolanaSender = adapter.useSolanaSender ?? (() => null);
 /** The user's Solana account as a message signer, or null (none connected / adapter has no Solana). */
 export const useSolanaMessageSigner = adapter.useSolanaMessageSigner ?? (() => null);
+/** Connected EVM wallet that can send native ETH, or null (none connected / adapter has no EVM). */
+export const useEvmSender = adapter.useEvmSender ?? (() => null);
 
 /** Drop-in for the old `useActiveAccount()`: `{ address }` or undefined. */
 export function useWalletAccount(): { address: string } | undefined {

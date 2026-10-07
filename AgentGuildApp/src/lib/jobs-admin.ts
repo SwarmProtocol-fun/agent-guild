@@ -279,11 +279,7 @@ export async function cancelJob(jobId: string, reason: string, actor: JobActor):
     for (const a of pending) batch.update(applications().doc(a.id), { status: "rejected" });
     await batch.commit();
   }
-  if (before.taskId) {
-    await adminDb().collection("tasks").doc(before.taskId)
-      .update({ status: "done", cancelled: true, updatedAt: FieldValue.serverTimestamp() })
-      .catch((e) => console.error(`Failed to close task ${before.taskId} for cancelled job ${jobId}:`, e));
-  }
+  await closeJobTasks(before, { cancelled: true });
   await recordJobEvent(before, "cancelled", actor, {
     status: "closed",
     details: { reason: reason || null, previousStatus: before.status, assignedAgentId: before.takenByAgentId ?? null },
@@ -321,11 +317,7 @@ export async function reviewDelivery(jobId: string, decision: ReviewInput, actor
     return job;
   });
 
-  if (decision.approve && before.taskId) {
-    await adminDb().collection("tasks").doc(before.taskId)
-      .update({ status: "done", updatedAt: FieldValue.serverTimestamp() })
-      .catch((e) => console.error(`Failed to close task ${before.taskId} for approved job ${jobId}:`, e));
-  }
+  if (decision.approve) await closeJobTasks(before);
   await recordJobEvent(before, decision.approve ? "approved" : "revision_requested", actor, {
     status: decision.approve ? "completed" : "in_progress",
     details: {
@@ -335,6 +327,108 @@ export async function reviewDelivery(jobId: string, decision: ReviewInput, actor
     },
   });
   return (await getJob(jobId))!;
+}
+
+/**
+ * Post a job and put a team on it in one step (the dashboard / agent-map
+ * "dispatch" flow). The first agent is the lead: it holds the job, is
+ * credit-policy checked like any claim, and delivers. The rest are
+ * collaborators — each gets its own task linked to the job, and they're
+ * listed in job.collaboratorAgentIds. Every agent must belong to the org.
+ */
+export async function dispatchJob(
+  input: JobInput,
+  meta: { orgId: string; postedByAddress: string },
+  agentIds: string[],
+  actor: JobActor,
+): Promise<{ jobId: string; taskIds: string[] }> {
+  const ids = Array.from(new Set(agentIds));
+  if (ids.length === 0) throw new JobActionError("Pick at least one agent", 400);
+  if (ids.length > 10) throw new JobActionError("At most 10 agents per dispatch", 400);
+  const agents = await Promise.all(ids.map(async (id) => {
+    const snap = await adminDb().collection("agents").doc(id).get();
+    const data = snap.data() as { orgId?: string; name?: string } | undefined;
+    if (!snap.exists || data?.orgId !== meta.orgId) throw new JobActionError(`Agent ${id} not found in this organization`, 404);
+    return { id, name: data.name || id };
+  }));
+
+  const jobId = await createJob(input, meta, actor);
+  const [lead, ...collaborators] = agents;
+  const taskIds = [await claimJob(jobId, lead.id, meta.orgId, input.projectId, lead.name, actor)];
+
+  if (collaborators.length) {
+    for (const c of collaborators) {
+      const ref = await adminDb().collection("tasks").add({
+        orgId: meta.orgId,
+        projectId: input.projectId,
+        title: input.title,
+        description: `From job (collaborating with ${lead.name}): ${input.description}`,
+        assigneeAgentId: c.id,
+        status: "todo",
+        priority: input.priority,
+        createdAt: FieldValue.serverTimestamp(),
+        jobId,
+      });
+      taskIds.push(ref.id);
+      await recordJobEvent({ id: jobId, orgId: meta.orgId }, "hired", actor, {
+        details: { agentId: c.id, agentName: c.name, role: "collaborator", taskId: ref.id },
+      });
+    }
+    await jobs().doc(jobId).update({ collaboratorAgentIds: collaborators.map((c) => c.id) });
+  }
+  return { jobId, taskIds };
+}
+
+/**
+ * Take an in-progress job back from its agent(s) and put it on the board
+ * again. Their tasks are closed; any earlier delivery and review history is
+ * kept. Delivered or approved work can't be reopened — review it instead.
+ */
+export async function reopenJob(jobId: string, reason: string, actor: JobActor): Promise<void> {
+  const ref = jobs().doc(jobId);
+  const before = await adminDb().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new JobActionError("Job not found", 404);
+    const job = { id: snap.id, ...snap.data() } as Job;
+    if (job.status !== "in_progress") throw new JobActionError(`Only in-progress jobs can be reopened (status: ${job.status})`, 409);
+    if (job.gigId) throw new JobActionError("Gig orders are tied to their seller — cancel or dispute instead", 409);
+    tx.update(ref, {
+      status: "open",
+      takenByAgentId: FieldValue.delete(),
+      claimedAt: FieldValue.delete(),
+      claimedByAgentName: FieldValue.delete(),
+      taskId: FieldValue.delete(),
+      collaboratorAgentIds: FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return job;
+  });
+  await closeJobTasks(before, { cancelled: true });
+  await recordJobEvent(before, "unassigned", actor, {
+    status: "open",
+    details: { agentId: before.takenByAgentId ?? null, collaboratorAgentIds: before.collaboratorAgentIds ?? [], reason: reason || null },
+  });
+}
+
+/**
+ * Close every open task working on this job: the lead's (job.taskId — older
+ * tasks predate the jobId link) and any collaborators' (tasks.jobId).
+ * Best-effort: the job's own state is already settled when this runs.
+ */
+async function closeJobTasks(job: Pick<Job, "id" | "taskId">, extra: Record<string, unknown> = {}): Promise<void> {
+  try {
+    const linked = await adminDb().collection("tasks").where("jobId", "==", job.id).get();
+    const ids = new Set(linked.docs.filter((d) => d.data().status !== "done").map((d) => d.id));
+    if (job.taskId) ids.add(job.taskId);
+    if (!ids.size) return;
+    const batch = adminDb().batch();
+    for (const id of ids) {
+      batch.update(adminDb().collection("tasks").doc(id), { status: "done", ...extra, updatedAt: FieldValue.serverTimestamp() });
+    }
+    await batch.commit();
+  } catch (e) {
+    console.error(`Failed to close tasks for job ${job.id}:`, e);
+  }
 }
 
 /** Firestore rejects `undefined` field values; FieldValue sentinels must survive, so no JSON round-trip. */
@@ -423,6 +517,12 @@ export async function recordEscrowClaimed(jobId: string, claimTxSig: string, act
 export async function recordEscrowDelivered(jobId: string, deliveryTxSig: string, actor?: JobActor): Promise<void> {
   const job = await updateJobEscrow(jobId, { deliveryTxSig, status: "delivered" });
   await recordJobEvent(job, "escrow_delivered", actor ?? { type: "system", id: "escrow" }, { details: { txSig: deliveryTxSig } });
+}
+
+/** After resolveDispute() is verified on-chain — see /api/admin/jobs/:jobId/escrow-resolve. */
+export async function recordEscrowResolved(jobId: string, resolveTxSig: string, resolvedAgentBps: number, actor: JobActor): Promise<void> {
+  const job = await updateJobEscrow(jobId, { resolveTxSig, resolvedAgentBps, status: "resolved" });
+  await recordJobEvent(job, "escrow_resolved", actor, { details: { txSig: resolveTxSig, agentBps: resolvedAgentBps } });
 }
 
 export async function recordEscrowDisputed(jobId: string, disputeTxSig: string): Promise<void> {

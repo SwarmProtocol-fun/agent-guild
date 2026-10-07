@@ -11,6 +11,14 @@
  */
 
 import type { PolicyTierName } from "@/lib/credit-policy";
+import type { LendingAsset } from "./assets";
+
+export type { LendingAsset };
+
+/*
+ * Amount fields named `...Usd` hold amounts in the record's `asset` units
+ * (USDC, SOL or ETH); a record without `asset` is USDC. See assets.ts.
+ */
 
 export type LoanKind = "trust" | "unsecured";
 export type LoanSource = "pool" | "solo";
@@ -45,6 +53,10 @@ export interface Loan {
     source: LoanSource;
     /** Set when source === "pool" */
     poolId?: string;
+    /** What was lent — the pool's asset. Solo loans are always USDC. Absent = USDC. */
+    asset?: LendingAsset;
+    /** USD value of the principal at request time (non-USDC loans), for limits and credit history. */
+    principalUsdValue?: number;
     /** Set once a solo loan is funded (source === "solo") */
     lenderWalletAddress?: string;
     status: LoanStatus;
@@ -112,6 +124,8 @@ export interface LendingPool {
     id: string;
     name: string;
     description?: string;
+    /** The single asset this pool takes, lends and pays out. Absent = USDC. */
+    asset?: LendingAsset;
     /** Vault-style share accounting — sharePrice = (availableLiquidityUsd + totalLentUsd) / (totalShares - pendingWithdrawalShares) */
     totalShares: number;
     availableLiquidityUsd: number;
@@ -160,7 +174,12 @@ export type PoolWithdrawalStatus = "pending_payout" | "paid" | "cancelled";
 export interface PoolWithdrawalRequest {
     id: string;
     poolId: string;
+    /** The signed-in account that owns the position (may be an EVM address). */
     walletAddress: string;
+    /** Wallet the treasury pays (Solana, or Ethereum for the ETH pool). Absent on older requests, which pay walletAddress. */
+    payoutWalletAddress?: string;
+    /** The pool's asset, copied for display. Absent = USDC. */
+    asset?: LendingAsset;
     amountUsd: number;
     sharesToBurn: number;
     status: PoolWithdrawalStatus;
@@ -177,20 +196,14 @@ export interface PoolWithdrawalRequest {
 }
 
 /** Audit trail of verified on-chain deposits into a pool. */
-/**
- * What a pool deposit was paid in. "sol" (native SOL) is devnet-only test
- * liquidity, valued at a fixed SOL→USD rate — the pool ledger itself stays USD.
- */
-export type DepositAsset = "usdc" | "sol";
-
 export interface PoolDepositRecord {
     id: string;
     poolId: string;
     walletAddress: string;
     amountUsd: number;
-    /** Omitted for USDC (the default). */
-    asset?: DepositAsset;
-    /** Native SOL deposits only: lamports actually received by the treasury. */
+    /** The pool's asset; omitted for USDC. */
+    asset?: LendingAsset;
+    /** Legacy: devnet SOL credited into the USDC pool at a fixed rate, before per-asset pools. */
     lamports?: number;
     /** Part of the transfer that wasn't credited (beta cap / paused / not allowlisted) and was queued for refund. */
     refundedUsd?: number;
@@ -263,6 +276,8 @@ export interface LendingPayout {
     fromWallet: string;
     toWallet: string;
     amountUsd: number;
+    /** Asset to send (and verify). Absent = USDC. */
+    asset?: LendingAsset;
     status: "pending" | "paid";
     loanId?: string;
     poolId?: string;

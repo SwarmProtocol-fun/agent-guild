@@ -11,6 +11,9 @@
  *                  signature the buyer already signed client-side. Required
  *                  unless the escrow is already released, so a job can't be
  *                  marked approved while the seller's funds are still locked.
+ *                  Verified on-chain (lib/solana/escrow-tx-verify.ts): a
+ *                  successful approve_delivery on this order's Task PDA,
+ *                  signed by the order's poster wallet.
  *
  * Approve → job completed/approved, agent's completed-job count +1, task closed.
  * Reject  → job back to in_progress; the agent delivers again (a new revision).
@@ -18,6 +21,7 @@
 import { NextRequest } from "next/server";
 import { recordEscrowReleased, reviewDelivery } from "@/lib/jobs-admin";
 import { validateReview } from "@/lib/job-lifecycle";
+import { verifyEscrowTx } from "@/lib/solana/escrow-tx-verify";
 import { userActor } from "@/lib/job-audit";
 import { jobErrorResponse, loadJobForMember, readJson } from "@/lib/job-route-auth";
 
@@ -39,6 +43,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ job
       { error: "This order has on-chain escrow — sign the release (approveDelivery) first and pass releaseTxSig" },
       { status: 409 },
     );
+  }
+
+  if (review.value.approve && escrowLocked && releaseTxSig && job.escrow) {
+    const check = await verifyEscrowTx(releaseTxSig, "approve_delivery", job.escrow.taskPda, job.escrow.posterSolanaAddress);
+    if (!check.verified) return Response.json({ error: check.reason }, { status: check.retryable ? 503 : 422 });
   }
 
   try {

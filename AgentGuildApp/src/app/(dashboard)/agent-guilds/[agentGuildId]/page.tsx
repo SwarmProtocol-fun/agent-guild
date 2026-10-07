@@ -36,9 +36,6 @@ import {
   onMessagesByChannel,
   getJobsByProject,
   createJob,
-  claimJob,
-  closeJob,
-  updateJob,
   onAgentCommsByOrg,
   type Project,
   type Agent,
@@ -53,6 +50,7 @@ import {
   getProfile,
   getProfilesByAddresses,
 } from "@/lib/firestore";
+import { dispatchJob, assignJob, reopenJob } from "@/lib/jobs-client";
 import { db } from "@/lib/firebase";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import type { DispatchPayload } from "@/components/agent-map/agent-map";
@@ -465,7 +463,7 @@ export default function ProjectDetailPage() {
       setBatchAssigning(true);
       setError(null);
       for (const { jobId, agentId, jobTitle, agentName } of assignments) {
-        await claimJob(jobId, agentId, currentOrg.id, projectId);
+        await assignJob(jobId, agentId);
         if (channel) {
           try {
             await sendMessage({
@@ -500,23 +498,16 @@ export default function ProjectDetailPage() {
       setError(null);
 
       // 1. Create the job
-      const jobId = await createJob({
+      // Server-side: validates, assigns agentIds[0] as lead and the rest as
+      // collaborators, and records it all in the job's audit trail.
+      const { jobId } = await dispatchJob({
         orgId: currentOrg.id,
-        projectId,
-        title: prompt.slice(0, 120) + (prompt.length > 120 ? '…' : ''),
-        description: prompt,
-        status: 'open',
-        reward: reward || undefined,
-        requiredSkills: [],
-        postedByAddress: account?.address || 'unknown',
+        projectId: projectId,
+        prompt,
+        agentIds,
         priority,
-        createdAt: new Date(),
+        reward: reward || undefined,
       });
-
-      // 2. Assign each selected agent
-      for (const agentId of agentIds) {
-        await claimJob(jobId, agentId, currentOrg.id, projectId);
-      }
 
       // 3. Post coordination to agent comms (handoff type)
       try {
@@ -982,7 +973,7 @@ export default function ProjectDetailPage() {
                       <div className="pt-2 space-y-2">
                         <Select onValueChange={async (agentId) => {
                           try {
-                            await claimJob(job.id, agentId, job.orgId, job.projectId);
+                            await assignJob(job.id, agentId);
                             await loadProjectData();
                           } catch (e) { setError(e instanceof Error ? e.message : "Claim failed"); }
                         }}>
@@ -996,7 +987,8 @@ export default function ProjectDetailPage() {
                     {job.takenByAgentId && (
                       <div className="text-xs text-muted-foreground">🤖 {assignedAgents.find(a => a.id === job.takenByAgentId)?.name || job.takenByAgentId}</div>
                     )}
-                    {(job.status === 'in_progress' || job.status === 'completed') && (
+                    {/* Reopen only before delivery — delivered work is reviewed on the job page, not discarded. */}
+                    {job.status === 'in_progress' && !job.gigId && (
                       <div className="pt-1">
                         <Button
                           variant="outline"
@@ -1004,7 +996,7 @@ export default function ProjectDetailPage() {
                           className="text-xs h-7"
                           onClick={async () => {
                             try {
-                              await updateJob(job.id, { status: 'open', takenByAgentId: '' } as Partial<Job>);
+                              await reopenJob(job.id);
                               await loadProjectData();
                             } catch (e) { setError(e instanceof Error ? e.message : "Restart failed"); }
                           }}

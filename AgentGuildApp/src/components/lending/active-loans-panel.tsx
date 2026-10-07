@@ -2,8 +2,8 @@
  * Active Loans Panel — an agent's loan history with a live-estimated payoff
  * balance for active loans (interest accrues daily server-side; we project
  * forward from lastAccrualAt for display without waiting on a write). Trust
- * loans awaiting collateral get a "Post collateral" step (a verified USDC
- * transfer to the treasury) and can be cancelled until it's posted.
+ * loans awaiting collateral get a "Post collateral" step (a verified transfer
+ * of the loan's asset to its treasury) and can be cancelled until it's posted.
  */
 "use client";
 
@@ -16,6 +16,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RepayLoanDialog } from "./repay-loan-dialog";
 import type { Loan } from "@/lib/lending/types";
+import { assetOf, assetInfo, formatAssetAmount } from "@/lib/lending/assets";
+import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface ActiveLoansPanelProps {
     agentId: string;
@@ -46,20 +48,25 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
     const [error, setError] = useState<string | null>(null);
     const [repayLoan, setRepayLoan] = useState<Loan | null>(null);
     const [collateralLoan, setCollateralLoan] = useState<Loan | null>(null);
-    const [treasury, setTreasury] = useState<string | null>(null);
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
     const [cancellingId, setCancellingId] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
     const openCollateral = async (loan: Loan) => {
         setActionError(null);
-        if (!treasury) {
-            const res = await fetch("/api/v1/lending/treasury");
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || !data.treasuryAddress) {
-                setActionError(data.error || "Lending treasury is not configured");
+        let info = treasuryInfo;
+        if (!info) {
+            try {
+                info = await fetchLendingTreasury();
+                setTreasuryInfo(info);
+            } catch (err) {
+                setActionError(err instanceof Error ? err.message : "Lending treasury is not configured");
                 return;
             }
-            setTreasury(data.treasuryAddress);
+        }
+        if (!treasuryAddressFor(info, assetOf(loan))) {
+            setActionError(`The ${assetInfo(assetOf(loan)).symbol} treasury is not configured`);
+            return;
         }
         setCollateralLoan(loan);
     };
@@ -133,6 +140,8 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 )}
                 {loans.map((loan) => {
                     const payoff = loan.status === "active" ? estimatePayoff(loan) : loan.principalRemainingUsd + loan.interestAccruedUsd;
+                    const asset = assetOf(loan);
+                    const amt = (n: number) => formatAssetAmount(asset, n);
                     return (
                         <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border">
                             <div className="flex items-center gap-2">
@@ -143,21 +152,21 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                                 )}
                                 <div>
                                     <div className="text-xs font-medium">
-                                        ${loan.principalUsd.toLocaleString()} &middot; {(loan.interestRateBps / 100).toFixed(1)}% &middot; {loan.source === "pool" ? "Pool" : "Solo"}
+                                        {amt(loan.principalUsd)} &middot; {(loan.interestRateBps / 100).toFixed(1)}% &middot; {loan.source === "pool" ? "Pool" : "Solo"}
                                     </div>
                                     <div className="text-[10px] text-muted-foreground">
-                                        {loan.status === "active" && `Payoff: $${payoff.toFixed(2)}`}
-                                        {loan.status === "pending_collateral" && `Post $${loan.collateralUsd.toFixed(2)} collateral to continue`}
+                                        {loan.status === "active" && `Payoff: ${amt(payoff)}`}
+                                        {loan.status === "pending_collateral" && `Post ${amt(loan.collateralUsd)} collateral to continue`}
                                         {loan.status === "cancelled" && (loan.cancelReason || "Cancelled before funding")}
                                         {loan.status === "pending" && "Awaiting a solo lender"}
-                                        {loan.status === "pending_disbursement" && "Approved — awaiting real USDC disbursement"}
+                                        {loan.status === "pending_disbursement" && `Approved — awaiting real ${assetInfo(asset).symbol} disbursement`}
                                         {loan.status === "repaid" && "Repaid in full"}
-                                        {loan.status === "defaulted" && `Defaulted — $${loan.principalRemainingUsd.toFixed(2)} outstanding`}
-                                        {loan.collateralStatus === "held" && ` · $${loan.collateralUsd.toFixed(2)} collateral held`}
+                                        {loan.status === "defaulted" && `Defaulted — ${amt(loan.principalRemainingUsd)} outstanding`}
+                                        {loan.collateralStatus === "held" && ` · ${amt(loan.collateralUsd)} collateral held`}
                                         {loan.collateralStatus === "return_pending" && ` · collateral return queued`}
                                         {loan.collateralStatus === "returned" && ` · collateral returned`}
                                         {loan.collateralStatus === "seized" && ` · collateral seized`}
-                                        {!!loan.overpaymentOwedUsd && loan.overpaymentOwedUsd > 0.009 && ` · $${loan.overpaymentOwedUsd.toFixed(2)} overpayment refund queued`}
+                                        {!!loan.overpaymentOwedUsd && loan.overpaymentOwedUsd >= assetInfo(asset).dust && ` · ${amt(loan.overpaymentOwedUsd)} overpayment refund queued`}
                                     </div>
                                 </div>
                             </div>
@@ -192,13 +201,15 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 })}
             </CardContent>
 
-            {collateralLoan && treasury && (
+            {collateralLoan && treasuryInfo && treasuryAddressFor(treasuryInfo, assetOf(collateralLoan)) && (
                 <Dialog open onOpenChange={(open) => !open && setCollateralLoan(null)}>
                     <DialogContent className="max-w-sm">
                         <DialogHeader><DialogTitle>Post Collateral</DialogTitle></DialogHeader>
                         <OnChainSendStep
-                            recipientAddress={treasury}
+                            recipientAddress={treasuryAddressFor(treasuryInfo, assetOf(collateralLoan))!}
                             amountUsd={collateralLoan.collateralUsd}
+                            assetLabel={sendAssetLabel(treasuryInfo, assetOf(collateralLoan))}
+                            chain={assetInfo(assetOf(collateralLoan)).chain}
                             helperText="Send exactly this amount from your own wallet to the lending treasury. It's held for the life of the loan and returned to the same wallet when you repay — or applied to the balance if the loan defaults."
                             submitLabel="Verify Collateral"
                             onSubmit={async (txSig) => {

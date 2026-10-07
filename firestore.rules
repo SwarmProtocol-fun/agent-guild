@@ -251,10 +251,12 @@ service cloud.firestore {
       allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
+    // Applications are created, revised and accepted/rejected server-side only
+    // (/api/jobs/:jobId/applications, /hire, /api/v1/jobs/:jobId/apply), so a
+    // bidder can't mark its own bid accepted.
     match /jobApplications/{docId} {
-      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
-      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
-      allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
+      allow read: if request.auth != null && isOrgMember(resource.data.orgId);
+      allow create, update, delete: if false;
     }
     match /jobComments/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
@@ -275,16 +277,22 @@ service cloud.firestore {
               'reviewStatus', 'reviewNotes', 'reviewedBy', 'reviewedAt', 'reviewHistory',
               'cancelledAt', 'cancelledBy', 'cancelReason', 'taskId', 'postedByAgentId'];
     }
+    // All job state changes go through the server (/api/jobs/*, /api/v1/jobs/*,
+    // /api/admin/jobs/*), which validates each transition, verifies on-chain
+    // escrow signatures and writes the jobEvents audit trail. The browser
+    // reads jobs and creates one thing directly: a gig order (orderGig), which
+    // must start in_progress with escrow, if any, merely "funded".
     match /jobs/{docId} {
       // Gig orders live in the buyer's org but the seller org fulfils them,
       // so it may read them too (getIncomingGigOrders queries by
       // sellerOrgId). Seller writes go through /api/jobs/:jobId/deliver.
       allow read: if request.auth != null && (isOrgMember(resource.data.orgId) ||
         isOrgMember(resource.data.get('sellerOrgId', null)));
-      allow delete: if request.auth != null && isOrgMember(resource.data.orgId);
-      allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged() &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(jobServerOnlyFields());
+      allow update, delete: if false;
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId) &&
+        request.resource.data.get('gigId', null) is string &&
+        request.resource.data.status == 'in_progress' &&
+        request.resource.data.get('escrow', {'status': 'funded'}).status == 'funded' &&
         !request.resource.data.keys().hasAny(jobServerOnlyFields());
     }
     match /kanbanBoards/{docId} {

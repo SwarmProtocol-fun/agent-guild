@@ -851,6 +851,8 @@ export interface Job {
   /** Every delivery, oldest first. deliveryNotes only holds the latest, so a rejected
    *  delivery's text would otherwise be lost (preference export — lib/preferences.ts). */
   deliveryHistory?: { notes: string; files: string[]; at: number }[];
+  /** Dispatched team jobs: agents working alongside the lead (takenByAgentId), each with a task linked by jobId. */
+  collaboratorAgentIds?: string[];
   /** The task auto-created for the assigned agent (server-side claims only) — closed on approval/cancel. */
   taskId?: string;
   /** Set when the poster withdraws the job (status → "closed"). */
@@ -922,121 +924,11 @@ export async function getOpenJobs(orgId: string): Promise<Job[]> {
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
 }
 
-export async function claimJob(jobId: string, agentId: string, orgId: string, projectId: string, agentName?: string): Promise<string> {
-  // ── Credit Policy Enforcement ──────────────────────────────
-  const { resolveAgentPolicy } = await import("@/lib/agent-policy");
-  const { canClaimJob } = await import("@/lib/credit-policy");
-  const { getCreditPolicyConfig, recordPolicyEvent } = await import("@/lib/credit-policy-settings");
-
-  const config = await getCreditPolicyConfig();
-  const policyResult = await resolveAgentPolicy(agentId);
-
-  if (config.enforcementEnabled && config.enforceJobClaims && policyResult.ok && policyResult.policy) {
-    // Load job to check eligibility
-    const jobSnap = await getDoc(doc(db, "jobs", jobId));
-    if (!jobSnap.exists()) throw new Error("Job not found");
-    const jobCheck = { id: jobSnap.id, ...jobSnap.data() } as Job;
-
-    // Count active tasks for concurrent limit check
-    const activeQ = query(
-      collection(db, "tasks"),
-      where("assigneeAgentId", "==", agentId),
-      where("status", "in", ["todo", "in_progress"]),
-    );
-    const activeSnap = await getDocs(activeQ);
-    const activeCount = activeSnap.size;
-
-    const eligibility = canClaimJob(policyResult.policy, {
-      reward: jobCheck.reward,
-      priority: jobCheck.priority,
-      minPolicyTier: jobCheck.minPolicyTier,
-    }, activeCount);
-
-    if (!eligibility.allowed) {
-      await recordPolicyEvent({
-        agentId,
-        orgId,
-        action: "job_claim_blocked",
-        tier: policyResult.tier!,
-        details: { jobId, reason: eligibility.reason, activeCount },
-      });
-      throw new Error(`Policy violation: ${eligibility.reason}`);
-    }
-
-    // If manual review required, create approval instead of direct claim
-    if (policyResult.policy.requiresManualReview) {
-      const { createApproval } = await import("@/lib/approvals");
-      await createApproval({
-        orgId,
-        type: "job_dispatch",
-        title: `Job claim requires review: ${jobCheck.title}`,
-        description: `Agent ${agentId} (tier: ${policyResult.policy.label}) requesting to claim job ${jobId}`,
-        requestedBy: agentId,
-        payload: { jobId, agentId, tier: policyResult.tier },
-        priority: "medium",
-      });
-      await recordPolicyEvent({
-        agentId,
-        orgId,
-        action: "manual_review_required",
-        tier: policyResult.tier!,
-        details: { jobId },
-      });
-      throw new Error("Job claim requires manual approval for your current policy tier");
-    }
-
-    await recordPolicyEvent({
-      agentId,
-      orgId,
-      action: "job_claim_allowed",
-      tier: policyResult.tier!,
-      details: { jobId, activeCount },
-    });
-  }
-
-  // ── Original claim logic ───────────────────────────────────
-  await updateDoc(doc(db, "jobs", jobId), {
-    status: "in_progress",
-    takenByAgentId: agentId,
-    updatedAt: serverTimestamp(),
-    ...(agentName ? { claimedAt: serverTimestamp(), claimedByAgentName: agentName } : {}),
-  });
-  // Auto-create a task for the claiming agent
-  const job = await getDoc(doc(db, "jobs", jobId));
-  const jobData = job.data();
-  const taskId = await createTask({
-    orgId,
-    projectId,
-    title: jobData?.title || "Job task",
-    description: `From job: ${jobData?.description || ""}`,
-    assigneeAgentId: agentId,
-    status: "todo",
-    priority: jobData?.priority || "medium",
-    createdAt: new Date(),
-  });
-  return taskId;
-}
-
-export async function closeJob(jobId: string): Promise<void> {
-  await updateDoc(doc(db, "jobs", jobId), {
-    status: "completed",
-    updatedAt: serverTimestamp(),
-  });
-}
-
 export interface JobReviewEvent {
   status: 'approved' | 'rejected';
   at: number;
   by: string;
   notes?: string;
-}
-
-export async function updateJob(jobId: string, data: Partial<Job>): Promise<void> {
-  await updateDoc(doc(db, "jobs", jobId), { ...data, updatedAt: serverTimestamp() });
-}
-
-export async function deleteJob(jobId: string): Promise<void> {
-  await deleteDoc(doc(db, "jobs", jobId));
 }
 
 // ─── Job Comments ────────────────────────────────────────
@@ -1314,35 +1206,8 @@ export function getGigPackage(gig: Pick<Gig, "packages">, packageId?: string): G
   return gig.packages?.find((p) => p.id === packageId);
 }
 
-/** Merges a partial GigEscrow update into a job's existing escrow record. */
-async function updateJobEscrow(jobId: string, patch: Partial<GigEscrow>): Promise<void> {
-  const job = await getJob(jobId);
-  if (!job?.escrow) throw new Error("Job has no escrow record");
-  await updateDoc(doc(db, "jobs", jobId), {
-    escrow: { ...job.escrow, ...patch },
-    updatedAt: serverTimestamp(),
-  });
-}
-
-/** Records a successful on-chain claimTask() — called by the seller agent's own CLI after it signs. */
-export async function recordEscrowClaimed(jobId: string, claimTxSig: string): Promise<void> {
-  await updateJobEscrow(jobId, { claimTxSig, status: "claimed" });
-}
-
-/** Records a successful on-chain submitDelivery() — called alongside submitJobDelivery(). */
-export async function recordEscrowDelivered(jobId: string, deliveryTxSig: string): Promise<void> {
-  await updateJobEscrow(jobId, { deliveryTxSig, status: "delivered" });
-}
-
-/** Records a successful on-chain disputeDelivery() — called alongside filing the record-only dispute. */
-export async function recordEscrowDisputed(jobId: string, disputeTxSig: string): Promise<void> {
-  await updateJobEscrow(jobId, { disputeTxSig, status: "disputed" });
-}
-
-/** Records a successful on-chain resolveDispute() — called by a platform admin. */
-export async function recordEscrowResolved(jobId: string, resolveTxSig: string, resolvedAgentBps: number): Promise<void> {
-  await updateJobEscrow(jobId, { resolveTxSig, resolvedAgentBps, status: "resolved" });
-}
+// Escrow tx records (claim/deliver/release/dispute/resolve) are written server-side
+// only — lib/jobs-admin.ts — after on-chain verification; see firestore.rules.
 
 // ─── Gig Reviews ─────────────────────────────────────────
 

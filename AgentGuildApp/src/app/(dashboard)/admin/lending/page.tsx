@@ -3,7 +3,8 @@
  *
  * The lending treasury has no signing key anywhere in this app — every real
  * payout (pool-funded loan disbursement, pool withdrawal, collateral return,
- * refund) is sent by a platform admin from the treasury wallet, then
+ * refund) is sent by a platform admin from the treasury wallet for that
+ * asset (Solana for USDC and SOL, Ethereum for ETH — a Safe is fine), then
  * confirmed here with the resulting signature, which the backend verifies
  * on-chain before touching the ledger. Also hosts a manual trigger for the
  * lending sweep (normally hourly).
@@ -21,12 +22,16 @@ import { useSession } from "@/contexts/SessionContext";
 import { isPlatformAdmin } from "@/lib/platform-admins";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import type { LendingPayout, Loan, PoolWithdrawalRequest } from "@/lib/lending/types";
+import { assetOf, assetInfo, formatAssetAmount, type LendingAsset } from "@/lib/lending/assets";
+import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 export default function AdminLendingPage() {
     const { address: sessionAddress, authenticated } = useSession();
     const isAdmin = isPlatformAdmin(sessionAddress);
 
-    const [treasury, setTreasury] = useState<string | null>(null);
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
+    const treasuryOf = (asset: LendingAsset) => (treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null);
+    const sendProps = (asset: LendingAsset) => ({ assetLabel: sendAssetLabel(treasuryInfo, asset), chain: assetInfo(asset).chain });
     const [disbursements, setDisbursements] = useState<Loan[]>([]);
     const [withdrawals, setWithdrawals] = useState<PoolWithdrawalRequest[]>([]);
     const [loading, setLoading] = useState(true);
@@ -59,13 +64,13 @@ export default function AdminLendingPage() {
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const [treasuryRes, loansRes, withdrawalsRes, payoutsRes] = await Promise.all([
-                fetch("/api/v1/lending/treasury"),
+            const [treasury, loansRes, withdrawalsRes, payoutsRes] = await Promise.all([
+                fetchLendingTreasury().catch(() => null),
                 fetch("/api/v1/lending/loans?open=pending_disbursement"),
                 fetch("/api/v1/lending/pools/withdrawals"),
                 fetch("/api/v1/lending/payouts"),
             ]);
-            if (treasuryRes.ok) setTreasury((await treasuryRes.json()).treasuryAddress);
+            setTreasuryInfo(treasury);
             if (loansRes.ok) setDisbursements((await loansRes.json()).loans || []);
             if (withdrawalsRes.ok) setWithdrawals((await withdrawalsRes.json()).requests || []);
             if (payoutsRes.ok) setPayouts((await payoutsRes.json()).payouts || []);
@@ -95,8 +100,11 @@ export default function AdminLendingPage() {
                     <h1 className="text-xl font-bold flex items-center gap-2">
                         <Landmark className="h-5 w-5 text-emerald-500" /> Lending Payouts
                     </h1>
-                    {treasury && (
-                        <p className="text-xs text-muted-foreground mt-1 font-mono">Treasury: {treasury}</p>
+                    {treasuryInfo && (
+                        <div className="text-xs text-muted-foreground mt-1 font-mono space-y-0.5">
+                            <p>Solana treasury (USDC, SOL): {treasuryInfo.assets.usdc.treasuryAddress}</p>
+                            <p>Ethereum treasury (ETH): {treasuryInfo.assets.eth ? `${treasuryInfo.assets.eth.treasuryAddress} · ${treasuryInfo.assets.eth.network}` : "not configured"}</p>
+                        </div>
                     )}
                 </div>
                 <div className="flex gap-2">
@@ -129,7 +137,7 @@ export default function AdminLendingPage() {
                                     <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                         <div>
                                             <div className="font-mono">{loan.borrowerWalletAddress}</div>
-                                            <div className="text-muted-foreground">${loan.principalUsd.toLocaleString()} &middot; {loan.kind} &middot; agent {loan.borrowerAgentId}</div>
+                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(loan), loan.principalUsd)} &middot; {loan.kind} &middot; agent {loan.borrowerAgentId}</div>
                                         </div>
                                         <div className="flex gap-1.5">
                                             <Button
@@ -165,8 +173,8 @@ export default function AdminLendingPage() {
                                 withdrawals.map((req) => (
                                     <div key={req.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                         <div>
-                                            <div className="font-mono">{req.walletAddress}</div>
-                                            <div className="text-muted-foreground">${req.amountUsd.toLocaleString()} from pool {req.poolId}</div>
+                                            <div className="font-mono">{req.payoutWalletAddress ?? req.walletAddress}</div>
+                                            <div className="text-muted-foreground">{formatAssetAmount(assetOf(req), req.amountUsd)} from pool {req.poolId}</div>
                                         </div>
                                         <Button size="sm" className="h-7 text-xs gap-1" onClick={() => setPayoutWithdrawal(req)}>
                                             <ArrowUpFromLine className="h-3 w-3" /> Mark Paid
@@ -190,13 +198,13 @@ export default function AdminLendingPage() {
                                 <p className="text-xs text-muted-foreground">Nothing pending.</p>
                             ) : (
                                 payouts.map((p) => {
-                                    const fromTreasury = !!treasury && p.fromWallet === treasury;
+                                    const fromTreasury = p.fromWallet === treasuryOf(assetOf(p));
                                     return (
                                         <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                             <div>
                                                 <div className="font-mono">{p.toWallet}</div>
                                                 <div className="text-muted-foreground">
-                                                    ${p.amountUsd.toLocaleString()} &middot; {p.kind.replace(/_/g, " ")} &middot; {p.reason}
+                                                    {formatAssetAmount(assetOf(p), p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")} &middot; {p.reason}
                                                     {!fromTreasury && <> &middot; owed by <span className="font-mono">{p.fromWallet.slice(0, 6)}…</span></>}
                                                 </div>
                                             </div>
@@ -219,7 +227,8 @@ export default function AdminLendingPage() {
                         <OnChainSendStep
                             recipientAddress={activePayout.toWallet}
                             amountUsd={activePayout.amountUsd}
-                            helperText={`${activePayout.reason}. Send exactly this amount from ${treasury && activePayout.fromWallet === treasury ? "the treasury" : activePayout.fromWallet}, then paste the signature.`}
+                            {...sendProps(assetOf(activePayout))}
+                            helperText={`${activePayout.reason}. Send exactly this amount from ${activePayout.fromWallet === treasuryOf(assetOf(activePayout)) ? "the treasury" : activePayout.fromWallet}, then paste the signature.`}
                             submitLabel="Confirm Payout"
                             onSubmit={async (txSig) => {
                                 const res = await fetch(`/api/v1/lending/payouts/${activePayout.id}/confirm`, {
@@ -243,6 +252,7 @@ export default function AdminLendingPage() {
                         <OnChainSendStep
                             recipientAddress={payoutLoan.borrowerWalletAddress!}
                             amountUsd={payoutLoan.principalUsd}
+                            {...sendProps(assetOf(payoutLoan))}
                             helperText="Send the principal from the treasury to this borrower, then paste the signature."
                             submitLabel="Confirm Disbursement"
                             onSubmit={async (txSig) => {
@@ -265,8 +275,9 @@ export default function AdminLendingPage() {
                     <DialogContent className="max-w-sm">
                         <DialogHeader><DialogTitle>Confirm Pool Withdrawal</DialogTitle></DialogHeader>
                         <OnChainSendStep
-                            recipientAddress={payoutWithdrawal.walletAddress}
+                            recipientAddress={payoutWithdrawal.payoutWalletAddress ?? payoutWithdrawal.walletAddress}
                             amountUsd={payoutWithdrawal.amountUsd}
+                            {...sendProps(assetOf(payoutWithdrawal))}
                             helperText="Send the locked-in amount from the treasury to this lender, then paste the signature."
                             submitLabel="Confirm Payout"
                             onSubmit={async (txSig) => {

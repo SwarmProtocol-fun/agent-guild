@@ -5,11 +5,14 @@
  * GET  /api/v1/lending/loans?lenderWallet=X        — loans funded by a given wallet
  * POST /api/v1/lending/loans                       — request a new loan for an agent
  *   Body: { agentId, orgId, kind: "trust"|"unsecured", source: "pool"|"solo",
- *           amountUsd, termDays?, poolId?, purpose?, requestedRateBps? }
+ *           amountUsd, termDays?, poolId?, asset?, purpose?, requestedRateBps? }
+ *   Pool loans are in the pool's asset (amountUsd is in that asset's units);
+ *   `asset` picks that asset's default pool when poolId is omitted.
  *   requestedRateBps only applies to source: "solo" — pool loans are always
  *   priced at the fixed tier rate. Solo rates still must fall within a band
  *   around that same tier rate (see eligibility.ts's validateSoloRateBps).
  */
+import { isLendingAsset } from "@/lib/lending/assets";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMember, requirePlatformAdmin, getWalletAddress, unauthorized, forbidden } from "@/lib/auth-guard";
@@ -62,6 +65,7 @@ export async function POST(req: NextRequest) {
         amountUsd?: number;
         termDays?: number;
         poolId?: string;
+        asset?: string;
         purpose?: string;
         requestedRateBps?: number;
     };
@@ -80,6 +84,12 @@ export async function POST(req: NextRequest) {
     }
     if (source !== "pool" && source !== "solo") {
         return NextResponse.json({ error: 'source must be "pool" or "solo"' }, { status: 400 });
+    }
+    if (body.asset !== undefined && !isLendingAsset(body.asset)) {
+        return NextResponse.json({ error: 'asset must be "usdc", "sol" or "eth"' }, { status: 400 });
+    }
+    if (source === "solo" && body.asset !== undefined && body.asset !== "usdc") {
+        return NextResponse.json({ error: "Solo loans are USDC — borrow SOL or ETH from its pool instead" }, { status: 400 });
     }
     if (source === "pool" && body.requestedRateBps !== undefined) {
         return NextResponse.json({ error: "Pool loans are always priced at the fixed tier rate — requestedRateBps only applies to solo loans" }, { status: 400 });
@@ -105,6 +115,7 @@ export async function POST(req: NextRequest) {
             amountUsd: amountUsd as number,
             termDays: body.termDays,
             poolId: body.poolId,
+            asset: isLendingAsset(body.asset) ? body.asset : undefined,
             purpose: body.purpose,
             requestedByWallet: getWalletAddress(req) || undefined,
             requestedRateBps: body.requestedRateBps,

@@ -37,7 +37,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
 import { SOLANA_RPC_URL } from "@/lib/solana/client";
-import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner } from "../types";
+import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender } from "../types";
 import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
@@ -360,6 +360,27 @@ function useSolanaMessageSigner(): SolanaMessageSigner | null {
   };
 }
 
+// Talks to the EIP-1193 provider directly so the target chain (e.g. Sepolia
+// for the ETH lending pool) needn't be one of the modal's selectable networks.
+function useEvmSender(): EvmSender | null {
+  const { address, isConnected } = useAppKitAccount({ namespace: "eip155" });
+  const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  if (!isConnected || !address || !walletProvider) return null;
+  return {
+    address,
+    sendNativeTransfer: async ({ to, valueWei, chainId }) => {
+      const current = Number(await walletProvider.request({ method: "eth_chainId" }));
+      if (current !== chainId) {
+        await walletProvider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: toHex(chainId) }] });
+      }
+      return walletProvider.request({
+        method: "eth_sendTransaction",
+        params: [{ from: address as `0x${string}`, to: to as `0x${string}`, value: toHex(valueWei) }],
+      });
+    },
+  };
+}
+
 function useDisconnect() {
   // Only reachable when AppKit was created; unconfigured → nothing to disconnect.
   return projectId ? useConfiguredDisconnect() : () => {};
@@ -543,5 +564,6 @@ export const walletConnectAdapter: WalletAdapter = {
   ConnectButton,
   useSolanaSender,
   useSolanaMessageSigner,
+  useEvmSender,
   storagePrefixes: ["wagmi.", "@appkit", "@w3m", "wc@2", "WALLETCONNECT", "walletConnect", "walletName", "solana-wallet-adapter"],
 };

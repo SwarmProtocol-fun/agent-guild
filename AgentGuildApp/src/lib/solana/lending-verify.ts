@@ -22,7 +22,7 @@
 import { Connection } from "@solana/web3.js";
 import { adminDb } from "@/lib/firebase-admin";
 import { getChain } from "@/lib/chains";
-import { LAMPORTS_PER_SOL, solLamportsForUsd } from "@/lib/lending/math";
+import { LAMPORTS_PER_SOL } from "@/lib/lending/math";
 
 // Same devnet USDC-Dev mint as settlement/solana-adapter.ts.
 const DEVNET_USDC_MINT = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
@@ -108,10 +108,11 @@ export function tokenBalanceDelta(
 
 export interface VerifyTransferInput {
     txSig: string;
-    /** Wallet that must have sent the USDC (its balance must drop by >= the amount). */
+    /** Wallet that must have sent the funds (its balance must drop by >= the amount). */
     expectedFromWallet: string;
-    /** Wallet that must have received the USDC. */
+    /** Wallet that must have received the funds. */
     expectedToWallet: string;
+    /** In the transfer's asset units (USDC, SOL or ETH — see lending/assets.ts on the `Usd` naming). */
     expectedAmountUsd: number;
     /** Replay-guard bookkeeping, stored alongside the claim. */
     purpose: string;
@@ -120,7 +121,7 @@ export interface VerifyTransferInput {
 
 export interface VerifiedTransfer {
     txSig: string;
-    /** Amount that actually arrived at expectedToWallet (may exceed the expected amount). */
+    /** Amount that actually arrived at expectedToWallet, in asset units (may exceed the expected amount). */
     receivedUsd: number;
 }
 
@@ -158,23 +159,6 @@ export async function verifyUsdcTransfer(input: VerifyTransferInput): Promise<Ve
     return { txSig, receivedUsd };
 }
 
-// Devnet SOL has no market price; this is just the rate test deposits are
-// credited at. Override with LENDING_DEVNET_SOL_USD.
-const DEFAULT_DEVNET_SOL_USD = 150;
-
-/**
- * SOL→USD rate native-SOL pool deposits are credited at, or null when native
- * SOL isn't accepted. Devnet only: on mainnet the treasury would hold SOL
- * while owing USDC, so SOL deposits are refused there outright.
- */
-export function devnetSolUsdRate(): number | null {
-    if (lendingCluster() !== "devnet") return null;
-    const raw = process.env.LENDING_DEVNET_SOL_USD;
-    const rate = raw ? Number(raw) : DEFAULT_DEVNET_SOL_USD;
-    if (!Number.isFinite(rate) || rate <= 0) throw new Error(`LENDING_DEVNET_SOL_USD must be a positive number (got "${raw}")`);
-    return rate;
-}
-
 /**
  * Net lamport change for `owner` across a transaction. `accountKeys` must be
  * the full key list (static + lookup-table) so it lines up index-for-index
@@ -189,17 +173,15 @@ export interface VerifiedSolTransfer extends VerifiedTransfer {
 }
 
 /**
- * Native-SOL counterpart of verifyUsdcTransfer() — devnet only. Checks the
- * treasury's lamport balance rose by at least the SOL equivalent of
- * expectedAmountUsd and the sender's fell by at least as much (the sender's
- * drop also includes the network fee when they paid it, so it's >=, never ==).
- * Same contract: read-only, the caller claims the signature with
+ * Native-SOL counterpart of verifyUsdcTransfer(), for the SOL pool — the
+ * amount (expectedAmountUsd) is in SOL. Checks the recipient's lamports rose
+ * by at least that much and the sender's fell by at least as much (the
+ * sender's drop also includes the network fee when they paid it, so it's >=,
+ * never ==). Same contract: read-only, the caller claims the signature with
  * claimUsdcTransferInTxn() inside the crediting transaction.
  */
 export async function verifySolTransfer(input: VerifyTransferInput): Promise<VerifiedSolTransfer> {
-    const { txSig, expectedFromWallet, expectedToWallet, expectedAmountUsd } = input;
-    const rate = devnetSolUsdRate();
-    if (rate === null) throw new Error("Native SOL deposits are only accepted on devnet — send USDC instead");
+    const { txSig, expectedFromWallet, expectedToWallet, expectedAmountUsd: expectedSol } = input;
 
     const claimed = await adminDb().collection(ONCHAIN_TX_COLLECTION).doc(txSig).get();
     if (claimed.exists) throw new Error("This transaction signature has already been used for a different credit");
@@ -213,17 +195,17 @@ export async function verifySolTransfer(input: VerifyTransferInput): Promise<Ver
     const accountKeys = Array.from({ length: keys.length }, (_, i) => keys.get(i)!.toBase58());
     const { preBalances, postBalances } = tx.meta;
 
-    const requiredLamports = solLamportsForUsd(expectedAmountUsd, rate);
+    const requiredLamports = Math.round(expectedSol * LAMPORTS_PER_SOL);
     const received = lamportBalanceDelta(accountKeys, preBalances, postBalances, expectedToWallet);
     if (received < requiredLamports) {
-        throw new Error(`Expected at least ${requiredLamports / LAMPORTS_PER_SOL} SOL to arrive at ${expectedToWallet}, found ${received / LAMPORTS_PER_SOL}`);
+        throw new Error(`Expected at least ${expectedSol} SOL to arrive at ${expectedToWallet}, found ${received / LAMPORTS_PER_SOL}`);
     }
     const sent = -lamportBalanceDelta(accountKeys, preBalances, postBalances, expectedFromWallet);
     if (sent < requiredLamports) {
-        throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${requiredLamports / LAMPORTS_PER_SOL} SOL`);
+        throw new Error(`Expected ${expectedFromWallet} to be the sender of at least ${expectedSol} SOL`);
     }
 
-    return { txSig, receivedUsd: (received / LAMPORTS_PER_SOL) * rate, lamports: received };
+    return { txSig, receivedUsd: received / LAMPORTS_PER_SOL, lamports: received };
 }
 
 /**

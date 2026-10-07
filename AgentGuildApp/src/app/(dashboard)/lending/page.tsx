@@ -24,9 +24,11 @@ import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-dialog";
 import { BorrowPanel } from "@/components/lending/borrow-panel";
 import type { Agent } from "@/lib/firestore";
-import type { DepositAsset, LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
-import { poolSharePrice as sharePrice, freeShares, solLamportsForUsd, LAMPORTS_PER_SOL } from "@/lib/lending/math";
-import { useSolanaSender, useSolanaMessageSigner } from "@/lib/wallet";
+import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
+import { poolSharePrice as sharePrice, freeShares } from "@/lib/lending/math";
+import { assetOf, assetInfo, formatAssetAmount, roundAmount, toBaseUnits } from "@/lib/lending/assets";
+import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, ETH_CHAIN_IDS, type LendingTreasuryInfo } from "@/lib/lending/client";
+import { useSolanaSender, useSolanaMessageSigner, useEvmSender } from "@/lib/wallet";
 import { walletLinkMessage } from "@/lib/solana/wallet-link";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { getConnection } from "@/lib/solana/client";
@@ -153,7 +155,7 @@ export default function LendingMarketplacePage() {
                     Lending Marketplace
                 </h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                    Apply for a loan for one of your agents, fund the community pool for diversified, lower-risk returns, or back a single agent&apos;s loan directly for a higher rate.
+                    Apply for a loan for one of your agents, fund a community pool (USDC, SOL or ETH — you earn in the asset you deposit) for diversified, lower-risk returns, or back a single agent&apos;s loan directly in USDC for a higher rate.
                 </p>
             </div>
 
@@ -206,6 +208,7 @@ export default function LendingMarketplacePage() {
                                             <div className="flex items-center gap-2">
                                                 <Users className="h-4 w-4 text-emerald-500" />
                                                 <CardTitle className="text-base">{pool.name}</CardTitle>
+                                                <Badge variant="outline" className="text-[10px] ml-auto">{assetInfo(assetOf(pool)).symbol}</Badge>
                                             </div>
                                             {pool.description && <CardDescription>{pool.description}</CardDescription>}
                                         </CardHeader>
@@ -213,11 +216,11 @@ export default function LendingMarketplacePage() {
                                             <div className="grid grid-cols-3 gap-2 text-center">
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Available</p>
-                                                    <p className="text-sm font-mono">${fmt(pool.availableLiquidityUsd)}</p>
+                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.availableLiquidityUsd)}</p>
                                                 </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Out on Loan</p>
-                                                    <p className="text-sm font-mono">${fmt(pool.totalLentUsd)}</p>
+                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.totalLentUsd)}</p>
                                                 </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Lifetime Yield</p>
@@ -226,7 +229,7 @@ export default function LendingMarketplacePage() {
                                             </div>
                                             {position && (
                                                 <div className="text-xs text-muted-foreground border-t border-border pt-2">
-                                                    Your position: <span className="font-mono text-foreground">${fmt(positionValue)}</span>
+                                                    Your position: <span className="font-mono text-foreground">{formatAssetAmount(assetOf(pool), positionValue)}</span>
                                                 </div>
                                             )}
                                             <div className="flex gap-2">
@@ -338,7 +341,7 @@ export default function LendingMarketplacePage() {
                                             {pools.filter((p) => positions[p.id]).map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <span>{p.name}</span>
-                                                    <span className="font-mono">${fmt(freeShares(positions[p.id]) * sharePrice(p))}</span>
+                                                    <span className="font-mono">{formatAssetAmount(assetOf(p), freeShares(positions[p.id]) * sharePrice(p))}</span>
                                                 </div>
                                             ))}
                                         </div>
@@ -350,7 +353,7 @@ export default function LendingMarketplacePage() {
                                         <div className="space-y-2">
                                             {pendingWithdrawals.filter((w) => w.status === "pending_payout").map((w) => (
                                                 <div key={w.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
-                                                    <span>${fmt(w.amountUsd)} requested</span>
+                                                    <span>{formatAssetAmount(assetOf(w), w.amountUsd)} requested</span>
                                                     <div className="flex items-center gap-2">
                                                         <Badge variant="outline" className="text-[10px]">awaiting admin payout</Badge>
                                                         <Button
@@ -384,7 +387,7 @@ export default function LendingMarketplacePage() {
                                             {payouts.owedByYou.filter((p) => p.status === "pending").map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-amber-500/30 text-xs">
                                                     <div>
-                                                        <div>${fmt(p.amountUsd)} to <span className="font-mono">{p.toWallet.slice(0, 6)}…{p.toWallet.slice(-4)}</span></div>
+                                                        <div>{formatAssetAmount(assetOf(p), p.amountUsd)} to <span className="font-mono">{p.toWallet.slice(0, 6)}…{p.toWallet.slice(-4)}</span></div>
                                                         <div className="text-[10px] text-muted-foreground">{p.reason}</div>
                                                     </div>
                                                     <Button size="sm" className="h-6 text-[10px] px-2" onClick={() => setSettlingPayout(p)}>Send Refund</Button>
@@ -400,7 +403,7 @@ export default function LendingMarketplacePage() {
                                             {payouts.owedToYou.map((p) => (
                                                 <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
                                                     <div>
-                                                        <div>${fmt(p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")}</div>
+                                                        <div>{formatAssetAmount(assetOf(p), p.amountUsd)} &middot; {p.kind.replace(/_/g, " ")}</div>
                                                         <div className="text-[10px] text-muted-foreground">{p.reason}</div>
                                                     </div>
                                                     <Badge variant="outline" className="text-[10px]">{p.status === "paid" ? "paid" : "queued"}</Badge>
@@ -500,6 +503,8 @@ export default function LendingMarketplacePage() {
                         <OnChainSendStep
                             recipientAddress={settlingPayout.toWallet}
                             amountUsd={settlingPayout.amountUsd}
+                            assetLabel={sendAssetLabel(null, assetOf(settlingPayout))}
+                            chain={assetInfo(assetOf(settlingPayout)).chain}
                             helperText={`${settlingPayout.reason}. Send exactly this amount from your wallet, then paste the signature.`}
                             submitLabel="Confirm Refund"
                             onSubmit={async (txSig) => {
@@ -544,24 +549,24 @@ function PoolActionDialog({
     onClose: () => void;
     onDone: () => void;
 }) {
+    const asset = assetOf(pool);
+    const { symbol, chain } = assetInfo(asset);
     const [step, setStep] = useState<"amount" | "send">("amount");
-    const [amount, setAmount] = useState("100");
-    const [treasury, setTreasury] = useState<string | null>(null);
-    const [usdcMint, setUsdcMint] = useState<string | null>(null);
-    // Non-null only on devnet, where native SOL deposits are accepted at this rate.
-    const [solUsdRate, setSolUsdRate] = useState<number | null>(null);
-    const [asset, setAsset] = useState<DepositAsset>("usdc");
+    const [amount, setAmount] = useState(asset === "usdc" ? "100" : "");
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
+    const treasury = treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null;
     const solanaSender = useSolanaSender();
+    const evmSender = useEvmSender();
     const messageSigner = useSolanaMessageSigner();
-    // Solana wallet that pays for deposits: the login itself, or (EVM login) the signature-linked one.
+    // Solana wallet that pays for Solana-pool deposits: the login itself, or (EVM login) the signature-linked one.
     const [linkedSolana, setLinkedSolana] = useState<string | null | undefined>(undefined);
     const [linking, setLinking] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [done, setDone] = useState(false);
-    const [refundedUsd, setRefundedUsd] = useState(0);
-    // undefined = still loading; null = uncapped
-    const [capacityUsd, setCapacityUsd] = useState<number | null | undefined>(undefined);
+    const [refundedAmount, setRefundedAmount] = useState(0);
+    // undefined = still loading; null = uncapped. In the pool's asset.
+    const [capacity, setCapacity] = useState<number | null | undefined>(undefined);
     const [blockedReason, setBlockedReason] = useState<string | null>(null);
 
     useEffect(() => {
@@ -569,39 +574,31 @@ function PoolActionDialog({
             fetch(`/api/v1/lending/pools/${pool.id}/deposit-limit`)
                 .then((r) => r.json())
                 .then((d) => {
-                    setCapacityUsd(d.capacityUsd ?? null);
+                    setCapacity(d.capacityUsd ?? null);
                     if (d.paused) setBlockedReason("Lending is paused — deposits are temporarily closed.");
                     else if (d.allowed === false) setBlockedReason("Lending is in a closed beta and this wallet isn't on the allowlist yet.");
                     else if (d.capacityUsd === 0) setBlockedReason("This pool (or your wallet) has reached its beta deposit cap.");
+                    else if (d.error) setBlockedReason(d.error);
                 })
-                .catch(() => setCapacityUsd(null));
+                .catch(() => setCapacity(null));
         }
     }, [mode, pool.id, walletAddress]);
 
     useEffect(() => {
         if (mode === "deposit") {
-            fetch("/api/v1/lending/treasury")
-                .then(async (r) => {
-                    const body = await r.json().catch(() => ({}));
-                    if (!r.ok) throw new Error(body.error || "Lending treasury not configured");
-                    return body;
-                })
-                .then((d) => {
-                    setTreasury(d.treasuryAddress);
-                    setUsdcMint(typeof d.usdcMint === "string" ? d.usdcMint : null);
-                    setSolUsdRate(typeof d.solUsdRate === "number" ? d.solUsdRate : null);
-                })
+            fetchLendingTreasury()
+                .then(setTreasuryInfo)
                 .catch((err) => setError(err instanceof Error ? err.message : "Failed to load treasury address"));
         }
     }, [mode]);
 
     useEffect(() => {
-        if (mode !== "deposit" || !walletAddress) return;
+        if (mode !== "deposit" || !walletAddress || chain !== "solana") return;
         fetch("/api/v1/solana/link")
             .then((r) => (r.ok ? r.json() : { solanaAddress: null }))
             .then((d) => setLinkedSolana(d.solanaAddress ?? null))
             .catch(() => setLinkedSolana(null));
-    }, [mode, walletAddress]);
+    }, [mode, walletAddress, chain]);
 
     const linkSolanaWallet = async () => {
         if (!messageSigner || !walletAddress) return;
@@ -627,48 +624,46 @@ function PoolActionDialog({
         }
     };
 
-    const amountUsd = parseFloat(amount) || 0;
-    const lamports = asset === "sol" && solUsdRate ? solLamportsForUsd(amountUsd, solUsdRate) : 0;
-    const solAmountLabel = `${(lamports / LAMPORTS_PER_SOL).toLocaleString(undefined, { maximumFractionDigits: 9 })} SOL (devnet)`;
-    // Deposits are verified as coming from the signed-in wallet, so it must be a Solana account.
+    const amountValue = roundAmount(asset, parseFloat(amount) || 0);
+    const priceUsd = treasuryInfo?.pricesUsd[asset] ?? null;
     const signedInWithEvm = !!walletAddress && walletAddress.startsWith("0x");
-    const needsLink = signedInWithEvm && !linkedSolana;
-    const payerAddress = signedInWithEvm ? linkedSolana : walletAddress;
-    const canWalletSend = !!solanaSender && !!payerAddress && solanaSender.address === payerAddress;
+    // Solana pools: an EVM login pays from its linked Solana wallet. ETH pool: the login itself must be an Ethereum wallet.
+    const needsLink = chain === "solana" && signedInWithEvm && !linkedSolana;
+    const needsEvmLogin = chain === "ethereum" && !!walletAddress && !signedInWithEvm;
+    const payerAddress = chain === "ethereum" ? walletAddress : signedInWithEvm ? linkedSolana : walletAddress;
+    const canWalletSend = chain === "ethereum"
+        ? !!evmSender && !!payerAddress && evmSender.address.toLowerCase() === payerAddress.toLowerCase()
+        : !!solanaSender && !!payerAddress && solanaSender.address === payerAddress;
 
-    const sendSolWithWallet = async (): Promise<string> => {
-        if (!solanaSender || !treasury) throw new Error("Connect a Solana wallet first");
-        const connection = getConnection();
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-        const tx = new Transaction({ feePayer: new PublicKey(solanaSender.address), blockhash, lastValidBlockHeight }).add(
-            SystemProgram.transfer({
-                fromPubkey: new PublicKey(solanaSender.address),
-                toPubkey: new PublicKey(treasury),
-                lamports,
-            }),
-        );
-        const sig = await solanaSender.sendTransaction(tx, connection);
-        // The server only credits finalized transfers.
-        const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
-        if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
-        return sig;
-    };
-
-    const sendUsdcWithWallet = async (): Promise<string> => {
-        if (!solanaSender || !treasury || !usdcMint) throw new Error("Connect a Solana wallet first");
+    const sendWithWallet = async (): Promise<string> => {
+        if (!treasury || !treasuryInfo) throw new Error("Treasury address not loaded yet");
+        if (asset === "eth") {
+            if (!evmSender || !treasuryInfo.assets.eth) throw new Error("Connect an Ethereum wallet first");
+            return evmSender.sendNativeTransfer({
+                to: treasury,
+                valueWei: toBaseUnits("eth", amountValue),
+                chainId: ETH_CHAIN_IDS[treasuryInfo.assets.eth.network],
+            });
+        }
+        if (!solanaSender) throw new Error("Connect a Solana wallet first");
         const connection = getConnection();
         const owner = new PublicKey(solanaSender.address);
-        const mint = new PublicKey(usdcMint);
         const treasuryKey = new PublicKey(treasury);
-        const from = getAssociatedTokenAddressSync(mint, owner);
-        const to = getAssociatedTokenAddressSync(mint, treasuryKey, true);
-        const raw = BigInt(Math.round(amountUsd * 1_000_000));
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-        const tx = new Transaction({ feePayer: owner, blockhash, lastValidBlockHeight }).add(
-            createAssociatedTokenAccountIdempotentInstruction(owner, to, treasuryKey, mint),
-            createTransferCheckedInstruction(from, mint, to, owner, raw, 6),
-        );
+        const tx = new Transaction({ feePayer: owner, blockhash, lastValidBlockHeight });
+        if (asset === "sol") {
+            tx.add(SystemProgram.transfer({ fromPubkey: owner, toPubkey: treasuryKey, lamports: Number(toBaseUnits("sol", amountValue)) }));
+        } else {
+            const mint = new PublicKey(treasuryInfo.usdcMint);
+            const from = getAssociatedTokenAddressSync(mint, owner);
+            const to = getAssociatedTokenAddressSync(mint, treasuryKey, true);
+            tx.add(
+                createAssociatedTokenAccountIdempotentInstruction(owner, to, treasuryKey, mint),
+                createTransferCheckedInstruction(from, mint, to, owner, toBaseUnits("usdc", amountValue), 6),
+            );
+        }
         const sig = await solanaSender.sendTransaction(tx, connection);
+        // The server only credits finalized transfers.
         const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
         if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
         return sig;
@@ -679,7 +674,7 @@ function PoolActionDialog({
             setError("Connect a wallet first");
             return;
         }
-        if (!(amountUsd > 0)) {
+        if (!(amountValue > 0)) {
             setError("Enter a valid amount");
             return;
         }
@@ -689,7 +684,7 @@ function PoolActionDialog({
             const res = await fetch(`/api/v1/lending/pools/${pool.id}/withdraw`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
-                body: JSON.stringify({ amountUsd }),
+                body: JSON.stringify({ amountUsd: amountValue }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -714,58 +709,42 @@ function PoolActionDialog({
                         <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
                             <CheckCircle2 className="h-4 w-4" /> {mode === "deposit" ? "Deposit Verified" : "Withdrawal Requested"}
                         </div>
-                        {mode === "deposit" && refundedUsd > 0 && (
+                        {mode === "deposit" && refundedAmount > 0 && (
                             <p className="text-xs text-amber-500">
-                                ${fmt(refundedUsd)} was over the beta deposit cap and wasn&apos;t credited — a refund from the treasury has been queued (see My Positions).
+                                {formatAssetAmount(asset, refundedAmount)} was over the beta deposit cap and wasn&apos;t credited — a refund from the treasury has been queued (see My Positions).
                             </p>
                         )}
                         {mode === "withdraw" && (
                             <p className="text-xs text-muted-foreground">
-                                A platform admin will send the USDC from the treasury shortly — this pool has no signing key of its own.
+                                A platform admin will send the {symbol} from the treasury shortly — this pool has no signing key of its own.
                             </p>
                         )}
                         <Button size="sm" onClick={onDone} className="w-full h-8 text-xs">Close</Button>
                     </div>
                 ) : step === "amount" ? (
                     <div className="space-y-4">
-                        {mode === "deposit" && solUsdRate !== null && (
-                            <div>
-                                <Label className="text-xs">Pay with</Label>
-                                <div className="mt-1 grid grid-cols-2 gap-1 rounded-lg border border-border p-1">
-                                    {(["usdc", "sol"] as const).map((a) => (
-                                        <button
-                                            key={a}
-                                            type="button"
-                                            onClick={() => setAsset(a)}
-                                            className={`h-7 rounded-md text-xs font-medium transition-colors ${asset === a ? "bg-emerald-500/15 text-emerald-500" : "text-muted-foreground hover:text-foreground"}`}
-                                        >
-                                            {a === "usdc" ? "USDC" : "SOL (devnet)"}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
                         <div>
-                            <Label className="text-xs">Amount (USD)</Label>
-                            <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="mt-1" />
+                            <Label className="text-xs">Amount ({symbol})</Label>
+                            <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} className="mt-1" placeholder={`0 ${symbol}`} />
+                            {asset !== "usdc" && priceUsd !== null && amountValue > 0 && (
+                                <p className="text-[10px] text-muted-foreground mt-1">≈ ${fmt(amountValue * priceUsd)} — this pool is accounted in {symbol}; you earn and withdraw {symbol}.</p>
+                            )}
                             {mode === "withdraw" && maxWithdraw !== undefined && (
-                                <p className="text-[10px] text-muted-foreground mt-1">Max: ${fmt(maxWithdraw)}</p>
+                                <p className="text-[10px] text-muted-foreground mt-1">Max: {formatAssetAmount(asset, maxWithdraw)}</p>
                             )}
-                            {mode === "deposit" && typeof capacityUsd === "number" && capacityUsd > 0 && (
-                                <p className="text-[10px] text-muted-foreground mt-1">Beta limit: up to ${fmt(capacityUsd)}</p>
-                            )}
-                            {mode === "deposit" && asset === "sol" && solUsdRate !== null && amountUsd > 0 && (
-                                <p className="text-[10px] text-muted-foreground mt-1">
-                                    = {solAmountLabel} at the devnet test rate of ${fmt(solUsdRate)}/SOL
-                                </p>
+                            {mode === "deposit" && typeof capacity === "number" && capacity > 0 && (
+                                <p className="text-[10px] text-muted-foreground mt-1">Beta limit: up to {formatAssetAmount(asset, capacity)}</p>
                             )}
                             {mode === "deposit" && blockedReason && (
                                 <p className="text-[10px] text-amber-500 mt-1">{blockedReason}</p>
                             )}
+                            {mode === "deposit" && needsEvmLogin && (
+                                <p className="text-[10px] text-amber-500 mt-1">The ETH pool runs on Ethereum — sign in with an Ethereum wallet to deposit.</p>
+                            )}
                             {mode === "deposit" && needsLink && (
                                 <div className="mt-2 space-y-1">
                                     <p className="text-[10px] text-amber-500">
-                                        You&apos;re signed in with an EVM wallet. Pool deposits are paid in Solana USDC, so link your Solana wallet to this account (one signature, no fee).
+                                        You&apos;re signed in with an EVM wallet. This pool takes {symbol} on Solana, so link your Solana wallet to this account (one signature, no fee).
                                     </p>
                                     <Button size="sm" variant="outline" onClick={linkSolanaWallet} disabled={!messageSigner || linking || linkedSolana === undefined} className="w-full h-7 text-xs gap-1">
                                         {linking && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -773,7 +752,7 @@ function PoolActionDialog({
                                     </Button>
                                 </div>
                             )}
-                            {mode === "deposit" && signedInWithEvm && linkedSolana && (
+                            {mode === "deposit" && chain === "solana" && signedInWithEvm && linkedSolana && (
                                 <p className="text-[10px] text-muted-foreground mt-1">
                                     Paying from linked Solana wallet {linkedSolana.slice(0, 4)}…{linkedSolana.slice(-4)}.{!canWalletSend && " Connect that wallet to send in one click, or send manually and paste the signature."}
                                 </p>
@@ -789,12 +768,13 @@ function PoolActionDialog({
                                 size="sm"
                                 onClick={() => setStep("send")}
                                 disabled={
-                                    !(amountUsd > 0) || !treasury || !!blockedReason || capacityUsd === undefined || needsLink || (signedInWithEvm && linkedSolana === undefined)
-                                    || (typeof capacityUsd === "number" && amountUsd > capacityUsd)
+                                    !(amountValue > 0) || !treasury || !!blockedReason || capacity === undefined || needsLink || needsEvmLogin
+                                    || (chain === "solana" && signedInWithEvm && linkedSolana === undefined)
+                                    || (typeof capacity === "number" && amountValue > capacity)
                                 }
                                 className="w-full h-8 text-xs gap-1"
                             >
-                                {!treasury && <Loader2 className="h-3 w-3 animate-spin" />}
+                                {!treasury && !error && <Loader2 className="h-3 w-3 animate-spin" />}
                                 Continue
                             </Button>
                         ) : (
@@ -807,23 +787,21 @@ function PoolActionDialog({
                 ) : (
                     <OnChainSendStep
                         recipientAddress={treasury!}
-                        amountUsd={amountUsd}
-                        amountLabel={asset === "sol" ? solAmountLabel : undefined}
-                        helperText={asset === "sol"
-                            ? `Worth $${fmt(amountUsd)} in the pool. Make sure your wallet is on Devnet. Send with your connected wallet, or send the exact amount yourself and paste the signature.`
-                            : undefined}
-                        onSendWithWallet={canWalletSend ? (asset === "sol" ? sendSolWithWallet : usdcMint ? sendUsdcWithWallet : undefined) : undefined}
+                        amountUsd={amountValue}
+                        assetLabel={sendAssetLabel(treasuryInfo, asset)}
+                        chain={chain}
+                        onSendWithWallet={canWalletSend ? sendWithWallet : undefined}
                         submitLabel="Verify Deposit"
                         onSubmit={async (txSig) => {
                             if (!walletAddress) throw new Error("Connect a wallet first");
                             const res = await fetch(`/api/v1/lending/pools/${pool.id}/deposit`, {
                                 method: "POST",
                                 headers: { "Content-Type": "application/json", "x-wallet-address": walletAddress },
-                                body: JSON.stringify({ amountUsd, txSig, asset }),
+                                body: JSON.stringify({ amountUsd: amountValue, txSig, asset }),
                             });
                             const body = await res.json().catch(() => ({}));
                             if (!res.ok) throw new Error(body.error || "Deposit verification failed");
-                            setRefundedUsd(body.refundedUsd || 0);
+                            setRefundedAmount(body.refundedUsd || 0);
                             setDone(true);
                         }}
                     />

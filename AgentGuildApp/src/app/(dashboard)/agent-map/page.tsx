@@ -25,13 +25,12 @@ import {
     getTasksByOrg,
     getJobsByOrg,
     getProjectsByOrg,
-    createJob,
-    claimJob,
     type Agent,
     type Task,
     type Job,
     type Project,
 } from "@/lib/firestore";
+import { dispatchJob, assignJob } from "@/lib/jobs-client";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -81,22 +80,16 @@ export default function AgentMapPage() {
         try {
             setDispatching(true);
 
-            const jobId = await createJob({
-                orgId: currentOrg.id,
-                projectId: selectedProject === "all" ? "" : selectedProject,
-                title: prompt.slice(0, 120) + (prompt.length > 120 ? "\u2026" : ""),
-                description: prompt,
-                status: "open",
-                reward: reward || undefined,
-                requiredSkills: [],
-                postedByAddress: account?.address || "unknown",
-                priority,
-                createdAt: new Date(),
+            // Server-side: validates, assigns agentIds[0] as lead and the rest as
+            // collaborators, and records it all in the job's audit trail.
+            const { jobId } = await dispatchJob({
+              orgId: currentOrg.id,
+              projectId: selectedProject === "all" ? "" : selectedProject,
+              prompt,
+              agentIds,
+              priority,
+              reward: reward || undefined,
             });
-
-            for (const agentId of agentIds) {
-                await claimJob(jobId, agentId, currentOrg.id, selectedProject === "all" ? "" : selectedProject);
-            }
 
             try {
                 await addDoc(collection(db, "agentComms"), {
@@ -126,7 +119,7 @@ export default function AgentMapPage() {
         try {
             setDispatching(true);
             for (const a of assignments) {
-                await claimJob(a.jobId, a.agentId, currentOrg.id, selectedProject === "all" ? "" : selectedProject);
+                await assignJob(a.jobId, a.agentId);
             }
             await loadData();
         } catch (err) {
