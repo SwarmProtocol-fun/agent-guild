@@ -576,6 +576,31 @@ describe("module setup", () => {
     expect(w.createAppKit).toHaveBeenCalledWith(expect.objectContaining({ defaultNetwork: SOLANA_DEVNET }));
   });
 
+  it("moves a browser left on Solana back to Ethereum before AppKit starts", async () => {
+    localStorage.setItem("@appkit/active_caip_network_id", `solana:${SOLANA_DEVNET.id}`);
+    localStorage.setItem("@appkit/active_namespace", "solana");
+    w.createAppKit.mockImplementationOnce(() => {
+      // AppKit reads storage during createAppKit — it must already be EVM.
+      expect(localStorage.getItem("@appkit/active_caip_network_id")).toBe("eip155:1");
+      expect(localStorage.getItem("@appkit/active_namespace")).toBe("eip155");
+    });
+    await loadAdapter();
+    expect(w.createAppKit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Solana when the user chose Solana in the account menu", async () => {
+    localStorage.setItem("agentguild.loginChain", "solana");
+    localStorage.setItem("@appkit/active_caip_network_id", `solana:${SOLANA_DEVNET.id}`);
+    await loadAdapter();
+    expect(localStorage.getItem("@appkit/active_caip_network_id")).toBe(`solana:${SOLANA_DEVNET.id}`);
+  });
+
+  it("leaves a stored EVM network alone", async () => {
+    localStorage.setItem("@appkit/active_caip_network_id", "eip155:999");
+    await loadAdapter();
+    expect(localStorage.getItem("@appkit/active_caip_network_id")).toBe("eip155:999");
+  });
+
   it("ignores a garbage preference", async () => {
     localStorage.setItem("agentguild.loginChain", "dogechain");
     await loadAdapter();

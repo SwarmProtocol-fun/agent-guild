@@ -95,6 +95,24 @@ function writeLoginChainPref(ns: LoginNamespace) {
 const networkFor = (ns: LoginNamespace) => (ns === "eip155" ? evmNetworks[0] : solanaDevnet);
 const defaultNetwork = networkFor(typeof window !== "undefined" ? readLoginChainPref() : "eip155");
 
+// AppKit restores the last active network from storage and ignores
+// `defaultNetwork`, so browsers left on Solana Devnet would keep logging in
+// with Solana. Unless the user picked Solana in the account menu, start them
+// on EVM — the login path (personal_sign) that works across wallets.
+const APPKIT_NETWORK_KEY = "@appkit/active_caip_network_id";
+const APPKIT_NAMESPACE_KEY = "@appkit/active_namespace";
+export function resetStoredNetworkToLoginChain() {
+  try {
+    if (readLoginChainPref() !== "eip155") return;
+    if (!localStorage.getItem(APPKIT_NETWORK_KEY)?.startsWith("solana:")) return;
+    localStorage.setItem(APPKIT_NETWORK_KEY, `eip155:${evmNetworks[0].id}`);
+    localStorage.setItem(APPKIT_NAMESPACE_KEY, "eip155");
+  } catch {
+    // localStorage unavailable — AppKit falls back to defaultNetwork anyway.
+  }
+}
+if (typeof window !== "undefined") resetStoredNetworkToLoginChain();
+
 // Wallets pinned to the top of the connect modal (e.g. Tangem, which is
 // WalletConnect-only). Set NEXT_PUBLIC_FEATURED_WALLET_IDS to a comma-separated
 // list of WalletConnect Explorer IDs.
