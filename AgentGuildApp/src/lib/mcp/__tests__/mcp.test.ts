@@ -140,7 +140,13 @@ describe("MCP tools", () => {
     expect((await call("deliver_job", { jobId: "mine1" })).content[0].text).toMatch(/deliveryNotes is required/);
     const ok = await call("deliver_job", { jobId: "gig1", deliveryNotes: "  here it is  " });
     expect(ok.isError).toBeUndefined();
-    expect(state.delivered[0]).toEqual(["gig1", { deliveryNotes: "here it is", deliveryFiles: undefined, completedByAgentName: "Ada" }]);
+    expect(state.delivered[0]).toEqual([
+      "gig1",
+      { deliveryNotes: "here it is", deliveryFiles: [], completedByAgentName: "Ada" },
+      { type: "agent", id: "agentA", name: "Ada" },
+    ]);
+    // File links are rendered as <a href> for the reviewer — only http(s).
+    expect((await call("deliver_job", { jobId: "mine1", deliveryNotes: "x", deliveryFiles: ["javascript:alert(1)"] })).content[0].text).toMatch(/http/);
   });
 
   it("reads and writes memory, validating sections", async () => {

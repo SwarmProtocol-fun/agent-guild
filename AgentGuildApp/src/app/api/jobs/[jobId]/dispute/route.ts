@@ -16,6 +16,7 @@ import { NextRequest } from "next/server";
 import { getWalletAddress, requireOrgMember } from "@/lib/auth-guard";
 import { getJob, recordEscrowDisputed } from "@/lib/jobs-admin";
 import { fileDispute } from "@/lib/credit-ops/disputes";
+import { recordJobEvent, userActor } from "@/lib/job-audit";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ jobId: string }> }) {
   const { jobId } = await params;
@@ -71,6 +72,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ job
     if (onChainDisputeTxSig) {
       await recordEscrowDisputed(job.id, onChainDisputeTxSig);
     }
+    await recordJobEvent(job, "disputed", userActor(wallet), {
+      details: { disputeId: id, side: callerOrgId === job.orgId ? "buyer" : "seller", onChainDisputeTxSig: onChainDisputeTxSig ?? null },
+    });
 
     return Response.json({ ok: true, disputeId: id });
   } catch (err) {

@@ -57,6 +57,9 @@ service cloud.firestore {
     match /subscriptions/{document=**}          { allow read, write: if false; }
     match /validationStakes/{document=**}       { allow read, write: if false; }
     match /slashingEvents/{document=**}         { allow read, write: if false; }
+    // Job audit trail — append-only, written by the Admin SDK (lib/job-audit.ts),
+    // read through GET /api/jobs/:jobId/events. No client access at all.
+    match /jobEvents/{document=**}              { allow read, write: if false; }
     match /riskSignals/{document=**}            { allow read, write: if false; }
     match /fraudReviewQueue/{document=**}       { allow read, write: if false; }
     match /platformConnections/{document=**}    { allow read, write: if false; }
@@ -258,15 +261,31 @@ service cloud.firestore {
       allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged();
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId);
     }
-    // upfrontVerified*: set only by server-side on-chain payment verification
-    // (src/lib/solana/gig-payment-verify.ts) — a buyer must not be able to
-    // mark their own gig order as paid.
+    // Server-only job fields:
+    //  - upfrontVerified*: set only by server-side on-chain payment verification
+    //    (src/lib/solana/gig-payment-verify.ts) — a buyer must not be able to
+    //    mark their own gig order as paid.
+    //  - delivery / review / cancel / taskId: set only by the /api/jobs and
+    //    /api/v1/jobs routes (lib/jobs-admin.ts), which validate the transition
+    //    and write the audit trail. A client writing them directly could approve
+    //    work without a record, or forge a delivery for an agent.
+    function jobServerOnlyFields() {
+      return ['upfrontVerifiedAt', 'upfrontVerifiedLamports',
+              'deliveryNotes', 'deliveryFiles', 'deliveryHistory', 'completedByAgentName',
+              'reviewStatus', 'reviewNotes', 'reviewedBy', 'reviewedAt', 'reviewHistory',
+              'cancelledAt', 'cancelledBy', 'cancelReason', 'taskId', 'postedByAgentId'];
+    }
     match /jobs/{docId} {
-      allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
+      // Gig orders live in the buyer's org but the seller org fulfils them,
+      // so it may read them too (getIncomingGigOrders queries by
+      // sellerOrgId). Seller writes go through /api/jobs/:jobId/deliver.
+      allow read: if request.auth != null && (isOrgMember(resource.data.orgId) ||
+        isOrgMember(resource.data.get('sellerOrgId', null)));
+      allow delete: if request.auth != null && isOrgMember(resource.data.orgId);
       allow update: if request.auth != null && isOrgMember(resource.data.orgId) && orgIdUnchanged() &&
-        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['upfrontVerifiedAt', 'upfrontVerifiedLamports']);
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(jobServerOnlyFields());
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId) &&
-        !request.resource.data.keys().hasAny(['upfrontVerifiedAt', 'upfrontVerifiedLamports']);
+        !request.resource.data.keys().hasAny(jobServerOnlyFields());
     }
     match /kanbanBoards/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
@@ -414,7 +433,13 @@ service cloud.firestore {
     // 0-5 rating scale (src/lib/firestore.ts's GigReview.rating).
     match /gigs/{docId} {
       allow read: if request.auth != null;
+      // A person-sold gig (sellerType "person") must name the lister's own
+      // wallet as seller, and can't use on-chain escrow — escrow delivery is
+      // signed by an agent key (see /api/jobs/:jobId/deliver).
       allow create: if request.auth != null && isOrgMember(request.resource.data.agentOrgId) &&
+        (request.resource.data.get('sellerType', 'agent') != 'person' ||
+         (request.resource.data.get('sellerAddress', '') == request.auth.uid &&
+          request.resource.data.get('escrowEnabled', false) != true)) &&
         request.resource.data.get('orderCount', 0) == 0 &&
         request.resource.data.get('avgRating', 0) == 0 &&
         request.resource.data.get('ratingCount', 0) == 0;
@@ -427,7 +452,9 @@ service cloud.firestore {
         (isOrgMember(resource.data.agentOrgId) &&
          request.resource.data.agentOrgId == resource.data.agentOrgId &&
          !request.resource.data.diff(resource.data).affectedKeys()
-           .hasAny(['avgRating', 'ratingCount', 'orderCount'])) ||
+           .hasAny(['avgRating', 'ratingCount', 'orderCount', 'sellerType', 'sellerAddress']) &&
+         (resource.data.get('sellerType', 'agent') != 'person' ||
+          request.resource.data.get('escrowEnabled', false) != true)) ||
         (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['orderCount', 'updatedAt']) &&
          request.resource.data.orderCount == resource.data.orderCount + 1)
       );

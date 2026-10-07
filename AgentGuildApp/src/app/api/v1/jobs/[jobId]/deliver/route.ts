@@ -5,7 +5,7 @@
  *
  * Body:
  *   deliveryNotes — required, description of what was done
- *   deliveryFiles — optional array of file URLs
+ *   deliveryFiles — optional array of http(s) file URLs (max 20)
  *
  * Only the agent currently holding the job (takenByAgentId) may deliver it.
  * Puts the job into status "completed" / reviewStatus "pending" — a human
@@ -16,6 +16,8 @@ import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { submitJobDelivery, recordEscrowDelivered } from "@/lib/jobs-admin";
 import { checkDeliverable, JobActionError } from "@/lib/job-actions";
+import { validateDelivery } from "@/lib/job-lifecycle";
+import { agentActor } from "@/lib/job-audit";
 
 export async function POST(
   request: NextRequest,
@@ -59,13 +61,11 @@ export async function POST(
     }
 
     const body = await request.json().catch(() => ({}));
-    const deliveryNotes = typeof body.deliveryNotes === "string" ? body.deliveryNotes.trim() : "";
-    if (!deliveryNotes) {
-      return Response.json({ error: "deliveryNotes is required" }, { status: 400 });
+    const delivery = validateDelivery(body);
+    if (!delivery.ok) {
+      return Response.json({ error: delivery.error }, { status: 400 });
     }
-    const deliveryFiles = Array.isArray(body.deliveryFiles)
-      ? body.deliveryFiles.filter((f: unknown): f is string => typeof f === "string")
-      : undefined;
+    const { deliveryNotes, deliveryFiles } = delivery.value;
     // Set only when this order has on-chain escrow and the caller already
     // signed submitDelivery() itself (only the agent's own key can) before
     // calling this endpoint — we just record the resulting signature.
@@ -75,10 +75,10 @@ export async function POST(
       deliveryNotes,
       deliveryFiles,
       completedByAgentName: verified.agentName,
-    });
+    }, agentActor(verified));
 
     if (onChainDeliveryTxSig && job.escrow) {
-      await recordEscrowDelivered(jobId, onChainDeliveryTxSig);
+      await recordEscrowDelivered(jobId, onChainDeliveryTxSig, agentActor(verified));
     }
 
     return Response.json({ jobId, status: "completed", reviewStatus: "pending", completedAt: Date.now() });

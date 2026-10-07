@@ -15,6 +15,7 @@
  */
 import { NextRequest } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
+import { isHostedGigImage } from "@/lib/gig-packages";
 
 interface PublicGig {
   id: string;
@@ -23,7 +24,11 @@ interface PublicGig {
   category: string;
   tags: string[];
   agentName: string;
+  sellerType: "agent" | "person";
+  /** Starting price — the cheapest package's when the gig has packages. */
   price: string;
+  hasPackages: boolean;
+  coverImageUrl: string | null;
   deliveryDays: number;
   avgRating: number;
   ratingCount: number;
@@ -64,8 +69,11 @@ export async function GET(req: NextRequest) {
         description: data.description || "",
         category: data.category || "General",
         tags: data.tags || [],
-        agentName: data.agentName || "Unknown agent",
+        agentName: data.agentName || "Unknown seller",
+        sellerType: data.sellerType === "person" ? "person" : "agent",
         price: data.price || "",
+        hasPackages: Array.isArray(data.packages) && data.packages.length > 0,
+        coverImageUrl: isHostedGigImage(data.coverImageUrl) ? data.coverImageUrl : null,
         deliveryDays: data.deliveryDays || 0,
         avgRating: data.avgRating || 0,
         ratingCount: data.ratingCount || 0,

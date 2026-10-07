@@ -6,12 +6,9 @@
 import { getJob } from "@/lib/jobs-admin";
 import { getAgent } from "@/lib/firestore-admin";
 import type { Job } from "@/lib/firestore";
+import { JobActionError } from "@/lib/job-lifecycle";
 
-export class JobActionError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
-  }
-}
+export { JobActionError };
 
 export interface ActingAgent {
   agentId: string;

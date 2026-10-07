@@ -1,5 +1,8 @@
 /**
  * Job Detail Page — Review delivery, approve/reject, manage job lifecycle
+ *
+ * Every state change goes through /api/jobs/:jobId/* (lib/jobs-client.ts),
+ * so it's validated server-side and lands in the job's audit trail.
  */
 "use client";
 
@@ -23,21 +26,15 @@ import { useOrg } from "@/contexts/OrgContext";
 import { useSession } from "@/contexts/SessionContext";
 import {
   getJob,
-  reviewJobDelivery,
-  submitJobDelivery,
   getChannelsByProject,
   getJobComments,
   addJobComment,
   getAgentsByOrg,
   getAgent,
   getJobApplications,
-  applyToJob,
-  updateJobApplication,
-  hireApplicant,
   getCompletedJobsByAgent,
   getGigReviewByJob,
   addGigReview,
-  recordEscrowReleased,
   type Job,
   type JobComment,
   type Agent,
@@ -47,6 +44,17 @@ import {
 import { GigEscrowStatusCard } from "@/components/jobs/gig-escrow-status-card";
 import { GigEscrowApproveButton } from "@/components/jobs/gig-escrow-approve-button";
 import { GigEscrowDisputeSignButton } from "@/components/jobs/gig-escrow-dispute-sign-button";
+import { JobAuditTrail } from "@/components/jobs/job-audit-trail";
+import {
+  applyWithAgent,
+  cancelJobPosting,
+  deliverJob,
+  editJob,
+  hireApplication,
+  reviewJob,
+  reviseApplication,
+} from "@/lib/jobs-client";
+import { canCancel, canEdit, isAwaitingReview, isHttpUrl } from "@/lib/job-lifecycle";
 
 const SOLANA_ESCROW_AVAILABLE = process.env.NEXT_PUBLIC_WALLET_PROVIDER === "solana";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
@@ -68,6 +76,8 @@ import {
   ChevronDown,
   ChevronUp,
   Pencil,
+  Ban,
+  History,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -99,13 +109,30 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [reviewAction, setReviewAction] = useState<'approve' | 'reject'>('approve');
   const [reviewNotes, setReviewNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  /** Bumped after each action so the audit trail refetches. */
+  const [auditKey, setAuditKey] = useState(0);
+
+  // Edit / cancel (poster only, while open / before delivery)
+  const [editOpen, setEditOpen] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editReward, setEditReward] = useState("");
+  const [editPriority, setEditPriority] = useState<Job["priority"]>("medium");
+  const [editSkills, setEditSkills] = useState("");
+  const [savingJob, setSavingJob] = useState(false);
+  const [editJobError, setEditJobError] = useState<string | null>(null);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   // Delivery submission
   const [deliveryDialogOpen, setDeliveryDialogOpen] = useState(false);
   const [deliveryNotesInput, setDeliveryNotesInput] = useState("");
   const [deliveryFilesInput, setDeliveryFilesInput] = useState("");
-  const [deliveryAgentName, setDeliveryAgentName] = useState("");
   const [submittingDelivery, setSubmittingDelivery] = useState(false);
+  const [deliveryError, setDeliveryError] = useState<string | null>(null);
 
   // Comments
   const [comments, setComments] = useState<JobComment[]>([]);
@@ -122,6 +149,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   const [applyQuote, setApplyQuote] = useState("");
   const [applyMessage, setApplyMessage] = useState("");
   const [submittingApplication, setSubmittingApplication] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [hiringApplicationId, setHiringApplicationId] = useState<string | null>(null);
   const [hireError, setHireError] = useState<string | null>(null);
   const [editingApplicationId, setEditingApplicationId] = useState<string | null>(null);
@@ -186,8 +214,6 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       try {
         const jobData = await getJob(resolvedParams.jobId);
         setJob(jobData);
-        if (jobData?.completedByAgentName) setDeliveryAgentName(jobData.completedByAgentName);
-        else if (jobData?.claimedByAgentName) setDeliveryAgentName(jobData.claimedByAgentName);
         if (jobData?.gigId) setGigReview(await getGigReviewByJob(resolvedParams.jobId));
       } catch (error) {
         console.error("Failed to load job:", error);
@@ -224,14 +250,15 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     }
   };
 
-  const handleReview = async () => {
+  const handleReview = async (releaseTxSig?: string) => {
     if (!job) return;
     setSubmitting(true);
+    setReviewError(null);
     try {
-      await reviewJobDelivery(job.id, {
-        approve: reviewAction === 'approve',
+      const updated = await reviewJob(job.id, {
+        decision: reviewAction,
         notes: reviewNotes,
-        by: address || "Unknown",
+        ...(releaseTxSig ? { releaseTxSig } : {}),
       });
 
       if (job.projectId && currentOrg) {
@@ -254,30 +281,75 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         }
       }
 
-      const updated = await getJob(job.id);
       setJob(updated);
+      setAuditKey((k) => k + 1);
       setReviewDialogOpen(false);
       setReviewNotes("");
     } catch (error) {
       console.error("Failed to review job:", error);
+      setReviewError(error instanceof Error ? error.message : "Failed to submit review");
     } finally {
       setSubmitting(false);
     }
   };
 
-  /** Fires after the buyer signs approveDelivery() on-chain — records the
-   *  release tx, then runs the normal (off-chain) approval on top of it. */
+  /** Fires after the buyer signs approveDelivery() on-chain — the review
+   *  route records the release tx and approves in one call. */
   const handleEscrowApproved = async (releaseTxSig: string) => {
     if (!job) return;
     setEscrowApproveError(null);
+    await handleReview(releaseTxSig);
+  };
+
+  const openEdit = () => {
+    if (!job) return;
+    setEditTitle(job.title);
+    setEditDescription(job.description || "");
+    setEditReward(job.reward || "");
+    setEditPriority(job.priority);
+    setEditSkills((job.requiredSkills ?? []).join(", "));
+    setEditJobError(null);
+    setEditOpen(true);
+  };
+
+  const handleSaveJob = async () => {
+    if (!job) return;
+    setSavingJob(true);
+    setEditJobError(null);
     try {
-      await recordEscrowReleased(job.id, releaseTxSig);
+      const updated = await editJob(job.id, {
+        title: editTitle,
+        description: editDescription,
+        reward: editReward.trim() || null,
+        priority: editPriority,
+        requiredSkills: editSkills.split(",").map((s) => s.trim()).filter(Boolean),
+      });
+      setJob(updated);
+      setAuditKey((k) => k + 1);
+      setEditOpen(false);
     } catch (error) {
-      console.error("Failed to record escrow release:", error);
-      // Non-fatal — the on-chain release already succeeded; continue with
-      // the off-chain approval so the job isn't stuck even if this write failed.
+      setEditJobError(error instanceof Error ? error.message : "Failed to save changes");
+    } finally {
+      setSavingJob(false);
     }
-    await handleReview();
+  };
+
+  const handleCancelJob = async () => {
+    if (!job) return;
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await cancelJobPosting(job.id, cancelReason.trim());
+      setJob(await getJob(job.id));
+      setAuditKey((k) => k + 1);
+      await loadApplications();
+      setCancelOpen(false);
+      setCancelReason("");
+    } catch (error) {
+      setCancelError(error instanceof Error ? error.message : "Failed to cancel job");
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const handleFileDispute = async () => {
@@ -296,6 +368,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to file dispute");
       setDisputeFiled(true);
+      setAuditKey((k) => k + 1);
       if (disputeOnChainTxSig) {
         const updated = await getJob(job.id);
         setJob(updated);
@@ -333,17 +406,23 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
   const handleSubmitDelivery = async () => {
     if (!job || !deliveryNotesInput.trim()) return;
+    const files = deliveryFilesInput
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    const badFile = files.find((f) => !isHttpUrl(f));
+    if (badFile) {
+      setDeliveryError(`Not an http(s) link: ${badFile}`);
+      return;
+    }
     setSubmittingDelivery(true);
+    setDeliveryError(null);
     try {
-      const files = deliveryFilesInput
-        .split("\n")
-        .map((f) => f.trim())
-        .filter(Boolean);
-      await submitJobDelivery(job.id, {
+      const updated = await deliverJob(job.id, {
         deliveryNotes: deliveryNotesInput.trim(),
         deliveryFiles: files,
-        completedByAgentName: deliveryAgentName.trim() || "Unknown agent",
       });
+      const deliveredBy = updated.completedByAgentName || "Unknown agent";
 
       if (job.projectId && currentOrg) {
         try {
@@ -354,7 +433,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               senderId: "system",
               senderName: "Agent Guild",
               senderType: "system",
-              content: `📦 **Job Delivered**\n\nJob: "${job.title}"\nDelivered by: @${deliveryAgentName.trim() || "Unknown agent"}\n\n${deliveryNotesInput.trim()}`,
+              content: `📦 **Job Delivered**\n\nJob: "${job.title}"\nDelivered by: @${deliveredBy}\n\n${deliveryNotesInput.trim()}`,
               orgId: currentOrg.id,
               createdAt: serverTimestamp(),
             });
@@ -364,13 +443,14 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         }
       }
 
-      const updated = await getJob(job.id);
       setJob(updated);
+      setAuditKey((k) => k + 1);
       setDeliveryDialogOpen(false);
       setDeliveryNotesInput("");
       setDeliveryFilesInput("");
     } catch (error) {
       console.error("Failed to submit delivery:", error);
+      setDeliveryError(error instanceof Error ? error.message : "Failed to submit delivery");
     } finally {
       setSubmittingDelivery(false);
     }
@@ -401,15 +481,14 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     const agent = orgAgents.find(a => a.id === applyAgentId);
     if (!agent) return;
     setSubmittingApplication(true);
+    setApplyError(null);
     try {
-      await applyToJob({
-        jobId: job.id,
-        orgId: currentOrg.id,
+      await applyWithAgent(job.id, {
         agentId: agent.id,
-        agentName: agent.name,
         quote: applyQuote.trim() || undefined,
         message: applyMessage.trim() || undefined,
       });
+      setAuditKey((k) => k + 1);
       setApplyDialogOpen(false);
       setApplyAgentId(""); setApplyQuote(""); setApplyMessage("");
       const updated = await getJob(job.id);
@@ -417,6 +496,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
       await loadApplications();
     } catch (error) {
       console.error("Failed to submit application:", error);
+      setApplyError(error instanceof Error ? error.message : "Failed to submit application");
     } finally {
       setSubmittingApplication(false);
     }
@@ -430,14 +510,15 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   };
 
   const handleSaveEditApplication = async () => {
-    if (!editingApplicationId) return;
+    if (!editingApplicationId || !job) return;
     setSavingEdit(true);
     setEditError(null);
     try {
-      await updateJobApplication(editingApplicationId, {
-        quote: editQuote.trim() || undefined,
-        message: editMessage.trim() || undefined,
+      await reviseApplication(job.id, editingApplicationId, {
+        quote: editQuote.trim(),
+        message: editMessage.trim(),
       });
+      setAuditKey((k) => k + 1);
       setEditingApplicationId(null);
       await loadApplications();
     } catch (error) {
@@ -453,7 +534,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     setHiringApplicationId(application.id);
     setHireError(null);
     try {
-      await hireApplicant(job.id, application, currentOrg.id, job.projectId || "");
+      await hireApplication(job.id, application.id);
 
       if (job.projectId && currentOrg) {
         try {
@@ -476,6 +557,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
       const updated = await getJob(job.id);
       setJob(updated);
+      setAuditKey((k) => k + 1);
       await loadApplications();
     } catch (error) {
       console.error("Failed to hire applicant:", error);
@@ -507,9 +589,19 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
     high: "bg-orange-100 text-orange-700 dark:bg-orange-950/40 dark:text-orange-400",
   };
 
-  const canReview = job.status === 'completed' && job.deliveryNotes && !job.reviewStatus;
-  const canDeliver = job.status === 'in_progress';
+  // Buyer = the posting org; seller = whoever does the work (a different org only for gig orders).
+  const isBuyer = !!currentOrg && currentOrg.id === job.orgId;
+  const isSeller = !!currentOrg && currentOrg.id === (job.gigId && job.sellerOrgId ? job.sellerOrgId : job.orgId);
+  // Every delivery sets reviewStatus "pending" — that, not a missing
+  // reviewStatus, is what "awaiting review" means.
+  const canReview = isBuyer && isAwaitingReview(job);
+  // Person-sold gig orders (Gig.sellerType "person") have no assigned agent — the seller delivers directly.
+  const canDeliver = isSeller && job.status === 'in_progress' && (!!job.takenByAgentId || !!job.gigId);
   const canApply = job.status === 'open' && job.hiringMode === 'applications';
+  const canEditJob = isBuyer && canEdit(job);
+  const canCancelJob = isBuyer && canCancel(job).ok;
+  const deliveries = job.deliveryHistory ?? [];
+  const reviews = job.reviewHistory ?? [];
 
   const sortedApplications = [...applications].sort((a, b) => {
     if (applySort === 'quote_asc') return parseQuoteValue(a.quote) - parseQuoteValue(b.quote);
@@ -520,8 +612,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
 
   return (
     <div className="container mx-auto p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1 min-w-0">
           <Link href="/jobs">
             <Button variant="ghost" size="sm" className="mb-2">
               <ChevronLeft className="h-4 w-4 mr-1" />
@@ -540,10 +632,21 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
           </div>
         </div>
 
+        <div className="flex flex-wrap gap-2 justify-end">
+        {canEditJob && (
+          <Button variant="outline" onClick={openEdit}>
+            <Pencil className="h-4 w-4 mr-2" />Edit
+          </Button>
+        )}
+        {canCancelJob && (
+          <Button variant="outline" className="text-destructive" onClick={() => { setCancelError(null); setCancelOpen(true); }}>
+            <Ban className="h-4 w-4 mr-2" />Cancel job
+          </Button>
+        )}
         {canReview && (
           <div className="flex gap-2">
             <Button onClick={() => { setReviewAction('reject'); setReviewDialogOpen(true); }} variant="outline" className="text-destructive">
-              <XCircle className="h-4 w-4 mr-2" />Reject
+              <XCircle className="h-4 w-4 mr-2" />Request Revisions
             </Button>
             <Button onClick={() => { setReviewAction('approve'); setReviewDialogOpen(true); }} className="bg-emerald-600 hover:bg-emerald-700">
               <CheckCircle2 className="h-4 w-4 mr-2" />Approve
@@ -568,7 +671,15 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             <AlertCircle className="h-4 w-4 mr-2" />Dispute
           </Button>
         )}
+        </div>
       </div>
+
+      {job.status === 'closed' && Boolean(job.cancelledAt) && (
+        <div className="p-3 rounded-md border border-border bg-muted/40 text-sm">
+          <span className="font-medium">Cancelled</span> {fmtDateTime(job.cancelledAt)}
+          {job.cancelReason && <span className="text-muted-foreground"> — {job.cancelReason}</span>}
+        </div>
+      )}
 
       <div className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
@@ -709,6 +820,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <FileText className="h-5 w-5 text-emerald-600" />Delivery
+                  {deliveries.length > 1 && <Badge variant="outline" className="text-xs">Revision {deliveries.length}</Badge>}
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -720,7 +832,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                   <div>
                     <div className="text-sm font-medium mb-2">Attached Files:</div>
                     <div className="space-y-2">
-                      {job.deliveryFiles.map((fileUrl, i) => (
+                      {job.deliveryFiles.filter(isHttpUrl).map((fileUrl, i) => (
                         <a key={i} href={fileUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-sm p-2 rounded bg-background hover:bg-muted transition-colors border">
                           <Upload className="h-4 w-4" />
                           <span className="truncate">{fileUrl.split('/').pop() || `file-${i + 1}`}</span>
@@ -735,6 +847,38 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                     Submitted {fmtDateTime(job.completedAt)}
                   </div>
                 ) : null}
+              </CardContent>
+            </Card>
+          )}
+
+          {deliveries.length > 1 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2"><History className="h-4 w-4" />Revision history</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ol className="space-y-3">
+                  {deliveries.slice(0, -1).map((d, i) => {
+                    // The review that came after delivery i is the one that sent it back.
+                    const verdict = reviews.find((r) => r.at >= d.at && (i + 1 >= deliveries.length || r.at <= deliveries[i + 1].at));
+                    return (
+                      <li key={i} className="border rounded-md p-3 text-sm space-y-2">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground">Revision {i + 1}</span>
+                          <span>{fmtDateTime(d.at)}</span>
+                        </div>
+                        <p className="whitespace-pre-wrap text-muted-foreground line-clamp-6">{d.notes}</p>
+                        {d.files.length > 0 && <p className="text-xs text-muted-foreground">{d.files.length} file{d.files.length === 1 ? "" : "s"} attached</p>}
+                        {verdict && (
+                          <div className="text-xs border-l-2 border-destructive/50 pl-2">
+                            <span className="font-medium">{verdict.status === "approved" ? "Approved" : "Sent back"}</span>
+                            {verdict.notes && <span className="text-muted-foreground">: {verdict.notes}</span>}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
               </CardContent>
             </Card>
           )}
@@ -848,47 +992,7 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             </Card>
           )}
 
-          <Card>
-            <CardHeader><CardTitle className="text-lg flex items-center gap-2"><Clock className="h-4 w-4" />Activity</CardTitle></CardHeader>
-            <CardContent>
-              <ul className="space-y-3 text-sm">
-                <li className="flex gap-2">
-                  <span className="text-muted-foreground shrink-0">📢</span>
-                  <div>
-                    <div>Job posted</div>
-                    <div className="text-xs text-muted-foreground">{fmtDateTime(job.createdAt)}</div>
-                  </div>
-                </li>
-                {Boolean(job.claimedAt || job.takenByAgentId) && (
-                  <li className="flex gap-2">
-                    <span className="text-muted-foreground shrink-0">🤖</span>
-                    <div>
-                      <div>Claimed by {job.claimedByAgentName || job.takenByAgentId}</div>
-                      {Boolean(job.claimedAt) && <div className="text-xs text-muted-foreground">{fmtDateTime(job.claimedAt)}</div>}
-                    </div>
-                  </li>
-                )}
-                {Boolean(job.completedAt) && (
-                  <li className="flex gap-2">
-                    <span className="text-muted-foreground shrink-0">📦</span>
-                    <div>
-                      <div>Delivered by {job.completedByAgentName}</div>
-                      <div className="text-xs text-muted-foreground">{fmtDateTime(job.completedAt)}</div>
-                    </div>
-                  </li>
-                )}
-                {Boolean(job.reviewedAt) && (
-                  <li className="flex gap-2">
-                    <span className="text-muted-foreground shrink-0">{job.reviewStatus === 'approved' ? '✅' : '↩️'}</span>
-                    <div>
-                      <div>{job.reviewStatus === 'approved' ? 'Approved' : 'Sent back for revisions'} by {job.reviewedBy}</div>
-                      <div className="text-xs text-muted-foreground">{fmtDateTime(job.reviewedAt)}</div>
-                    </div>
-                  </li>
-                )}
-              </ul>
-            </CardContent>
-          </Card>
+          <JobAuditTrail job={job} refreshKey={auditKey} />
         </div>
       </div>
 
@@ -929,13 +1033,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Submit Delivery</DialogTitle>
-            <DialogDescription>Submit the completed work for review.</DialogDescription>
+            <DialogDescription>
+              Hand in the work on behalf of {job.claimedByAgentName || "the assigned agent"}. It goes to the poster for review, and the audit trail records that you submitted it.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div>
-              <label className="text-sm font-medium mb-2 block">Completed by</label>
-              <Input placeholder="Agent name" value={deliveryAgentName} onChange={(e) => setDeliveryAgentName(e.target.value)} />
-            </div>
+            {deliveryError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {deliveryError}
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium mb-2 block">Delivery notes <span className="text-destructive">*</span></label>
               <Textarea placeholder="Describe what was done, deliverables, and any notes for the reviewer..." value={deliveryNotesInput} onChange={(e) => setDeliveryNotesInput(e.target.value)} rows={5} />
@@ -961,6 +1068,11 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             <DialogDescription>Pitch one of your agents for this job with a price quote.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {applyError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {applyError}
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium mb-2 block">Agent <span className="text-destructive">*</span></label>
               <Select value={applyAgentId} onValueChange={setApplyAgentId}>
@@ -991,10 +1103,10 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         </DialogContent>
       </Dialog>
 
-      <Dialog open={reviewDialogOpen} onOpenChange={setReviewDialogOpen}>
+      <Dialog open={reviewDialogOpen} onOpenChange={(open) => { setReviewDialogOpen(open); if (!open) setReviewError(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{reviewAction === 'approve' ? 'Approve Delivery' : 'Reject Delivery'}</DialogTitle>
+            <DialogTitle>{reviewAction === 'approve' ? 'Approve Delivery' : 'Request Revisions'}</DialogTitle>
             <DialogDescription>{reviewAction === 'approve' ? 'Mark this job as successfully completed and approved.' : 'Send this job back for revisions. The agent will be notified.'}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -1002,6 +1114,11 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               <label className="text-sm font-medium mb-2 block">Feedback {reviewAction === 'reject' && <span className="text-destructive">*</span>}</label>
               <Textarea placeholder={reviewAction === 'approve' ? "Great work! (optional)" : "Please explain what needs to be changed..."} value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} rows={4} />
             </div>
+            {reviewError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {reviewError}
+              </div>
+            )}
             {escrowApproveError && (
               <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
                 {escrowApproveError}
@@ -1020,8 +1137,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                   <p className="text-xs text-destructive">This deployment isn't configured for Solana wallets — can't release on-chain escrow here.</p>
                 )
               ) : (
-                <Button onClick={handleReview} disabled={submitting || (reviewAction === 'reject' && !reviewNotes.trim())} className={reviewAction === 'approve' ? "bg-emerald-600 hover:bg-emerald-700" : "bg-destructive hover:bg-destructive/90"}>
-                  {submitting ? "Submitting..." : reviewAction === 'approve' ? 'Approve' : 'Reject'}
+                <Button onClick={() => handleReview()} disabled={submitting || (reviewAction === 'reject' && !reviewNotes.trim())} className={reviewAction === 'approve' ? "bg-emerald-600 hover:bg-emerald-700" : "bg-destructive hover:bg-destructive/90"}>
+                  {submitting ? "Submitting..." : reviewAction === 'approve' ? 'Approve' : 'Send Back'}
                 </Button>
               )}
             </div>
@@ -1069,6 +1186,90 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Job</DialogTitle>
+            <DialogDescription>Details can change until an agent is assigned. Every change is logged in the audit trail.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {editJobError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {editJobError}
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium mb-2 block">Title <span className="text-destructive">*</span></label>
+              <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} maxLength={200} />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Description</label>
+              <Textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={5} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium mb-2 block">Reward</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
+                  <Input className="pl-7" value={editReward} onChange={(e) => setEditReward(e.target.value)} placeholder="None" />
+                </div>
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-2 block">Priority</label>
+                <Select value={editPriority} onValueChange={(v) => setEditPriority(v as Job["priority"])}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="low">Low</SelectItem>
+                    <SelectItem value="medium">Medium</SelectItem>
+                    <SelectItem value="high">High</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-2 block">Required skills (comma-separated)</label>
+              <Input value={editSkills} onChange={(e) => setEditSkills(e.target.value)} placeholder="research, writing" />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setEditOpen(false)} disabled={savingJob}>Cancel</Button>
+              <Button onClick={handleSaveJob} disabled={savingJob || !editTitle.trim()}>
+                {savingJob ? "Saving..." : "Save Changes"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel This Job</DialogTitle>
+            <DialogDescription>
+              {job.takenByAgentId
+                ? `${job.claimedByAgentName || "The assigned agent"} is working on this. Cancelling closes the job and their task.`
+                : "The job comes off the board and any pending applications are declined."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {cancelError && (
+              <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
+                {cancelError}
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium mb-2 block">Reason (optional)</label>
+              <Textarea value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} rows={3} placeholder="Shown to the agent and kept in the audit trail" />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setCancelOpen(false)} disabled={cancelling}>Keep Job</Button>
+              <Button onClick={handleCancelJob} disabled={cancelling} className="bg-destructive hover:bg-destructive/90">
+                {cancelling ? "Cancelling..." : "Cancel Job"}
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

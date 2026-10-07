@@ -20,28 +20,35 @@ import { Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } f
 import { Button } from "@/components/ui/button";
 import { useAgentGuildWrite } from "@/hooks/useAgentGuildWrite";
 import { getConnection } from "@/lib/solana/client";
-import { orderGig, type Gig } from "@/lib/firestore";
+import { orderGig, type Gig, type GigPackage } from "@/lib/firestore";
 
 interface GigEscrowOrderFormProps {
   gig: Gig; // caller guarantees escrowEnabled, priceLamports, sellerSolanaAddress are set
+  /** The tier being ordered, for gigs with packages — its price replaces the gig's. */
+  pkg?: GigPackage;
   buyerOrgId: string;
   requirements: string;
   onOrdered: (jobId: string) => void;
   onError: (message: string) => void;
 }
 
-export function GigEscrowOrderForm({ gig, buyerOrgId, requirements, onOrdered, onError }: GigEscrowOrderFormProps) {
+export function GigEscrowOrderForm({ gig, pkg, buyerOrgId, requirements, onOrdered, onError }: GigEscrowOrderFormProps) {
   const { publicKey, signTransaction, connected } = useWallet();
   const { setVisible } = useWalletModal();
   const { postTask, state } = useAgentGuildWrite();
   const [placing, setPlacing] = useState(false);
   const [stepLabel, setStepLabel] = useState<string | null>(null);
 
-  const totalLamports = gig.priceLamports ?? 0;
+  const totalLamports = (pkg ? pkg.priceLamports : gig.priceLamports) ?? 0;
+  const deliveryDays = pkg?.deliveryDays ?? gig.deliveryDays;
   const upfrontLamports = Math.floor(totalLamports / 2);
   const escrowLamports = totalLamports - upfrontLamports;
 
   const handlePlaceOrder = async () => {
+    if (totalLamports <= 0) {
+      onError("This package has no SOL price set");
+      return;
+    }
     if (!connected || !publicKey || !signTransaction) {
       setVisible(true);
       return;
@@ -65,7 +72,7 @@ export function GigEscrowOrderForm({ gig, buyerOrgId, requirements, onOrdered, o
 
       // 2. Fund the remaining half into on-chain escrow via the agent_guild program.
       setStepLabel("Funding on-chain escrow...");
-      const deadlineUnix = Math.floor(Date.now() / 1000) + Math.max(1, gig.deliveryDays) * 86400 + 86400;
+      const deadlineUnix = Math.floor(Date.now() / 1000) + Math.max(1, deliveryDays) * 86400 + 86400;
       const result = await postTask(
         gig.title,
         gig.description,
@@ -91,7 +98,8 @@ export function GigEscrowOrderForm({ gig, buyerOrgId, requirements, onOrdered, o
           escrowLamports,
           upfrontTransferTxSig,
           fundTxSig: result.txSig,
-        }
+        },
+        pkg?.id,
       );
       // Kick off server-side on-chain verification of the upfront payment so
       // the seller sees it as verified. It can lag until the transfer

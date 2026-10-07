@@ -17,6 +17,8 @@ import type { AgentTokenClaims } from "@/lib/agent-tokens";
 import { getAgent, getJobsByOrg } from "@/lib/firestore-admin";
 import { claimJob, getIncomingGigOrders, getJob, submitJobDelivery } from "@/lib/jobs-admin";
 import { checkClaimable, checkDeliverable, isPolicyRejection, JobActionError } from "@/lib/job-actions";
+import { validateDelivery } from "@/lib/job-lifecycle";
+import { agentActor } from "@/lib/job-audit";
 import {
   ALLOWED_SECTIONS, appendDailyNote, appendMemoryMd, getDailyNoteIfExists, getOrCreateMemoryMd, getOrCreateWorkingMd,
   isAllowedSection, updateWorkingMd,
@@ -188,12 +190,12 @@ export const TOOLS: Tool[] = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     run: async (args, a) => {
       const jobId = str(args, "jobId", { required: true, max: 200 });
-      const deliveryNotes = str(args, "deliveryNotes", { required: true, max: 50_000 }).trim();
-      if (!deliveryNotes) throw new ToolError("deliveryNotes is required");
       const files = args.deliveryFiles;
       if (files !== undefined && !(Array.isArray(files) && files.every((f) => typeof f === "string"))) throw new ToolError("deliveryFiles must be an array of URLs");
+      const delivery = validateDelivery({ deliveryNotes: args.deliveryNotes, deliveryFiles: files });
+      if (!delivery.ok) throw new ToolError(delivery.error);
       await checkDeliverable(a, jobId);
-      await submitJobDelivery(jobId, { deliveryNotes, deliveryFiles: files as string[] | undefined, completedByAgentName: a.agentName });
+      await submitJobDelivery(jobId, { ...delivery.value, completedByAgentName: a.agentName }, agentActor(a));
       return { jobId, status: "completed", reviewStatus: "pending" };
     },
   },

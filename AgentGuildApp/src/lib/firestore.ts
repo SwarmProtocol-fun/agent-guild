@@ -809,6 +809,8 @@ export interface Job {
   reward?: string;
   requiredSkills: string[];
   postedByAddress: string;
+  /** Set when an agent posted the job via POST /api/v1/jobs (postedByAddress is then "agent:<id>"). */
+  postedByAgentId?: string;
   takenByAgentId?: string;
   priority: 'low' | 'medium' | 'high';
   claimedAt?: unknown;
@@ -823,6 +825,8 @@ export interface Job {
   minTrustScore?: number;
   /** applications mode only: denormalized count, incremented on each application */
   applicationCount?: number;
+  /** Gig orders only: which GigPackage tier was ordered, when the gig has packages. */
+  gigPackageId?: GigPackageTier;
   /** Set when this job was created by ordering a Gig — links back to the listing. */
   gigId?: string;
   /** Gig orders only: the org that owns the fulfilling agent (may differ from `orgId`,
@@ -847,6 +851,12 @@ export interface Job {
   /** Every delivery, oldest first. deliveryNotes only holds the latest, so a rejected
    *  delivery's text would otherwise be lost (preference export — lib/preferences.ts). */
   deliveryHistory?: { notes: string; files: string[]; at: number }[];
+  /** The task auto-created for the assigned agent (server-side claims only) — closed on approval/cancel. */
+  taskId?: string;
+  /** Set when the poster withdraws the job (status → "closed"). */
+  cancelledAt?: unknown;
+  cancelledBy?: string;
+  cancelReason?: string;
   // Hedera Onchain Escrow
   hederaScheduledTxId?: string; // Hedera ScheduleId (e.g., "0.0.123456")
   hederaBountyHbar?: string; // Bounty amount in HBAR
@@ -862,16 +872,24 @@ export interface Job {
   updatedAt?: unknown;
 }
 
+/**
+ * Post a job. Goes through POST /api/jobs so it's validated server-side and
+ * recorded in the audit trail; the session wallet becomes postedByAddress
+ * and the status always starts "open", whatever the caller passes for those.
+ */
 export async function createJob(data: Omit<Job, "id">): Promise<string> {
-  const clean = Object.fromEntries(
-    Object.entries(data).filter(([, v]) => v !== undefined)
-  );
-  const ref = await addDoc(collection(db, "jobs"), {
-    ...clean,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
+  const { postJob } = await import("./jobs-client");
+  return postJob(data.orgId, {
+    title: data.title,
+    description: data.description,
+    reward: data.reward,
+    requiredSkills: data.requiredSkills,
+    priority: data.priority,
+    projectId: data.projectId,
+    hiringMode: data.hiringMode,
+    minCompletedJobs: data.minCompletedJobs,
+    minTrustScore: data.minTrustScore,
   });
-  return ref.id;
 }
 
 export async function getJob(jobId: string): Promise<Job | null> {
@@ -1013,49 +1031,8 @@ export interface JobReviewEvent {
   notes?: string;
 }
 
-/**
- * The buyer's verdict on a delivery: approve (job completes) or send back
- * for revisions. Appends to reviewHistory. Empty notes clear reviewNotes —
- * passing `undefined` to updateDoc throws, which used to fail every review
- * submitted without notes.
- */
-export async function reviewJobDelivery(
-  jobId: string,
-  decision: { approve: boolean; notes: string; by: string },
-): Promise<void> {
-  const status = decision.approve ? 'approved' : 'rejected';
-  const notes = decision.notes.trim();
-  const event: JobReviewEvent = { status, at: Date.now(), by: decision.by, ...(notes ? { notes } : {}) };
-  await updateDoc(doc(db, "jobs", jobId), {
-    reviewStatus: status,
-    reviewNotes: notes || deleteField(),
-    reviewedBy: decision.by,
-    reviewedAt: new Date(),
-    status: decision.approve ? 'completed' : 'in_progress',
-    reviewHistory: arrayUnion(event),
-    updatedAt: serverTimestamp(),
-  });
-}
-
 export async function updateJob(jobId: string, data: Partial<Job>): Promise<void> {
   await updateDoc(doc(db, "jobs", jobId), { ...data, updatedAt: serverTimestamp() });
-}
-
-export async function submitJobDelivery(jobId: string, data: {
-  deliveryNotes: string;
-  deliveryFiles?: string[];
-  completedByAgentName: string;
-}): Promise<void> {
-  await updateDoc(doc(db, "jobs", jobId), {
-    status: "completed",
-    deliveryNotes: data.deliveryNotes,
-    deliveryFiles: data.deliveryFiles ?? [],
-    completedByAgentName: data.completedByAgentName,
-    completedAt: serverTimestamp(),
-    reviewStatus: "pending",
-    deliveryHistory: arrayUnion({ notes: data.deliveryNotes, files: data.deliveryFiles ?? [], at: Date.now() }),
-    updatedAt: serverTimestamp(),
-  });
 }
 
 export async function deleteJob(jobId: string): Promise<void> {
@@ -1101,7 +1078,7 @@ export interface JobApplication {
   message?: string;
   status: 'pending' | 'accepted' | 'rejected';
   createdAt: unknown;
-  /** Set each time the applicant revises their quote/pitch via updateJobApplication(). */
+  /** Set each time the applicant revises their quote/pitch (PATCH /api/jobs/:jobId/applications/:id). */
   updatedAt?: unknown;
 }
 
@@ -1109,45 +1086,6 @@ export async function getJobApplications(jobId: string): Promise<JobApplication[
   const q = query(collection(db, "jobApplications"), where("jobId", "==", jobId));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as JobApplication));
-}
-
-export async function applyToJob(data: Omit<JobApplication, "id" | "status" | "createdAt">): Promise<string> {
-  const ref = await addDoc(collection(db, "jobApplications"), {
-    ...data,
-    status: "pending",
-    createdAt: serverTimestamp(),
-  });
-  await updateDoc(doc(db, "jobs", data.jobId), { applicationCount: increment(1) });
-  return ref.id;
-}
-
-/**
- * Revise a pending application's quote/pitch — the counter-offer step: a
- * bidder adjusts price after seeing the field is competitive, without
- * withdrawing and re-applying (which would lose their place/timestamp).
- * Only valid while the application is still "pending" — once hired or
- * rejected, the quote is part of the historical record.
- */
-export async function updateJobApplication(
-  applicationId: string,
-  data: Partial<Pick<JobApplication, "quote" | "message">>,
-): Promise<void> {
-  await updateDoc(doc(db, "jobApplications", applicationId), { ...data, updatedAt: serverTimestamp() });
-}
-
-/** Accept one application, reject the rest, and assign the job to the hired agent. */
-export async function hireApplicant(jobId: string, application: JobApplication, orgId: string, projectId: string): Promise<void> {
-  // Routes through claimJob so hiring respects credit-policy enforcement and
-  // auto-creates the agent's task, same as every other job-assignment path.
-  await claimJob(jobId, application.agentId, orgId, projectId, application.agentName);
-
-  const others = (await getJobApplications(jobId)).filter(a => a.id !== application.id && a.status === "pending");
-  const batch = writeBatch(db);
-  batch.update(doc(db, "jobApplications", application.id), { status: "accepted" });
-  for (const other of others) {
-    batch.update(doc(db, "jobApplications", other.id), { status: "rejected" });
-  }
-  await batch.commit();
 }
 
 /** An agent's completed & approved job history — used to render their portfolio. */
@@ -1176,8 +1114,36 @@ export async function getIncomingGigOrders(sellerOrgId: string): Promise<Job[]> 
 // the seller agent's org are usually different, which is the whole point of
 // a marketplace rather than an internal job board.
 
+/** One pricing tier on a gig (Fiverr-style Basic / Standard / Premium). */
+export interface GigPackage {
+  id: GigPackageTier;
+  name: string;
+  description: string;
+  /** Display price, free text like Gig.price (e.g. "150", or "0.5 SOL" on escrow gigs) */
+  price: string;
+  /** Authoritative on-chain price for this tier when the gig is escrowEnabled. */
+  priceLamports?: number;
+  deliveryDays: number;
+  revisions: number;
+  /** What's included — rendered as a checklist on the gig page. */
+  features: string[];
+}
+
+export type GigPackageTier = "basic" | "standard" | "premium";
+export const GIG_PACKAGE_TIERS: GigPackageTier[] = ["basic", "standard", "premium"];
+
+export interface GigFaq {
+  question: string;
+  answer: string;
+}
+
 export interface Gig {
   id: string;
+  /** Who fulfils orders: one of the org's agents (default), or a person in the org.
+   *  Person gigs leave agentId empty; agentName is the person's display name. */
+  sellerType?: "agent" | "person";
+  /** Person gigs only: the wallet of the member who listed it. */
+  sellerAddress?: string;
   agentId: string;
   agentOrgId: string;
   agentName: string;
@@ -1198,6 +1164,13 @@ export interface Gig {
   priceLamports?: number;
   /** Seller agent's Solana address at the time the gig was listed (escrowEnabled only). */
   sellerSolanaAddress?: string;
+  /** Hosted image URLs (uploaded via POST /api/v1/gigs/images). */
+  coverImageUrl?: string;
+  galleryUrls?: string[];
+  /** Optional tiers. When set, `price`/`deliveryDays`/`priceLamports` above
+   *  mirror the cheapest tier so older readers still show a "from" price. */
+  packages?: GigPackage[];
+  faqs?: GigFaq[];
   createdAt: unknown;
   updatedAt?: unknown;
 }
@@ -1244,7 +1217,11 @@ export async function setGigStatus(gigId: string, status: Gig["status"]): Promis
   await updateDoc(doc(db, "gigs", gigId), { status, updatedAt: serverTimestamp() });
 }
 
-export async function updateGig(gigId: string, data: Partial<Pick<Gig, "title" | "description" | "category" | "tags" | "price" | "deliveryDays">>): Promise<void> {
+export type GigEditableFields = Pick<Gig,
+  "title" | "description" | "category" | "tags" | "price" | "deliveryDays" | "priceLamports" |
+  "coverImageUrl" | "galleryUrls" | "packages" | "faqs">;
+
+export async function updateGig(gigId: string, data: Partial<GigEditableFields>): Promise<void> {
   await updateDoc(doc(db, "gigs", gigId), { ...data, updatedAt: serverTimestamp() });
 }
 
@@ -1295,28 +1272,32 @@ export async function orderGig(
   gigId: string,
   buyer: { orgId: string; address: string },
   requirements?: string,
-  escrow?: Omit<GigEscrow, "status">
+  escrow?: Omit<GigEscrow, "status">,
+  packageId?: GigPackageTier,
 ): Promise<string> {
   const gig = await getGig(gigId);
   if (!gig) throw new Error("Gig not found");
   if (gig.status !== "active") throw new Error("This gig is not currently active");
+  const pkg = getGigPackage(gig, packageId);
+  if (packageId && !pkg) throw new Error("That package is no longer offered");
 
   const jobRef = await addDoc(collection(db, "jobs"), {
     orgId: buyer.orgId,
     projectId: "",
-    title: gig.title,
+    title: pkg ? `${gig.title} — ${pkg.name}` : gig.title,
     description: requirements?.trim() || gig.description,
     status: "in_progress",
-    reward: gig.price,
+    reward: pkg?.price ?? gig.price,
     requiredSkills: gig.tags,
     postedByAddress: buyer.address,
-    takenByAgentId: gig.agentId,
+    takenByAgentId: gig.agentId || "",
     priority: "medium",
     claimedAt: serverTimestamp(),
     claimedByAgentName: gig.agentName,
     hiringMode: "instant",
     gigId: gig.id,
     sellerOrgId: gig.agentOrgId,
+    ...(pkg ? { gigPackageId: pkg.id } : {}),
     ...(escrow ? { escrow: { ...escrow, status: "funded" as const } } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -1325,6 +1306,12 @@ export async function orderGig(
   await updateDoc(doc(db, "gigs", gigId), { orderCount: increment(1) });
 
   return jobRef.id;
+}
+
+/** The ordered tier, or undefined for single-price gigs / unknown ids. */
+export function getGigPackage(gig: Pick<Gig, "packages">, packageId?: string): GigPackage | undefined {
+  if (!packageId) return undefined;
+  return gig.packages?.find((p) => p.id === packageId);
 }
 
 /** Merges a partial GigEscrow update into a job's existing escrow record. */
@@ -1345,11 +1332,6 @@ export async function recordEscrowClaimed(jobId: string, claimTxSig: string): Pr
 /** Records a successful on-chain submitDelivery() — called alongside submitJobDelivery(). */
 export async function recordEscrowDelivered(jobId: string, deliveryTxSig: string): Promise<void> {
   await updateJobEscrow(jobId, { deliveryTxSig, status: "delivered" });
-}
-
-/** Records a successful on-chain approveDelivery() — called alongside the buyer's approval. */
-export async function recordEscrowReleased(jobId: string, releaseTxSig: string): Promise<void> {
-  await updateJobEscrow(jobId, { releaseTxSig, status: "released" });
 }
 
 /** Records a successful on-chain disputeDelivery() — called alongside filing the record-only dispute. */

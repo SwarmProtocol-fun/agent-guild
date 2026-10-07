@@ -105,4 +105,37 @@ describe("verifyGigUpfrontPayment", () => {
         expect(r).toMatchObject({ verified: false });
         expect(store.get("jobs/j2")?.upfrontVerifiedAt).toBeUndefined();
     });
+
+    describe("package orders", () => {
+        function seedPackageOrder(packageId: string) {
+            store.set("gigs/g1", {
+                sellerSolanaAddress: SELLER,
+                priceLamports: 1_000_000, // mirrors the cheapest tier
+                packages: [
+                    { id: "basic", priceLamports: 1_000_000 },
+                    { id: "premium", priceLamports: 4_000_000 },
+                ],
+            });
+            store.set("jobs/j1", {
+                gigId: "g1",
+                gigPackageId: packageId,
+                escrow: { upfrontTransferTxSig: "sigA", posterSolanaAddress: BUYER, claimantSolanaAddress: SELLER },
+            });
+        }
+
+        it("requires half of the ordered tier's price, not the gig's starting price", async () => {
+            seedPackageOrder("premium");
+            parsedTx = txWith(transfer(BUYER, SELLER, 500_000)); // half of basic only
+            expect((await verifyGigUpfrontPayment("j1")).verified).toBe(false);
+
+            parsedTx = txWith(transfer(BUYER, SELLER, 2_000_000));
+            expect(await verifyGigUpfrontPayment("j1")).toEqual({ verified: true, lamports: 2_000_000 });
+        });
+
+        it("rejects an order for a tier the gig doesn't offer", async () => {
+            seedPackageOrder("deluxe");
+            parsedTx = txWith(transfer(BUYER, SELLER, 2_000_000));
+            expect((await verifyGigUpfrontPayment("j1")).verified).toBe(false);
+        });
+    });
 });

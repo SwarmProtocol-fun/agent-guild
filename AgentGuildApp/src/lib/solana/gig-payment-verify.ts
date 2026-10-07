@@ -18,6 +18,7 @@ import { Connection, type ParsedInstruction, type PartiallyDecodedInstruction } 
 import { FieldValue } from "firebase-admin/firestore";
 import { adminDb } from "@/lib/firebase-admin";
 import { SOLANA_RPC_URL } from "@/lib/solana/client";
+import { orderPriceLamports } from "@/lib/gig-packages";
 
 const PAYMENT_TX_COLLECTION = "gigPaymentTxs";
 
@@ -52,7 +53,9 @@ export async function verifyGigUpfrontPayment(jobId: string): Promise<UpfrontVer
 
   const gig = (await db.collection("gigs").doc(job.gigId).get()).data();
   const seller = gig?.sellerSolanaAddress as string | undefined;
-  const priceLamports = gig?.priceLamports as number | undefined;
+  // Package orders owe their tier's price, read from the listing — the job's
+  // gigPackageId only picks which tier, it never carries an amount.
+  const priceLamports = gig ? orderPriceLamports(gig, job.gigPackageId) : undefined;
   if (!seller || !priceLamports) return { verified: false, reason: "Gig has no Solana price or payout address" };
 
   const escrow = job.escrow as { upfrontTransferTxSig?: string; posterSolanaAddress?: string; claimantSolanaAddress?: string };
@@ -64,8 +67,9 @@ export async function verifyGigUpfrontPayment(jobId: string): Promise<UpfrontVer
   if (!txSig || !buyer) return { verified: false, reason: "Order has no upfront payment signature" };
 
   // Matches the order form: upfront = floor(price / 2). Compared to the gig's
-  // current price, so a seller who raised the price after the order will see
-  // the shortfall here and can decide whether to proceed.
+  // (or ordered tier's) current price, so a seller who raised the price
+  // after the order will see the shortfall here and can decide whether to
+  // proceed.
   const requiredLamports = Math.floor(priceLamports / 2);
 
   const tx = await new Connection(SOLANA_RPC_URL, "finalized").getParsedTransaction(txSig, {

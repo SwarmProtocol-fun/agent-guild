@@ -27,13 +27,8 @@ import { rateLimit } from "@/app/api/v1/rate-limit";
 import { claimJob } from "@/lib/jobs-admin";
 import { checkClaimable, isPolicyRejection, JobActionError } from "@/lib/job-actions";
 import { getActiveDelegation, recordDelegationSpend } from "@/lib/delegation";
+import { parseReward } from "@/lib/job-lifecycle";
 
-/** Same free-text-to-number convention as the dashboard's parseQuoteValue — Job.reward has no fixed format. */
-function parseRewardUsdc(reward?: string): number {
-  if (!reward) return 0;
-  const n = parseFloat(reward.replace(/[^0-9.]/g, ""));
-  return isNaN(n) ? 0 : n;
-}
 
 export async function POST(
   request: NextRequest,
@@ -78,7 +73,7 @@ export async function POST(
 
     const body = await request.json().catch(() => ({}));
     const onBehalfOf = typeof body.onBehalfOf === "string" ? body.onBehalfOf : null;
-    const rewardUsdc = parseRewardUsdc(job.reward);
+    const rewardUsdc = Math.max(0, parseReward(job.reward));
 
     let delegationGrantId: string | null = null;
     if (onBehalfOf && onBehalfOf !== verified.agentId) {
@@ -119,6 +114,8 @@ export async function POST(
       ...(delegationGrantId ? { delegation: { grantId: delegationGrantId, onBehalfOf } } : {}),
     });
   } catch (err: any) {
+    // Lost a race with another claimant (claimJob is transactional on status "open").
+    if (err instanceof JobActionError) return Response.json({ error: err.message }, { status: err.status });
     console.error("Claim job error:", err);
     // claimJob() throws plain Errors for credit-policy rejections — surface those as 403, not 500.
     const message: string = err.message || "Internal error";

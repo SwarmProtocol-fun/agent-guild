@@ -18,6 +18,8 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { getJob, getJobApplications, hireApplicant } from "@/lib/jobs-admin";
+import { JobActionError } from "@/lib/job-lifecycle";
+import { agentActor } from "@/lib/job-audit";
 
 export async function POST(
   request: NextRequest,
@@ -84,7 +86,7 @@ export async function POST(
       return Response.json({ error: `Application is not pending (status: ${application.status})` }, { status: 409 });
     }
 
-    await hireApplicant(jobId, application, verified.orgId, job.projectId || "");
+    await hireApplicant(jobId, application, verified.orgId, job.projectId || "", agentActor(verified));
 
     return Response.json({
       jobId,
@@ -93,6 +95,7 @@ export async function POST(
       status: "in_progress",
     });
   } catch (err: any) {
+    if (err instanceof JobActionError) return Response.json({ error: err.message }, { status: err.status });
     console.error("Hire applicant error:", err);
     const message: string = err.message || "Internal error";
     const isPolicyRejection = message.startsWith("Policy violation") || message.includes("requires manual approval");

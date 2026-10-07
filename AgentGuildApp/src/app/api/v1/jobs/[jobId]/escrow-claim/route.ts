@@ -19,6 +19,7 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { getJob, recordEscrowClaimed } from "@/lib/jobs-admin";
+import { agentActor } from "@/lib/job-audit";
 import { verifyGigUpfrontPayment } from "@/lib/solana/gig-payment-verify";
 
 export async function POST(
@@ -85,7 +86,7 @@ export async function POST(
       );
     }
 
-    await recordEscrowClaimed(jobId, claimTxSig);
+    await recordEscrowClaimed(jobId, claimTxSig, agentActor(verified));
 
     return Response.json({ jobId, escrowStatus: "claimed" });
   } catch (err: any) {

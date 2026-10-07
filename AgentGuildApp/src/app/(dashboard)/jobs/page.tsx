@@ -18,13 +18,13 @@ import {
   getProjectsByOrg,
   getAgentsByOrg,
   createJob,
-  claimJob,
   getChannelsByProject,
   type Job,
   type Project,
   type Agent,
 } from "@/lib/firestore";
 import { QuickPostJobDialog } from "@/components/jobs/quick-post-job-dialog";
+import { assignJob } from "@/lib/jobs-client";
 import { collection, addDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { cn } from "@/lib/utils";
@@ -215,7 +215,7 @@ export default function JobBoardPage() {
       setUpdating(true);
       setError(null);
       const agentName = getAgentName(agentId);
-      await claimJob(job.id, agentId, currentOrg.id, job.projectId || "", agentName);
+      await assignJob(job.id, agentId);
 
       // Send notification to the project's channel
       if (job.projectId && currentOrg) {

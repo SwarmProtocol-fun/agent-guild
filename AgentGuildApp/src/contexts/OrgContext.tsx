@@ -38,7 +38,7 @@ interface OrgContextValue {
   refreshAgentCount: () => Promise<void>;
 }
 
-const OrgContext = createContext<OrgContextValue>({
+export const OrgContext = createContext<OrgContextValue>({
   currentOrg: null,
   organizations: [],
   loading: true,

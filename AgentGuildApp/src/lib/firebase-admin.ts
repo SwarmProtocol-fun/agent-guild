@@ -14,6 +14,7 @@
 import { getApps, initializeApp, cert, type App } from "firebase-admin/app";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { getAuth, type Auth } from "firebase-admin/auth";
+import { getStorage } from "firebase-admin/storage";
 
 /**
  * Undo the ways a PEM key gets mangled when pasted into a hosting dashboard's
@@ -63,4 +64,16 @@ export function adminDb(): Firestore {
 export function adminAuth(): Auth {
   if (!_auth) _auth = getAuth(getAdminApp());
   return _auth;
+}
+
+/** Name of the project's default Storage bucket, or null if unconfigured. */
+export function adminBucketName(): string | null {
+  return process.env.FIREBASE_STORAGE_BUCKET || process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || null;
+}
+
+/** The project's default Storage bucket (Admin SDK — bypasses Storage rules). */
+export function adminBucket() {
+  const name = adminBucketName();
+  if (!name) throw new Error("Firebase Storage not configured: set NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET.");
+  return getStorage(getAdminApp()).bucket(name);
 }
