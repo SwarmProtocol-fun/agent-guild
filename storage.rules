@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// Firebase Storage rules for swarm-protocol.firebasestorage.app.
+//
+// Before this file existed the bucket ran on the console's 30-day test-mode
+// rules, which expired 2026-04-18 and silently denied every browser upload.
+//
+// Identity: the dashboard signs into Firebase Auth with a custom token whose
+// uid is the canonical wallet address (see firestore.rules "Auth model"), so
+// org membership is checked the same way firestore.rules' isOrgMember does,
+// by reading the organization doc (cross-service rules).
+//
+// Reads of shared files normally go through download URLs, which carry a
+// token and bypass these rules — the read rules below only cover SDK reads.
+// Server-side writes (gigs/ images via POST /api/v1/gigs/images) use the
+// Admin SDK and bypass rules too, so gigs/ stays closed to clients.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isOrgMember(orgId) {
+      let orgPath = /databases/(default)/documents/organizations/$(orgId);
+      return request.auth != null &&
+        firestore.exists(orgPath) &&
+        (request.auth.uid == firestore.get(orgPath).data.ownerAddress ||
+         request.auth.uid in firestore.get(orgPath).data.get('members', []));
+    }
+
+    // Chat & guild channel attachments — src/lib/storage.ts uploadFile():
+    // orgs/{orgId}/channels/{channelId}/{timestamp}_{filename}, 25 MB max.
+    // Create-only: an existing attachment can't be overwritten or deleted
+    // from the browser, since messages link to it. Uploads to an existing
+    // path can evaluate as `create`, hence the explicit `resource == null`.
+    match /orgs/{orgId}/channels/{channelId}/{fileName} {
+      allow read: if isOrgMember(orgId);
+      allow create: if resource == null && isOrgMember(orgId) &&
+        request.resource.size <= 25 * 1024 * 1024;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
