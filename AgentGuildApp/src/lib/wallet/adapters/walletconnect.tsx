@@ -119,11 +119,14 @@ const solanaAdapter = new SolanaAdapter({
   wallets: [new PhantomWalletAdapter(), new SolflareWalletAdapter()] as unknown as NonNullable<ConstructorParameters<typeof SolanaAdapter>[0]>["wallets"],
 });
 
+// The AppKit instance, or undefined when unconfigured.
+let appKit: Pick<ReturnType<typeof createAppKit>, "isOpen" | "subscribeState"> | undefined;
+
 if (projectId) {
   const origin = typeof window !== "undefined"
     ? window.location.origin
     : `https://${process.env.NEXT_PUBLIC_APP_DOMAIN || "agent-guild.com"}`;
-  createAppKit({
+  appKit = createAppKit({
     adapters: [wagmiAdapter, solanaAdapter],
     projectId,
     networks,
@@ -201,6 +204,36 @@ export function routeSolanaToSessionChain<T>(provider: T): T {
   return provider;
 }
 
+/** Longest we hold a signature request waiting for the modal to close. */
+export const MODAL_CLOSE_WAIT_MS = 10_000;
+
+/**
+ * Resolves once the AppKit modal is closed (or after MODAL_CLOSE_WAIT_MS).
+ *
+ * Auto-login asks for a signature the moment an email/social (embedded)
+ * wallet connects — while the connect modal is still open. AppKit then skips
+ * its approval view (the modal is already open), and when the modal closes
+ * with an empty transaction stack it aborts every open request: "Request was
+ * aborted". Sending after the close lets AppKit open the approval view.
+ */
+export function waitForModalClose(): Promise<void> {
+  const kit = appKit;
+  if (!kit?.isOpen()) return Promise.resolve();
+  return new Promise((resolve) => {
+    let unsubscribe: (() => void) | undefined;
+    const done = () => {
+      clearTimeout(timer);
+      unsubscribe?.();
+      resolve();
+    };
+    const timer = setTimeout(done, MODAL_CLOSE_WAIT_MS);
+    unsubscribe = kit.subscribeState((state) => {
+      if (!state.open) done();
+    });
+    if (!kit.isOpen()) done();
+  });
+}
+
 async function signSolanaMessage(provider: SolanaProvider, message: string): Promise<string> {
   const signature = await routeSolanaToSessionChain(provider).signMessage(new TextEncoder().encode(message));
   return Buffer.from(signature).toString("base64");
@@ -270,6 +303,7 @@ function useSignMessage() {
   const { walletProvider: solanaProvider } = useAppKitProvider<SolanaProvider>("solana");
 
   return async (message: string) => {
+    await waitForModalClose();
     if (namespace === "eip155" && address) {
       // Sign through AppKit's provider as the login address so the request
       // matches the wallet's live signer.

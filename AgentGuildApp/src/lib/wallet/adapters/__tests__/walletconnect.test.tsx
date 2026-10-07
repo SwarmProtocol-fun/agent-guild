@@ -4,7 +4,7 @@
  * the mocked hook state through `w`.
  */
 import bs58 from "bs58";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, renderHook, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 
@@ -310,6 +310,77 @@ describe("useSignMessage", () => {
       const { result } = renderHook(() => a.useSignMessage());
       await result.current("hello");
       expect(request).toHaveBeenCalledWith(expect.anything(), `solana:${SOLANA_DEVNET.id}`);
+    });
+  });
+
+  describe("while the AppKit modal is open (embedded wallet just connected)", () => {
+    // A fake AppKit whose modal open state the test controls.
+    function fakeModal(open: boolean) {
+      const listeners = new Set<(s: { open: boolean }) => void>();
+      const kit = {
+        open,
+        isOpen: () => kit.open,
+        subscribeState: vi.fn((cb: (s: { open: boolean }) => void) => {
+          listeners.add(cb);
+          return () => listeners.delete(cb);
+        }),
+        setOpen(next: boolean) {
+          kit.open = next;
+          listeners.forEach((l) => l({ open: next }));
+        },
+        listenerCount: () => listeners.size,
+      };
+      return kit;
+    }
+
+    // Later tests must not inherit a module bound to a fake (open) modal.
+    afterEach(() => vi.resetModules());
+
+    async function loadWithModal(kit: ReturnType<typeof fakeModal>) {
+      vi.resetModules();
+      w.createAppKit.mockReturnValueOnce(kit);
+      return loadAdapter();
+    }
+
+    it("holds the signature request until the modal closes", async () => {
+      const kit = fakeModal(true);
+      const a = await loadWithModal(kit);
+      embeddedBoth("eip155");
+      const provider = w.providers.eip155 as ReturnType<typeof evmProvider>;
+      const { result } = renderHook(() => a.useSignMessage());
+      const pending = result.current("hello");
+      await Promise.resolve();
+      expect(provider.request).not.toHaveBeenCalled();
+      kit.setOpen(false);
+      await expect(pending).resolves.toBe("0xsig");
+      expect(provider.request).toHaveBeenCalledTimes(1);
+      expect(kit.listenerCount()).toBe(0);
+    });
+
+    it("signs immediately when the modal is closed", async () => {
+      const kit = fakeModal(false);
+      const a = await loadWithModal(kit);
+      embeddedBoth("solana");
+      const { result } = renderHook(() => a.useSignMessage());
+      await expect(result.current("hello")).resolves.toBe(Buffer.from([1, 2, 3]).toString("base64"));
+      expect(kit.subscribeState).not.toHaveBeenCalled();
+    });
+
+    it("stops waiting after the cap so a modal left open doesn't block login forever", async () => {
+      vi.useFakeTimers();
+      try {
+        const kit = fakeModal(true);
+        const a = await loadWithModal(kit);
+        embeddedBoth("eip155");
+        const { MODAL_CLOSE_WAIT_MS } = await import("../walletconnect");
+        const { result } = renderHook(() => a.useSignMessage());
+        const pending = result.current("hello");
+        await vi.advanceTimersByTimeAsync(MODAL_CLOSE_WAIT_MS);
+        await expect(pending).resolves.toBe("0xsig");
+        expect(kit.listenerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
