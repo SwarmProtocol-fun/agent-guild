@@ -13,6 +13,7 @@ const store = {
   getAccount: vi.fn(),
   updateAccount: vi.fn(),
   resetPaper: vi.fn(),
+  addPaperFunds: vi.fn(async (...args: [string, number]) => 1000 + args[1]),
   listPaperPositions: vi.fn(async () => [] as { shares: number; avgPrice: number }[]),
   getPaperPosition: vi.fn(async () => null),
   listAllOpenPaperPositions: vi.fn(async () => []),
@@ -189,6 +190,17 @@ describe("polymarket mod routes", () => {
     expect(await resp.json()).toMatchObject({ ok: true, decision: "BUY_YES", action: "buy-yes", error: null });
     expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.objectContaining({ tokenId: "t-yes" }), "buy", expect.anything());
     expect(store.addBotLog).toHaveBeenCalledWith("b1", expect.objectContaining({ kind: "decision", decision: "BUY_YES" }));
+  });
+
+  it("people can add paper money; the agent can't, and amounts are bounded", async () => {
+    const fund = route("POST /paper/fund");
+    expect((await fund(post({ agentId: "a1", amount: 500 }), asAgent)).status).toBe(403);
+    expect((await fund(post({ agentId: "a1", amount: 0 }), asMember)).status).toBe(400);
+    expect((await fund(post({ agentId: "a1", amount: 2_000_000 }), asMember)).status).toBe(400);
+    expect(store.addPaperFunds).not.toHaveBeenCalled();
+    const ok = await fund(post({ agentId: "a1", amount: 500 }), asMember);
+    expect(await ok.json()).toEqual({ ok: true, cash: 1500 });
+    expect(store.addPaperFunds).toHaveBeenCalledWith("a1", 500);
   });
 
   it("validates price-trigger bots", async () => {

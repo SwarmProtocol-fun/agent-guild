@@ -147,7 +147,8 @@ export function LoanEligibilityCard({ agentId, orgId, onLoanRequested }: LoanEli
                     gate={dialogKind === "trust" ? eligibility.trust : eligibility.unsecured}
                     walletAddress={sessionAddress}
                     onRequested={() => {
-                        setDialogKind(null);
+                        // Keep the dialog open on its success screen (next steps);
+                        // the user dismisses it with "Done".
                         load();
                         onLoanRequested();
                     }}

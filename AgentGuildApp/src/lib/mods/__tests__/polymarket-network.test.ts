@@ -13,6 +13,7 @@ const store = {
   getAccount: vi.fn(),
   updateAccount: vi.fn(),
   resetPaper: vi.fn(),
+  addPaperFunds: vi.fn(async (...args: [string, number]) => 1000 + args[1]),
   listPaperPositions: vi.fn(async () => []),
   getPaperPosition: vi.fn(async () => null),
   listAllOpenPaperPositions: vi.fn(async () => []),

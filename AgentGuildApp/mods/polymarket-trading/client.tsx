@@ -452,7 +452,12 @@ function PolymarketPanel({ api }: PanelProps) {
         <Badge tone={mode === "live" ? "warning" : "neutral"}>{mode === "live" ? "Live" : "Paper"}</Badge>
         {liveBlocked && <Badge tone="danger">Geoblocked</Badge>}
         <div className="ml-auto flex flex-wrap items-center gap-x-5 gap-y-1">
-          <Stat label={mode === "live" ? "pUSD" : "Paper cash"}>{usd(account?.cash)}</Stat>
+          <Stat label={mode === "live" ? "pUSD" : "Paper cash"}>
+            {usd(account?.cash)}
+            {mode === "paper" && (
+              <button type="button" className="ml-1.5 font-sans text-[11px] underline" onClick={() => setTab("settings")}>Add</button>
+            )}
+          </Stat>
           <Stat label="Equity">{usd(account?.equity)}</Stat>
           {account?.pnl != null && <Stat label="Total PnL"><span className={pnlClass(account.pnl)}>{signed(account.pnl)}</span></Stat>}
           <Stat label="Today">{account ? <span className={pnlClass(account.dailyRealizedPnl)}>{signed(account.dailyRealizedPnl)}</span> : "—"}</Stat>
@@ -871,6 +876,8 @@ function SettingsTab({ agent, account, postJson, onChange }: { agent: MyAgent; a
   const [form, setForm] = useState({ maxOrderUsd: "", maxExposureUsd: "", maxDailyLossUsd: "" });
   const [msg, setMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [paperAmount, setPaperAmount] = useState("1000");
+  const paperNum = Number(paperAmount);
   useEffect(() => {
     if (risk) setForm({ maxOrderUsd: String(risk.maxOrderUsd), maxExposureUsd: String(risk.maxExposureUsd), maxDailyLossUsd: String(risk.maxDailyLossUsd) });
   }, [risk?.maxOrderUsd, risk?.maxExposureUsd, risk?.maxDailyLossUsd]);
@@ -912,14 +919,30 @@ function SettingsTab({ agent, account, postJson, onChange }: { agent: MyAgent; a
 
         <h3 className="pt-3 text-xs font-semibold uppercase tracking-wide">Paper account</h3>
         <p className={`text-[11px] ${mutedClass}`}>Paper orders fill against the real Polymarket book with real fees, and pay out when markets resolve.</p>
-        <button
-          type="button" className={buttonClass("secondary")} disabled={!!busy}
-          onClick={() => { if (window.confirm("Reset paper cash to $1,000 and clear paper positions?")) run("reset", "paper/reset", { agentId: agent.agentId }, "Paper account reset to $1,000"); }}
-        >
-          Reset paper account
-        </button>
+        <div>
+          <label className={labelClass} htmlFor="pm-paper-amount">Paper money ($)</label>
+          <input
+            id="pm-paper-amount" className={`${inputClass} ${monoClass} max-w-[180px]`} inputMode="decimal"
+            value={paperAmount} onChange={(e) => setPaperAmount(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button" className={buttonClass("primary")} disabled={!!busy || !(paperNum >= 1 && paperNum <= 1_000_000)}
+            onClick={() => run("fund", "paper/fund", { agentId: agent.agentId, amount: paperNum }, `Added ${usd(paperNum)} paper money`)}
+          >
+            Add paper funds
+          </button>
+          <button
+            type="button" className={buttonClass("secondary")} disabled={!!busy || !(paperNum >= 10 && paperNum <= 1_000_000)}
+            onClick={() => { if (window.confirm(`Reset paper cash to ${usd(paperNum)} and clear paper positions?`)) run("reset", "paper/reset", { agentId: agent.agentId, startCash: paperNum }, `Paper account reset to ${usd(paperNum)}`); }}
+          >
+            Reset to this amount
+          </button>
+        </div>
+        <p className={`text-[11px] ${mutedClass}`}>Adding funds raises the starting balance too, so your PnL stays honest.</p>
         {mode === "live" && (
-          <button type="button" className={buttonClass("secondary", "ml-2")} disabled={!!busy} onClick={() => run("mode", "mode", { agentId: agent.agentId, mode: "paper" }, "Switched to paper")}>
+          <button type="button" className={buttonClass("secondary")} disabled={!!busy} onClick={() => run("mode", "mode", { agentId: agent.agentId, mode: "paper" }, "Switched to paper")}>
             Switch to paper
           </button>
         )}

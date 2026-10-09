@@ -12,7 +12,6 @@ import { Loader2, AlertCircle, CheckCircle2, Users, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
     Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -62,7 +61,6 @@ export function RequestLoanDialog({
     const band = soloRateBand(gate.rateBps);
     const [ratePercent, setRatePercent] = useState(String(gate.rateBps / 100));
     const [termDays, setTermDays] = useState("30");
-    const [purpose, setPurpose] = useState("");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [done, setDone] = useState(false);
@@ -82,7 +80,7 @@ export function RequestLoanDialog({
             return;
         }
         if (priceUsd !== null && amountValue * priceUsd > gate.maxAmountUsd) {
-            setError(`Amount exceeds the maximum of $${gate.maxAmountUsd.toLocaleString()}`);
+            setError(`Your current limit for this loan is $${gate.maxAmountUsd.toLocaleString()}${asset !== "usdc" ? ` (≈ ${formatAssetAmount(asset, gate.maxAmountUsd / priceUsd)})` : ""} — it grows with each loan you repay`);
             return;
         }
         let requestedRateBps: number | undefined;
@@ -103,7 +101,6 @@ export function RequestLoanDialog({
                     agentId, orgId, kind, source,
                     poolId: source === "pool" ? pool?.id : undefined,
                     amount: amountValue, termDays: parseInt(termDays, 10),
-                    purpose: purpose || undefined,
                     requestedRateBps,
                 }),
             });
@@ -181,12 +178,30 @@ export function RequestLoanDialog({
 
                         <div>
                             <Label className="text-xs">Amount ({assetInfo(asset).symbol})</Label>
-                            <Input
-                                type="number"
-                                value={amount}
-                                onChange={(e) => setAmount(e.target.value)}
-                                className="mt-1"
-                            />
+                            <div className="mt-1 flex gap-2">
+                                <Input
+                                    type="number"
+                                    value={amount}
+                                    onChange={(e) => setAmount(e.target.value)}
+                                />
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-9 text-xs"
+                                    disabled={priceUsd === null}
+                                    onClick={() => {
+                                        if (priceUsd === null) return;
+                                        const max = gate.maxAmountUsd / priceUsd;
+                                        // Round down so the max never exceeds the limit after conversion.
+                                        const decimals = asset === "usdc" ? 2 : 6;
+                                        setAmount(String(Math.floor(max * 10 ** decimals) / 10 ** decimals));
+                                        setError(null);
+                                    }}
+                                >
+                                    Max
+                                </Button>
+                            </div>
                             <p className="text-[10px] text-muted-foreground mt-1">
                                 Max ${gate.maxAmountUsd.toLocaleString()}{asset !== "usdc" && priceUsd !== null && ` (≈ ${formatAssetAmount(asset, gate.maxAmountUsd / priceUsd)})`} at {(gate.rateBps / 100).toFixed(1)}% APR
                                 {market && collateralPrice !== null && parseFloat(amount) > 0 && (
@@ -249,17 +264,6 @@ export function RequestLoanDialog({
                                     ))}
                                 </SelectContent>
                             </Select>
-                        </div>
-
-                        <div>
-                            <Label className="text-xs">Purpose (optional)</Label>
-                            <Textarea
-                                value={purpose}
-                                onChange={(e) => setPurpose(e.target.value)}
-                                placeholder="What is this loan for?"
-                                className="mt-1"
-                                rows={2}
-                            />
                         </div>
 
                         {kind === "trust" && (

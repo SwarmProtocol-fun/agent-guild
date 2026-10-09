@@ -101,6 +101,21 @@ export async function updateAccount(agentId: string, patch: Partial<Pick<PmAccou
   await db().collection(ACCOUNTS).doc(agentId).update({ ...patch, updatedAt: FieldValue.serverTimestamp() });
 }
 
+/**
+ * Adds paper money. The starting balance rises by the same amount, so the
+ * account's PnL (equity − start) isn't inflated by the deposit.
+ */
+export async function addPaperFunds(agentId: string, amount: number): Promise<number> {
+  const ref = db().collection(ACCOUNTS).doc(agentId);
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new Error("No Polymarket account for this agent");
+    const cash = Number(snap.data()!.paperCash ?? 0) + amount;
+    tx.update(ref, { paperCash: cash, paperStartCash: Number(snap.data()!.paperStartCash ?? 0) + amount });
+    return cash;
+  });
+}
+
 /** Back to a clean paper account: fresh cash, paper positions closed out (trade history is kept). */
 export async function resetPaper(agentId: string, startCash = PAPER_START_CASH): Promise<void> {
   const open = await db().collection(PAPER_POSITIONS).where("agentId", "==", agentId).get();
@@ -244,8 +259,24 @@ export interface PmTrade {
   createdAt: Date | null;
 }
 
+/** UTC day key for the per-day PnL counter, e.g. "d20261009". */
+export function dayKey(at = new Date()): string {
+  return `d${at.toISOString().slice(0, 10).replace(/-/g, "")}`;
+}
+
+/**
+ * Logs a fill and adds its realized PnL to the account's per-day counter
+ * (pnlByDay.<day>.<mode>). The daily-loss check reads that counter, so it
+ * needs no composite index.
+ */
 export async function recordTrade(data: Omit<PmTrade, "id" | "createdAt">): Promise<string> {
   const ref = await db().collection(TRADES).add({ ...data, createdAt: FieldValue.serverTimestamp() });
+  if (data.realizedPnl) {
+    await db().collection(ACCOUNTS).doc(data.agentId).set(
+      { pnlByDay: { [dayKey()]: { [data.mode]: FieldValue.increment(data.realizedPnl) } } },
+      { merge: true },
+    );
+  }
   return ref.id;
 }
 
@@ -259,17 +290,30 @@ function docToTrade(d: FirebaseFirestore.QueryDocumentSnapshot): PmTrade {
   };
 }
 
+/** Firestore's "this query needs an index" error. */
+function isMissingIndex(err: unknown): boolean {
+  return (err as { code?: number }).code === 9 || /requires an index/i.test(String((err as Error)?.message));
+}
+
 export async function listTrades(agentId: string, limit = 100): Promise<PmTrade[]> {
-  const snap = await db().collection(TRADES).where("agentId", "==", agentId).orderBy("createdAt", "desc").limit(limit).get();
-  return snap.docs.map(docToTrade);
+  const byAgent = db().collection(TRADES).where("agentId", "==", agentId);
+  try {
+    const snap = await byAgent.orderBy("createdAt", "desc").limit(limit).get();
+    return snap.docs.map(docToTrade);
+  } catch (err) {
+    // Until the (agentId, createdAt) index is deployed: read without ordering and sort here.
+    if (!isMissingIndex(err)) throw err;
+    const snap = await byAgent.limit(500).get();
+    return snap.docs.map(docToTrade)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))
+      .slice(0, limit);
+  }
 }
 
 /** Today's (UTC) realized PnL for one mode — what the daily-loss limit checks. */
 export async function getDailyRealizedPnl(agentId: string, mode: TradingMode): Promise<number> {
-  const start = new Date();
-  start.setUTCHours(0, 0, 0, 0);
-  const snap = await db().collection(TRADES).where("agentId", "==", agentId).where("createdAt", ">=", start).get();
-  return snap.docs.reduce((sum, d) => (d.data().mode === mode ? sum + Number(d.data().realizedPnl ?? 0) : sum), 0);
+  const snap = await db().collection(ACCOUNTS).doc(agentId).get();
+  return Number(snap.data()?.pnlByDay?.[dayKey()]?.[mode] ?? 0);
 }
 
 // ── Bots ────────────────────────────────────────────────────────────────────

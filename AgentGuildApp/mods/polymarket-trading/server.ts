@@ -9,6 +9,7 @@ import {
   getAccount,
   updateAccount,
   resetPaper,
+  addPaperFunds,
   listPaperPositions,
   getPaperPosition,
   listAllOpenPaperPositions,
@@ -985,6 +986,18 @@ export default defineServerMod({
       await ensureAccount(body.agentId, access.orgId);
       await resetPaper(body.agentId, startCash);
       return json({ ok: true, cash: startCash });
+    },
+
+    /** POST /paper/fund { agentId, amount } — add paper money (1–1,000,000). People only. */
+    "POST /paper/fund": async (req, ctx) => {
+      if (ctx.agent) return fail("Only a person can add paper funds", 403);
+      const body = await req.json().catch(() => ({}));
+      const access = await requireAgentAccess(ctx, body.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const amount = Number(body.amount);
+      if (!(amount >= 1 && amount <= 1_000_000)) return fail("amount must be between 1 and 1,000,000");
+      await ensureAccount(body.agentId, access.orgId);
+      return json({ ok: true, cash: await addPaperFunds(body.agentId, amount) });
     },
 
     /** GET /markets?q= — trending events, or search results. */
