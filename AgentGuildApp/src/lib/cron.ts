@@ -39,6 +39,8 @@ export interface CronJob {
     schedule: string;
     /** Human-readable schedule label */
     scheduleLabel?: string;
+    /** IANA time zone the schedule runs in. Jobs saved before this existed run in UTC. */
+    timezone?: string;
     /** Which channel to send results to */
     targetChannelId?: string;
     /** Which agents to assign */
@@ -73,6 +75,7 @@ export interface CronJobCreateInput {
     message: string;
     schedule: string;
     scheduleLabel?: string;
+    timezone?: string;
     targetChannelId?: string;
     agentIds?: string[];
     priority?: "low" | "medium" | "high";
@@ -85,6 +88,7 @@ export interface CronJobUpdateInput {
     message?: string;
     schedule?: string;
     scheduleLabel?: string;
+    timezone?: string;
     targetChannelId?: string;
     agentIds?: string[];
     priority?: "low" | "medium" | "high";
@@ -141,6 +145,15 @@ export function parseCronToHuman(cron: string): string {
     return cron;
 }
 
+/** The browser's IANA time zone — schedules are saved in the zone of whoever set them. */
+export function browserTimeZone(): string {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    } catch {
+        return "UTC";
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Firestore CRUD
 // ═══════════════════════════════════════════════════════════════
@@ -153,6 +166,7 @@ export async function createCronJob(input: CronJobCreateInput): Promise<string> 
         ...input,
         enabled: input.enabled ?? true,
         scheduleLabel: input.scheduleLabel || parseCronToHuman(input.schedule),
+        timezone: input.timezone || browserTimeZone(),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
     });
@@ -164,7 +178,10 @@ export async function updateCronJob(id: string, input: CronJobUpdateInput): Prom
     const ref = doc(db, CRON_COLLECTION, id);
     await updateDoc(ref, {
         ...input,
-        ...(input.schedule ? { scheduleLabel: input.scheduleLabel || parseCronToHuman(input.schedule) } : {}),
+        ...(input.schedule ? {
+            scheduleLabel: input.scheduleLabel || parseCronToHuman(input.schedule),
+            timezone: input.timezone || browserTimeZone(),
+        } : {}),
         updatedAt: serverTimestamp(),
     });
 }
@@ -197,6 +214,7 @@ export async function getCronJob(id: string): Promise<CronJob | null> {
         message: data.message,
         schedule: data.schedule,
         scheduleLabel: data.scheduleLabel,
+        timezone: data.timezone,
         targetChannelId: data.targetChannelId,
         agentIds: data.agentIds || [],
         priority: data.priority,
@@ -226,10 +244,12 @@ function docToCronJob(d: { id: string; data: () => Record<string, unknown> }): C
         message: data.message,
         schedule: data.schedule,
         scheduleLabel: data.scheduleLabel,
+        timezone: data.timezone,
         targetChannelId: data.targetChannelId,
         agentIds: data.agentIds,
         priority: data.priority,
         enabled: (data.enabled as boolean) ?? true,
+        paused: data.paused,
         createdBy: data.createdBy,
         createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null,
         updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate() : null,

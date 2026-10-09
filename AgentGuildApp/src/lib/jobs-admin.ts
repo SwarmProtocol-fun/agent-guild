@@ -50,6 +50,48 @@ export async function getJob(jobId: string): Promise<Job | null> {
   return { id: snap.id, ...snap.data() } as Job;
 }
 
+/**
+ * One page of an org's jobs in a single status, oldest first — what agents
+ * poll to find work. Filtered and limited in the query (index: orgId,
+ * status, createdAt), so the cost of a poll is the page size, not the org's
+ * whole job history. `cursor` is the last job id of the previous page.
+ */
+export async function listOrgJobsByStatus(
+  orgId: string,
+  status: Job["status"],
+  opts: { limit: number; cursor?: string | null },
+): Promise<{ jobs: Job[]; nextCursor: string | null }> {
+  let q = jobs()
+    .where("orgId", "==", orgId)
+    .where("status", "==", status)
+    .orderBy("createdAt", "asc")
+    .limit(opts.limit + 1);
+  if (opts.cursor) {
+    const after = await jobs().doc(opts.cursor).get();
+    if (!after.exists || after.data()?.orgId !== orgId) throw new JobActionError("Invalid cursor", 400);
+    q = q.startAfter(after);
+  }
+  const snap = await q.get();
+  const page = snap.docs.slice(0, opts.limit).map((d) => ({ id: d.id, ...d.data() } as Job));
+  return { jobs: page, nextCursor: snap.docs.length > opts.limit ? page[page.length - 1].id : null };
+}
+
+/**
+ * Jobs currently or previously held by `agentId`, newest first (index:
+ * takenByAgentId, createdAt desc). Covers both jobs `orgId` posted and gig
+ * orders placed against its agents by other orgs (sellerOrgId === orgId).
+ */
+export async function getJobsAssignedToAgent(agentId: string, orgId: string, limit: number): Promise<Job[]> {
+  const snap = await jobs()
+    .where("takenByAgentId", "==", agentId)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data() } as Job))
+    .filter((j) => j.orgId === orgId || j.sellerOrgId === orgId);
+}
+
 /** Jobs assigned to `sellerOrgId`'s agents via gig orders — see firestore.ts::getIncomingGigOrders. */
 export async function getIncomingGigOrders(sellerOrgId: string): Promise<Job[]> {
   const snap = await jobs().where("sellerOrgId", "==", sellerOrgId).get();
@@ -443,12 +485,25 @@ export async function getJobApplications(jobId: string): Promise<JobApplication[
   return snap.docs.map((d) => ({ id: d.id, ...d.data() } as JobApplication));
 }
 
+/**
+ * One application per agent per job: the doc id is `${jobId}_${agentId}` and
+ * create() fails if it exists, so two concurrent applies can't both land.
+ */
 export async function applyToJob(data: Omit<JobApplication, "id" | "status" | "createdAt">, actor?: JobActor): Promise<string> {
-  const ref = await applications().add(stripUndefined({
-    ...data,
-    status: "pending",
-    createdAt: FieldValue.serverTimestamp(),
-  }));
+  const ref = applications().doc(`${data.jobId}_${data.agentId}`);
+  try {
+    await ref.create(stripUndefined({
+      ...data,
+      status: "pending",
+      createdAt: FieldValue.serverTimestamp(),
+    }));
+  } catch (err) {
+    const e = err as { code?: unknown; message?: string };
+    if (e.code === 6 || /ALREADY_EXISTS/.test(e.message ?? "")) {
+      throw new JobActionError("You have already applied to this job", 409);
+    }
+    throw err;
+  }
   await jobs().doc(data.jobId).update({ applicationCount: FieldValue.increment(1) });
   const job = await getJob(data.jobId);
   if (job) {

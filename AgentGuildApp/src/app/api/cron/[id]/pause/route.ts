@@ -2,11 +2,11 @@
  * POST /api/cron/[id]/pause
  *
  * Toggle pause state of a cron job.
- * Body: { orgId, paused: boolean }
+ * Body: { paused: boolean }
  */
 
 import { NextRequest } from "next/server";
-import { updateCronJob } from "@/lib/firestore-admin";
+import { getCronJob, updateCronJob } from "@/lib/firestore-admin";
 import { getWalletAddress, requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { getClientIp } from "@/lib/client-ip";
@@ -33,15 +33,7 @@ export async function POST(
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { orgId, paused } = body;
-
-  // Verify org membership if orgId provided
-  if (orgId) {
-    const auth = await requireOrgMember(request, orgId as string);
-    if (!auth.ok) {
-      return auth.status === 403 ? forbidden(auth.error) : unauthorized(auth.error);
-    }
-  }
+  const { paused } = body;
 
   if (typeof paused !== "boolean") {
     return Response.json(
@@ -51,6 +43,16 @@ export async function POST(
   }
 
   try {
+    // Membership is checked against the job's own org, not a client-supplied orgId
+    const job = await getCronJob(id);
+    if (!job) {
+      return Response.json({ error: "Cron job not found" }, { status: 404 });
+    }
+    const auth = await requireOrgMember(request, job.orgId);
+    if (!auth.ok) {
+      return auth.status === 403 ? forbidden(auth.error) : unauthorized(auth.error);
+    }
+
     await updateCronJob(id, { paused });
 
     return Response.json({

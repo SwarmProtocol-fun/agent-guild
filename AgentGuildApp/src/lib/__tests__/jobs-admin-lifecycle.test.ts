@@ -51,16 +51,40 @@ function docRef(name: string, id: string) {
       if (!e) throw new Error(`NOT_FOUND: ${name}/${id}`);
       col(name).set(id, { data: apply(e.data, patch), v: e.v + 1 });
     },
+    async create(data: Data) {
+      await Promise.resolve(); // let a concurrent create interleave
+      if (col(name).has(id)) throw Object.assign(new Error(`6 ALREADY_EXISTS: ${name}/${id}`), { code: 6 });
+      col(name).set(id, { data: apply({}, data), v: 1 });
+    },
   };
 }
 
-function query(name: string, filters: [string, string, unknown][]) {
+type Order = { field: string; dir: "asc" | "desc" } | null;
+type Shape = { filters: [string, string, unknown][]; order: Order; max: number | null; after: string | null };
+
+function query(name: string, shape: Shape = { filters: [], order: null, max: null, after: null }) {
   return {
-    where: (f: string, o: string, v: unknown) => query(name, [...filters, [f, o, v]]),
+    where: (f: string, o: string, v: unknown) => query(name, { ...shape, filters: [...shape.filters, [f, o, v]] }),
+    orderBy: (field: string, dir: "asc" | "desc" = "asc") => query(name, { ...shape, order: { field, dir } }),
+    limit: (n: number) => {
+      if (n < 1) throw new Error("limit must be positive"); // as the real SDK
+      return query(name, { ...shape, max: n });
+    },
+    startAfter: (snap: { id: string }) => query(name, { ...shape, after: snap.id }),
     async get() {
-      const docs = [...col(name).entries()]
-        .filter(([, e]) => filters.every(([f, o, v]) => (o === "in" ? (v as unknown[]).includes(e.data[f]) : e.data[f] === v)))
-        .map(([id, e]) => ({ id, data: () => ({ ...e.data }) }));
+      let rows = [...col(name).entries()]
+        .filter(([, e]) => shape.filters.every(([f, o, v]) => (o === "in" ? (v as unknown[]).includes(e.data[f]) : e.data[f] === v)));
+      if (shape.order) {
+        const { field, dir } = shape.order;
+        // Real Firestore drops docs missing the orderBy field and tie-breaks on doc id.
+        rows = rows.filter(([, e]) => e.data[field] !== undefined).sort(([ia, a], [ib, b]) => {
+          const d = (a.data[field] as number) - (b.data[field] as number) || ia.localeCompare(ib);
+          return dir === "asc" ? d : -d;
+        });
+      }
+      if (shape.after) rows = rows.slice(rows.findIndex(([id]) => id === shape.after) + 1);
+      if (shape.max !== null) rows = rows.slice(0, shape.max);
+      const docs = rows.map(([id, e]) => ({ id, data: () => ({ ...e.data }) }));
       return { docs, size: docs.length };
     },
   };
@@ -69,7 +93,7 @@ function query(name: string, filters: [string, string, unknown][]) {
 const adminDbFake = {
   collection: (name: string) => ({
     doc: (id: string) => docRef(name, id),
-    where: (f: string, o: string, v: unknown) => query(name, [[f, o, v]]),
+    where: (f: string, o: string, v: unknown) => query(name).where(f, o, v),
     async add(data: Data) {
       const id = `${name}-${db.nextId++}`;
       col(name).set(id, { data: apply({}, data), v: 1 });
@@ -124,6 +148,8 @@ import {
   submitJobDelivery,
   updateOpenJob,
   getJobApplications,
+  listOrgJobsByStatus,
+  getJobsAssignedToAgent,
 } from "@/lib/jobs-admin";
 import { getJobEvents } from "@/lib/job-audit";
 import { JobActionError } from "@/lib/job-lifecycle";
@@ -311,5 +337,67 @@ describe("jobs-admin lifecycle", () => {
 
     col("jobs").set("gig1", { data: { orgId: "org1", status: "in_progress", gigId: "g", takenByAgentId: "agentA" }, v: 1 });
     await expect(reopenJob("gig1", "", user)).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe("job board queries", () => {
+  // Pin createdAt so ordering doesn't depend on jobs posted in the same millisecond.
+  const at = (jobId: string, createdAt: number) => { col("jobs").get(jobId)!.data.createdAt = createdAt; };
+
+  it("pages an org's open jobs oldest first, skipping other statuses and orgs", async () => {
+    const ids = [];
+    for (let i = 0; i < 5; i++) { const id = await postJob({ title: `j${i}` }); at(id, 1000 + i); ids.push(id); }
+    await claimJob(ids[1], "agentA", "org1", "p1", "Ada"); // no longer open
+    col("jobs").set("other", { data: { orgId: "org2", status: "open", createdAt: 1 }, v: 1 });
+
+    const p1 = await listOrgJobsByStatus("org1", "open", { limit: 2 });
+    expect(p1.jobs.map((j) => j.id)).toEqual([ids[0], ids[2]]);
+    expect(p1.nextCursor).toBe(ids[2]);
+
+    const p2 = await listOrgJobsByStatus("org1", "open", { limit: 2, cursor: p1.nextCursor });
+    expect(p2.jobs.map((j) => j.id)).toEqual([ids[3], ids[4]]);
+    expect(p2.nextCursor).toBeNull(); // exactly filled the page — no empty extra page
+
+    expect((await listOrgJobsByStatus("org1", "in_progress", { limit: 10 })).jobs.map((j) => j.id)).toEqual([ids[1]]);
+  });
+
+  it("rejects a cursor that doesn't exist or belongs to another org", async () => {
+    await expect(listOrgJobsByStatus("org1", "open", { limit: 5, cursor: "nope" })).rejects.toMatchObject({ status: 400 });
+    col("jobs").set("theirs", { data: { orgId: "org2", status: "open", createdAt: 1 }, v: 1 });
+    await expect(listOrgJobsByStatus("org1", "open", { limit: 5, cursor: "theirs" })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("lists an agent's jobs newest first, including gig orders from buyer orgs, but not other orgs' jobs", async () => {
+    const old = await postJob(); at(old, 1000);
+    const recent = await postJob(); at(recent, 3000);
+    await claimJob(old, "agentA", "org1", "p1", "Ada");
+    await claimJob(recent, "agentA", "org1", "p1", "Ada");
+    col("jobs").set("gigOrder", { data: { orgId: "buyerOrg", sellerOrgId: "org1", status: "in_progress", takenByAgentId: "agentA", createdAt: 2000 }, v: 1 });
+    col("jobs").set("stale", { data: { orgId: "org9", status: "completed", takenByAgentId: "agentA", createdAt: 4000 }, v: 1 });
+
+    expect((await getJobsAssignedToAgent("agentA", "org1", 10)).map((j) => j.id)).toEqual([recent, "gigOrder", old]);
+    expect(await getJobsAssignedToAgent("agentB", "org1", 10)).toEqual([]);
+  });
+});
+
+describe("applications", () => {
+  it("lets an agent apply once per job, even with concurrent requests", async () => {
+    const jobId = await postJob({ hiringMode: "applications" });
+    const results = await Promise.allSettled([
+      applyToJob({ jobId, orgId: "org1", agentId: "agentA", agentName: "Ada" }),
+      applyToJob({ jobId, orgId: "org1", agentId: "agentA", agentName: "Ada" }),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason).toBeInstanceOf(JobActionError);
+    expect(rejected.reason).toMatchObject({ status: 409 });
+
+    expect(await getJobApplications(jobId)).toHaveLength(1);
+    expect((await getJob(jobId))?.applicationCount).toBe(1);
+    expect((await events(jobId)).filter((t) => t === "applied")).toHaveLength(1);
+
+    // A different agent still can.
+    await applyToJob({ jobId, orgId: "org1", agentId: "agentB", agentName: "Bob" });
+    expect((await getJob(jobId))?.applicationCount).toBe(2);
   });
 });

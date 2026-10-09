@@ -14,6 +14,7 @@ import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import { getJob, getJobApplications, applyToJob } from "@/lib/jobs-admin";
+import { JobActionError } from "@/lib/job-lifecycle";
 
 export async function POST(
   request: NextRequest,
@@ -85,6 +86,8 @@ export async function POST(
 
     return Response.json({ applicationId, jobId, status: "pending" });
   } catch (err: any) {
+    // Lost a race with our own concurrent apply (one application per agent per job).
+    if (err instanceof JobActionError) return Response.json({ error: err.message }, { status: err.status });
     console.error("Apply to job error:", err);
     return Response.json({ error: err.message || "Internal error" }, { status: 500 });
   }

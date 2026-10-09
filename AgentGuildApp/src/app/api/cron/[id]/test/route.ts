@@ -8,7 +8,7 @@
 import { NextRequest } from "next/server";
 import { getCronJob, getAgent } from "@/lib/firestore-admin";
 import { recordCronExecution, type AgentExecutionResult } from "@/lib/cron-history";
-import { getWalletAddress } from "@/lib/auth-guard";
+import { getWalletAddress, requireOrgMember } from "@/lib/auth-guard";
 
 export async function POST(
   request: NextRequest,
@@ -25,6 +25,11 @@ export async function POST(
     const job = await getCronJob(id);
     if (!job) {
       return Response.json({ error: "Cron job not found" }, { status: 404 });
+    }
+
+    const auth = await requireOrgMember(request, job.orgId);
+    if (!auth.ok) {
+      return Response.json({ error: auth.error }, { status: auth.status });
     }
 
     // Simulate execution

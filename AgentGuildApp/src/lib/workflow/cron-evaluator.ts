@@ -54,18 +54,55 @@ function fieldMatches(field: string, value: number, min: number, max: number): b
   return false;
 }
 
-/** Check if a 5-field cron expression matches a given Date */
-export function cronMatchesNow(cronExpr: string, now: Date): boolean {
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+const ZONED_FORMAT: Intl.DateTimeFormatOptions = {
+  hourCycle: "h23",
+  minute: "numeric",
+  hour: "numeric",
+  day: "numeric",
+  month: "numeric",
+  weekday: "short",
+};
+
+/** Wall-clock fields of `now` in an IANA time zone (falls back to UTC if the zone is invalid). */
+function zonedParts(now: Date, timeZone: string) {
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat("en-US", { ...ZONED_FORMAT, timeZone });
+  } catch {
+    fmt = new Intl.DateTimeFormat("en-US", { ...ZONED_FORMAT, timeZone: "UTC" });
+  }
+  const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
+  return {
+    minute: parseInt(parts.minute, 10),
+    hour: parseInt(parts.hour, 10),
+    dom: parseInt(parts.day, 10),
+    month: parseInt(parts.month, 10),
+    dow: WEEKDAYS.indexOf(parts.weekday),
+  };
+}
+
+/**
+ * Check if a 5-field cron expression matches a given Date.
+ * With `timeZone` (IANA, e.g. "America/New_York") the fields are read in that
+ * zone; without it, in the server's local time.
+ */
+export function cronMatchesNow(cronExpr: string, now: Date, timeZone?: string): boolean {
   const fields = cronExpr.trim().split(/\s+/);
   if (fields.length !== 5) return false;
 
   const [minuteField, hourField, domField, monthField, dowField] = fields;
 
-  const minute = now.getMinutes();
-  const hour = now.getHours();
-  const dom = now.getDate();
-  const month = now.getMonth() + 1; // 1-12
-  const dow = now.getDay();          // 0=Sunday
+  const { minute, hour, dom, month, dow } = timeZone
+    ? zonedParts(now, timeZone)
+    : {
+        minute: now.getMinutes(),
+        hour: now.getHours(),
+        dom: now.getDate(),
+        month: now.getMonth() + 1, // 1-12
+        dow: now.getDay(),          // 0=Sunday
+      };
 
   return (
     fieldMatches(minuteField, minute, 0, 59) &&
@@ -154,6 +191,8 @@ interface RawCronJob {
   targetChannelId?: string;
   enabled: boolean;
   paused?: boolean;
+  /** IANA zone the schedule is written in; absent on jobs created before zones were stored. */
+  timezone?: string;
 }
 
 /** Get all enabled cron jobs (cross-org). */
@@ -192,7 +231,7 @@ export async function evaluateRegularCronJobs(): Promise<{
   const redis = getRedis();
 
   for (const job of active) {
-    if (!cronMatchesNow(job.schedule, now)) continue;
+    if (!cronMatchesNow(job.schedule, now, job.timezone)) continue;
 
     // Minute-level idempotency via Redis
     const idempotencyKey = `cron-job:${job.id}:${minuteKey}`;
@@ -294,6 +333,19 @@ export async function evaluateRegularCronJobs(): Promise<{
 
     // Record execution history
     const endTime = new Date();
+    const runError = jobSuccess ? undefined : "Execution failed";
+    try {
+      await adminDb().collection("cronJobs").doc(job.id).update({
+        lastRun: {
+          time: endTime,
+          success: jobSuccess,
+          durationMs: endTime.getTime() - startTime.getTime(),
+          ...(runError ? { error: runError } : {}),
+        },
+      });
+    } catch (err) {
+      console.error(`[cron-jobs] Failed to update lastRun for ${job.id}:`, err);
+    }
     try {
       await recordCronExecution(
         job.id,
@@ -303,7 +355,7 @@ export async function evaluateRegularCronJobs(): Promise<{
         endTime,
         jobSuccess,
         agentResults,
-        jobSuccess ? undefined : "Execution failed",
+        runError,
       );
     } catch (err) {
       console.error(`[cron-jobs] Failed to record history for ${job.id}:`, err);

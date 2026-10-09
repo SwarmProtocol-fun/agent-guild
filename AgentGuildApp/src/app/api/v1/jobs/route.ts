@@ -10,16 +10,19 @@
  *
  * Query params:
  *   status — filter by job status (default: "open")
- *   mine   — "true" to list jobs currently assigned to the calling agent, ignores status
+ *   mine   — "true" to list jobs assigned to the calling agent (newest first), ignores status
  *   limit  — max results (default 50, max 100)
+ *   cursor — nextCursor from the previous page (status listings only, oldest first)
+ *
+ * Response: { jobs, count, nextCursor } — nextCursor is null on the last page.
  */
 
 import { NextRequest } from "next/server";
 import { verifyAgentRequest, isTimestampFresh } from "@/app/api/v1/verify";
 import { rateLimit } from "@/app/api/v1/rate-limit";
 import type { Job } from "@/lib/firestore";
-import { createJob, getJobsByOrg, getIncomingGigOrders } from "@/lib/jobs-admin";
-import { validateJobInput } from "@/lib/job-lifecycle";
+import { createJob, getJobsAssignedToAgent, listOrgJobsByStatus } from "@/lib/jobs-admin";
+import { JobActionError, validateJobInput } from "@/lib/job-lifecycle";
 import { agentActor } from "@/lib/job-audit";
 
 const VALID_STATUSES: Job["status"][] = ["open", "claimed", "in_progress", "completed", "closed"];
@@ -58,25 +61,27 @@ export async function GET(request: NextRequest) {
     if (!mine && !VALID_STATUSES.includes(statusParam as Job["status"])) {
       return Response.json({ error: "Invalid status filter" }, { status: 400 });
     }
-    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 100);
-
-    let filtered: Job[];
-    if (mine) {
-      // "mine" spans two distinct Job shapes: jobs this org posted and
-      // assigned internally (orgId === my org), and gig orders placed by a
-      // DIFFERENT org against one of my agents (sellerOrgId === my org,
-      // orgId is the buyer's). Missing the second case would hide every gig
-      // order from the very agent that needs to claim/deliver it.
-      const [posted, incoming] = await Promise.all([
-        getJobsByOrg(verified.orgId),
-        getIncomingGigOrders(verified.orgId),
-      ]);
-      filtered = [...posted, ...incoming].filter((j) => j.takenByAgentId === verified.agentId);
-    } else {
-      filtered = (await getJobsByOrg(verified.orgId)).filter((j) => j.status === statusParam);
+    const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 100));
+    if (!verified.orgId) {
+      return Response.json({ error: "Agent has no organization" }, { status: 403 });
     }
 
-    const jobs = filtered.slice(0, limit).map((j) => ({
+    let filtered: Job[];
+    let nextCursor: string | null = null;
+    if (mine) {
+      // Spans both jobs this org posted and gig orders a DIFFERENT org placed
+      // against one of my agents (sellerOrgId === my org) — see getJobsAssignedToAgent.
+      filtered = await getJobsAssignedToAgent(verified.agentId, verified.orgId, limit);
+    } else {
+      const page = await listOrgJobsByStatus(verified.orgId, statusParam as Job["status"], {
+        limit,
+        cursor: url.searchParams.get("cursor"),
+      });
+      filtered = page.jobs;
+      nextCursor = page.nextCursor;
+    }
+
+    const jobs = filtered.map((j) => ({
       id: j.id,
       title: j.title,
       description: j.description,
@@ -96,8 +101,9 @@ export async function GET(request: NextRequest) {
       upfrontPaymentVerified: j.gigId ? !!j.upfrontVerifiedAt : null,
     }));
 
-    return Response.json({ jobs, count: jobs.length });
+    return Response.json({ jobs, count: jobs.length, nextCursor });
   } catch (err: any) {
+    if (err instanceof JobActionError) return Response.json({ error: err.message }, { status: err.status });
     console.error("List jobs error:", err);
     return Response.json({ error: err.message || "Internal error" }, { status: 500 });
   }

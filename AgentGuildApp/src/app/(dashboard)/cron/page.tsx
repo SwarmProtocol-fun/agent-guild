@@ -18,7 +18,7 @@ import { useAuthAddress } from "@/hooks/useAuthAddress";
 import { getAgentsByOrg, type Agent } from "@/lib/firestore";
 import {
     type CronJob, type CronJobCreateInput,
-    SCHEDULE_PRESETS, parseCronToHuman,
+    SCHEDULE_PRESETS, parseCronToHuman, browserTimeZone,
     createCronJob, updateCronJob, deleteCronJob, toggleCronJob, getCronJobs,
 } from "@/lib/cron";
 
@@ -214,7 +214,9 @@ function TaskDialog({
                     {/* Schedule */}
                     <div>
                         <div className="flex items-center justify-between mb-2">
-                            <label className="text-xs font-medium text-muted-foreground">Schedule</label>
+                            <label className="text-xs font-medium text-muted-foreground">
+                                Schedule <span className="text-muted-foreground/70">· times in {browserTimeZone()}</span>
+                            </label>
                             <button
                                 onClick={() => setUseCustom(!useCustom)}
                                 className="text-xs text-amber-500 hover:text-amber-400 transition-colors"
@@ -523,6 +525,7 @@ export default function CronPage() {
                                             <span className="flex items-center gap-1">
                                                 <Clock className="h-3 w-3" />
                                                 {job.scheduleLabel || parseCronToHuman(job.schedule)}
+                                                <span className="text-muted-foreground/70">({job.timezone || "UTC"})</span>
                                             </span>
                                             {job.lastRun && (
                                                 <span className="flex items-center gap-1">
