@@ -34,7 +34,7 @@ export function ethLendingNetwork(): EthNetwork {
     return raw;
 }
 
-function rpcUrl(): string {
+export function rpcUrl(): string {
     const rpc = process.env.ETH_LENDING_RPC_URL;
     if (ethLendingNetwork() === "mainnet") {
         if (!rpc) throw new Error("ETH_LENDING_RPC_URL must be set when ETH_LENDING_NETWORK=mainnet");

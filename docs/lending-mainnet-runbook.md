@@ -38,7 +38,7 @@ Solo loans and loan offers stay USDC.
 withdraw USDC exactly as in the USDC pool. A borrower's collateral is sized so
 the loan starts at the market's max loan-to-value (ETH 65%, SOL 55%), posted to
 that asset's treasury, and returned in that asset on repayment. Market loans are
-always kind `trust`. The hourly sweep starts **liquidation** when a loan's LTV
+always kind `trust`. The sweep (every 10 minutes) starts **liquidation** when a loan's LTV
 (principal + interest over collateral value, live prices) reaches the
 liquidation threshold (ETH 80%, SOL 75%), or when it's overdue past the grace
 period. Liquidation seizes the collateral and stops interest; see *Daily
@@ -101,7 +101,7 @@ code locally against production Firestore; use the emulator
    - `LENDING_MAX_POOL_TVL_USD`, `LENDING_MAX_DEPOSIT_PER_WALLET_USD`, `LENDING_MAX_LOAN_USD`
    - `LENDING_PAUSED=true` is the kill switch (blocks new risk; repayments always work).
 5. **Sweep.** Set `INTERNAL_SERVICE_SECRET`. On Netlify,
-   `netlify/functions/lending-sweep.mts` runs hourly. Elsewhere, schedule:
+   `netlify/functions/lending-sweep.mts` runs every 10 minutes. Elsewhere, schedule:
    `curl -X POST "$SITE/api/cron/lending-sweep" -H "x-service-secret: $INTERNAL_SERVICE_SECRET"`
 6. **Indexes.** `firebase deploy --only firestore:indexes` (lending composite
    indexes are in `firestore.indexes.json`). Wait for them to finish building.
@@ -170,7 +170,7 @@ refund is queued rather than rejected:
 - Amounts are JS numbers rounded to each asset's ledger precision (USDC 6
   decimals, SOL 9, ETH 9 — gwei), not integer token units; on-chain checks
   convert to exact base units.
-- Liquidation is checked hourly (or on **Run Sweep**), not continuously, and the
+- Liquidation is checked every 10 minutes (or on **Run Sweep**), not continuously, and the
   sale is manual. A fast price drop can fall past the collateral's value before
   it's sold; that loss lands on the market's USDC lenders. The LTV buffers are
   the protection; borrowers can't top up collateral yet.

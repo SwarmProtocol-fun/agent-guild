@@ -41,6 +41,22 @@ function applyFields(base: Data, fields: Data): Data {
     return out;
 }
 
+/** update() semantics: a dotted key ("a.b") is a field path into nested maps, as in real Firestore. set()/create() keep keys literal. */
+function applyUpdate(base: Data, fields: Data): Data {
+    let out = { ...base };
+    for (const [k, v] of Object.entries(fields)) {
+        const [head, ...rest] = k.split(".");
+        if (!rest.length) out = applyFields(out, { [k]: v });
+        else out[head] = applyUpdate((out[head] as Data | undefined) ?? {}, { [rest.join(".")]: v });
+    }
+    return out;
+}
+
+/** Reads a possibly dotted field path. */
+function fieldAt(d: Data, path: string): unknown {
+    return path.split(".").reduce<unknown>((o, k) => (o as Data | undefined)?.[k], d);
+}
+
 let autoId = 0;
 
 export class FakeFirestore {
@@ -86,7 +102,7 @@ export class FakeDocRef {
         const col = this.db.col(this.collectionName);
         const cur = col.get(this.id);
         if (!cur) throw new Error(`No document to update: ${this.collectionName}/${this.id}`);
-        col.set(this.id, applyFields(cur, data));
+        col.set(this.id, applyUpdate(cur, data));
     }
 
     async create(data: Data) {
@@ -147,7 +163,7 @@ export class FakeQuery {
     async get() {
         let rows = [...this.db.col(this.collectionName).entries()].filter(([, d]) =>
             this.filters.every(({ field, op, value }) => {
-                const v = d[field];
+                const v = fieldAt(d, field);
                 if (op === "==") return v === value;
                 if (op === "in") return (value as unknown[]).includes(v);
                 if (op === "<") return typeof v === "number" && v < (value as number);
@@ -186,7 +202,7 @@ export class FakeTxn {
             const col = this.db.col(ref.collectionName);
             const cur = col.get(ref.id);
             if (!cur) throw new Error(`No document to update: ${ref.collectionName}/${ref.id}`);
-            col.set(ref.id, applyFields(cur, data));
+            col.set(ref.id, applyUpdate(cur, data));
         });
     }
 

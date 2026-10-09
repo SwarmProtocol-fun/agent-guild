@@ -231,3 +231,50 @@ export function loanToValue(debt: number, debtPriceUsd: number, collateral: numb
 export function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
 }
+
+/**
+ * What lenders earn right now, annualized: interest accruing on active loans
+ * per year over the pool's value. Idle liquidity earns nothing, so this
+ * already reflects utilization. Simple (not compounded) and before losses.
+ */
+export function poolSupplyApy(pool: LendingPool, asOf: number = nowSec()): number {
+    const value = poolValue(pool, asOf);
+    return value > 0 ? Math.max(0, pool.accruingPerYear ?? 0) / value : 0;
+}
+
+/** Share of the pool's capital out on loan (or reserved for approved loans). */
+export function poolUtilization(pool: LendingPool): number {
+    const total = pool.availableLiquidity + pool.totalLent;
+    return total > 0 ? clamp(pool.totalLent / total, 0, 1) : 0;
+}
+
+/**
+ * A lender's lifetime result in a pool: what the position is worth now plus
+ * everything taken out (paid or awaiting payout), minus everything put in.
+ * principalWithdrawn counts confirmed withdrawals at their full amount.
+ */
+export function positionEarnings(
+    pool: LendingPool,
+    position: Pick<PoolPosition, "shares" | "pendingWithdrawalShares" | "principalDeposited" | "principalWithdrawn">,
+    pendingPayoutAmount = 0,
+    asOf: number = nowSec(),
+): { value: number; earned: number } {
+    const value = freeShares(position) * poolSharePrice(pool, asOf);
+    return { value, earned: value + pendingPayoutAmount + position.principalWithdrawn - position.principalDeposited };
+}
+
+export type LoanHealth = "healthy" | "watch" | "at_risk";
+
+/** How close a collateral-market loan is to liquidation: "at_risk" within 5 points of the threshold, "watch" within 10. */
+export function loanHealth(ltv: number, liquidationLtvBps: number): LoanHealth {
+    const bps = Math.round(ltv * 1_000_000) / 100; // basis points, without float drift
+    if (bps >= liquidationLtvBps - 500) return "at_risk";
+    if (bps >= liquidationLtvBps - 1000) return "watch";
+    return "healthy";
+}
+
+/** Extra collateral needed to bring a loan down to `targetLtv` (0 if already there). */
+export function collateralToReachLtv(debtUsd: number, collateral: number, collateralPriceUsd: number, targetLtv: number): number {
+    if (!(collateralPriceUsd > 0) || !(targetLtv > 0)) return 0;
+    return Math.max(0, debtUsd / (targetLtv * collateralPriceUsd) - collateral);
+}

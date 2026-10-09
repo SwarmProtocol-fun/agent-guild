@@ -4,10 +4,10 @@
  * Lending housekeeping (see lib/lending/sweep.ts): defaults loans past their
  * due date + grace period, expires trust loans that never posted collateral,
  * and reconciles each pool's interest accrual. Idempotent — safe to run as
- * often as you like; hourly is plenty.
+ * often as you like; every 10 minutes keeps liquidations timely.
  *
  * Auth: Platform admin or internal service secret
- * Trigger: netlify/functions/lending-sweep.mts (hourly) or manual
+ * Trigger: netlify/functions/lending-sweep.mts (every 10 minutes) or manual
  */
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformAdmin, requireInternalService } from "@/lib/auth-guard";
@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     try {
         const result = await sweepLending();
         console.log(
-            `[lending-sweep] defaulted=${result.defaulted.length} liquidating=${result.liquidating.length} expired=${result.expired.length} ` +
+            `[lending-sweep] defaulted=${result.defaulted.length} liquidating=${result.liquidating.length} expired=${result.expired.length} collateralPosted=${result.collateralPosted.length} agentSends=${result.agentSendsSettled.length} ` +
             `pools=${result.poolsReconciled.length} errors=${result.errors.length}`,
         );
         return NextResponse.json(result, { status: result.errors.length > 0 ? 207 : 200 });

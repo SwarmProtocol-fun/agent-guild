@@ -1,9 +1,10 @@
 /**
  * Repay Loan Dialog — pay down or fully pay off an active loan with a real,
- * verified on-chain transfer in the loan's asset: pick an amount, send it yourself to the
- * right recipient (the treasury for pool loans, the lender directly for solo
- * loans), then paste the signature for the backend to verify before it
- * applies the payment.
+ * verified on-chain transfer in the loan's asset to the right recipient (the
+ * treasury for pool loans, the lender directly for solo loans). Pick an
+ * amount, then either pay from the agent's own wallet in one click, or send
+ * it from your own wallet (connected, or by hand and paste the signature)
+ * for the backend to verify before it applies the payment.
  */
 "use client";
 
@@ -15,6 +16,9 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSession } from "@/contexts/SessionContext";
 import { OnChainSendStep } from "./onchain-send-step";
+import { AgentWalletSendStep } from "./agent-wallet-send-step";
+import { SendSourceTabs, type SendSource } from "./send-source-tabs";
+import { useWalletTransfer } from "./use-wallet-transfer";
 import type { Loan } from "@/lib/lending/types";
 import { assetOf, assetInfo, ceilAmount, formatAssetAmount, roundAmount } from "@/lib/lending/assets";
 import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
@@ -38,6 +42,8 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffEstimate, onRe
     const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
     const recipient = loan.source === "solo" ? loan.lenderWalletAddress || null : treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null;
     const [done, setDone] = useState(false);
+    const [source, setSource] = useState<SendSource>("agent");
+    const { canSend, send } = useWalletTransfer(treasuryInfo);
 
     useEffect(() => {
         fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
@@ -46,6 +52,7 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffEstimate, onRe
     const handleClose = () => {
         setStep("amount");
         setDone(false);
+        setSource("agent");
         onOpenChange(false);
     };
 
@@ -92,13 +99,26 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffEstimate, onRe
                         </Button>
                     </div>
                 ) : (
+                    <div className="space-y-3">
+                    <SendSourceTabs value={source} onChange={setSource} label="Repay from" />
+                    {source === "agent" ? (
+                        <AgentWalletSendStep
+                            endpoint={`/api/v1/lending/loans/${loan.id}/repay/agent-wallet`}
+                            amount={amountValue}
+                            verb="Repay"
+                            description={(a) => <>Sends {a} from the agent&apos;s wallet to {loan.source === "solo" ? "the lender" : "the lending treasury"} and applies it: interest first, then principal.</>}
+                            doneMessage="Payment applied from the agent's wallet."
+                            onPosted={() => { setDone(true); onRepaid(); }}
+                        />
+                    ) : (
                     <OnChainSendStep
                         recipientAddress={recipient!}
                         amount={amountValue}
                         assetLabel={sendAssetLabel(treasuryInfo, asset)}
                         chain={assetInfo(asset).chain}
-                        helperText={`Send from the ${loan.borrowerOrgId} org's wallet, then paste the signature.`}
+                        helperText="Send from your wallet (the one signed in, or its linked Solana wallet), then paste the signature."
                         submitLabel="Verify Payment"
+                        onSendWithWallet={canSend(asset) ? () => send(asset, recipient!, amountValue) : undefined}
                         onSubmit={async (txSig) => {
                             const res = await fetch(`/api/v1/lending/loans/${loan.id}/repay`, {
                                 method: "POST",
@@ -113,6 +133,8 @@ export function RepayLoanDialog({ open, onOpenChange, loan, payoffEstimate, onRe
                             onRepaid();
                         }}
                     />
+                    )}
+                    </div>
                 )}
             </DialogContent>
         </Dialog>

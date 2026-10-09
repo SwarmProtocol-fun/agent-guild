@@ -73,6 +73,7 @@ import {
     confirmPoolWithdrawal,
     requestLoan,
     postLoanCollateral,
+    addLoanCollateral,
     confirmLoanDisbursement,
     repayLoan,
     markLoanDefaulted,
@@ -359,6 +360,84 @@ describe("collateral markets (USDC/ETH, USDC/SOL)", () => {
         vi.setSystemTime(T0 + 31 * DAY * 1000);
         expect((await markLoanDefaulted(loan.id)).status).toBe("liquidating");
         expect((await getLoan(loan.id))!.liquidationReason).toBe("overdue");
+    });
+
+    it("the sweep posts collateral an agent's wallet sent once it finalizes, and never expires it meanwhile", async () => {
+        const pool = await fundedMarket("market-usdc-sol");
+        const loan = await borrow(pool.id, 550);
+        const sig = solSig();
+        await db.collection("loans").doc(loan.id).update({
+            agentCollateralSend: { walletId: "w1", wallet: "AGENTWALLET", asset: "sol", amount: loan.collateral, txSig: sig, status: "sent", startedAt: T0, requestedBy: "0xm", error: null },
+        });
+        vi.setSystemTime(T0 + 30 * DAY * 1000); // well past the pending-collateral expiry
+
+        verifySolTransfer.mockRejectedValueOnce(new Error("Transaction not found or not finalized yet — wait a few seconds and retry"));
+        const first = await sweepLending();
+        expect(first.expired).not.toContain(loan.id);
+        expect((await getLoan(loan.id))!.status).toBe("pending_collateral");
+
+        const second = await sweepLending();
+        expect(second.collateralPosted).toEqual([loan.id]);
+        const posted = (await getLoan(loan.id))!;
+        expect(posted).toMatchObject({ status: "pending_disbursement", collateralStatus: "held", collateralPostedByWallet: "AGENTWALLET" });
+        expect(posted.agentCollateralSend?.status).toBe("posted");
+    });
+
+    it("adding collateral pulls a loan back from liquidation, and all of it is returned on repayment", async () => {
+        const pool = await fundedMarket("market-usdc-sol");
+        const loan = await borrow(pool.id, 550); // 10 SOL at $100
+        await postLoanCollateral(loan.id, "BORROWER", solSig());
+        await confirmLoanDisbursement(loan.id, solSig());
+        prices.sol = 72; // LTV = 76.4% ≥ 75% — would liquidate
+        const after = await addLoanCollateral(loan.id, "BORROWER", 2, solSig());
+        expect(verifySolTransfer).toHaveBeenLastCalledWith(expect.objectContaining({ expectedFromWallet: "BORROWER", expectedToWallet: "TREASURY", expectedAmount: 2 }));
+        expect(after.collateral).toBeCloseTo(12, 8);
+        expect(after.collateralTopUps).toHaveLength(1);
+        expect((await sweepLending()).liquidating).toEqual([]); // 550 / (12 × 72) = 63.7%
+
+        await repayLoan(loan.id, 600, "BORROWER", solSig());
+        expect(payouts("collateral_return")).toMatchObject([{ asset: "sol", toWallet: "BORROWER", amount: 12 }]);
+    });
+
+    it("extra collateral from another wallet, or for a loan no longer active, is recorded and queued back", async () => {
+        const pool = await fundedMarket("market-usdc-sol");
+        const loan = await borrow(pool.id, 550);
+        await postLoanCollateral(loan.id, "BORROWER", solSig());
+        await confirmLoanDisbursement(loan.id, solSig());
+
+        await expect(addLoanCollateral(loan.id, "STRANGER", 1, solSig())).rejects.toThrow(/must come from BORROWER.*return has been queued/);
+        expect((await getLoan(loan.id))!.collateral).toBeCloseTo(10, 8);
+        expect(payouts("collateral_return")).toMatchObject([{ toWallet: "STRANGER", amount: 1, asset: "sol" }]);
+
+        prices.sol = 60;
+        await sweepLending(); // liquidating
+        await expect(addLoanCollateral(loan.id, "BORROWER", 1, solSig())).rejects.toThrow(/no longer active \(status: liquidating\)/);
+        expect(payouts("collateral_return")).toHaveLength(2);
+    });
+
+    it("only collateral-market loans take extra collateral", async () => {
+        const pool = await poolFor("sol");
+        await confirmPoolDeposit(pool.id, "LENDER1", 100, solSig());
+        const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "trust", source: "pool", poolId: pool.id, amount: 2, requestedByWallet: "BORROWER" });
+        await expect(addLoanCollateral(loan.id, "BORROWER", 1, solSig())).rejects.toThrow(/collateral-market/);
+    });
+
+    it("collateral that arrives twice is recorded and the second one queued back, not left in the treasury", async () => {
+        const pool = await fundedMarket("market-usdc-sol");
+        const loan = await borrow(pool.id, 550);
+        await postLoanCollateral(loan.id, "BORROWER", solSig());
+        await expect(postLoanCollateral(loan.id, "BORROWER", solSig())).rejects.toThrow(/return has been queued/);
+        expect(payouts("collateral_return")).toMatchObject([{ toWallet: "BORROWER", amount: loan.collateral }]);
+    });
+
+    it("the sweep still expires a loan whose agent-wallet send failed before anything was broadcast", async () => {
+        const pool = await fundedMarket("market-usdc-sol");
+        const loan = await borrow(pool.id, 550);
+        await db.collection("loans").doc(loan.id).update({
+            agentCollateralSend: { walletId: "w1", wallet: "AGENTWALLET", asset: "sol", amount: loan.collateral, txSig: null, status: "failed", startedAt: T0, requestedBy: "0xm", error: "Simulation failed" },
+        });
+        vi.setSystemTime(T0 + 30 * DAY * 1000);
+        expect((await sweepLending()).expired).toEqual([loan.id]);
     });
 
     it("skips liquidation checks while prices are unavailable, and reports it", async () => {

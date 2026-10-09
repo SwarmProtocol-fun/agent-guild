@@ -1,5 +1,5 @@
 /**
- * Netlify scheduled function — runs the lending sweep hourly by calling
+ * Netlify scheduled function — runs the lending sweep every 10 minutes by calling
  * POST /api/cron/lending-sweep with the internal service secret.
  *
  * Requires INTERNAL_SERVICE_SECRET in the site's environment. URL is set by
@@ -22,4 +22,5 @@ export default async function handler(): Promise<Response> {
     return new Response(body, { status: res.status });
 }
 
-export const config = { schedule: "@hourly" };
+// Every 10 minutes: collateral-market loans are checked for liquidation at live prices, and ETH/SOL move fast.
+export const config = { schedule: "*/10 * * * *" };

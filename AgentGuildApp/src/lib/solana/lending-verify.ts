@@ -54,7 +54,7 @@ export function usdcMintAddress(): string {
     return mint || DEVNET_USDC_MINT;
 }
 
-function rpcUrl(): string {
+export function rpcUrl(): string {
     const rpc = process.env.SOLANA_RPC_URL;
     if (lendingCluster() === "mainnet-beta") {
         if (!rpc) throw new Error("SOLANA_RPC_URL must be set when SOLANA_CLUSTER=mainnet-beta");

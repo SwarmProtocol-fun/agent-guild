@@ -25,17 +25,13 @@ import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-di
 import { BorrowPanel } from "@/components/lending/borrow-panel";
 import type { Agent } from "@/lib/firestore";
 import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
-import { poolSharePrice as sharePrice, freeShares } from "@/lib/lending/math";
-import { assetOf, assetInfo, formatAssetAmount, poolLabel, roundAmount, toBaseUnits } from "@/lib/lending/assets";
-import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, ETH_CHAIN_IDS, type LendingTreasuryInfo } from "@/lib/lending/client";
-import { useSolanaSender, useSolanaMessageSigner, useEvmSender } from "@/lib/wallet";
+import { poolSharePrice as sharePrice, freeShares, poolSupplyApy, poolUtilization, positionEarnings } from "@/lib/lending/math";
+import { assetOf, assetInfo, formatAssetAmount, poolLabel, roundAmount } from "@/lib/lending/assets";
+import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
+import { useSolanaMessageSigner } from "@/lib/wallet";
+import { useWalletTransfer } from "@/components/lending/use-wallet-transfer";
 import { walletLinkMessage } from "@/lib/solana/wallet-link";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
-import { getConnection } from "@/lib/solana/client";
-import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
-import {
-    createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync,
-} from "@solana/spl-token";
 
 type Tab = "borrow" | "pools" | "fund" | "offers" | "positions";
 
@@ -65,6 +61,11 @@ export default function LendingMarketplacePage() {
     const [poolDialog, setPoolDialog] = useState<{ pool: LendingPool; mode: "deposit" | "withdraw" } | null>(null);
     const [fundingLoan, setFundingLoan] = useState<Loan | null>(null);
     const [creatingOffer, setCreatingOffer] = useState(false);
+
+    /** Withdrawals from a pool that are approved but not yet paid out — still the lender's money. */
+    const pendingPayoutFor = (poolId: string) => pendingWithdrawals
+        .filter((w) => w.poolId === poolId && w.status === "pending_payout")
+        .reduce((sum, w) => sum + w.amount, 0);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -173,7 +174,7 @@ export default function LendingMarketplacePage() {
                         onClick={() => setActiveTab(key)}
                         className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === key
                             ? "border-emerald-500 text-emerald-500"
-                            : "border-transparent text-muted-foreground hover:text-foreground"
+                            : "border-transparent text-muted-foreground hover:text-[hsl(var(--foreground))]"
                             }`}
                     >
                         {label}
@@ -198,10 +199,10 @@ export default function LendingMarketplacePage() {
                     {activeTab === "pools" && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {pools.map((pool) => {
-                                const price = sharePrice(pool);
-                                const yieldPct = pool.totalDeposited > 0 ? (pool.totalInterestEarned / pool.totalDeposited) * 100 : 0;
+                                const apy = poolSupplyApy(pool);
+                                const utilization = poolUtilization(pool);
                                 const position = positions[pool.id];
-                                const positionValue = position ? freeShares(position) * price : 0;
+                                const earnings = position ? positionEarnings(pool, position, pendingPayoutFor(pool.id)) : null;
                                 return (
                                     <Card key={pool.id}>
                                         <CardHeader>
@@ -218,23 +219,34 @@ export default function LendingMarketplacePage() {
                                             )}
                                         </CardHeader>
                                         <CardContent className="space-y-3">
-                                            <div className="grid grid-cols-3 gap-2 text-center">
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                                                <div>
+                                                    <p className="text-[10px] text-muted-foreground" title="Interest accruing on active loans per year, over the pool's value. Before any defaults.">Supply APY</p>
+                                                    <p className="text-sm font-mono tabular-nums text-emerald-500">{(apy * 100).toFixed(2)}%</p>
+                                                </div>
+                                                <div>
+                                                    <p className="text-[10px] text-muted-foreground">Utilization</p>
+                                                    <p className="text-sm font-mono tabular-nums">{(utilization * 100).toFixed(0)}%</p>
+                                                </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Available</p>
-                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.availableLiquidity)}</p>
+                                                    <p className="text-sm font-mono tabular-nums">{formatAssetAmount(assetOf(pool), pool.availableLiquidity)}</p>
                                                 </div>
                                                 <div>
                                                     <p className="text-[10px] text-muted-foreground">Out on Loan</p>
-                                                    <p className="text-sm font-mono">{formatAssetAmount(assetOf(pool), pool.totalLent)}</p>
-                                                </div>
-                                                <div>
-                                                    <p className="text-[10px] text-muted-foreground">Lifetime Yield</p>
-                                                    <p className="text-sm font-mono text-emerald-500">+{yieldPct.toFixed(2)}%</p>
+                                                    <p className="text-sm font-mono tabular-nums">{formatAssetAmount(assetOf(pool), pool.totalLent)}</p>
                                                 </div>
                                             </div>
-                                            {position && (
-                                                <div className="text-xs text-muted-foreground border-t border-border pt-2">
-                                                    Your position: <span className="font-mono text-foreground">{formatAssetAmount(assetOf(pool), positionValue)}</span>
+                                            <div className="h-1 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]" aria-hidden="true">
+                                                <div className="h-full rounded-full bg-emerald-500/70" style={{ width: `${utilization * 100}%` }} />
+                                            </div>
+                                            {(pool.totalDefaulted ?? 0) > 0 && (
+                                                <p className="text-[10px] text-amber-500">{formatAssetAmount(assetOf(pool), pool.totalDefaulted)} lost to defaults to date</p>
+                                            )}
+                                            {position && earnings && (
+                                                <div className="flex items-center justify-between text-xs text-muted-foreground border-t border-border pt-2">
+                                                    <span>Your position: <span className="font-mono tabular-nums text-foreground">{formatAssetAmount(assetOf(pool), earnings.value)}</span></span>
+                                                    <EarnedLabel asset={assetOf(pool)} earned={earnings.earned} />
                                                 </div>
                                             )}
                                             <div className="flex gap-2">
@@ -343,12 +355,18 @@ export default function LendingMarketplacePage() {
                                         <p className="text-xs text-muted-foreground">No pool deposits yet.</p>
                                     ) : (
                                         <div className="space-y-2">
-                                            {pools.filter((p) => positions[p.id]).map((p) => (
-                                                <div key={p.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
-                                                    <span>{p.name}</span>
-                                                    <span className="font-mono">{formatAssetAmount(assetOf(p), freeShares(positions[p.id]) * sharePrice(p))}</span>
-                                                </div>
-                                            ))}
+                                            {pools.filter((p) => positions[p.id]).map((p) => {
+                                                const e = positionEarnings(p, positions[p.id], pendingPayoutFor(p.id));
+                                                return (
+                                                    <div key={p.id} className="flex items-center justify-between gap-2 p-2.5 rounded-md border border-border text-xs">
+                                                        <span>{p.name}</span>
+                                                        <span className="flex items-center gap-3">
+                                                            <EarnedLabel asset={assetOf(p)} earned={e.earned} />
+                                                            <span className="font-mono tabular-nums">{formatAssetAmount(assetOf(p), e.value)}</span>
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
                                         </div>
                                     )}
                                 </div>
@@ -460,8 +478,14 @@ export default function LendingMarketplacePage() {
                                     ) : (
                                         <div className="space-y-2">
                                             {fundedLoans.map((l) => (
-                                                <div key={l.id} className="flex items-center justify-between p-2.5 rounded-md border border-border text-xs">
-                                                    <span>{agentNames[l.borrowerAgentId] || l.borrowerAgentId} &middot; ${l.principal.toLocaleString()}</span>
+                                                <div key={l.id} className="flex items-center justify-between gap-2 p-2.5 rounded-md border border-border text-xs">
+                                                    <div>
+                                                        <div>{agentNames[l.borrowerAgentId] || l.borrowerAgentId} &middot; ${l.principal.toLocaleString()} at {(l.interestRateBps / 100).toFixed(1)}%</div>
+                                                        <div className="text-[10px] text-muted-foreground tabular-nums">
+                                                            Repaid ${fmt(l.principalPaid)} principal + ${fmt(l.interestPaid)} interest
+                                                            {l.status === "active" && l.dueAt && ` · due ${new Date(l.dueAt * 1000).toLocaleDateString()}`}
+                                                        </div>
+                                                    </div>
                                                     <Badge variant="outline" className="text-[10px]">{l.status}</Badge>
                                                 </div>
                                             ))}
@@ -560,8 +584,7 @@ function PoolActionDialog({
     const [amount, setAmount] = useState(asset === "usdc" ? "100" : "");
     const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
     const treasury = treasuryInfo ? treasuryAddressFor(treasuryInfo, asset) : null;
-    const solanaSender = useSolanaSender();
-    const evmSender = useEvmSender();
+    const { canSend, send } = useWalletTransfer(treasuryInfo);
     const messageSigner = useSolanaMessageSigner();
     // Solana wallet that pays for Solana-pool deposits: the login itself, or (EVM login) the signature-linked one.
     const [linkedSolana, setLinkedSolana] = useState<string | null | undefined>(undefined);
@@ -636,42 +659,10 @@ function PoolActionDialog({
     const needsLink = chain === "solana" && signedInWithEvm && !linkedSolana;
     const needsEvmLogin = chain === "ethereum" && !!walletAddress && !signedInWithEvm;
     const payerAddress = chain === "ethereum" ? walletAddress : signedInWithEvm ? linkedSolana : walletAddress;
-    const canWalletSend = chain === "ethereum"
-        ? !!evmSender && !!payerAddress && evmSender.address.toLowerCase() === payerAddress.toLowerCase()
-        : !!solanaSender && !!payerAddress && solanaSender.address === payerAddress;
-
+    const canWalletSend = !!payerAddress && canSend(asset, payerAddress);
     const sendWithWallet = async (): Promise<string> => {
-        if (!treasury || !treasuryInfo) throw new Error("Treasury address not loaded yet");
-        if (asset === "eth") {
-            if (!evmSender || !treasuryInfo.assets.eth) throw new Error("Connect an Ethereum wallet first");
-            return evmSender.sendNativeTransfer({
-                to: treasury,
-                valueWei: toBaseUnits("eth", amountValue),
-                chainId: ETH_CHAIN_IDS[treasuryInfo.assets.eth.network],
-            });
-        }
-        if (!solanaSender) throw new Error("Connect a Solana wallet first");
-        const connection = getConnection();
-        const owner = new PublicKey(solanaSender.address);
-        const treasuryKey = new PublicKey(treasury);
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-        const tx = new Transaction({ feePayer: owner, blockhash, lastValidBlockHeight });
-        if (asset === "sol") {
-            tx.add(SystemProgram.transfer({ fromPubkey: owner, toPubkey: treasuryKey, lamports: Number(toBaseUnits("sol", amountValue)) }));
-        } else {
-            const mint = new PublicKey(treasuryInfo.usdcMint);
-            const from = getAssociatedTokenAddressSync(mint, owner);
-            const to = getAssociatedTokenAddressSync(mint, treasuryKey, true);
-            tx.add(
-                createAssociatedTokenAccountIdempotentInstruction(owner, to, treasuryKey, mint),
-                createTransferCheckedInstruction(from, mint, to, owner, toBaseUnits("usdc", amountValue), 6),
-            );
-        }
-        const sig = await solanaSender.sendTransaction(tx, connection);
-        // The server only credits finalized transfers.
-        const result = await connection.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "finalized");
-        if (result.value.err) throw new Error(`Transaction failed on-chain: ${JSON.stringify(result.value.err)}`);
-        return sig;
+        if (!treasury) throw new Error("Treasury address not loaded yet");
+        return send(asset, treasury, amountValue);
     };
 
     const requestWithdrawal = async () => {
@@ -831,6 +822,11 @@ function FundLoanDialog({
 }) {
     const [step, setStep] = useState<"review" | "send">("review");
     const [done, setDone] = useState(false);
+    const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
+    const { canSend, send } = useWalletTransfer(treasuryInfo);
+    useEffect(() => {
+        fetchLendingTreasury().then(setTreasuryInfo).catch(() => setTreasuryInfo(null));
+    }, []);
 
     return (
         <Dialog open onOpenChange={(open) => !open && (done ? onDone() : onClose())}>
@@ -849,7 +845,7 @@ function FundLoanDialog({
                     </div>
                 ) : step === "review" ? (
                     <div className="space-y-4">
-                        <div className="p-3 rounded-lg border border-border bg-muted/20 space-y-1.5 text-xs">
+                        <div className="p-3 rounded-lg border border-border bg-[hsl(var(--muted))]/20 space-y-1.5 text-xs">
                             <div className="flex justify-between"><span className="text-muted-foreground">Borrower</span><span>{borrowerName}</span></div>
                             <div className="flex justify-between"><span className="text-muted-foreground">Principal</span><span className="font-mono">${loan.principal.toLocaleString()}</span></div>
                             <div className="flex justify-between"><span className="text-muted-foreground">Rate</span><span>{(loan.interestRateBps / 100).toFixed(1)}% APR</span></div>
@@ -874,7 +870,9 @@ function FundLoanDialog({
                     <OnChainSendStep
                         recipientAddress={loan.borrowerWalletAddress!}
                         amount={loan.principal}
+                        assetLabel={sendAssetLabel(treasuryInfo, "usdc")}
                         helperText="Send the principal directly to the borrower's wallet, then paste the signature."
+                        onSendWithWallet={canSend("usdc") ? () => send("usdc", loan.borrowerWalletAddress!, loan.principal) : undefined}
                         submitLabel="Verify & Fund"
                         onSubmit={async (txSig) => {
                             if (!walletAddress) throw new Error("Connect a wallet first");
@@ -893,5 +891,15 @@ function FundLoanDialog({
                 )}
             </DialogContent>
         </Dialog>
+    );
+}
+
+function EarnedLabel({ asset, earned }: { asset: ReturnType<typeof assetOf>; earned: number }) {
+    const dust = assetInfo(asset).dust;
+    if (Math.abs(earned) < dust) return <span className="font-mono tabular-nums text-muted-foreground">±0 earned</span>;
+    return (
+        <span className={`font-mono tabular-nums ${earned > 0 ? "text-emerald-500" : "text-red-500"}`}>
+            {earned > 0 ? "+" : "−"}{formatAssetAmount(asset, Math.abs(earned))} {earned > 0 ? "earned" : "lost"}
+        </span>
     );
 }

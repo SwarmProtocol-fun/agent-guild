@@ -72,6 +72,7 @@ import type {
     PoolWithdrawalRequest,
     EligibilitySummary,
     LoanOffer,
+    CollateralTopUp,
 } from "./types";
 
 const POOLS = "lendingPools";
@@ -984,7 +985,6 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
     const loan = await getLoan(loanId);
     if (!loan) throw new Error("Loan not found");
     if (!(loan.collateral > 0)) throw new Error("This loan doesn't require collateral");
-    if (loan.collateralStatus && loan.collateralStatus !== "awaiting") throw new Error(`Collateral already ${loan.collateralStatus.replace("_", " ")}`);
     // A collateral-market loan's collateral is a different asset (and maybe chain) from its principal.
     const asset = collateralAssetOf(loan);
     const wallet = await resolvePayerWallet(account, asset);
@@ -1033,6 +1033,77 @@ export async function postLoanCollateral(loanId: string, account: string, txSig:
 
     if (result.returned) {
         throw new Error(`This loan is no longer awaiting collateral (status: ${result.status}). Your transfer was recorded and its return has been queued.`);
+    }
+    invalidateCache(`credit:${loan.borrowerAgentId}`);
+    return result.loan;
+}
+
+/**
+ * Add collateral to an active collateral-market loan to pull its
+ * loan-to-value away from liquidation. It must come from the wallet that
+ * posted the original collateral, so the whole amount returns to one place.
+ * The transfer has already landed by the time this runs, so if the loan
+ * stopped being active (repaid, liquidating) or it came from another wallet,
+ * the signature is still claimed and the amount is queued back to its sender.
+ */
+export async function addLoanCollateral(loanId: string, account: string, amount: number, txSig: string): Promise<Loan> {
+    const loanRef = adminDb().collection(LOANS).doc(loanId);
+    const loan = await getLoan(loanId);
+    if (!loan) throw new Error("Loan not found");
+    if (!loan.collateralAsset) throw new Error("Only collateral-market loans take extra collateral");
+    const asset = loan.collateralAsset;
+    amount = roundAmount(asset, amount);
+    if (!(amount > 0)) throw new Error("Amount must be positive");
+    const wallet = await resolvePayerWallet(account, asset);
+
+    const treasury = treasuryFor(asset);
+    const transfer: VerifyTransferInput = {
+        txSig: normalizeTxSig(asset, txSig),
+        expectedFromWallet: wallet,
+        expectedToWallet: treasury,
+        expectedAmount: amount,
+        purpose: "loan_collateral",
+        refId: loanId,
+    };
+    await verifyLendingTransfer(asset, transfer);
+
+    const result = await adminDb().runTransaction(async (txn) => {
+        const snap = await txn.get(loanRef);
+        if (!snap.exists) throw new Error("Loan not found");
+        const current = toLoan(snap.id, snap.data()!);
+        healLegacyInTxn(txn, loanRef, "loans", snap.data());
+
+        claimLendingTransferInTxn(asset, txn, transfer);
+
+        const fromOther = !!current.collateralPostedByWallet && current.collateralPostedByWallet.toLowerCase() !== wallet.toLowerCase();
+        if (current.status !== "active" || current.collateralStatus !== "held" || fromOther) {
+            createPayoutInTxn(txn, {
+                kind: "collateral_return",
+                fromWallet: treasury,
+                toWallet: wallet,
+                amount,
+                asset,
+                loanId,
+                reason: fromOther
+                    ? "Extra collateral sent from a different wallet than the one that posted it"
+                    : `Extra collateral arrived after the loan was no longer active (status: ${current.status})`,
+            });
+            return { returned: true as const, status: current.status, fromOther };
+        }
+
+        const topUp: CollateralTopUp = { amount, txSig: transfer.txSig, at: nowSec(), byWallet: wallet };
+        const update = {
+            collateral: roundAmount(asset, current.collateral + amount),
+            collateralTopUps: [...(current.collateralTopUps ?? []), topUp],
+        };
+        txn.update(loanRef, update);
+        return { returned: false as const, loan: { ...current, ...update } };
+    });
+
+    if (result.returned) {
+        throw new Error(result.fromOther
+            ? `Extra collateral must come from ${loan.collateralPostedByWallet}, the wallet that posted it. Your transfer was recorded and its return has been queued.`
+            : `This loan is no longer active (status: ${result.status}). Your transfer was recorded and its return has been queued.`);
     }
     invalidateCache(`credit:${loan.borrowerAgentId}`);
     return result.loan;

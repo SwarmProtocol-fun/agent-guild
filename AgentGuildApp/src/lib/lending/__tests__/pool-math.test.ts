@@ -10,6 +10,11 @@ import {
     accruePoolInterest,
     depositCapacity,
     computeDefaultRecovery,
+    poolSupplyApy,
+    poolUtilization,
+    positionEarnings,
+    loanHealth,
+    collateralToReachLtv,
 } from "../math";
 import type { LendingPool } from "../types";
 
@@ -231,5 +236,47 @@ describe("computeDefaultRecovery", () => {
     it("conserves the collateral exactly", () => {
         const r = computeDefaultRecovery(123.45, 6.78, 200);
         expect(r.recoveredPrincipal + r.recoveredInterest + r.collateralExcess).toBeCloseTo(200, 12);
+    });
+});
+
+describe("lender-facing pool stats", () => {
+    const T = 1_800_000_000;
+    it("supply APY is accruing interest over pool value, so idle cash dilutes it", () => {
+        // 400 lent at 10% = 40/yr over a 1000 pool → 4%.
+        const pool = makePool({ accruingPerYear: 40, interestReceivable: 0, interestAccrualAt: T });
+        expect(poolSupplyApy(pool, T)).toBeCloseTo(0.04, 10);
+        expect(poolSupplyApy(makePool({ totalShares: 0, availableLiquidity: 0, totalLent: 0 }), T)).toBe(0);
+        expect(poolSupplyApy(makePool(), T)).toBe(0); // no accrual tracked yet
+    });
+
+    it("utilization is the share of capital out on loan", () => {
+        expect(poolUtilization(makePool())).toBeCloseTo(0.4, 10);
+        expect(poolUtilization(makePool({ availableLiquidity: 0, totalLent: 0 }))).toBe(0);
+    });
+
+    it("earnings count the current value, confirmed and pending withdrawals, against deposits", () => {
+        // price 1.1: 1100 value over 1000 shares.
+        const pool = makePool({ availableLiquidity: 700 });
+        const position = { shares: 200, pendingWithdrawalShares: 50, principalDeposited: 300, principalWithdrawn: 110 };
+        // free 150 shares × 1.1 = 165, + 55 pending payout + 110 withdrawn − 300 = 30.
+        const r = positionEarnings(pool, position, 55, T);
+        expect(r.value).toBeCloseTo(165, 8);
+        expect(r.earned).toBeCloseTo(30, 8);
+    });
+});
+
+describe("collateral-market loan health", () => {
+    it("bands loans by distance to the liquidation threshold", () => {
+        expect(loanHealth(0.6, 8000)).toBe("healthy");
+        expect(loanHealth(0.7, 8000)).toBe("watch");
+        expect(loanHealth(0.76, 8000)).toBe("at_risk");
+        expect(loanHealth(0.9, 8000)).toBe("at_risk");
+    });
+
+    it("works out the top-up that reaches a target LTV", () => {
+        // $550 debt, 10 SOL at $72 = 76.4%. Reaching 55% needs 550/(0.55×72) − 10 = 3.89 SOL.
+        expect(collateralToReachLtv(550, 10, 72, 0.55)).toBeCloseTo(550 / (0.55 * 72) - 10, 10);
+        expect(collateralToReachLtv(100, 10, 72, 0.55)).toBe(0);
+        expect(collateralToReachLtv(100, 10, 0, 0.55)).toBe(0);
     });
 });

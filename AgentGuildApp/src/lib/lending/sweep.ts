@@ -5,8 +5,11 @@
  *      (collateral-market loans are liquidated instead).
  *   1b. Liquidate collateral-market loans whose loan-to-value reached their
  *      market's liquidation threshold at live prices.
- *   2. Cancel trust loans still awaiting collateral after
- *      LENDING_PENDING_EXPIRY_DAYS, releasing any pool liquidity they reserved.
+ *   2. Post collateral that was sent from an agent's own wallet and has
+ *      since finalized (Ethereum takes ~15 minutes), then cancel loans still
+ *      awaiting collateral after LENDING_PENDING_EXPIRY_DAYS, releasing any
+ *      pool liquidity they reserved. A loan whose agent-wallet transfer is
+ *      already on-chain is never expired — its collateral is on the way.
  *   3. Reconcile every pool's interest accrual against its active loans.
  *
  * Every step is idempotent and each loan is processed independently, so a
@@ -19,6 +22,8 @@ import { accrue } from "./math";
 import { cancelLoan, listPools, markLoanDefaulted, currentLoanToValue, startLiquidation } from "./lending-service";
 import type { LendingPool, Loan } from "./types";
 import { normalizeLegacy, healLegacyInTxn } from "./legacy-fields";
+import { finishPendingAgentCollateral, finishPendingAgentTopUps } from "./agent-collateral";
+import { finishPendingAgentRepays } from "./agent-repay";
 
 const LOANS = "loans";
 const POOLS = "lendingPools";
@@ -30,6 +35,10 @@ export interface SweepResult {
     /** Collateral-market loans moved to "liquidating" (overdue or under-collateralized). */
     liquidating: string[];
     expired: string[];
+    /** Loans whose agent-wallet collateral finalized and was posted this run. */
+    collateralPosted: string[];
+    /** Loans whose agent-wallet top-up or repayment finalized and was applied this run. */
+    agentSendsSettled: string[];
     poolsReconciled: Array<{ poolId: string; activeLoans: number; accruingPerYear: number; interestReceivable: number }>;
     errors: string[];
 }
@@ -72,7 +81,7 @@ export async function reconcilePoolAccrual(poolId: string): Promise<{ activeLoan
 export async function sweepLending(): Promise<SweepResult> {
     const limits = lendingLimits();
     const now = nowSec();
-    const result: SweepResult = { defaulted: [], liquidating: [], expired: [], poolsReconciled: [], errors: [] };
+    const result: SweepResult = { defaulted: [], liquidating: [], expired: [], collateralPosted: [], agentSendsSettled: [], poolsReconciled: [], errors: [] };
 
     const overdue = await adminDb().collection(LOANS)
         .where("status", "==", "active")
@@ -103,11 +112,28 @@ export async function sweepLending(): Promise<SweepResult> {
         }
     }
 
+    for (const [label, finish, into] of [
+        ["agent collateral", finishPendingAgentCollateral, result.collateralPosted],
+        ["agent top-up", finishPendingAgentTopUps, result.agentSendsSettled],
+        ["agent repayment", finishPendingAgentRepays, result.agentSendsSettled],
+    ] as const) {
+        try {
+            const finished = await finish();
+            into.push(...finished.posted);
+            result.errors.push(...finished.errors.map((e) => `${label} ${e}`));
+        } catch (err) {
+            result.errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
     const stale = await adminDb().collection(LOANS)
         .where("status", "==", "pending_collateral")
         .where("requestedAt", "<", now - limits.pendingExpiryDays * 86400)
         .get();
     for (const doc of stale.docs) {
+        const send = (doc.data() as Loan).agentCollateralSend;
+        // A transfer from the agent's wallet is in flight; the loan waits for it to settle.
+        if (send?.status === "sent" || send?.status === "sending") continue;
         try {
             await cancelLoan(doc.id, { byAdmin: true, reason: `Collateral not posted within ${limits.pendingExpiryDays} days` });
             result.expired.push(doc.id);

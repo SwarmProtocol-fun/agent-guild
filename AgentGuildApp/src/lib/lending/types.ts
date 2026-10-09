@@ -98,6 +98,13 @@ export interface Loan {
     collateralTxSig?: string;
     /** Wallet that posted the collateral — where it is returned. */
     collateralPostedByWallet?: string;
+    /** Set when the collateral is being posted straight from the agent's own wallet (lib/lending/agent-collateral.ts). */
+    agentCollateralSend?: AgentWalletSend;
+    /** Latest collateral top-up / repayment sent from the agent's own wallet (one in flight at a time). */
+    agentTopUpSend?: AgentWalletSend;
+    agentRepaySend?: AgentWalletSend;
+    /** Collateral-market loans: collateral added after posting (already included in `collateral`). */
+    collateralTopUps?: CollateralTopUp[];
     /** True once this pool loan's principal/interest is included in the pool's accruingPerYear / interestReceivable. */
     poolAccrualTracked?: boolean;
     cancelReason?: string;
@@ -315,4 +322,41 @@ export interface LendingPayout {
     createdAt: number;
     paidAt?: number;
     txSig?: string;
+}
+
+/**
+ * One transfer from the borrowing agent's custodial wallet
+ * (lib/lending/agent-wallet-send.ts). "sending" = claimed, not broadcast;
+ * "sent" = broadcast, awaiting finality; "posted" = verified and credited;
+ * "returned" = landed after the loan stopped taking it, queued back;
+ * "failed" = see `error` (with no txSig, nothing moved).
+ */
+export type AgentSendStatus = "sending" | "sent" | "posted" | "returned" | "failed";
+
+export interface AgentWalletSend {
+    walletId: string;
+    wallet: string;
+    asset: "usdc" | "sol" | "eth";
+    amount: number;
+    /** Where it was sent (the treasury, or a solo lender for repayments). Absent on early collateral sends (treasury). */
+    recipient?: string;
+    txSig: string | null;
+    status: AgentSendStatus;
+    startedAt: number;
+    sentAt?: number;
+    /** Wallet address of the person who triggered it. */
+    requestedBy: string;
+    error: string | null;
+}
+
+/** @deprecated use AgentWalletSend */
+export type AgentCollateralSend = AgentWalletSend;
+export type AgentCollateralStatus = AgentSendStatus;
+
+/** Collateral added to an active collateral-market loan after it was posted. */
+export interface CollateralTopUp {
+    amount: number;
+    txSig: string;
+    at: number;
+    byWallet: string;
 }

@@ -2,22 +2,28 @@
  * Active Loans Panel — an agent's loan history with a live-estimated payoff
  * balance for active loans (interest accrues daily server-side; we project
  * forward from lastAccrualAt for display without waiting on a write). Trust
- * loans awaiting collateral get a "Post collateral" step (a verified transfer
- * of the loan's asset to its treasury) and can be cancelled until it's posted.
+ * loans awaiting collateral get a "Post collateral" step — one click from the
+ * agent's own wallet by default, or a verified transfer from the member's own
+ * wallet — and can be cancelled until it's posted. Active collateral-market
+ * loans show how close they are to liquidation and can take more collateral.
  */
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Loader2, AlertCircle, ShieldCheck, Landmark } from "lucide-react";
+import { Loader2, AlertCircle, ShieldCheck, Landmark, TriangleAlert } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OnChainSendStep } from "./onchain-send-step";
+import { AgentWalletSendStep } from "./agent-wallet-send-step";
+import { AddCollateralDialog } from "./add-collateral-dialog";
+import { SendSourceTabs, type SendSource } from "./send-source-tabs";
+import { useWalletTransfer } from "./use-wallet-transfer";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RepayLoanDialog } from "./repay-loan-dialog";
 import type { Loan } from "@/lib/lending/types";
 import { assetOf, assetInfo, collateralAssetOf, formatAssetAmount, poolLabel } from "@/lib/lending/assets";
-import { loanToValue } from "@/lib/lending/math";
+import { loanToValue, loanHealth, type LoanHealth } from "@/lib/lending/math";
 import { fetchLendingTreasury, treasuryAddressFor, sendAssetLabel, type LendingTreasuryInfo } from "@/lib/lending/client";
 
 interface ActiveLoansPanelProps {
@@ -51,9 +57,12 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
     const [error, setError] = useState<string | null>(null);
     const [repayLoan, setRepayLoan] = useState<Loan | null>(null);
     const [collateralLoan, setCollateralLoan] = useState<Loan | null>(null);
+    const [collateralSource, setCollateralSource] = useState<SendSource>("agent");
+    const [topUpLoan, setTopUpLoan] = useState<Loan | null>(null);
     const [treasuryInfo, setTreasuryInfo] = useState<LendingTreasuryInfo | null>(null);
     const [cancellingId, setCancellingId] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
+    const { canSend, send } = useWalletTransfer(treasuryInfo);
 
     const openCollateral = async (loan: Loan) => {
         setActionError(null);
@@ -71,6 +80,7 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
             setActionError(`The ${assetInfo(collateralAssetOf(loan)).symbol} treasury is not configured`);
             return;
         }
+        setCollateralSource("agent");
         setCollateralLoan(loan);
     };
 
@@ -157,21 +167,22 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                         ? loanToValue(payoff, debtPrice, loan.collateral, collPrice)
                         : null;
                     return (
-                        <div key={loan.id} className="flex items-center justify-between p-2.5 rounded-md border border-border">
-                            <div className="flex items-center gap-2">
+                        <div key={loan.id} className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-md border border-border">
+                            <div className="flex min-w-0 flex-1 items-center gap-2">
                                 {loan.kind === "trust" ? (
                                     <ShieldCheck className="h-3.5 w-3.5 text-amber-500" />
                                 ) : (
                                     <Landmark className="h-3.5 w-3.5 text-emerald-500" />
                                 )}
-                                <div>
+                                <div className="min-w-0 flex-1">
                                     <div className="text-xs font-medium">
                                         {amt(loan.principal)} &middot; {(loan.interestRateBps / 100).toFixed(1)}% &middot; {loan.source === "pool" ? (loan.collateralAsset ? `${poolLabel(loan)} market` : "Pool") : "Solo"}
                                     </div>
                                     <div className="text-[10px] text-muted-foreground">
                                         {loan.status === "active" && `Payoff: ${amt(payoff)}`}
-                                        {loan.status === "pending_collateral" && `Post ${coll(loan.collateral)} collateral to continue`}
-                                        {ltv !== null && loan.liquidationLtvBps && ` · LTV ${(ltv * 100).toFixed(0)}% (liquidates at ${(loan.liquidationLtvBps / 100).toFixed(0)}%)`}
+                                        {loan.status === "pending_collateral" && (loan.agentCollateralSend?.status === "sent"
+                                            ? `${coll(loan.collateral)} collateral sent from the agent's wallet; confirming`
+                                            : `Post ${coll(loan.collateral)} collateral to continue`)}
                                         {loan.status === "liquidating" && `Collateral (${coll(loan.collateral)}) seized for sale — ${amt(loan.principalRemaining + loan.interestAccrued)} owed`}
                                         {loan.status === "liquidated" && `Collateral sold for ${amt(loan.liquidationProceeds ?? 0)}; loan closed`}
                                         {loan.status === "cancelled" && (loan.cancelReason || "Cancelled before funding")}
@@ -185,12 +196,18 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                                         {loan.collateralStatus === "seized" && ` · collateral seized`}
                                         {!!loan.overpaymentOwed && loan.overpaymentOwed >= assetInfo(asset).dust && ` · ${amt(loan.overpaymentOwed)} overpayment refund queued`}
                                     </div>
+                                    {ltv !== null && loan.liquidationLtvBps && <LtvMeter ltv={ltv} liquidationLtvBps={loan.liquidationLtvBps} />}
                                 </div>
                             </div>
                             <div className="flex items-center gap-2">
                                 <Badge variant="outline" className={`text-[10px] ${STATUS_STYLES[loan.status]}`}>
                                     {loan.status}
                                 </Badge>
+                                {loan.status === "active" && loan.collateralAsset && loan.collateralStatus === "held" && (
+                                    <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" disabled={!treasuryInfo} onClick={() => setTopUpLoan(loan)}>
+                                        Add collateral
+                                    </Button>
+                                )}
                                 {loan.status === "active" && (
                                     <Button size="sm" variant="outline" className="h-6 text-[10px] px-2" onClick={() => setRepayLoan(loan)}>
                                         Repay
@@ -222,6 +239,16 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 <Dialog open onOpenChange={(open) => !open && setCollateralLoan(null)}>
                     <DialogContent className="max-w-sm">
                         <DialogHeader><DialogTitle>Post Collateral</DialogTitle></DialogHeader>
+                        <SendSourceTabs value={collateralSource} onChange={setCollateralSource} label="Pay collateral from" />
+                        {collateralSource === "agent" ? (
+                            <AgentWalletSendStep
+                                endpoint={`/api/v1/lending/loans/${collateralLoan.id}/collateral/agent-wallet`}
+                                verb="Post"
+                                description={(a) => <>Sends exactly <span className="font-medium text-foreground">{a}</span> from the agent&apos;s wallet to the lending treasury and verifies it. It&apos;s returned to the same wallet when the loan is repaid.</>}
+                                doneMessage="Collateral posted from the agent's wallet. The loan moves on to funding."
+                                onPosted={() => { load(); setTimeout(() => setCollateralLoan(null), 1500); }}
+                            />
+                        ) : (
                         <OnChainSendStep
                             recipientAddress={treasuryAddressFor(treasuryInfo, collateralAssetOf(collateralLoan))!}
                             amount={collateralLoan.collateral}
@@ -229,6 +256,9 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                             chain={assetInfo(collateralAssetOf(collateralLoan)).chain}
                             helperText="Send exactly this amount from your own wallet to the lending treasury. It's held for the life of the loan and returned to the same wallet when you repay — or applied to the balance if the loan defaults."
                             submitLabel="Verify Collateral"
+                            onSendWithWallet={canSend(collateralAssetOf(collateralLoan))
+                                ? () => send(collateralAssetOf(collateralLoan), treasuryAddressFor(treasuryInfo, collateralAssetOf(collateralLoan))!, collateralLoan.collateral)
+                                : undefined}
                             onSubmit={async (txSig) => {
                                 const res = await fetch(`/api/v1/lending/loans/${collateralLoan.id}/collateral`, {
                                     method: "POST",
@@ -240,8 +270,19 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                                 load();
                             }}
                         />
+                        )}
                     </DialogContent>
                 </Dialog>
+            )}
+
+            {topUpLoan && treasuryInfo && (
+                <AddCollateralDialog
+                    loan={topUpLoan}
+                    debt={estimatePayoff(topUpLoan)}
+                    treasuryInfo={treasuryInfo}
+                    onClose={() => setTopUpLoan(null)}
+                    onAdded={load}
+                />
             )}
 
             {repayLoan && (
@@ -257,5 +298,37 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                 />
             )}
         </Card>
+    );
+}
+
+const HEALTH_STYLES: Record<LoanHealth, { bar: string; text: string; label: string }> = {
+    healthy: { bar: "bg-emerald-500", text: "text-muted-foreground", label: "Healthy" },
+    watch: { bar: "bg-amber-500", text: "text-amber-600 dark:text-amber-400", label: "Watch" },
+    at_risk: { bar: "bg-red-500", text: "text-red-600 dark:text-red-400", label: "Close to liquidation" },
+};
+
+/** Loan-to-value against the liquidation threshold, with a plain warning as it gets close. */
+function LtvMeter({ ltv, liquidationLtvBps }: { ltv: number; liquidationLtvBps: number }) {
+    const threshold = liquidationLtvBps / 10_000;
+    const health = loanHealth(ltv, liquidationLtvBps);
+    const style = HEALTH_STYLES[health];
+    // The bar spans 0 → the threshold; full means liquidation.
+    const fill = Math.min(1, ltv / threshold);
+    return (
+        <div className="mt-1.5 max-w-xs">
+            <div
+                className="h-1.5 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]"
+                role="meter" aria-label="Loan-to-value" aria-valuemin={0} aria-valuemax={Math.round(threshold * 100)} aria-valuenow={Math.round(ltv * 100)}
+            >
+                <div className={`h-full rounded-full transition-[width] ${style.bar}`} style={{ width: `${fill * 100}%` }} />
+            </div>
+            <div className={`mt-0.5 flex items-center gap-1 text-[10px] tabular-nums ${style.text}`}>
+                {health === "at_risk" && <TriangleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />}
+                <span>
+                    LTV {(ltv * 100).toFixed(1)}% · liquidates at {(threshold * 100).toFixed(0)}% · {style.label}
+                    {health === "at_risk" && " — add collateral or repay"}
+                </span>
+            </div>
+        </div>
     );
 }

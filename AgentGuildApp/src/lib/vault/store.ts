@@ -255,7 +255,8 @@ export interface AuditEntry {
     | "secret.rotation_configured" | "secret.rotation_due" | "secret.rotation_failed"
     | "runtime.connected" | "runtime.revoked"
     | "shroud.configured" | "shroud.blocked" | "shroud.halted" | "shroud.resumed"
-    | "intent.policy_updated" | "intent.rejected" | "intent.failed" | "intent.executed";
+    | "intent.policy_updated" | "intent.rejected" | "intent.failed" | "intent.executed"
+    | "lending.collateral_from_agent_wallet" | "lending.collateral_top_up_from_agent_wallet" | "lending.repay_from_agent_wallet";
   actorType: "user" | "agent";
   actorId: string;
   target: string;
