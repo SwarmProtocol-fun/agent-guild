@@ -23,8 +23,54 @@ interface TradeRecord {
   sizeUsd: number;
   fillPrice?: number;
   realizedPnl?: number;
-  status: "opened" | "closed";
+  /** opened/closed for live trades; paper fills can also be sl, tp, limit or liquidation. */
+  status: string;
 }
+
+interface PaperTrade {
+  id: string;
+  coin: string;
+  isBuy: boolean;
+  sizeUsd: number;
+  px: number;
+  fee: number;
+  realizedPnl: number;
+  reduceOnly: boolean;
+  reason: "manual" | "limit" | "sl" | "tp" | "liquidation" | "strategy";
+}
+
+interface PaperPositionRow {
+  coin: string;
+  szi: number;
+  entryPx: number;
+  notionalUsd: number;
+  unrealizedPnl: number;
+  slPx: number | null;
+  tpPx: number | null;
+}
+
+interface PaperRestingOrder {
+  orderId: string;
+  coin: string;
+  isBuy: boolean;
+  sz: number;
+  limitPx: number;
+  leverage: number;
+  reduceOnly: boolean;
+}
+
+interface PaperAccountView {
+  balance: number;
+  startBalance: number;
+  dailyPnl: number;
+  equity: number;
+  marginUsed: number;
+  available: number;
+  positions: PaperPositionRow[];
+  orders: PaperRestingOrder[];
+}
+
+const PAPER_MODE_KEY = "hyperliquid-trading:paper";
 
 interface Strategy {
   id: string;
@@ -34,6 +80,7 @@ interface Strategy {
   enabled: boolean;
   pendingSignal: boolean;
   webhookToken: string | null;
+  paper?: boolean;
   params?: Record<string, unknown>;
   lastRunAt?: string | null;
 }
@@ -531,6 +578,25 @@ function TradingPanel({ api }: PanelProps) {
   // at all once instant trading is on.
   const [masterSecret, setMasterSecret] = useState("");
 
+  // Paper mode: every order, position and new bot goes to the agent's virtual
+  // account, filled against the real mainnet book. Remembered per browser.
+  const [paperMode, setPaperModeState] = useState(false);
+  useEffect(() => {
+    try {
+      setPaperModeState(localStorage.getItem(PAPER_MODE_KEY) === "1");
+    } catch {
+      // storage blocked — start in live mode
+    }
+  }, []);
+  function setPaperMode(on: boolean) {
+    setPaperModeState(on);
+    try {
+      localStorage.setItem(PAPER_MODE_KEY, on ? "1" : "0");
+    } catch {
+      // storage blocked — the toggle still works for this visit
+    }
+  }
+
   // ── Agent picker ───────────────────────────────────────────────────────────
   const [myAgents, setMyAgents] = useState<MyAgent[] | "loading" | "error">("loading");
 
@@ -634,11 +700,12 @@ function TradingPanel({ api }: PanelProps) {
   const [instantStatus, setInstantStatus] = useState<string | null>(null);
   useEffect(() => { setUsePassphrase(false); setInstantStatus(null); }, [agentId]);
   // Owners can always act — ensureSigner turns instant trading on as needed.
-  const canSign = instant || !!masterSecret || (isOwner && !usePassphrase);
-  const needsPassphraseInput = !instant && (!isOwner || usePassphrase);
+  // Paper orders need no signer at all.
+  const canSign = paperMode || instant || !!masterSecret || (isOwner && !usePassphrase);
+  const needsPassphraseInput = !paperMode && !instant && (!isOwner || usePassphrase);
   // Market data follows the network the agent trades on — or, before it
-  // trades, the one its owner has picked.
-  const network: Network = walletStatus?.network ?? instantNetwork;
+  // trades, the one its owner has picked. Paper always uses mainnet prices.
+  const network: Network = paperMode ? "mainnet" : walletStatus?.network ?? instantNetwork;
 
   async function enableInstant(net: Network = instantNetwork): Promise<string | null> {
     if (!agentId) return null;
@@ -941,6 +1008,7 @@ function TradingPanel({ api }: PanelProps) {
   /** One path for the ticket, the command line and Close buttons: sign, send, then follow the task. */
   async function placeOrder(kind: "trade" | "close", fields: Record<string, unknown>, summary: string): Promise<boolean> {
     if (!agentId) return false;
+    if (paperMode) return placePaperOrder(kind, fields, summary);
     if (!(await ensureSigner())) return false;
     const entry: OrderLogEntry = { id: Date.now(), summary, agentName: selectedAgent?.name ?? agentId, status: "sending…" };
     setOrderLog((log) => [entry, ...log].slice(0, 50));
@@ -958,6 +1026,36 @@ function TradingPanel({ api }: PanelProps) {
       }
       updateOrder(entry.id, { taskId: data.taskId, status: "queued" });
       pollOrder(entry.id, data.taskId);
+      return true;
+    } catch {
+      updateOrder(entry.id, { status: "failed to send" });
+      return false;
+    } finally {
+      setOrderSending(false);
+    }
+  }
+
+  /** Paper orders fill (or rest) within the request — no task to follow. */
+  async function placePaperOrder(kind: "trade" | "close", fields: Record<string, unknown>, summary: string): Promise<boolean> {
+    const entry: OrderLogEntry = { id: Date.now(), summary: `Paper · ${summary}`, agentName: selectedAgent?.name ?? agentId, status: "sending…" };
+    setOrderLog((log) => [entry, ...log].slice(0, 50));
+    setOrderSending(true);
+    try {
+      const resp = await api(`paper/${kind}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgId, agentId, ...fields }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        updateOrder(entry.id, { status: `rejected: ${data.error}` });
+        return false;
+      }
+      const filled = data.filled ? `filled ${formatSize(data.filled.sz)} @ ${formatPrice(data.filled.avgPx)}` : "";
+      const resting = data.resting ? `resting ${formatSize(data.resting.sz)} @ ${formatPrice(data.resting.limitPx)}` : "";
+      updateOrder(entry.id, { status: [filled, resting].filter(Boolean).join(", ") || "completed" });
+      refreshAccount();
+      loadHistory();
       return true;
     } catch {
       updateOrder(entry.id, { status: "failed to send" });
@@ -989,7 +1087,7 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
-  const openOrders = orderLog.filter((o) => !TERMINAL_STATUSES.includes(o.status) && !/^(rejected|failed)/.test(o.status));
+  const openOrders = orderLog.filter((o) => !TERMINAL_STATUSES.includes(o.status) && !/^(rejected|failed|filled|resting)/.test(o.status));
   const lastOrder = orderLog[0];
 
   // ── Command line ("long ETH $25 5x sl 3 tp 8") ────────────────────────────
@@ -1014,7 +1112,12 @@ function TradingPanel({ api }: PanelProps) {
   const [marginUsed, setMarginUsed] = useState<number | null>(null);
   const [closingCoin, setClosingCoin] = useState<string | null>(null);
 
+  const [paperAccount, setPaperAccount] = useState<PaperAccountView | null>(null);
+  const [paperStartInput, setPaperStartInput] = useState("10000");
+  const [paperBusy, setPaperBusy] = useState(false);
+
   async function refreshAccount() {
+    if (paperMode) return refreshPaperAccount();
     if (!wallet) return;
     setPositions((prev) => (Array.isArray(prev) ? prev : "loading"));
     try {
@@ -1036,15 +1139,64 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  async function refreshPaperAccount() {
+    if (!agentId) return;
+    setPositions((prev) => (Array.isArray(prev) ? prev : "loading"));
+    try {
+      const resp = await api(`paper/${agentId}`);
+      const data = await resp.json();
+      if (data.error) {
+        setPositions("error");
+        return;
+      }
+      setPaperAccount(data);
+      setPositions((data.positions as PaperPositionRow[]).map((p) => ({
+        coin: p.coin, size: p.szi, notionalUsd: p.notionalUsd, entryPrice: p.entryPx, unrealizedPnl: p.unrealizedPnl,
+      })));
+      setAccountValue(data.equity);
+      setMarginUsed(data.marginUsed);
+    } catch {
+      setPositions("error");
+    }
+  }
+
+  async function resetPaper() {
+    const startBalance = Number(paperStartInput);
+    if (!confirm(`Reset ${selectedAgent?.name ?? "this agent"}'s paper account to $${startBalance.toLocaleString()}? Open paper positions and orders are dropped; history is kept.`)) return;
+    setPaperBusy(true);
+    try {
+      const resp = await api("paper/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgId, agentId, startBalance }),
+      });
+      const data = await resp.json();
+      if (data.error) alert(data.error);
+      refreshPaperAccount();
+    } finally {
+      setPaperBusy(false);
+    }
+  }
+
+  async function cancelPaperOrder(orderId: string) {
+    await api(`paper/orders/${orderId}/cancel`, { method: "POST" });
+    refreshPaperAccount();
+  }
+
   useEffect(() => {
     setPositions(null);
     setAccountValue(null);
     setMarginUsed(null);
-    if (!wallet) return;
+    setPaperAccount(null);
+    if (paperMode ? !agentId : !wallet) return;
     refreshAccount();
     const id = setInterval(refreshAccount, 10000);
     return () => clearInterval(id);
-  }, [wallet, network]);
+  }, [wallet, network, paperMode, agentId]);
+
+  useEffect(() => {
+    if (agentId) loadHistory();
+  }, [paperMode]);
 
   async function closePosition(positionCoin: string) {
     setClosingCoin(positionCoin);
@@ -1140,13 +1292,30 @@ function TradingPanel({ api }: PanelProps) {
     if (!agentId) return;
     setHistory((prev) => (prev && prev !== "loading" && prev !== "error" ? prev : "loading"));
     try {
-      const resp = await api(`history/${agentId}`);
+      const resp = await api(paperMode ? `paper/history/${agentId}` : `history/${agentId}`);
       const data = await resp.json();
       if (data.error) {
         setHistory("error");
         return;
       }
-      setHistory(data);
+      if (!paperMode) {
+        setHistory(data);
+        return;
+      }
+      const label: Record<PaperTrade["reason"], string | null> = {
+        manual: null, strategy: null, limit: "limit fill", sl: "stop loss", tp: "take profit", liquidation: "liquidated",
+      };
+      setHistory({
+        stats: data.stats,
+        trades: (data.trades as PaperTrade[]).map((t) => {
+          const closes = t.reduceOnly || t.realizedPnl !== 0;
+          return {
+            id: t.id, coin: t.coin, isBuy: t.isBuy, sizeUsd: Number(t.sizeUsd.toFixed(2)), fillPrice: t.px,
+            realizedPnl: closes ? t.realizedPnl - t.fee : undefined,
+            status: label[t.reason] ?? (closes ? "closed" : "opened"),
+          };
+        }),
+      });
     } catch {
       setHistory("error");
     }
@@ -1199,13 +1368,14 @@ function TradingPanel({ api }: PanelProps) {
 
   /** Creates a bot — from the New bot form or a backtest's "Start this bot live". */
   async function createBot(spec: { type: StrategyType; coin: string; sizeUsd: number; params: Record<string, unknown> }): Promise<boolean> {
-    const signer = await ensureSigner();
+    // A paper bot trades the paper account, so it needs no wallet or signer.
+    const signer = paperMode ? { wallet } : await ensureSigner();
     if (!signer) return false;
     setStrategyStatus("creating…");
     const resp = await api("strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ orgId, agentId, wallet: signer.wallet || wallet, ...spec }),
+      body: JSON.stringify({ orgId, agentId, wallet: signer.wallet || wallet, ...spec, ...(paperMode ? { paper: true } : {}) }),
     });
     const data = await resp.json();
     setStrategyStatus(data.error ? `error: ${data.error}` : null);
@@ -1228,7 +1398,7 @@ function TradingPanel({ api }: PanelProps) {
 
   async function startBotFromBacktest(spec: BotSpec): Promise<boolean> {
     const ok = await createBot(spec);
-    if (ok) setStrategyStatus(`${BOT_KINDS[spec.type].label} bot started on ${spec.coin}.`);
+    if (ok) setStrategyStatus(`${paperMode ? "Paper " : ""}${BOT_KINDS[spec.type].label} bot started on ${spec.coin}.`);
     return ok;
   }
 
@@ -1260,8 +1430,13 @@ function TradingPanel({ api }: PanelProps) {
     loadStrategies();
   }
 
+  /** A paper bot fires without a signer; a live one needs the instant wallet or the passphrase. */
+  async function botSigner(id: string) {
+    return strategyList.find((x) => x.id === id)?.paper ? true : !!(await ensureSigner());
+  }
+
   async function fireSignal(id: string) {
-    if (!(await ensureSigner())) return;
+    if (!(await botSigner(id))) return;
     setStrategyStatus(`firing ${id}…`);
     const resp = await api(`strategy/${id}/signal`, {
       method: "POST",
@@ -1307,7 +1482,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   async function executePending(id: string) {
-    if (!(await ensureSigner())) return;
+    if (!(await botSigner(id))) return;
     setExecutingId(id);
     setStrategyStatus(null);
     try {
@@ -1438,9 +1613,15 @@ function TradingPanel({ api }: PanelProps) {
             </select>
           )}
         </div>
+        <Segmented
+          label="Trading mode" size="xs" value={paperMode ? "paper" : "live"} onChange={(m) => setPaperMode(m === "paper")}
+          options={[{ id: "live", label: "Live" }, { id: "paper", label: "Paper" }]}
+        />
         {agentId && (
           <div className="flex items-center gap-2">
-            {instant ? (
+            {paperMode ? (
+              <Badge tone="warning">Paper · mainnet prices</Badge>
+            ) : instant ? (
               <Badge tone={network === "mainnet" ? "danger" : "success"}>Live · {network}</Badge>
             ) : isOwner && !usePassphrase ? (
               <Segmented
@@ -1453,7 +1634,7 @@ function TradingPanel({ api }: PanelProps) {
           </div>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1">
-          {wallet && (
+          {wallet && !paperMode && (
             <span className={`hidden md:inline text-[11px] ${monoClass} ${mutedClass}`} title={wallet}>
               {wallet.slice(0, 6)}…{wallet.slice(-4)}
             </span>
@@ -1727,7 +1908,7 @@ function TradingPanel({ api }: PanelProps) {
             }
             disabled={!ticketReady || orderSending || instantBusy}
           >
-            {orderSending || instantBusy ? "Sending…" : !agentId ? "Pick an agent" : `${isBuy ? "Buy / Long" : "Sell / Short"} ${coin}`}
+            {orderSending || instantBusy ? "Sending…" : !agentId ? "Pick an agent" : `${paperMode ? "Paper " : ""}${isBuy ? "Buy / Long" : "Sell / Short"} ${coin}`}
           </button>
 
           <p className="min-h-4 text-[11px]" aria-live="polite">
@@ -1746,6 +1927,8 @@ function TradingPanel({ api }: PanelProps) {
                 <span className="truncate">{lastOrder.summary}</span>
                 <Badge tone={orderTone(lastOrder.status)}>{lastOrder.status.length > 28 ? `${lastOrder.status.slice(0, 28)}…` : lastOrder.status}</Badge>
               </span>
+            ) : paperMode ? (
+              <span className={mutedClass}>Paper: fills against the real mainnet book with real fees — no real money moves.</span>
             ) : !instant && isOwner ? (
               <span className={mutedClass}>Your first order switches {selectedAgent?.name ?? "the agent"} to its own wallet — no passphrase.</span>
             ) : null}
@@ -1765,7 +1948,7 @@ function TradingPanel({ api }: PanelProps) {
             value={orderText} onChange={(e) => setOrderText(e.target.value)} autoComplete="off"
           />
           <span id="commandPreview" className={`hidden sm:inline text-[11px] ${mutedClass} truncate max-w-[40%]`} aria-live="polite">
-            {parsedOrder ? ("error" in parsedOrder ? parsedOrder.error : `${describeOrder(parsedOrder)} on ${network}`) : ""}
+            {parsedOrder ? ("error" in parsedOrder ? parsedOrder.error : `${describeOrder(parsedOrder)} on ${paperMode ? "paper" : network}`) : ""}
           </span>
           <button type="submit" className={secondaryButtonClass("py-1 text-xs")} disabled={orderSending || !parsedOrder || "error" in parsedOrder || !canSign}>
             Send
@@ -1807,10 +1990,36 @@ function TradingPanel({ api }: PanelProps) {
           {!agentId && bottomTab !== "agent" ? (
             <p className={`p-3 text-sm ${mutedClass}`}>Pick an agent in the top bar to see its account.</p>
           ) : bottomTab === "positions" ? (
-            positions === "loading" ? <Spinner label="Loading positions…" /> :
+            <div className="space-y-2">
+            {paperMode && paperAccount && (
+              <div className="flex flex-wrap items-end gap-x-5 gap-y-2 rounded-sm bg-[hsl(var(--muted))]/50 px-2 py-1.5">
+                <Stat label="Paper balance">${paperAccount.balance.toFixed(2)}</Stat>
+                <Stat label="Started with">${paperAccount.startBalance.toLocaleString()}</Stat>
+                <Stat label="Return">
+                  <span className={pnlClass(paperAccount.equity - paperAccount.startBalance)}>
+                    {signed(((paperAccount.equity - paperAccount.startBalance) / paperAccount.startBalance) * 100)}%
+                  </span>
+                </Stat>
+                <Stat label="Today"><span className={pnlClass(paperAccount.dailyPnl)}>{signed(paperAccount.dailyPnl)}</span></Stat>
+                <Stat label="Available">${paperAccount.available.toFixed(2)}</Stat>
+                <div className="ml-auto flex items-end gap-1.5">
+                  <div>
+                    <label htmlFor="paperStart" className={labelClass}>Reset to $</label>
+                    <input
+                      id="paperStart" name="paperStart" type="number" min="100" step="100" className={`${inputClass} ${monoClass} w-28 py-1 text-xs`}
+                      value={paperStartInput} onChange={(e) => setPaperStartInput(e.target.value)}
+                    />
+                  </div>
+                  <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={resetPaper} disabled={paperBusy || !(Number(paperStartInput) >= 100)}>
+                    {paperBusy ? "Resetting…" : "Reset"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {positions === "loading" ? <Spinner label="Loading positions…" /> :
             positions === "error" ? <ErrorNote message="Couldn't load positions." onRetry={refreshAccount} /> :
-            !wallet ? <p className={`p-3 text-sm ${mutedClass}`}>No wallet yet — place an order and the agent&apos;s wallet is set up for you.</p> :
-            positionList.length === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>No open positions.</p> : (
+            !wallet && !paperMode ? <p className={`p-3 text-sm ${mutedClass}`}>No wallet yet — place an order and the agent&apos;s wallet is set up for you.</p> :
+            positionList.length === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>{paperMode ? "No open paper positions — place an order above to start." : "No open positions."}</p> : (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -1857,9 +2066,34 @@ function TradingPanel({ api }: PanelProps) {
                   </tbody>
                 </table>
               </div>
-            )
+            )}
+            </div>
           ) : bottomTab === "orders" ? (
-            orderLog.length === 0 ? (
+            <div className="space-y-2">
+            {paperMode && paperAccount && paperAccount.orders.length > 0 && (
+              <div>
+                <div className={`px-2 pb-1 text-[10px] font-medium uppercase tracking-wide ${mutedClass}`}>Resting paper orders</div>
+                <table className="w-full text-xs">
+                  <tbody className="divide-y divide-[hsl(var(--border))]">
+                    {paperAccount.orders.map((o) => (
+                      <tr key={o.orderId}>
+                        <td className="px-2 py-1.5">
+                          <span className="font-semibold">{o.coin}</span>{" "}
+                          <Badge tone={o.isBuy ? "success" : "danger"}>{o.isBuy ? "buy" : "sell"}</Badge>
+                          {o.reduceOnly && <span className={`ml-1 ${mutedClass}`}>reduce-only</span>}
+                        </td>
+                        <td className={`px-2 py-1.5 text-right ${monoClass}`}>{formatSize(o.sz)} @ {formatPrice(o.limitPx)}</td>
+                        <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>{o.leverage}x</td>
+                        <td className="px-2 py-1.5 text-right">
+                          <button type="button" className={secondaryButtonClass("px-2 py-0.5 text-xs")} onClick={() => cancelPaperOrder(o.orderId)}>Cancel</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {orderLog.length === 0 ? (
               <p className={`p-3 text-sm ${mutedClass}`}>Orders you send from this screen show up here while they fill.</p>
             ) : (
               <table className="w-full text-xs">
@@ -1884,11 +2118,14 @@ function TradingPanel({ api }: PanelProps) {
                   ))}
                 </tbody>
               </table>
-            )
+            )}
+            </div>
           ) : bottomTab === "bots" ? (
             <div className="space-y-2">
               <p className={`px-1 text-xs ${mutedClass}`}>
-                {instant
+                {paperMode
+                  ? "New bots start on the paper account and trade on their own — switch to Live for real-money bots."
+                  : instant
                   ? `${runningBots} running — bots trade on their own from ${selectedAgent?.name ?? "the agent"}'s wallet, within its limits.`
                   : "Bots spot their conditions automatically; with a passphrase wallet each fire waits for you to confirm it."}
               </p>
@@ -1903,6 +2140,7 @@ function TradingPanel({ api }: PanelProps) {
                         <div className="flex items-center gap-1.5 text-sm font-semibold">
                           <PulseDot tone={s.enabled ? "live" : "idle"} />
                           {BOT_KINDS[s.type].label} · {s.coin}
+                          {s.paper && <Badge tone="warning">paper</Badge>}
                         </div>
                         <p className={`text-[11px] ${mutedClass}`}>{BOT_KINDS[s.type].blurb}</p>
                       </div>
@@ -1962,12 +2200,12 @@ function TradingPanel({ api }: PanelProps) {
                         {s.enabled ? "Stop" : "Start"}
                       </button>
                       {s.pendingSignal && (
-                        <button type="button" className={primaryButtonClass("px-2 py-1 text-xs")} onClick={() => executePending(s.id)} disabled={!canSign || executingId === s.id}>
+                        <button type="button" className={primaryButtonClass("px-2 py-1 text-xs")} onClick={() => executePending(s.id)} disabled={!(canSign || s.paper) || executingId === s.id}>
                           {executingId === s.id ? "Running…" : "Run now"}
                         </button>
                       )}
                       {s.type === "signal" && (
-                        <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => fireSignal(s.id)} disabled={!canSign}>
+                        <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => fireSignal(s.id)} disabled={!(canSign || s.paper)}>
                           Fire
                         </button>
                       )}
@@ -2186,7 +2424,7 @@ function TradingPanel({ api }: PanelProps) {
                     </p>
                   )}
                   <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId || instantBusy}>
-                    Start {BOT_KINDS[strategyType].label} bot
+                    Start {paperMode ? "paper " : ""}{BOT_KINDS[strategyType].label} bot
                   </button>
                 </form>
               )}
@@ -2203,7 +2441,7 @@ function TradingPanel({ api }: PanelProps) {
           ) : bottomTab === "history" ? (
             history === "loading" ? <Spinner label="Loading history…" /> :
             history === "error" ? <ErrorNote message="Couldn't load trade history." onRetry={loadHistory} /> :
-            !history || history.stats.count === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>No trades yet.</p> : (
+            !history || history.trades.length === 0 ? <p className={`p-3 text-sm ${mutedClass}`}>{paperMode ? "No paper trades yet." : "No trades yet."}</p> : (
               <div className="space-y-2">
                 <div className={`flex items-center gap-4 px-2 text-xs ${mutedClass}`}>
                   <span><span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.stats.count}</span> closed</span>

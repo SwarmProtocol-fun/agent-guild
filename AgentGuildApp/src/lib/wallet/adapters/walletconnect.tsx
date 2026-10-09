@@ -37,7 +37,7 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 import { Button } from "@/components/ui/button";
 import { CHAIN_CONFIGS } from "@/lib/chains";
 import { SOLANA_RPC_URL } from "@/lib/solana/client";
-import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender } from "../types";
+import type { WalletAdapter, ConnectButtonProps, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender, EvmChainParams } from "../types";
 import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
@@ -378,7 +378,37 @@ function useEvmSender(): EvmSender | null {
         params: [{ from: address as `0x${string}`, to: to as `0x${string}`, value: toHex(valueWei) }],
       });
     },
+    sendContractCall: async ({ to, data, chain }) => {
+      await switchOrAddChain(walletProvider, chain);
+      return walletProvider.request({
+        method: "eth_sendTransaction",
+        params: [{ from: address as `0x${string}`, to: to as `0x${string}`, data }],
+      });
+    },
   };
+}
+
+/** Switch to `chain`; if the wallet has never seen it (EIP-3085 code 4902), add it and switch. */
+async function switchOrAddChain(provider: EIP1193Provider, chain: EvmChainParams) {
+  const id = toHex(chain.chainId);
+  if (Number(await provider.request({ method: "eth_chainId" })) === chain.chainId) return;
+  try {
+    await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: id }] });
+  } catch (err) {
+    const code = (err as { code?: number; data?: { originalError?: { code?: number } } }).code
+      ?? (err as { data?: { originalError?: { code?: number } } }).data?.originalError?.code;
+    if (code !== 4902) throw err;
+    await provider.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: id,
+        chainName: chain.name,
+        nativeCurrency: chain.nativeCurrency,
+        rpcUrls: [chain.rpcUrl],
+        blockExplorerUrls: chain.explorerUrl ? [chain.explorerUrl] : undefined,
+      }],
+    });
+  }
 }
 
 function useDisconnect() {

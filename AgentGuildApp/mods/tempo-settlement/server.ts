@@ -1,41 +1,40 @@
+import { createHash } from "crypto";
 import { Mppx, tempo as mppTempo } from "mppx/server";
-import { isAddress } from "viem";
+import { isAddress, isHash, parseUnits, type Hex } from "viem";
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { hashJobResult, verifyReceipt, tempoAdapter } from "@/lib/settlement/registry";
+import { verifyReceipt, tempoAdapter } from "@/lib/settlement/registry";
 import { getChain, USDC_DECIMALS } from "@/lib/chains";
 // Admin SDK on the server: lib/skills.ts's resolver uses the browser
 // Firestore SDK, which is unauthenticated here and denied by the rules.
-import { getAgentCapabilities, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listOrgJobsByStatus } from "@/lib/jobs-admin";
 import { generateAgentWallet, listAgentWallets } from "@/lib/agent-wallets";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import type { Job, Organization } from "@/lib/firestore";
 import {
-  claimPayout, getPayoutsByTx, listPayouts, markPayoutsPaid, releasePayouts,
+  claimPayout, getPayout, getPayoutsByTx, listPayouts, markPayoutsPaid, releasePayouts,
   type PayoutUnit, type TempoPayout,
 } from "@/lib/mods/tempo-payouts-store";
 
 /**
- * Tempo payouts. An org owner pays agents for approved jobs in a TIP-20
- * stablecoin on Tempo; several jobs go out in ONE atomic transaction, and
- * each transfer's memo carries the job's receipt hash so anyone can check
- * the payment against the work on-chain. Agents with the "tempo-settle"
- * upgrade can also settle their own finished tasks (POST /settle).
+ * Tempo payouts. An org owner pays their agents for approved jobs in a
+ * TIP-20 stablecoin on Tempo, FROM THEIR OWN WALLET. The server never holds
+ * or signs with the money; it:
  *
- * Money comes from the platform payout wallet (PLATFORM_SETTLEMENT_KEY) —
- * testnet funds today. Every unit is claimed in Firestore before the
- * transfer, so nothing is ever paid twice.
+ *   1. lists approved, unpaid jobs and each agent's wallet (POST /wallet
+ *      gives an agent one if it has none),
+ *   2. reserves the jobs being paid and hands back the exact transfers —
+ *      recipient, amount, and a memo derived from the job's delivery
+ *      (POST /payouts/start),
+ *   3. after the owner's wallet sends them, finds each transfer on-chain by
+ *      its memo and checks recipient and amount before marking the job paid
+ *      (POST /payouts/confirm).
+ *
+ * A reserved job can't be paid twice; it's only released (POST
+ * /payouts/cancel) after the chain shows nothing was sent for it.
  */
 
-/** Capability key — must match the agentSkills id on this mod's entry in lib/skills.ts. */
-export const CAP_SETTLE = "tempo-settle";
 const MAX_BATCH = 25;
-
-/** Per-payout ceiling, so one bad request can't drain the payout wallet. */
-function maxPayout(): number {
-  const n = Number(process.env.TEMPO_MAX_PAYOUT_USDC);
-  return Number.isFinite(n) && n > 0 ? n : 100;
-}
 
 class HttpError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -69,16 +68,21 @@ async function callerOrgIds(ctx: RouteContext): Promise<string[]> {
   return (await callerOrgs(ctx)).map((o) => o.org.id);
 }
 
-async function requireOwner(ctx: RouteContext, orgId: unknown): Promise<Organization> {
-  if (ctx.agent) throw new HttpError("Payouts are sent by an org owner, not an agent", 403);
+async function requireMember(ctx: RouteContext, orgId: unknown): Promise<CallerOrg> {
   if (typeof orgId !== "string" || !orgId) throw new HttpError("orgId is required", 400);
   const match = (await callerOrgs(ctx)).find((o) => o.org.id === orgId);
   if (!match) throw new HttpError("Not a member of this organization", 403);
-  if (!match.isOwner) throw new HttpError("Only the org owner can send payouts", 403);
+  return match;
+}
+
+async function requireOwner(ctx: RouteContext, orgId: unknown): Promise<Organization> {
+  if (ctx.agent) throw new HttpError("Payouts are sent by an org owner, not an agent", 403);
+  const match = await requireMember(ctx, orgId);
+  if (!match.isOwner) throw new HttpError("Only the org owner can pay agents", 403);
   return match.org;
 }
 
-// ── Amounts ──────────────────────────────────────────────────────────────
+// ── Amounts and memos ────────────────────────────────────────────────────
 
 /**
  * A job's reward is free text ("150", "$50", "25 USDC", "0.5 SOL"). Only
@@ -97,10 +101,20 @@ function checkAmount(value: unknown, label: string): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n) || n <= 0) throw new HttpError(`${label}: amount must be a positive number`, 400);
   if (Math.round(n * 1_000_000) / 1_000_000 !== n) throw new HttpError(`${label}: amount has more than 6 decimals`, 400);
-  const cap = maxPayout();
-  if (n > cap) throw new HttpError(`${label}: amount is over the ${cap} per-payout limit`, 400);
   return n;
 }
+
+/**
+ * The 32-byte memo a job's payment carries: a hash of the org, the job and
+ * what the agent delivered. Unique per job (so the transfer can be found by
+ * memo alone) and checkable by anyone holding the delivery.
+ */
+export function jobReceiptHash(job: Pick<Job, "id" | "orgId" | "deliveryNotes">): string {
+  return createHash("sha256").update(`agent-guild/job-payout/v1\n${job.orgId}\n${job.id}\n${job.deliveryNotes ?? ""}`).digest("hex");
+}
+
+const memoOf = (p: TempoPayout) => `0x${p.resultHash}` as Hex;
+const jobUnit = (jobId: string): PayoutUnit => ({ kind: "job", jobId });
 
 const evmWallets = async (agentId: string) =>
   (await listAgentWallets(agentId)).filter((w) => w.chain === "evm").map((w) => ({ address: w.publicKey, label: w.label ?? null }));
@@ -116,17 +130,31 @@ function isPayable(job: Job): boolean {
   return true;
 }
 
-/** Send one atomic batch and record it. Claims must already be held for every unit. */
-async function sendBatch(units: PayoutUnit[], items: { to: string; resultHash: string; amountUsdc: number }[]) {
-  let tx: { txSig: string; explorerUrl: string };
-  try {
-    tx = await tempoAdapter.settleBatch(items);
-  } catch (err) {
-    await releasePayouts(units).catch(() => {});
-    throw new HttpError(`Tempo transaction failed: ${(err as Error).message}`, 502);
-  }
-  const persisted = await markPayoutsPaid(units, tx);
-  return { ...tx, persisted };
+/** What the owner's wallet has to send for one reserved job. */
+function transferOf(p: TempoPayout) {
+  return { jobId: p.jobId!, jobTitle: p.jobTitle, to: p.to, amountUsdc: p.amountUsdc, amountBase: p.amountBase!, memo: memoOf(p) };
+}
+
+/**
+ * Look for a reserved job's transfer on-chain — right memo, to the agent's
+ * wallet, for the full amount — and if it's there, mark the job paid.
+ * Returns the payout as it now stands.
+ */
+async function confirmOnChain(payout: TempoPayout, txHash?: Hex): Promise<TempoPayout> {
+  if (payout.status === "paid") return payout;
+  const found = await tempoAdapter.findMemoTransfer({
+    memo: memoOf(payout),
+    to: payout.to,
+    minAmount: BigInt(payout.amountBase ?? "0"),
+    txHash,
+    fromBlock: payout.fromBlock ? BigInt(payout.fromBlock) : undefined,
+  });
+  if (!found) return payout;
+  const explorerUrl = getChain("tempo")?.explorer.txUrl(found.txHash) ?? "";
+  // paidBy becomes the wallet that actually sent it, as seen on-chain.
+  const tx = { txSig: found.txHash, explorerUrl, paidBy: found.from.toLowerCase() };
+  await markPayoutsPaid([jobUnit(payout.jobId!)], tx);
+  return { ...payout, ...tx, status: "paid", paidAt: new Date().toISOString() };
 }
 
 function csvEscape(v: string): string {
@@ -151,31 +179,29 @@ export default defineServerMod({
   },
 
   routes: {
-    /** GET /overview — the payout wallet, its balance, the token, who pays fees, and what's not configured. */
-    "GET /overview": (_req, ctx) => handle(async () => {
-      const [status, orgs] = await Promise.all([tempoAdapter.payoutStatus(), callerOrgs(ctx)]);
-      return {
-        ...status,
-        maxPayoutUsdc: maxPayout(),
-        orgs: orgs.map(({ org, isOwner }) => ({ id: org.id, name: org.name, isOwner })),
-      };
+    /**
+     * GET /overview?payer= — the Tempo network and token payouts use, the
+     * payer wallet's balance of it (when `payer` is given), and the caller's orgs.
+     */
+    "GET /overview": (req, ctx) => handle(async () => {
+      const payer = new URL(req.url).searchParams.get("payer") ?? undefined;
+      const [token, orgs] = await Promise.all([tempoAdapter.payoutToken(payer), callerOrgs(ctx)]);
+      return { ...token, orgs: orgs.map(({ org, isOwner }) => ({ id: org.id, name: org.name, isOwner })) };
     }),
 
     /**
-     * GET /payable?orgId= — approved jobs in this org waiting to be paid,
-     * with the agent's Tempo (EVM) wallets and a suggested amount from the
-     * job's reward. Jobs already paid or in flight are left out.
+     * GET /payable?orgId= — approved jobs in this org not paid yet, with the
+     * agent's Tempo (EVM) wallets and a suggested amount from the job's
+     * reward; plus `waiting`: jobs reserved for a payment the chain hasn't
+     * shown yet.
      */
     "GET /payable": (req, ctx) => handle(async () => {
-      const orgId = new URL(req.url).searchParams.get("orgId");
-      const orgs = await callerOrgs(ctx);
-      const match = orgs.find((o) => o.org.id === orgId);
-      if (!match) throw new HttpError("Not a member of this organization", 403);
+      const { org } = await requireMember(ctx, new URL(req.url).searchParams.get("orgId"));
 
       const [{ jobs }, agents, payouts] = await Promise.all([
-        listOrgJobsByStatus(match.org.id, "completed", { limit: 100 }),
-        getAgentsByOrg(match.org.id),
-        listPayouts([match.org.id], 1000),
+        listOrgJobsByStatus(org.id, "completed", { limit: 100 }),
+        getAgentsByOrg(org.id),
+        listPayouts([org.id], 1000),
       ]);
       const handled = new Set(payouts.filter((p) => p.jobId).map((p) => p.jobId));
       const names = new Map(agents.map((a) => [a.id, a.name]));
@@ -194,27 +220,36 @@ export default defineServerMod({
           agentName: names.get(j.takenByAgentId!) ?? j.completedByAgentName ?? j.claimedByAgentName ?? null,
           wallets: wallets.get(j.takenByAgentId!) ?? [],
         })),
+        waiting: payouts
+          .filter((p) => p.kind === "job" && p.status === "pending" && p.amountBase)
+          .map((p) => ({ ...transferOf(p), agentId: p.agentId, agentName: p.agentName ?? null, createdAt: p.createdAt })),
       };
     }),
 
     /**
-     * POST /payouts — pay approved jobs in one atomic Tempo transaction.
-     * Org owner only. Body: { orgId, items: [{ jobId, to, amountUsdc }] }.
-     * `to` must be one of the job's agent's Tempo wallets.
+     * POST /payouts/start — reserve approved jobs for payment and return the
+     * transfers the owner's wallet must send. Org owner only.
+     * Body: { orgId, items: [{ jobId, to, amountUsdc }] }. `to` must be one
+     * of the job's agent's Tempo wallets. Starting a job that's already
+     * reserved (with the same recipient and amount) returns the same transfer.
      */
-    "POST /payouts": (req, ctx) => handle(async () => {
+    "POST /payouts/start": (req, ctx) => handle(async () => {
       const body = await req.json();
       const org = await requireOwner(ctx, body.orgId);
       const raw = Array.isArray(body.items) ? body.items : [];
       if (raw.length === 0) throw new HttpError("Pick at least one job to pay", 400);
-      if (raw.length > MAX_BATCH) throw new HttpError(`At most ${MAX_BATCH} jobs per payout`, 400);
+      if (raw.length > MAX_BATCH) throw new HttpError(`At most ${MAX_BATCH} jobs at a time`, 400);
+
+      const token = await tempoAdapter.payoutToken();
+      if (token.missing.length) throw new HttpError(`Payouts are off until the server has ${token.missing.join(" and ")} set`, 503);
 
       const { jobs } = await listOrgJobsByStatus(org.id, "completed", { limit: 100 });
       const byId = new Map(jobs.map((j) => [j.id, j]));
       const agents = new Map((await getAgentsByOrg(org.id)).map((a) => [a.id, a.name]));
       const walletCache = new Map<string, Set<string>>();
+      const fromBlock = String(await tempoAdapter.blockNumber());
 
-      const planned: { unit: PayoutUnit; payout: TempoPayout }[] = [];
+      const planned: TempoPayout[] = [];
       const seen = new Set<string>();
       for (const item of raw) {
         const job = byId.get(String(item?.jobId));
@@ -231,33 +266,73 @@ export default defineServerMod({
           throw new HttpError(`${job.title}: pay to one of the agent's own Tempo wallets`, 400);
         }
         planned.push({
-          unit: { kind: "job", jobId: job.id },
-          payout: {
-            orgId: org.id, kind: "job", jobId: job.id, jobTitle: job.title,
-            agentId, agentName: agents.get(agentId), to, amountUsdc,
-            resultHash: hashJobResult({ taskId: `job:${job.id}`, exitCode: 0, executionTimeMs: 0, stdout: job.deliveryNotes }),
-            status: "pending", paidBy: canonicalizeWalletAddress(ctx.session!.address), createdAt: new Date().toISOString(),
-          },
+          orgId: org.id, kind: "job", jobId: job.id, jobTitle: job.title,
+          agentId, agentName: agents.get(agentId), to, amountUsdc,
+          amountBase: parseUnits(String(amountUsdc), token.decimals).toString(),
+          resultHash: jobReceiptHash(job),
+          status: "pending", paidBy: canonicalizeWalletAddress(ctx.session!.address),
+          fromBlock, createdAt: new Date().toISOString(),
         });
       }
 
-      // Claim every job before paying any. If one is taken, let the rest go.
-      const claimed: PayoutUnit[] = [];
-      for (const { unit, payout } of planned) {
+      // Reserve every job before handing any transfer out. If one is taken, let the new ones go.
+      const transfers: ReturnType<typeof transferOf>[] = [];
+      const reserved: PayoutUnit[] = [];
+      for (const payout of planned) {
+        const unit = jobUnit(payout.jobId!);
         const claim = await claimPayout(unit, payout);
-        if (claim.state !== "claimed") {
-          await releasePayouts(claimed).catch(() => {});
-          throw new HttpError(`${payout.jobTitle} is already ${claim.state === "paid" ? "paid" : "being paid"}`, 409);
+        if (claim.state === "claimed") {
+          reserved.push(unit);
+          transfers.push(transferOf(payout));
+          continue;
         }
-        claimed.push(unit);
+        const existing = claim.state === "pending" ? await getPayout(unit) : null;
+        if (existing && existing.amountBase === payout.amountBase && existing.to.toLowerCase() === payout.to.toLowerCase()) {
+          transfers.push(transferOf(existing));
+          continue;
+        }
+        await releasePayouts(reserved).catch(() => {});
+        throw new HttpError(
+          claim.state === "paid" ? `${payout.jobTitle} is already paid`
+            : `${payout.jobTitle} is already waiting on a payment — finish or cancel that one first`,
+          409,
+        );
       }
 
-      const tx = await sendBatch(claimed, planned.map(({ payout }) => ({ to: payout.to, resultHash: payout.resultHash, amountUsdc: payout.amountUsdc })));
-      return {
-        ...tx,
-        paid: planned.length,
-        totalUsdc: planned.reduce((s, p) => s + p.payout.amountUsdc, 0),
-      };
+      return { token: token.token, tokenSymbol: token.tokenSymbol, chain: token.chain, transfers };
+    }),
+
+    /**
+     * POST /payouts/confirm — find a reserved job's transfer on-chain (by tx
+     * hash if given, else by memo and recipient) and mark it paid if it paid
+     * the agent's wallet in full. Any org member may ask. Body: { orgId, jobId, txHash? }
+     */
+    "POST /payouts/confirm": (req, ctx) => handle(async () => {
+      const body = await req.json();
+      const { org } = await requireMember(ctx, body.orgId);
+      const payout = await getPayout(jobUnit(String(body.jobId ?? "")));
+      if (!payout || payout.orgId !== org.id) throw new HttpError("No payment was started for this job", 404);
+      const txHash = body.txHash ? String(body.txHash) : undefined;
+      if (txHash && !isHash(txHash)) throw new HttpError("txHash is not a transaction hash", 400);
+      const now = await confirmOnChain(payout, txHash as Hex | undefined);
+      return { status: now.status, txSig: now.txSig ?? null, explorerUrl: now.explorerUrl ?? null };
+    }),
+
+    /**
+     * POST /payouts/cancel — release a reserved job so it can be paid again.
+     * Checks the chain first: if the transfer did go out, the job is marked
+     * paid instead. Org owner only. Body: { orgId, jobId }
+     */
+    "POST /payouts/cancel": (req, ctx) => handle(async () => {
+      const body = await req.json();
+      const org = await requireOwner(ctx, body.orgId);
+      const unit = jobUnit(String(body.jobId ?? ""));
+      const payout = await getPayout(unit);
+      if (!payout || payout.orgId !== org.id) throw new HttpError("No payment was started for this job", 404);
+      const now = await confirmOnChain(payout);
+      if (now.status === "paid") return { cancelled: false, status: "paid", txSig: now.txSig, explorerUrl: now.explorerUrl };
+      await releasePayouts([unit]);
+      return { cancelled: true, status: "cancelled" };
     }),
 
     /**
@@ -274,46 +349,6 @@ export default defineServerMod({
       if (existing.length) return { address: existing[0].address, created: false };
       const wallet = await generateAgentWallet(agent.id, org.id, canonicalizeWalletAddress(ctx.session!.address), { chain: "evm", label: "Tempo payouts" });
       return { address: wallet.publicKey, created: true };
-    }),
-
-    /**
-     * POST /settle — an agent settles one of its own finished tasks. Needs
-     * a verified agent signature and the "tempo-settle" upgrade. Pays into
-     * the agent's own Tempo wallet (the first, unless `agentWallet` names
-     * another of its wallets). A retry with the same taskId returns the
-     * first receipt instead of paying again.
-     *
-     * Body: { taskId, amountUsdc, exitCode?, executionTimeMs?, stdout?, agentWallet? }
-     */
-    "POST /settle": (req, ctx) => handle(async () => {
-      if (!ctx.agent) throw new HttpError("POST /settle needs a signed agent request", 401);
-      const { agentId, orgId } = ctx.agent;
-      const body = await req.json();
-      if (!body.taskId) throw new HttpError("taskId is required", 400);
-      const amountUsdc = checkAmount(body.amountUsdc, `task ${body.taskId}`);
-
-      const caps = await getAgentCapabilities(agentId, orgId);
-      if (!caps.some((c) => c.key === CAP_SETTLE)) {
-        throw new HttpError(`Agent ${agentId} doesn't have the "${CAP_SETTLE}" upgrade`, 403);
-      }
-
-      const wallets = (await evmWallets(agentId)).map((w) => w.address);
-      const to = body.agentWallet ? wallets.find((w) => w.toLowerCase() === String(body.agentWallet).toLowerCase()) : wallets[0];
-      if (!to) throw new HttpError(wallets.length ? "agentWallet is not one of this agent's Tempo wallets" : "This agent has no Tempo wallet yet", 400);
-
-      const unit: PayoutUnit = { kind: "task", agentId, taskId: String(body.taskId) };
-      const payout: TempoPayout = {
-        orgId, kind: "task", taskId: String(body.taskId), agentId, to, amountUsdc,
-        resultHash: hashJobResult({ taskId: String(body.taskId), exitCode: body.exitCode ?? 0, executionTimeMs: body.executionTimeMs ?? 0, stdout: body.stdout }),
-        status: "pending", paidBy: `agent:${agentId}`, createdAt: new Date().toISOString(),
-      };
-      const claim = await claimPayout(unit, payout);
-      if (claim.state === "paid") return { receipt: claim.payout, replayed: true };
-      if (claim.state === "conflict") throw new HttpError("Task already settled for another org", 409);
-      if (claim.state === "pending") throw new HttpError("Settlement already in progress for this task", 409);
-
-      const tx = await sendBatch([unit], [{ to, resultHash: payout.resultHash, amountUsdc }]);
-      return { receipt: { ...payout, status: "paid", txSig: tx.txSig, explorerUrl: tx.explorerUrl }, persisted: tx.persisted };
     }),
 
     /** GET /history — this caller's orgs' payouts, newest first. */
@@ -342,11 +377,11 @@ export default defineServerMod({
     },
 
     /**
-     * GET /paid/ping — Machine Payments Protocol (HTTP 402) demo: an
-     * anonymous machine client pays 0.001 inline (request → 402 challenge →
-     * paid retry → 200 + receipt). `public: true` because MPP's own
-     * credential check is the auth. It only ever RECEIVES payment.
-     * Used by GatewayAgent's mpp-fetch executor as a test target.
+     * GET /paid/ping — not part of payouts: a Machine Payments Protocol
+     * (HTTP 402) test target for GatewayAgent's mpp-fetch executor, which
+     * points at this path. An anonymous machine client pays 0.001 inline
+     * (request → 402 challenge → paid retry → 200 + receipt). `public: true`
+     * because MPP's own credential check is the auth. It only ever RECEIVES payment.
      */
     "GET /paid/ping": {
       public: true,

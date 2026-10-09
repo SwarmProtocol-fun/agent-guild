@@ -51,7 +51,9 @@ interface Bot {
   id: string; type: "ai" | "mid-price" | "streak-fade" | "price-trigger"; enabled: boolean; sizeUsd: number;
   market: { conditionId: string; question: string; outcomes: { name: string }[] } | null; params: Record<string, unknown>;
   lastReason: string | null; lastEvalAt: number | null; waitingOnAgent: boolean; lastRunAt: string | null;
+  maxLossUsd: number | null; stats: Record<"paper" | "live", BotStats>;
 }
+interface BotStats { entries: number; wins: number; losses: number; realizedPnl: number; volumeUsd: number }
 interface BotLog { id: string; kind: string; reason: string; createdAt: string | null }
 interface OpenOrder { id: string; tokenId: string; side: string; price: number; size: number; filled: number }
 
@@ -264,7 +266,8 @@ const BOT_HELP: Record<Bot["type"], string> = {
   "price-trigger": "Buys the chosen outcome when its ask crosses your price, then optionally sells at a take-profit or stop-loss.",
 };
 
-type Tab = "positions" | "trades" | "bots" | "orders" | "settings";
+type Tab = "positions" | "trades" | "bots" | "orders" | "agent" | "settings";
+interface InstallStatus { installed: boolean; enabled: boolean }
 type Browse = "trending" | "btc" | "search";
 
 // ── Panel ───────────────────────────────────────────────────────────────────
@@ -310,6 +313,18 @@ function PolymarketPanel({ api }: PanelProps) {
     const t = setInterval(loadAccount, 15_000);
     return () => clearInterval(t);
   }, [loadAccount]);
+
+  // Capabilities: trading needs the mod's capabilities enabled for this agent.
+  const [caps, setCaps] = useState<Record<string, boolean> | null>(null);
+  const [install, setInstall] = useState<InstallStatus | null>(null);
+  const loadMe = useCallback(() => {
+    if (!agentId) return;
+    call<{ capabilities: Record<string, boolean>; install?: InstallStatus }>(`me?agentId=${encodeURIComponent(agentId)}`)
+      .then(({ capabilities, install }) => { setCaps(capabilities); setInstall(install ?? null); })
+      .catch(() => { setCaps(null); setInstall(null); });
+  }, [agentId, call]);
+  useEffect(() => { setCaps(null); setInstall(null); loadMe(); }, [loadMe]);
+  const missingCaps = caps ? Object.entries(caps).filter(([, ok]) => !ok).map(([k]) => k) : [];
 
   // Market browser
   const [browse, setBrowse] = useState<Browse>("trending");
@@ -464,6 +479,9 @@ function PolymarketPanel({ api }: PanelProps) {
         </div>
       </div>
       {accountError && <Note tone="danger">{accountError}</Note>}
+      {agent && missingCaps.length > 0 && (
+        <AccessNotice agent={agent} missing={missingCaps} install={install} postJson={postJson} onGranted={loadMe} />
+      )}
       {liveBlocked && (
         <Note tone="danger">
           Polymarket blocks order placement from this server&apos;s location ({[account?.geo?.region, account?.geo?.country].filter(Boolean).join(", ")}). Live orders will be refused. Switch to paper in Settings.
@@ -630,6 +648,7 @@ function PolymarketPanel({ api }: PanelProps) {
             ["trades", "Trades"],
             ["bots", "Bots"],
             ...(mode === "live" ? [["orders", "Open orders"]] : []),
+            ["agent", "Agent"],
             ["settings", "Settings"],
           ] as [Tab, string][]).map(([id, label]) => (
             <button
@@ -643,8 +662,9 @@ function PolymarketPanel({ api }: PanelProps) {
         <div className="p-3">
           {tab === "positions" && <PositionsTab account={account} onSelect={(conditionId) => call<{ market: Market }>(`market/${conditionId}`).then(({ market }) => setMarket(market)).catch(() => {})} />}
           {tab === "trades" && agentId && <TradesTab key={`${agentId}-${tradesKey}`} agentId={agentId} call={call} />}
-          {tab === "bots" && agentId && <BotsTab key={agentId} agentId={agentId} market={market} outcomeIndex={outcomeIndex} call={call} postJson={postJson} maxOrderUsd={account?.account.risk.maxOrderUsd ?? 25} />}
+          {tab === "bots" && agentId && <BotsTab key={agentId} agentId={agentId} mode={mode} market={market} outcomeIndex={outcomeIndex} call={call} postJson={postJson} maxOrderUsd={account?.account.risk.maxOrderUsd ?? 25} />}
           {tab === "orders" && agentId && <OrdersTab key={agentId} agentId={agentId} call={call} />}
+          {tab === "agent" && agent && <AgentTab agent={agent} account={account} caps={caps} install={install} />}
           {tab === "settings" && agent && <SettingsTab agent={agent} account={account} postJson={postJson} onChange={() => { loadAccount(); loadAgents(); }} />}
         </div>
       </div>
@@ -749,8 +769,8 @@ function OrdersTab({ agentId, call }: { agentId: string; call: Call }) {
   );
 }
 
-function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }: {
-  agentId: string; market: Market | null; outcomeIndex: number; call: Call; postJson: PostJson; maxOrderUsd: number;
+function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrderUsd }: {
+  agentId: string; mode: "paper" | "live"; market: Market | null; outcomeIndex: number; call: Call; postJson: PostJson; maxOrderUsd: number;
 }) {
   const [bots, setBots] = useState<Bot[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -762,7 +782,10 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
   const [trigger, setTrigger] = useState("");
   const [tp, setTp] = useState("");
   const [sl, setSl] = useState("");
+  const [maxLoss, setMaxLoss] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [edit, setEdit] = useState({ size: "", maxLoss: "" });
   const [openLog, setOpenLog] = useState<string | null>(null);
   const [log, setLog] = useState<BotLog[] | null>(null);
 
@@ -786,7 +809,10 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
       : type === "price-trigger" ? { outcomeIndex, when, price: pct(trigger), takeProfit: pct(tp), stopLoss: pct(sl) }
       : {};
     try {
-      await postJson("bots", { agentId, type, sizeUsd: Number(size), conditionId: needsMarket ? market?.conditionId : undefined, params });
+      await postJson("bots", {
+        agentId, type, sizeUsd: Number(size), conditionId: needsMarket ? market?.conditionId : undefined, params,
+        maxLossUsd: maxLoss ? Number(maxLoss) : null,
+      });
       load();
     } catch (err) {
       setError((err as Error).message);
@@ -794,6 +820,19 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
       setBusy(false);
     }
   }
+
+  async function saveEdit(id: string) {
+    setError(null);
+    try {
+      await postJson(`bots/${id}/update`, { sizeUsd: Number(edit.size), maxLossUsd: edit.maxLoss ? Number(edit.maxLoss) : null });
+      setEditing(null);
+      load();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  const totals = (bots ?? []).reduce((t, b) => ({ pnl: t.pnl + b.stats[mode].realizedPnl, entries: t.entries + b.stats[mode].entries }), { pnl: 0, entries: 0 });
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
@@ -808,6 +847,10 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
         <div>
           <label className={labelClass} htmlFor="pm-bot-size">USD per trade (max {usd(maxOrderUsd, 0)})</label>
           <input id="pm-bot-size" className={`${inputClass} ${monoClass}`} inputMode="decimal" value={size} onChange={(e) => setSize(e.target.value)} />
+        </div>
+        <div>
+          <label className={labelClass} htmlFor="pm-bot-maxloss">Stop after losing (USD, optional)</label>
+          <input id="pm-bot-maxloss" className={`${inputClass} ${monoClass}`} inputMode="decimal" value={maxLoss} onChange={(e) => setMaxLoss(e.target.value)} placeholder="no limit" />
         </div>
         {type === "ai" && (
           <>
@@ -838,6 +881,12 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
       </form>
 
       <div className="space-y-2 lg:col-span-3">
+        {!!bots?.length && (
+          <div className="flex gap-5">
+            <Stat label={`Bots realized PnL (${mode})`}><span className={pnlClass(totals.pnl)}>{signed(totals.pnl)}</span></Stat>
+            <Stat label="Entries">{totals.entries}</Stat>
+          </div>
+        )}
         {!bots ? <div className={`text-xs ${mutedClass}`}>Loading…</div> : !bots.length ? <div className={`text-xs ${mutedClass}`}>No bots yet.</div> : bots.map((b) => (
           <div key={b.id} className={`${panelClass} p-2`}>
             <div className="flex flex-wrap items-center gap-2">
@@ -846,12 +895,27 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
               {b.waitingOnAgent && <Badge tone="warning">Waiting on agent</Badge>}
               <span className={`${monoClass} text-xs ${mutedClass}`}>{usd(b.sizeUsd)}/trade</span>
               <div className="ml-auto flex gap-1">
+                <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => { setEditing(editing === b.id ? null : b.id); setEdit({ size: String(b.sizeUsd), maxLoss: b.maxLossUsd != null ? String(b.maxLossUsd) : "" }); }}>Edit</button>
                 <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => setOpenLog(openLog === b.id ? null : b.id)}>{openLog === b.id ? "Hide log" : "Log"}</button>
                 <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => postJson(`bots/${b.id}/toggle`, { enabled: !b.enabled }).then(load).catch((e: Error) => setError(e.message))}>{b.enabled ? "Stop" : "Start"}</button>
                 <button className={buttonClass("danger", "py-0.5 text-xs")} onClick={() => { if (window.confirm("Delete this bot and its log?")) call(`bots/${b.id}`, { method: "DELETE" }).then(load).catch((e: Error) => setError(e.message)); }}>Delete</button>
               </div>
             </div>
             {b.market && <div className="mt-1 truncate text-xs">{b.market.question}</div>}
+            <div className={`mt-1 flex flex-wrap gap-x-4 text-[11px] ${monoClass} ${mutedClass}`}>
+              <span>PnL <span className={pnlClass(b.stats[mode].realizedPnl)}>{signed(b.stats[mode].realizedPnl)}</span></span>
+              <span>{b.stats[mode].entries} entries</span>
+              <span>{b.stats[mode].wins}W / {b.stats[mode].losses}L</span>
+              <span>vol {usd(b.stats[mode].volumeUsd, 0)}</span>
+              <span>{b.maxLossUsd != null ? `stops at −${usd(b.maxLossUsd, 0)}` : "no loss limit"}</span>
+            </div>
+            {editing === b.id && (
+              <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); saveEdit(b.id); }}>
+                <div><label className={labelClass} htmlFor={`pm-e-size-${b.id}`}>USD/trade</label><input id={`pm-e-size-${b.id}`} className={`${inputClass} ${monoClass} w-24`} inputMode="decimal" value={edit.size} onChange={(e) => setEdit({ ...edit, size: e.target.value })} /></div>
+                <div><label className={labelClass} htmlFor={`pm-e-loss-${b.id}`}>Stop after losing</label><input id={`pm-e-loss-${b.id}`} className={`${inputClass} ${monoClass} w-28`} inputMode="decimal" value={edit.maxLoss} onChange={(e) => setEdit({ ...edit, maxLoss: e.target.value })} placeholder="no limit" /></div>
+                <button className={buttonClass("primary", "py-1 text-xs")}>Save</button>
+              </form>
+            )}
             {b.lastReason && <div className={`mt-1 text-[11px] ${mutedClass}`}>Last check: {b.lastReason}</div>}
             {openLog === b.id && (
               <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto border-t border-[hsl(var(--border))] pt-2 text-[11px]">
@@ -866,6 +930,144 @@ function BotsTab({ agentId, market, outcomeIndex, call, postJson, maxOrderUsd }:
             )}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/** Why orders would be refused, and the one action that fixes it: install, grant, or ask the owner. */
+function AccessNotice({ agent, missing, install, postJson, onGranted }: {
+  agent: MyAgent; missing: string[]; install: InstallStatus | null; postJson: PostJson; onGranted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const codes = missing.map((c) => <code key={c} className="mx-0.5">{c}</code>);
+  if (install && !install.installed) {
+    return (
+      <Note tone="warning">
+        {agent.orgName} hasn&apos;t installed Polymarket Trading, so {agent.name}&apos;s orders and bots will be refused.{" "}
+        <a className="font-medium underline" href="/market/polymarket-trading">Install it from the Market</a>
+      </Note>
+    );
+  }
+  const grant = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await postJson("grant", { agentId: agent.agentId });
+      onGranted();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Note tone="warning">
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span>
+          {install && !install.enabled ? "Polymarket Trading is switched off for " : "Missing for "}{agent.orgName}: {codes}. Orders and bots will be refused.
+          {!agent.isOwner && " Ask the org owner to grant it here."}
+        </span>
+        {agent.isOwner && (
+          <button type="button" className={buttonClass("primary", "py-0.5 text-xs")} disabled={busy} onClick={grant}>
+            {busy ? "Granting…" : "Grant to this org"}
+          </button>
+        )}
+        {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
+      </span>
+    </Note>
+  );
+}
+
+function CopyBlock({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+  };
+  return (
+    <div className="rounded-sm border border-[hsl(var(--border))]">
+      <div className="flex items-center justify-between gap-2 border-b border-[hsl(var(--border))] px-2 py-1">
+        <span className={`text-[11px] ${mutedClass}`}>{label}</span>
+        <button type="button" className="text-[11px] underline" onClick={copy} aria-label={`Copy: ${label}`}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+      <pre className={`${monoClass} whitespace-pre-wrap break-words p-2 text-[11px] leading-relaxed`}>{text}</pre>
+    </div>
+  );
+}
+
+/** How to put the agent to work: what it has, what to DM it, and how other runtimes call the tools. */
+function AgentTab({ agent, account, caps, install }: {
+  agent: MyAgent; account: AccountView | null; caps: Record<string, boolean> | null; install: InstallStatus | null;
+}) {
+  const mode = account?.account.mode ?? agent.mode;
+  const origin = typeof window === "undefined" ? "https://agent-guild.com" : window.location.origin;
+  const checks: [string, boolean | null][] = [
+    ["Polymarket Trading installed", install ? install.installed && install.enabled : null],
+    ["polymarket-trade (place orders)", caps ? !!caps["polymarket-trade"] : null],
+    ["polymarket-run-bots (run bots)", caps ? !!caps["polymarket-run-bots"] : null],
+    [`${mode === "live" ? "Live" : "Paper"} account${account ? ` · ${usd(account.cash)} cash` : ""}`, account ? (account.cash ?? 0) > 0 : null],
+  ];
+  const messages = [
+    {
+      label: "One paper trade",
+      text: "Paper trade on Polymarket: check your account with polymarket_account, find an active market about bitcoin with polymarket_markets, look at its order book, then buy $10 of the outcome you think is underpriced with polymarket_order. Tell me the market, what you bought, the price, and why.",
+    },
+    {
+      label: "Start a bot",
+      text: "Start a Polymarket paper bot: polymarket_bot_create with type \"streak-fade\", sizeUsd 5 and maxLossUsd 20. Then check polymarket_bots in a few minutes and show me its last log lines with polymarket_bot_log.",
+    },
+    {
+      label: "Daily check-in",
+      text: "Polymarket check-in: show your open positions and today's PnL (polymarket_account), your last 5 trades (polymarket_trades), and whether any bot is waiting on you (polymarket_bots).",
+    },
+  ];
+  const cli = [
+    "# From the agent's machine (Agent Guild Connect CLI):",
+    "agent-guild mod tools polymarket-trading",
+    `agent-guild mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'`,
+    `agent-guild mod call polymarket-trading polymarket_order '{"conditionId":"0x…","outcomeIndex":0,"side":"buy","usd":10}'`,
+    "",
+    "# MCP clients (agent-guild mcp): guild_mod_tools, guild_mod_call",
+    `# Any runtime: tool definitions at ${origin}/api/mods/polymarket-trading/agent/tools`,
+  ].join("\n");
+
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide">1 · Ready to trade?</h3>
+        <ul className="space-y-1 text-xs">
+          {checks.map(([label, ok]) => (
+            <li key={label} className="flex items-center gap-2">
+              <Badge tone={ok == null ? "neutral" : ok ? "success" : "warning"}>{ok == null ? "…" : ok ? "Yes" : "No"}</Badge>
+              <span>{label}</span>
+            </li>
+          ))}
+        </ul>
+        <p className={`text-xs ${mutedClass}`}>
+          {mode === "paper"
+            ? "Paper fills against the real Polymarket book with real fees. No money moves."
+            : "This agent is in live mode: its orders use real funds."}
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide">2 · Tell {agent.name}</h3>
+          <a className={buttonClass("primary", "py-0.5 text-xs")} href={`/chat?agent=${encodeURIComponent(agent.agentId)}`}>Open DM</a>
+        </div>
+        <p className={`text-xs ${mutedClass}`}>
+          Send one of these in a private DM. The agent&apos;s daemon (<code>agent-guild supervise</code>) has to be running to answer.
+        </p>
+        {messages.map((m) => <CopyBlock key={m.label} label={m.label} text={m.text} />)}
+      </div>
+
+      <div className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide">3 · Other runtimes</h3>
+        <p className={`text-xs ${mutedClass}`}>
+          Every call is signed as the agent. The hub checks the capability, risk limits and paper/live mode on each one.
+        </p>
+        <CopyBlock label="CLI · MCP · HTTP" text={cli} />
       </div>
     </div>
   );

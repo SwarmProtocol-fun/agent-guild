@@ -16,7 +16,7 @@ import { getGlobalActiveRuns } from "@/lib/workflow/store";
 import { advanceRun } from "@/lib/workflow/executor";
 import { evaluateCronTriggers, evaluateRegularCronJobs } from "@/lib/workflow/cron-evaluator";
 import { getRedis } from "@/lib/redis";
-import { runHyperliquidStrategyTick, runAiTraderTick } from "../../../../../mods/hyperliquid-trading/server";
+import { runHyperliquidStrategyTick, runAiTraderTick, runHyperliquidPaperTick } from "../../../../../mods/hyperliquid-trading/server";
 import { runPolymarketTick } from "../../../../../mods/polymarket-trading/server";
 import { sweepStaleAgents } from "@/lib/heartbeat";
 
@@ -112,6 +112,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ── Phase 4b: Hyperliquid paper accounts — resting limit fills, TP/SL,
+  // hourly funding and liquidation, all on mainnet prices.
+  let hyperliquidPaperResult = { filled: 0, triggered: 0, funded: 0, liquidated: 0, errors: 0 };
+  if (Date.now() - startTime < TIME_BUDGET_MS) {
+    try {
+      hyperliquidPaperResult = await runHyperliquidPaperTick();
+    } catch (err) {
+      console.error("[tick] Hyperliquid paper evaluation failed:", err);
+      hyperliquidPaperResult.errors = 1;
+    }
+  }
+
   // ── Phase 5: Presence. A dead daemon stops heartbeating; this is what
   // flips its stored status to offline so the dashboard matches reality.
   let presenceFlipped = 0;
@@ -160,6 +172,7 @@ export async function POST(req: NextRequest) {
     cron: cronResult,
     cronJobs: cronJobsResult,
     hyperliquidStrategies: hyperliquidResult,
+    hyperliquidPaper: hyperliquidPaperResult,
     aiTraders: aiTraderResult,
     polymarket: polymarketResult,
     presenceFlipped,

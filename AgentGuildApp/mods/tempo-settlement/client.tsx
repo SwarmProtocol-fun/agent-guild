@@ -1,22 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { CheckCircle2, Download, ExternalLink, LoaderCircle, Send, ShieldCheck, Wallet, Zap } from "lucide-react";
+import { CheckCircle2, Clock, Download, ExternalLink, LoaderCircle, RefreshCw, Send, ShieldCheck, Wallet, X, Zap } from "lucide-react";
+import { encodeFunctionData, parseAbi, type Hex } from "viem";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
+import { useEvmSender, type EvmChainParams } from "@/lib/wallet";
 
 // ── Data from the server ─────────────────────────────────────────────────
 
 interface Overview {
   network: string;
+  chain: EvmChainParams;
   token: string | null;
   tokenSymbol: string | null;
-  payoutWallet: string | null;
-  payoutWalletUrl: string | null;
+  /** The connected wallet's balance of the payout token. */
   balance: number | null;
-  feeMode: "sponsor-account" | "sponsor-relay" | "payout-wallet";
   missing: string[];
   error: string | null;
-  maxPayoutUsdc: number;
   orgs: { id: string; name: string; isOwner: boolean }[];
 }
 
@@ -29,6 +29,18 @@ interface PayableJob {
   agentName: string | null;
   wallets: { address: string; label: string | null }[];
 }
+
+/** A transfer the owner's wallet has to send for one reserved job. */
+interface Transfer {
+  jobId: string;
+  jobTitle?: string;
+  to: string;
+  amountUsdc: number;
+  amountBase: string;
+  memo: Hex;
+}
+
+interface Waiting extends Transfer { agentId: string; agentName: string | null; createdAt: string }
 
 interface Payout {
   orgId: string;
@@ -43,9 +55,12 @@ interface Payout {
   status: "pending" | "paid";
   txSig?: string;
   explorerUrl?: string;
+  paidBy: string;
   createdAt: string;
   paidAt?: string;
 }
+
+const TIP20 = parseAbi(["function transferWithMemo(address to, uint256 amount, bytes32 memo)"]);
 
 /** Per-job choices in the "Ready to pay" list. */
 interface Draft { selected: boolean; amount: string; to: string }
@@ -128,12 +143,6 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
 
 const inputClass = "h-8 rounded-md border border-[hsl(var(--input))] bg-transparent px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]";
 
-const FEE_LABEL: Record<Overview["feeMode"], string> = {
-  "sponsor-account": "Sponsored",
-  "sponsor-relay": "Sponsored (relay)",
-  "payout-wallet": "Paid by payout wallet",
-};
-
 async function json<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
@@ -143,33 +152,39 @@ async function json<T>(res: Response): Promise<T> {
 // ── Panel ────────────────────────────────────────────────────────────────
 
 function PayoutsPanel({ api }: PanelProps) {
+  const sender = useEvmSender();
+  const payer = sender?.address ?? null;
   const [overview, setOverview] = useState<Overview | null>(null);
   const [orgId, setOrgId] = useState<string | null>(null);
   const [payable, setPayable] = useState<PayableJob[] | null>(null);
+  const [waiting, setWaiting] = useState<Waiting[]>([]);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [history, setHistory] = useState<Payout[] | null>(null);
-  const [paying, setPaying] = useState(false);
-  const [result, setResult] = useState<{ tone: "success" | "danger"; text: ReactNode } | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [busyJob, setBusyJob] = useState<string | null>(null);
+  const [result, setResult] = useState<{ tone: "success" | "danger" | "warning"; text: ReactNode } | null>(null);
   const [creatingWallet, setCreatingWallet] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [verified, setVerified] = useState<Record<string, boolean>>({});
 
   const org = overview?.orgs.find((o) => o.id === orgId) ?? null;
   const symbol = overview?.tokenSymbol ?? "USD";
-  const ready = overview != null && overview.missing.length === 0;
+  const configured = overview != null && overview.missing.length === 0;
+  const paying = progress != null;
+  const canPay = !!org?.isOwner && configured && !!sender && !paying;
 
   const loadOverview = useCallback(() => {
-    api("overview").then((r) => json<Overview>(r)).then((o) => {
+    api(`overview${payer ? `?payer=${encodeURIComponent(payer)}` : ""}`).then((r) => json<Overview>(r)).then((o) => {
       setOverview(o);
       setOrgId((cur) => cur ?? o.orgs.find((x) => x.isOwner)?.id ?? o.orgs[0]?.id ?? null);
     }).catch((e: Error) => setResult({ tone: "danger", text: e.message }));
-  }, [api]);
+  }, [api, payer]);
 
   const loadPayable = useCallback(() => {
     if (!orgId) return;
-    setPayable(null);
-    api(`payable?orgId=${encodeURIComponent(orgId)}`).then((r) => json<{ jobs: PayableJob[] }>(r)).then(({ jobs }) => {
+    api(`payable?orgId=${encodeURIComponent(orgId)}`).then((r) => json<{ jobs: PayableJob[]; waiting: Waiting[] }>(r)).then(({ jobs, waiting }) => {
       setPayable(jobs);
+      setWaiting(waiting);
       setDrafts(Object.fromEntries(jobs.map((j) => [j.jobId, {
         selected: false,
         amount: j.suggestedUsdc != null ? String(j.suggestedUsdc) : "",
@@ -179,8 +194,10 @@ function PayoutsPanel({ api }: PanelProps) {
   }, [api, orgId]);
 
   const loadHistory = useCallback(() => {
-    api("history").then((r) => json<{ payouts: Payout[] }>(r)).then((d) => setHistory(d.payouts)).catch(() => setHistory([]));
+    api("history").then((r) => json<{ payouts: Payout[] }>(r)).then((d) => setHistory(d.payouts.filter((p) => p.status === "paid"))).catch(() => setHistory([]));
   }, [api]);
+
+  const refresh = useCallback(() => { loadPayable(); loadHistory(); loadOverview(); }, [loadPayable, loadHistory, loadOverview]);
 
   useEffect(() => { loadOverview(); loadHistory(); }, [loadOverview, loadHistory]);
   useEffect(() => { loadPayable(); }, [loadPayable]);
@@ -190,7 +207,7 @@ function PayoutsPanel({ api }: PanelProps) {
   const invalid = selected.some((j) => {
     const d = drafts[j.jobId];
     const n = Number(d.amount);
-    return !d.to || !Number.isFinite(n) || n <= 0 || n > (overview?.maxPayoutUsdc ?? Infinity);
+    return !d.to || !Number.isFinite(n) || n <= 0;
   });
   const overBalance = overview?.balance != null && total > overview.balance;
 
@@ -211,32 +228,116 @@ function PayoutsPanel({ api }: PanelProps) {
     }
   }
 
-  async function pay() {
-    if (!orgId || selected.length === 0) return;
-    setPaying(true);
+  /** Ask the server to find this job's transfer on-chain; retries while the tx is still landing. */
+  async function confirm(jobId: string, txHash?: string, attempts = 1): Promise<{ status: string; explorerUrl: string | null }> {
+    for (let i = 0; ; i++) {
+      const r = await json<{ status: string; explorerUrl: string | null }>(
+        await api("payouts/confirm", { method: "POST", body: JSON.stringify({ orgId, jobId, txHash }) }),
+      );
+      if (r.status === "paid" || i + 1 >= attempts) return r;
+      await new Promise((ok) => setTimeout(ok, 1500));
+    }
+  }
+
+  /** Send each transfer from the connected wallet, one wallet confirmation per job, and record it. */
+  async function send(transfers: Transfer[], chain: EvmChainParams, token: string) {
+    if (!sender) throw new Error("Connect an EVM wallet to pay from");
+    let paid = 0;
+    let lastUrl: string | null = null;
+    for (const [i, t] of transfers.entries()) {
+      setProgress(`Confirm ${transfers.length > 1 ? `payment ${i + 1} of ${transfers.length}` : "the payment"} in your wallet — ${t.jobTitle ?? t.jobId}`);
+      const txHash = await sender.sendContractCall({
+        to: token,
+        chain,
+        data: encodeFunctionData({ abi: TIP20, functionName: "transferWithMemo", args: [t.to as Hex, BigInt(t.amountBase), t.memo] }),
+      });
+      setProgress(`Waiting for Tempo to confirm ${t.jobTitle ?? t.jobId}…`);
+      const r = await confirm(t.jobId, txHash, 20);
+      if (r.status !== "paid") throw new Error(`${t.jobTitle ?? t.jobId} was sent but isn't on-chain yet. It's under "Waiting for payment" — press Check in a moment.`);
+      paid++;
+      lastUrl = r.explorerUrl;
+    }
+    return { paid, lastUrl };
+  }
+
+  async function run(fn: () => Promise<{ paid: number; lastUrl: string | null; totalUsdc: number }>) {
     setResult(null);
     try {
-      const items = selected.map((j) => ({ jobId: j.jobId, to: drafts[j.jobId].to, amountUsdc: Number(drafts[j.jobId].amount) }));
-      const r = await json<{ txSig: string; explorerUrl: string; paid: number; totalUsdc: number; persisted: boolean }>(
-        await api("payouts", { method: "POST", body: JSON.stringify({ orgId, items }) }),
-      );
+      const r = await fn();
       setResult({
         tone: "success",
         text: (
           <>
-            Paid {r.paid} job{r.paid === 1 ? "" : "s"} · {money(r.totalUsdc)} {symbol} in one transaction.{" "}
-            <a href={r.explorerUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">View on explorer</a>
-            {!r.persisted && " The payment landed but couldn't be recorded — it won't be paid again, but may not show below."}
+            Paid {r.paid} job{r.paid === 1 ? "" : "s"} · {money(r.totalUsdc)} {symbol} from your wallet.{" "}
+            {r.lastUrl && <a href={r.lastUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">View on explorer</a>}
           </>
         ),
       });
-      loadPayable();
-      loadHistory();
-      loadOverview();
+    } catch (e) {
+      const msg = (e as Error).message;
+      const rejected = /reject|denied|cancel/i.test(msg);
+      setResult({
+        tone: rejected ? "warning" : "danger",
+        text: rejected ? "You cancelled in your wallet. Anything not sent is under “Waiting for payment” — send it or cancel it there." : msg,
+      });
+    } finally {
+      setProgress(null);
+      refresh();
+    }
+  }
+
+  function pay() {
+    if (!orgId || selected.length === 0) return;
+    return run(async () => {
+      setProgress("Reserving jobs…");
+      const items = selected.map((j) => ({ jobId: j.jobId, to: drafts[j.jobId].to, amountUsdc: Number(drafts[j.jobId].amount) }));
+      const start = await json<{ token: string; chain: EvmChainParams; transfers: Transfer[] }>(
+        await api("payouts/start", { method: "POST", body: JSON.stringify({ orgId, items }) }),
+      );
+      const r = await send(start.transfers, start.chain, start.token);
+      return { ...r, totalUsdc: start.transfers.reduce((s, t) => s + t.amountUsdc, 0) };
+    });
+  }
+
+  function resume(w: Waiting) {
+    if (!overview?.token) return;
+    return run(async () => {
+      // The transfer may already have gone out — check before asking the wallet again.
+      setProgress(`Checking Tempo for ${w.jobTitle ?? w.jobId}…`);
+      const done = await confirm(w.jobId);
+      if (done.status === "paid") return { paid: 1, lastUrl: done.explorerUrl, totalUsdc: w.amountUsdc };
+      const r = await send([w], overview.chain, overview.token!);
+      return { ...r, totalUsdc: w.amountUsdc };
+    });
+  }
+
+  async function check(w: Waiting) {
+    setBusyJob(w.jobId);
+    try {
+      const r = await confirm(w.jobId);
+      setResult(r.status === "paid"
+        ? { tone: "success", text: <>Found it — {w.jobTitle ?? w.jobId} is paid.</> }
+        : { tone: "warning", text: <>No transfer for {w.jobTitle ?? w.jobId} on Tempo yet.</> });
+      if (r.status === "paid") refresh();
     } catch (e) {
       setResult({ tone: "danger", text: (e as Error).message });
     } finally {
-      setPaying(false);
+      setBusyJob(null);
+    }
+  }
+
+  async function cancel(w: Waiting) {
+    setBusyJob(w.jobId);
+    try {
+      const r = await json<{ cancelled: boolean }>(await api("payouts/cancel", { method: "POST", body: JSON.stringify({ orgId, jobId: w.jobId }) }));
+      setResult(r.cancelled
+        ? { tone: "success", text: <>{w.jobTitle ?? w.jobId} is back in Ready to pay.</> }
+        : { tone: "success", text: <>That payment had already gone out — {w.jobTitle ?? w.jobId} is marked paid.</> });
+      refresh();
+    } catch (e) {
+      setResult({ tone: "danger", text: (e as Error).message });
+    } finally {
+      setBusyJob(null);
     }
   }
 
@@ -262,6 +363,11 @@ function PayoutsPanel({ api }: PanelProps) {
     URL.revokeObjectURL(url);
   }
 
+  const ownerNote = !org ? null
+    : !org.isOwner ? "Only the org owner can pay agents."
+      : !sender ? "Connect an EVM wallet to pay from."
+        : `Approved jobs not paid yet. Paid from your wallet, ${short(sender.address)}.`;
+
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
@@ -270,8 +376,8 @@ function PayoutsPanel({ api }: PanelProps) {
           <div>
             <h1 className="text-lg font-semibold">Tempo payouts</h1>
             <p className={cx("max-w-2xl text-sm", muted)}>
-              Pay agents for approved jobs in stablecoins on Tempo. Pick several jobs and they go out in one transaction;
-              each payment carries the job&apos;s receipt hash, so anyone can check it on-chain.
+              Pay your agents for approved jobs in stablecoins on Tempo, straight from your own wallet into each agent&apos;s wallet.
+              Every payment carries a fingerprint of the job&apos;s delivery, so anyone can match it to the work on-chain.
             </p>
           </div>
         </div>
@@ -284,15 +390,13 @@ function PayoutsPanel({ api }: PanelProps) {
 
       {/* Where the money comes from */}
       <section className="grid grid-cols-2 gap-4 rounded-xl border border-[hsl(var(--border))] p-4 sm:grid-cols-4">
-        <Stat label="Payout wallet">
-          {overview?.payoutWallet
-            ? <a className="font-mono text-xs hover:underline" href={overview.payoutWalletUrl ?? undefined} target="_blank" rel="noreferrer">{short(overview.payoutWallet)}</a>
-            : <span className={muted}>—</span>}
+        <Stat label="Paying from">
+          {payer ? <span className="font-mono text-xs">{short(payer)}</span> : <span className={muted}>No EVM wallet connected</span>}
         </Stat>
-        <Stat label="Balance">
+        <Stat label="Your balance">
           {overview?.balance != null ? <span className="tabular-nums">{money(overview.balance)} {symbol}</span> : <span className={muted}>—</span>}
         </Stat>
-        <Stat label="Network fee">{overview ? FEE_LABEL[overview.feeMode] : "—"}</Stat>
+        <Stat label="Token">{overview?.tokenSymbol ?? (overview?.token ? short(overview.token) : "—")}</Stat>
         <Stat label="Network">{overview ? <Badge tone="warning">{overview.network}</Badge> : "—"}</Stat>
       </section>
 
@@ -300,12 +404,35 @@ function PayoutsPanel({ api }: PanelProps) {
         <Notice tone="warning">Payouts are off until the server has {overview.missing.join(" and ")} set.</Notice>
       )}
       {overview?.error && <Notice tone="warning">Couldn&apos;t reach Tempo: {overview.error}</Notice>}
-      {result && <Notice tone={result.tone}>{result.text}</Notice>}
+      {progress && (
+        <div role="status" className="flex items-center gap-2 rounded-lg border border-[hsl(var(--border))] px-3 py-2 text-xs">
+          <LoaderCircle className="size-3.5 animate-spin" /> {progress}
+        </div>
+      )}
+      {result && !progress && <Notice tone={result.tone}>{result.text}</Notice>}
 
-      <Card
-        title="Ready to pay"
-        description={org && !org.isOwner ? "Only the org owner can send payouts." : `Approved jobs not paid yet. Up to ${overview?.maxPayoutUsdc ?? "—"} ${symbol} per job.`}
-      >
+      {waiting.length > 0 && (
+        <Card title="Waiting for payment" description="Reserved so they can't be paid twice, but not seen on Tempo yet. Send them, check again, or cancel to free the job.">
+          <ul className="divide-y divide-[hsl(var(--border))]/60">
+            {waiting.map((w) => (
+              <li key={w.jobId} className="flex flex-wrap items-center gap-3 py-3">
+                <Clock className={cx("size-4", muted)} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{w.jobTitle ?? w.jobId}</div>
+                  <div className={cx("text-xs", muted)}>
+                    {money(w.amountUsdc)} {symbol} to {w.agentName ?? w.agentId} · <span className="font-mono">{short(w.to)}</span> · started {timeAgo(w.createdAt)}
+                  </div>
+                </div>
+                <Button icon={RefreshCw} loading={busyJob === w.jobId} disabled={paying} onClick={() => check(w)}>Check</Button>
+                {org?.isOwner && <Button icon={X} disabled={paying || busyJob != null} onClick={() => cancel(w)}>Cancel</Button>}
+                {org?.isOwner && <Button primary icon={Send} disabled={!canPay || busyJob != null} onClick={() => resume(w)}>Send</Button>}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <Card title="Ready to pay" description={ownerNote}>
         {!orgId ? (
           <p className={cx("text-sm", muted)}>You&apos;re not in an organization yet.</p>
         ) : payable == null ? (
@@ -322,7 +449,7 @@ function PayoutsPanel({ api }: PanelProps) {
               {payable.map((job) => {
                 const d = drafts[job.jobId];
                 if (!d) return null;
-                const canEdit = !!org?.isOwner && ready;
+                const canEdit = !!org?.isOwner && configured && !paying;
                 return (
                   <li key={job.jobId} className="flex flex-wrap items-center gap-3 py-3">
                     <input type="checkbox" aria-label={`Pay ${job.title}`} className="size-4 accent-[hsl(var(--primary))]"
@@ -336,7 +463,7 @@ function PayoutsPanel({ api }: PanelProps) {
                     </div>
                     {job.wallets.length === 0 ? (
                       <Button icon={Wallet} disabled={!org?.isOwner} loading={creatingWallet === job.agentId} onClick={() => createWallet(job)}>
-                        Give agent a Tempo wallet
+                        Give agent a wallet to be paid into
                       </Button>
                     ) : (
                       <>
@@ -357,12 +484,13 @@ function PayoutsPanel({ api }: PanelProps) {
               })}
             </ul>
             <footer className="mt-3 flex flex-wrap items-center justify-end gap-3 border-t border-[hsl(var(--border))]/60 pt-3">
-              {overBalance && <span className="text-xs text-red-600 dark:text-red-400">More than the payout wallet holds</span>}
+              {overBalance && <span className="text-xs text-red-600 dark:text-red-400">More than your wallet holds</span>}
               <span className={cx("text-xs tabular-nums", muted)}>
                 {selected.length} selected · {money(total)} {symbol}
+                {selected.length > 1 && " · one wallet confirmation each"}
               </span>
               <Button primary icon={Send} loading={paying} onClick={pay}
-                disabled={!org?.isOwner || !ready || selected.length === 0 || invalid || overBalance}>
+                disabled={!canPay || selected.length === 0 || invalid || overBalance}>
                 {selected.length > 1 ? `Pay ${selected.length} jobs` : "Pay"}
               </Button>
             </footer>
@@ -370,7 +498,7 @@ function PayoutsPanel({ api }: PanelProps) {
         )}
       </Card>
 
-      <Card title="Paid" description="Verify re-reads the transaction from Tempo and checks the memo matches the job's receipt hash."
+      <Card title="Paid" description="Verify re-reads the transaction from Tempo and checks its memo matches the job's delivery fingerprint."
         actions={<Button icon={Download} onClick={exportCsv} disabled={!history?.length}>CSV</Button>}>
         {history == null ? (
           <div className="h-12 animate-pulse rounded-md bg-[hsl(var(--muted))]" />
@@ -381,18 +509,18 @@ function PayoutsPanel({ api }: PanelProps) {
             {history.map((p) => {
               const key = p.jobId ? `job:${p.jobId}` : `task:${p.agentId}:${p.taskId}`;
               const v = p.txSig ? verified[p.txSig] : undefined;
+              const from = p.paidBy.startsWith("0x") ? short(p.paidBy) : null;
               return (
                 <li key={key} className="flex flex-wrap items-center gap-3 py-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="truncate font-medium">{p.jobTitle ?? `Task ${p.taskId}`}</span>
                       <span className="font-mono tabular-nums">{money(p.amountUsdc)} {symbol}</span>
-                      {p.status === "pending" && <Badge tone="warning">Sending</Badge>}
-                      {p.kind === "task" && <Badge>Settled by agent</Badge>}
                       {v != null && <Badge tone={v ? "success" : "danger"}>{v ? "Receipt verified" : "Memo mismatch"}</Badge>}
                     </div>
                     <div className={cx("text-xs", muted)}>
-                      {p.agentName ?? p.agentId} · to <span className="font-mono">{short(p.to)}</span> · {timeAgo(p.paidAt ?? p.createdAt)}
+                      {from && <>from <span className="font-mono">{from}</span> · </>}
+                      to {p.agentName ?? p.agentId} (<span className="font-mono">{short(p.to)}</span>) · {timeAgo(p.paidAt ?? p.createdAt)}
                     </div>
                   </div>
                   {p.txSig && (

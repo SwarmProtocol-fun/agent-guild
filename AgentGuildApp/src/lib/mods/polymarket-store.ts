@@ -145,6 +145,8 @@ export interface PaperPositionDoc extends MarketRef {
   avgPrice: number;
   realizedPnl: number;
   open: boolean;
+  /** The bot whose buy last added to this position, so its resolution counts toward that bot's results. */
+  strategyId: string | null;
 }
 
 function positionId(agentId: string, tokenId: string): string {
@@ -157,6 +159,7 @@ function docToPosition(d: FirebaseFirestore.DocumentSnapshot): PaperPositionDoc 
     id: d.id, agentId: x.agentId, orgId: x.orgId, conditionId: x.conditionId, question: x.question, slug: x.slug,
     endDate: x.endDate ?? null, tokenId: x.tokenId, outcomeIndex: x.outcomeIndex, outcome: x.outcome,
     shares: Number(x.shares ?? 0), avgPrice: Number(x.avgPrice ?? 0), realizedPnl: Number(x.realizedPnl ?? 0), open: x.open === true,
+    strategyId: x.strategyId ?? null,
   };
 }
 
@@ -191,6 +194,7 @@ export async function applyPaperFill(
   market: MarketRef,
   side: "buy" | "sell",
   fill: Fill,
+  strategyId: string | null = null,
 ): Promise<{ realized: number; cash: number }> {
   const accountRef = db().collection(ACCOUNTS).doc(agentId);
   const posRef = db().collection(PAPER_POSITIONS).doc(positionId(agentId, market.tokenId));
@@ -205,14 +209,20 @@ export async function applyPaperFill(
       const cost = fill.notional + fill.fee;
       if (cost > cash + 1e-9) throw new PaperError(`Not enough paper cash: need $${cost.toFixed(2)}, have $${cash.toFixed(2)}`);
       const next = applyBuy(prevPos, fill);
-      tx.set(posRef, { agentId, orgId, ...market, ...next, open: true, updatedAt: FieldValue.serverTimestamp() });
+      tx.set(posRef, {
+        agentId, orgId, ...market, ...next, open: true, strategyId: strategyId ?? (prev?.open ? prev.strategyId : null),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
       tx.update(accountRef, { paperCash: cash - cost });
       return { realized: -fill.fee, cash: cash - cost };
     }
 
     if (!prevPos || prevPos.shares + 1e-9 < fill.shares) throw new PaperError("Not enough shares to sell");
     const { position, realized } = applySell(prevPos, fill);
-    tx.set(posRef, { agentId, orgId, ...market, ...position, open: position.shares > 0, updatedAt: FieldValue.serverTimestamp() });
+    tx.set(posRef, {
+      agentId, orgId, ...market, ...position, open: position.shares > 0, strategyId: prev?.strategyId ?? null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
     const proceeds = fill.notional - fill.fee;
     tx.update(accountRef, { paperCash: cash + proceeds });
     return { realized, cash: cash + proceeds };
@@ -277,7 +287,26 @@ export async function recordTrade(data: Omit<PmTrade, "id" | "createdAt">): Prom
       { merge: true },
     );
   }
+  if (data.strategyId) await bumpBotStats(data.strategyId, data);
   return ref.id;
+}
+
+/** Adds one fill to its bot's per-mode results. A deleted bot is simply skipped. */
+async function bumpBotStats(botId: string, t: Omit<PmTrade, "id" | "createdAt">): Promise<void> {
+  const inc = (n: number) => FieldValue.increment(n);
+  const closing = t.side !== "buy";
+  const prefix = `stats.${t.mode}`;
+  try {
+    await db().collection(BOTS).doc(botId).update({
+      [`${prefix}.entries`]: inc(t.side === "buy" ? 1 : 0),
+      [`${prefix}.wins`]: inc(closing && t.realizedPnl > 0 ? 1 : 0),
+      [`${prefix}.losses`]: inc(closing && t.realizedPnl < 0 ? 1 : 0),
+      [`${prefix}.realizedPnl`]: inc(t.realizedPnl),
+      [`${prefix}.volumeUsd`]: inc(t.side === "resolve" ? 0 : t.notional),
+    });
+  } catch (err) {
+    if ((err as { code?: number }).code !== 5) throw err; // 5 = NOT_FOUND
+  }
 }
 
 function docToTrade(d: FirebaseFirestore.QueryDocumentSnapshot): PmTrade {
@@ -337,6 +366,25 @@ export interface BotState {
   eliminated?: boolean;
 }
 
+/** A bot's results in one mode. realizedPnl includes buy fees and paper resolutions. */
+export interface BotStats {
+  entries: number;
+  wins: number;
+  losses: number;
+  realizedPnl: number;
+  volumeUsd: number;
+}
+
+export const EMPTY_BOT_STATS: BotStats = { entries: 0, wins: 0, losses: 0, realizedPnl: 0, volumeUsd: 0 };
+
+function toStats(v: unknown): BotStats {
+  const x = (v ?? {}) as Partial<Record<keyof BotStats, unknown>>;
+  return {
+    entries: Number(x.entries ?? 0), wins: Number(x.wins ?? 0), losses: Number(x.losses ?? 0),
+    realizedPnl: Number(x.realizedPnl ?? 0), volumeUsd: Number(x.volumeUsd ?? 0),
+  };
+}
+
 export interface PmBot {
   id: string;
   agentId: string;
@@ -347,6 +395,9 @@ export interface PmBot {
   /** Fixed-market bots (AI on a market, price trigger). BTC bots pick each window's market themselves. */
   market: BotMarket | null;
   params: Record<string, unknown>;
+  /** Kill switch: the bot stops itself once its realized PnL in the current mode reaches −this. */
+  maxLossUsd: number | null;
+  stats: Record<TradingMode, BotStats>;
   state: BotState;
   lastRunAt: Date | null;
   createdAt: Date | null;
@@ -356,13 +407,14 @@ function docToBot(d: FirebaseFirestore.DocumentSnapshot): PmBot {
   const x = d.data() ?? {};
   return {
     id: d.id, agentId: x.agentId, orgId: x.orgId, type: x.type, enabled: x.enabled === true, sizeUsd: Number(x.sizeUsd ?? 0),
-    market: x.market ?? null, params: x.params ?? {}, state: x.state ?? {}, lastRunAt: toDate(x.lastRunAt), createdAt: toDate(x.createdAt),
+    market: x.market ?? null, params: x.params ?? {}, maxLossUsd: x.maxLossUsd == null ? null : Number(x.maxLossUsd),
+    stats: { paper: toStats(x.stats?.paper), live: toStats(x.stats?.live) }, state: x.state ?? {}, lastRunAt: toDate(x.lastRunAt), createdAt: toDate(x.createdAt),
   };
 }
 
-export async function createBot(data: Pick<PmBot, "agentId" | "orgId" | "type" | "sizeUsd" | "market" | "params">): Promise<string> {
+export async function createBot(data: Pick<PmBot, "agentId" | "orgId" | "type" | "sizeUsd" | "market" | "params"> & { maxLossUsd?: number | null }): Promise<string> {
   const ref = await db().collection(BOTS).add({
-    ...data, enabled: true, state: {}, lastRunAt: null, createdAt: FieldValue.serverTimestamp(),
+    ...data, maxLossUsd: data.maxLossUsd ?? null, stats: { paper: EMPTY_BOT_STATS, live: EMPTY_BOT_STATS }, enabled: true, state: {}, lastRunAt: null, createdAt: FieldValue.serverTimestamp(),
   });
   return ref.id;
 }
@@ -384,7 +436,7 @@ export async function listEnabledBots(): Promise<PmBot[]> {
 
 export async function updateBot(
   id: string,
-  patch: { enabled?: boolean; params?: Record<string, unknown>; state?: BotState; touch?: boolean },
+  patch: { enabled?: boolean; params?: Record<string, unknown>; sizeUsd?: number; maxLossUsd?: number | null; state?: BotState; touch?: boolean },
 ): Promise<void> {
   const { touch, state, ...rest } = patch;
   const update: Record<string, unknown> = { ...rest };

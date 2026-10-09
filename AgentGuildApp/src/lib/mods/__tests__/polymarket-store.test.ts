@@ -17,13 +17,27 @@ function merge(target: Doc, patch: Doc): Doc {
   }
   return out;
 }
+/** update() treats "a.b" as a nested field path, as Firestore does. */
+function expandPaths(v: Doc): Doc {
+  const out: Doc = {};
+  for (const [k, val] of Object.entries(v)) {
+    const parts = k.split(".");
+    let node = out;
+    for (const part of parts.slice(0, -1)) node = (node[part] ??= {}) as Doc;
+    node[parts.at(-1)!] = val;
+  }
+  return out;
+}
 const coll = (name: string) => { if (!data.has(name)) data.set(name, new Map()); return data.get(name)!; };
 function docRef(name: string, id: string) {
   return {
     id,
     get: async () => ({ id, exists: coll(name).has(id), data: () => coll(name).get(id) }),
     set: async (v: Doc, opts?: { merge?: boolean }) => { coll(name).set(id, opts?.merge ? merge(coll(name).get(id) ?? {}, v) : merge({}, v)); },
-    update: async (v: Doc) => { coll(name).set(id, merge(coll(name).get(id) ?? {}, v)); },
+    update: async (v: Doc) => {
+      if (!coll(name).has(id)) throw Object.assign(new Error("5 NOT_FOUND"), { code: 5 });
+      coll(name).set(id, merge(coll(name).get(id) ?? {}, expandPaths(v)));
+    },
   };
 }
 function query(name: string, filters: [string, unknown][] = [], ordered = false, lim = Infinity) {
@@ -92,6 +106,32 @@ describe("polymarket store without composite indexes", () => {
     expect((await store.listTrades("a1")).length).toBe(2);
     missingIndexes = false;
     expect((await store.listTrades("a1")).length).toBe(2);
+  });
+
+  it("adds each bot's fills to its per-mode results", async () => {
+    await store.ensureAccount("a1", "o1");
+    const botId = await store.createBot({ agentId: "a1", orgId: "o1", type: "mid-price", sizeUsd: 5, market: null, params: {} });
+    await store.recordTrade({ ...trade(-0.1), side: "buy", notional: 5, strategyId: botId });
+    await store.recordTrade({ ...trade(4.9), side: "resolve", notional: 10, strategyId: botId, status: "won" });
+    await store.recordTrade({ ...trade(-5.1), side: "resolve", notional: 0, strategyId: botId, status: "lost" });
+    await store.recordTrade({ ...trade(2, "live"), strategyId: botId });
+    const bot = (await store.getBot(botId))!;
+    expect(bot.stats.paper).toMatchObject({ entries: 1, wins: 1, losses: 1, volumeUsd: 5 });
+    expect(bot.stats.paper.realizedPnl).toBeCloseTo(-0.3);
+    expect(bot.stats.live).toMatchObject({ entries: 0, wins: 1, realizedPnl: 2 });
+    expect(bot.maxLossUsd).toBeNull();
+    // A fill for a deleted bot still records the trade.
+    await expect(store.recordTrade({ ...trade(1), strategyId: "gone" })).resolves.toBeTypeOf("string");
+  });
+
+  it("a paper position remembers which bot bought it", async () => {
+    await store.ensureAccount("a1", "o1");
+    const ref = { conditionId: "c", question: "q", slug: "s", endDate: null, tokenId: "t", outcomeIndex: 0, outcome: "Yes" };
+    const fill = { shares: 10, notional: 5, fee: 0, avgPrice: 0.5, worstPrice: 0.5 };
+    await store.applyPaperFill("a1", "o1", ref, "buy", fill, "bot1");
+    expect((await store.getPaperPosition("a1", "t"))?.strategyId).toBe("bot1");
+    await store.applyPaperFill("a1", "o1", ref, "buy", fill); // a manual top-up keeps the attribution
+    expect((await store.getPaperPosition("a1", "t"))?.strategyId).toBe("bot1");
   });
 
   it("keys the counter by UTC day", () => {

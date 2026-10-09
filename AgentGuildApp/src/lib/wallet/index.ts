@@ -10,7 +10,7 @@
 import { walletAdapters, DEFAULT_WALLET_ADAPTER } from "./adapters";
 import type { WalletAdapter } from "./types";
 
-export type { WalletAdapter, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender } from "./types";
+export type { WalletAdapter, WalletState, WalletStatus, SolanaSender, SolanaMessageSigner, EvmSender, EvmChainParams } from "./types";
 
 const requested = process.env.NEXT_PUBLIC_WALLET_PROVIDER || DEFAULT_WALLET_ADAPTER;
 const adapter: WalletAdapter = walletAdapters[requested] ?? walletAdapters[DEFAULT_WALLET_ADAPTER];

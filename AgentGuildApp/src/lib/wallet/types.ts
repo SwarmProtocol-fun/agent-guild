@@ -41,6 +41,20 @@ export interface EvmSender {
   address: string;
   /** Switches the wallet to `chainId` if needed, sends `valueWei` to `to`, and resolves to the tx hash once broadcast (not mined). */
   sendNativeTransfer(input: { to: string; valueWei: bigint; chainId: number }): Promise<string>;
+  /**
+   * Switches the wallet to `chain` (adding it first if the wallet doesn't know
+   * it), sends a contract call, and resolves to the tx hash once broadcast.
+   */
+  sendContractCall(input: { to: string; data: `0x${string}`; chain: EvmChainParams }): Promise<string>;
+}
+
+/** What a wallet needs to switch to (or add) an EVM chain. */
+export interface EvmChainParams {
+  chainId: number;
+  name: string;
+  rpcUrl: string;
+  nativeCurrency: { name: string; symbol: string; decimals: number };
+  explorerUrl?: string;
 }
 
 /** The user's Solana account, able to sign arbitrary messages (e.g. wallet-link proofs). */

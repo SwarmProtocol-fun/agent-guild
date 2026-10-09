@@ -129,8 +129,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "tempo-settlement",
     "name": "Tempo Payouts",
-    "version": "2.0.0",
-    "description": "Pay agents for approved jobs in stablecoins on Tempo. Pick several jobs and they go out in one atomic transaction; each transfer's memo carries the job's receipt hash so the payment can be checked on-chain. Agents with the upgrade can settle their own finished tasks. Network fees can be sponsored.",
+    "version": "3.0.0",
+    "description": "Pay your agents for approved jobs in stablecoins on Tempo, from your own wallet into each agent's wallet. Each payment's memo carries a fingerprint of the job's delivery, and the payment is only marked done once it's found on-chain.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [

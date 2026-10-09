@@ -1,9 +1,8 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { enqueueTask, getTask, newTaskId, recordCompletedTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
-import { enforceCapability, getAgentCapabilities } from "@/lib/skills";
 import { encryptValue, decryptValue } from "@/lib/secrets";
-import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { Wallet as EvmWallet } from "ethers";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
@@ -50,6 +49,19 @@ import {
   answerAiRequest,
   expireAiRequest,
   type AiRequest,
+  getPaperAccount,
+  resetPaperAccount,
+  listPaperPositions,
+  listAllPaperPositions,
+  createPaperOrder,
+  getPaperOrder,
+  listPaperOrders,
+  listAllPaperOrders,
+  deletePaperOrder,
+  bookPaperFill,
+  applyPaperFunding,
+  getPaperTradeHistory,
+  type PaperPositionDoc,
 } from "@/lib/mods/hyperliquid-store";
 import crypto from "crypto";
 import {
@@ -63,7 +75,20 @@ import {
 } from "./ai-trader-core";
 import type { Candle } from "./indicators";
 import { findPerpAsset, readOraclePxOnchain, type PerpAssetMeta } from "./oracle";
-import { placeOrder as placeHlOrder, type PlaceOrderResult } from "./exchange";
+import { placeOrder as placeHlOrder, MARKET_SLIPPAGE, MIN_ORDER_USD, type PlaceOrderResult } from "./exchange";
+import {
+  MAKER_FEE_RATE,
+  PAPER_START_BALANCE,
+  TAKER_FEE_RATE,
+  fundingPayment,
+  isLiquidatable,
+  restingFillable,
+  roundSize,
+  summarize,
+  triggerHit,
+  walkBook,
+  type CoinMeta,
+} from "./paper";
 
 type HlNetwork = "testnet" | "mainnet";
 
@@ -95,7 +120,7 @@ async function getMidPrice(coin: string, network: HlNetwork): Promise<number> {
   return px;
 }
 
-type PerpUniverse = { name: string; szDecimals: number }[];
+type PerpUniverse = { name: string; szDecimals: number; maxLeverage?: number }[];
 const universeCache = new Map<HlNetwork, { at: number; universe: PerpUniverse }>();
 
 /** Perp universe (asset index = position) — cached a minute, since listings change rarely. */
@@ -375,6 +400,272 @@ async function placeNatively(p: {
   return { taskId };
 }
 
+// ── Paper trading ────────────────────────────────────────────────────────────
+
+/** Paper fills always use mainnet's book and prices — testnet's are too thin to preview anything real. */
+const PAPER_NETWORK: HlNetwork = "mainnet";
+
+interface PaperMarket {
+  mids: Record<string, number>;
+  meta: Record<string, CoinMeta>;
+}
+
+async function getPaperMarket(): Promise<PaperMarket> {
+  const [mids, universe] = await Promise.all([
+    hlInfo<Record<string, string>>({ type: "allMids" }, PAPER_NETWORK),
+    getPerpUniverse(PAPER_NETWORK),
+  ]);
+  return {
+    mids: Object.fromEntries(Object.entries(mids).map(([c, px]) => [c, Number(px)])),
+    meta: Object.fromEntries(universe.map((u) => [u.name, { szDecimals: u.szDecimals, maxLeverage: u.maxLeverage ?? 50 }])),
+  };
+}
+
+/** The paper account marked to the current mainnet mids. */
+async function getPaperSummary(agentId: string, orgId: string) {
+  const [account, positions, market] = await Promise.all([getPaperAccount(agentId, orgId), listPaperPositions(agentId), getPaperMarket()]);
+  return { account, ...summarize(account.balance, positions, market.mids, market.meta) };
+}
+
+interface PaperOrderParams {
+  orgId: string;
+  agentId: string;
+  coin: string;
+  isBuy: boolean;
+  sizeUsd?: number;
+  /** Exact size in coins — closes use it so nothing is left behind as the price moves. */
+  sz?: number;
+  orderType?: "market" | "limit";
+  limitPrice?: number;
+  leverage?: number;
+  stopLossPct?: number;
+  takeProfitPct?: number;
+  reduceOnly?: boolean;
+  strategyId?: string | null;
+}
+
+interface PaperOrderOutcome {
+  /** The paper trade id (or the resting order's, if nothing filled yet) — named like a live order's taskId so bot logs treat both alike. */
+  taskId: string;
+  paper: true;
+  filled: { sz: number; avgPx: number; fee: number; realizedPnl: number } | null;
+  resting: { orderId: string; sz: number; limitPx: number } | null;
+  balance: number | null;
+}
+
+/**
+ * The paper twin of placing a live order. Same rules as live: risk limits,
+ * size from the mid at the coin's szDecimals, the $10 minimum, market orders
+ * capped at MARKET_SLIPPAGE from mid. It fills against the real mainnet book
+ * at the taker fee, and the unfilled rest of a limit order rests until the tick fills it.
+ */
+async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome | { error: string }> {
+  const orderType = p.orderType ?? "market";
+  const reduceOnly = p.reduceOnly ?? false;
+
+  const risk = await getRiskConfig(p.agentId);
+  if (risk && !reduceOnly) {
+    if ((p.sizeUsd ?? 0) > risk.maxPositionUsd) {
+      return { error: `sizeUsd ${p.sizeUsd} exceeds configured maxPositionUsd ${risk.maxPositionUsd}` };
+    }
+    const account = await getPaperAccount(p.agentId, p.orgId);
+    if (account.dailyPnl <= -risk.maxDailyLossUsd) {
+      return { error: `Daily loss limit reached on paper (${account.dailyPnl.toFixed(2)} <= -${risk.maxDailyLossUsd})` };
+    }
+  }
+
+  let market: PaperMarket;
+  let book: { levels?: { px: string; sz: string }[][] };
+  try {
+    [market, book] = await Promise.all([getPaperMarket(), hlInfo<typeof book>({ type: "l2Book", coin: p.coin }, PAPER_NETWORK)]);
+  } catch (err) {
+    return { error: `Couldn't read the ${p.coin} market: ${(err as Error).message}` };
+  }
+  const mid = market.mids[p.coin];
+  const meta = market.meta[p.coin];
+  if (!mid || !meta) return { error: `Unknown coin ${p.coin}` };
+
+  const sz = roundSize(p.sz ?? (p.sizeUsd ?? 0) / mid, meta.szDecimals);
+  if (sz <= 0) return { error: `$${p.sizeUsd} is below the smallest ${p.coin} order size (${10 ** -meta.szDecimals} ${p.coin})` };
+  let limitPx: number;
+  if (orderType === "market") {
+    limitPx = p.isBuy ? mid * (1 + MARKET_SLIPPAGE) : mid * (1 - MARKET_SLIPPAGE);
+  } else {
+    if (!p.limitPrice) return { error: "limitPrice is required for limit orders" };
+    limitPx = p.limitPrice;
+  }
+  if (!reduceOnly && sz * limitPx < MIN_ORDER_USD) {
+    return { error: `Order value $${(sz * limitPx).toFixed(2)} is below Hyperliquid's $${MIN_ORDER_USD} minimum` };
+  }
+
+  const leverage = p.leverage ?? risk?.leverage ?? 1;
+  const stopLossPct = p.stopLossPct ?? (reduceOnly ? undefined : risk?.defaultStopLossPct);
+  const takeProfitPct = p.takeProfitPct ?? (reduceOnly ? undefined : risk?.defaultTakeProfitPct);
+  const side = (p.isBuy ? book.levels?.[1] : book.levels?.[0]) ?? [];
+  const walk = walkBook(side.map((l) => ({ px: Number(l.px), sz: Number(l.sz) })), sz, p.isBuy, limitPx, meta.szDecimals);
+
+  let filled: PaperOrderOutcome["filled"] = null;
+  let balance: number | null = null;
+  let tradeId: string | null = null;
+  if (walk.sz > 0) {
+    const booked = await bookPaperFill(
+      p.agentId,
+      { coin: p.coin, isBuy: p.isBuy, sz: walk.sz, px: walk.avgPx, feeRate: TAKER_FEE_RATE, leverage, reduceOnly, stopLossPct, takeProfitPct },
+      market.mids, market.meta,
+      { orgId: p.orgId, reason: p.strategyId ? "strategy" : "manual", strategyId: p.strategyId ?? null },
+    );
+    if ("error" in booked) return booked;
+    filled = { sz: booked.sz, avgPx: walk.avgPx, fee: booked.fee, realizedPnl: booked.realized };
+    balance = booked.balance;
+    tradeId = booked.tradeId;
+  }
+
+  let resting: PaperOrderOutcome["resting"] = null;
+  const rest = roundSize(sz - walk.sz, meta.szDecimals);
+  if (orderType === "limit" && rest > 0) {
+    const orderId = await createPaperOrder({
+      agentId: p.agentId, orgId: p.orgId, coin: p.coin, isBuy: p.isBuy, sz: rest, limitPx, leverage, reduceOnly,
+      stopLossPct: stopLossPct ?? null, takeProfitPct: takeProfitPct ?? null, strategyId: p.strategyId ?? null,
+    });
+    resting = { orderId, sz: rest, limitPx };
+  }
+  if (!filled && !resting) {
+    return { error: `Nothing filled — no ${p.coin} liquidity within ${MARKET_SLIPPAGE * 100}% of the mid` };
+  }
+  return { taskId: (tradeId ?? resting?.orderId)!, paper: true, filled, resting, balance };
+}
+
+/**
+ * Hub tick phase for paper accounts, on mainnet prices: fills resting limits
+ * the mid has traded through (at their limit, maker fee), fires stop losses and
+ * take profits at the mark, charges hourly funding, and liquidates any account
+ * whose equity drops under its maintenance margin.
+ */
+export async function runHyperliquidPaperTick(): Promise<{ filled: number; triggered: number; funded: number; liquidated: number; errors: number }> {
+  const result = { filled: 0, triggered: 0, funded: 0, liquidated: 0, errors: 0 };
+  const [orders, positions] = await Promise.all([listAllPaperOrders(), listAllPaperPositions()]);
+  if (!orders.length && !positions.length) return result;
+
+  type Ctx = { funding: string; oraclePx: string; markPx: string; midPx?: string | null };
+  const [meta, ctxs] = await hlInfo<[{ universe: { name: string; szDecimals: number; maxLeverage: number }[] }, Ctx[]]>(
+    { type: "metaAndAssetCtxs" }, PAPER_NETWORK,
+  );
+  const coinMeta: Record<string, CoinMeta> = {};
+  const mids: Record<string, number> = {};
+  const marks: Record<string, number> = {};
+  const funding: Record<string, { rate: number; oraclePx: number }> = {};
+  meta.universe.forEach((u, i) => {
+    const c = ctxs[i];
+    if (!c) return;
+    coinMeta[u.name] = { szDecimals: u.szDecimals, maxLeverage: u.maxLeverage };
+    marks[u.name] = Number(c.markPx);
+    mids[u.name] = Number(c.midPx) || Number(c.markPx);
+    funding[u.name] = { rate: Number(c.funding), oraclePx: Number(c.oraclePx) };
+  });
+
+  for (const o of orders) {
+    const mid = mids[o.coin];
+    if (!mid || !restingFillable(o.isBuy, o.limitPx, mid)) continue;
+    try {
+      const booked = await bookPaperFill(
+        o.agentId,
+        {
+          coin: o.coin, isBuy: o.isBuy, sz: o.sz, px: o.limitPx, feeRate: MAKER_FEE_RATE, leverage: o.leverage, reduceOnly: o.reduceOnly,
+          stopLossPct: o.stopLossPct ?? undefined, takeProfitPct: o.takeProfitPct ?? undefined,
+        },
+        mids, coinMeta,
+        { orgId: o.orgId, reason: "limit", strategyId: o.strategyId, restingOrderId: o.id },
+      );
+      if (!("error" in booked)) {
+        result.filled++;
+      } else if (booked.error !== "Order is no longer open") {
+        // Can't be filled any more (margin gone, position already closed) — cancel rather than retry every tick.
+        await deletePaperOrder(o.id);
+        console.warn(`[hyperliquid-paper] cancelled order ${o.id}: ${booked.error}`);
+      }
+    } catch (err) {
+      result.errors++;
+      console.error(`[hyperliquid-paper] order ${o.id} failed:`, err);
+    }
+  }
+
+  const now = Date.now();
+  const afterFills = result.filled ? await listAllPaperPositions() : positions;
+  for (const p of afterFills) {
+    const mark = marks[p.coin];
+    if (!mark) continue;
+    try {
+      const hit = triggerHit(p, mark);
+      if (hit) {
+        const booked = await bookPaperFill(
+          p.agentId,
+          { coin: p.coin, isBuy: p.szi < 0, sz: Math.abs(p.szi), px: mark, feeRate: TAKER_FEE_RATE, leverage: p.leverage, reduceOnly: true },
+          marks, coinMeta, { orgId: p.orgId, reason: hit },
+        );
+        if (!("error" in booked)) result.triggered++;
+        continue;
+      }
+      const since = p.lastFundingAt?.getTime() ?? now;
+      const hours = Math.floor((now - since) / 3_600_000);
+      const f = funding[p.coin];
+      if (hours >= 1 && f) {
+        // Capped at a day, so a tick outage can't land one huge payment.
+        const amount = fundingPayment(p.szi, f.oraclePx || mark, f.rate) * Math.min(hours, 24);
+        await applyPaperFunding(p.agentId, p.coin, amount, new Date(since + hours * 3_600_000));
+        result.funded++;
+      }
+    } catch (err) {
+      result.errors++;
+      console.error(`[hyperliquid-paper] position ${p.id} failed:`, err);
+    }
+  }
+
+  const byAgent = new Map<string, PaperPositionDoc[]>();
+  for (const p of result.triggered ? await listAllPaperPositions() : afterFills) {
+    byAgent.set(p.agentId, [...(byAgent.get(p.agentId) ?? []), p]);
+  }
+  for (const [agentId, held] of byAgent) {
+    try {
+      const account = await getPaperAccount(agentId, held[0].orgId);
+      if (!isLiquidatable(summarize(account.balance, held, marks, coinMeta))) continue;
+      for (const p of held) {
+        await bookPaperFill(
+          agentId,
+          { coin: p.coin, isBuy: p.szi < 0, sz: Math.abs(p.szi), px: marks[p.coin] || p.entryPx, feeRate: TAKER_FEE_RATE, leverage: p.leverage, reduceOnly: true },
+          marks, coinMeta, { orgId: p.orgId, reason: "liquidation" },
+        );
+      }
+      result.liquidated++;
+    } catch (err) {
+      result.errors++;
+      console.error(`[hyperliquid-paper] liquidation check for ${agentId} failed:`, err);
+    }
+  }
+  return result;
+}
+
+type Signer = { privateKey: string; network: HlNetwork };
+
+/** One bot order: filled on the paper account for a paper bot, otherwise signed with `signer` and sent. */
+async function sendStrategyOrder(
+  strategy: Strategy,
+  signer: Signer | null,
+  order: { coin: string; isBuy: boolean; sizeUsd: number; leverage?: number; reduceOnly?: boolean; sz?: number },
+): Promise<{ taskId: string } | { error: string }> {
+  if (strategy.paper) {
+    return placePaperOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, ...order });
+  }
+  if (!signer) return { error: "No signing key for a live order" };
+  const { coin, isBuy, sizeUsd, leverage, reduceOnly } = order;
+  return enforceRiskAndEnqueue({ orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy, sizeUsd, leverage, reduceOnly, ...signer });
+}
+
+/** Where a bot's market data comes from: mainnet for a paper bot, else its agent's trading network (null: no wallet yet). */
+async function strategyNetwork(strategy: Strategy): Promise<HlNetwork | null> {
+  if (strategy.paper) return PAPER_NETWORK;
+  return (await getTradingWallet(strategy.agentId))?.network ?? null;
+}
+
 type AccessDenied = { error: string; status: number };
 
 /**
@@ -431,19 +722,19 @@ async function fireSignalStrategy(
   if (strategy.type !== "signal") {
     return { status: 400, body: { error: "Only signal strategies can be fired this way" } };
   }
-  let privateKey: string, network: HlNetwork;
-  try {
-    ({ privateKey, network } = await resolveSigningKey(strategy.agentId, body.masterSecret));
-  } catch (err) {
-    return { status: 400, body: { error: (err as Error).message } };
+  let signer: Signer | null = null;
+  if (!strategy.paper) {
+    try {
+      signer = await resolveSigningKey(strategy.agentId, body.masterSecret);
+    } catch (err) {
+      return { status: 400, body: { error: (err as Error).message } };
+    }
   }
 
   const signalParams = strategy.params as { direction?: "buy" | "sell" };
   const isBuy = body.isBuy ?? (signalParams.direction ? signalParams.direction === "buy" : true);
 
-  const result = await enforceRiskAndEnqueue({
-    orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, isBuy, sizeUsd: strategy.sizeUsd, privateKey, network,
-  });
+  const result = await sendStrategyOrder(strategy, signer, { coin: strategy.coin, isBuy, sizeUsd: strategy.sizeUsd });
   if ("error" in result) return { status: 400, body: result };
   await touchStrategyRun(strategy.id);
   return result;
@@ -471,11 +762,13 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
     return { status: 400, body: { error: "Strategy has no pending signal" } };
   }
 
-  let privateKey: string, network: HlNetwork;
-  try {
-    ({ privateKey, network } = await resolveSigningKey(strategy.agentId, masterSecret));
-  } catch (err) {
-    return { status: 400, body: { error: (err as Error).message } };
+  let signer: Signer | null = null;
+  if (!strategy.paper) {
+    try {
+      signer = await resolveSigningKey(strategy.agentId, masterSecret);
+    } catch (err) {
+      return { status: 400, body: { error: (err as Error).message } };
+    }
   }
 
   if (strategy.type === "ai") {
@@ -483,7 +776,7 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
     const ctx = (strategy.pendingContext ?? {}) as { action?: AiAction; isLong?: boolean; notionalUsd?: number };
     if (!ctx.action) return { status: 400, body: { error: "Pending AI decision has no action" } };
     const pos = ctx.isLong != null && ctx.notionalUsd ? { isLong: ctx.isLong, notionalUsd: ctx.notionalUsd } : null;
-    const placed = await placeAiAction(strategy, ctx.action, pos, privateKey, network);
+    const placed = await placeAiAction(strategy, ctx.action, pos, signer);
     if (placed && "error" in placed) return { status: 400, body: placed };
     await clearStrategyPending(strategy.id, placed?.params);
     if (!placed) return { status: 400, body: { error: "Nothing to do — the position has already changed" } };
@@ -496,9 +789,7 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
   const detectedCoin = (strategy.pendingContext as { detectedCoin?: string } | null)?.detectedCoin;
   const coin = strategy.type === "sniper" && detectedCoin ? detectedCoin : strategy.coin;
 
-  const result = await enforceRiskAndEnqueue({
-    orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy: true, sizeUsd: strategy.sizeUsd, privateKey, network,
-  });
+  const result = await sendStrategyOrder(strategy, signer, { coin, isBuy: true, sizeUsd: strategy.sizeUsd });
   if ("error" in result) return { status: 400, body: result };
 
   if (strategy.type === "grid") {
@@ -567,6 +858,32 @@ function positionFor(state: ClearinghouseState, coin: string): { position: AiPos
   };
 }
 
+/** A bot's open position as the order paths need it; size (signed, in coins) lets a paper close take exactly all of it. */
+type AiHeld = { isLong: boolean; notionalUsd: number; size?: number };
+
+function heldFor(held: { position: AiPosition; notionalUsd: number } | null): AiHeld | null {
+  return held ? { isLong: held.position.isLong, notionalUsd: held.notionalUsd, size: held.position.size } : null;
+}
+
+/** Equity and this bot's position — from the paper account for a paper bot, else read off Hyperliquid for its wallet. */
+async function aiAccountState(strategy: Strategy): Promise<
+  { accountValue: number; held: { position: AiPosition; notionalUsd: number } | null; network: HlNetwork } | { error: string }
+> {
+  if (strategy.paper) {
+    const summary = await getPaperSummary(strategy.agentId, strategy.orgId);
+    const p = summary.positions.find((x) => x.coin === strategy.coin);
+    return {
+      accountValue: summary.equity,
+      network: PAPER_NETWORK,
+      held: p ? { position: { isLong: p.szi > 0, size: p.szi, entryPx: p.entryPx, unrealizedPnl: p.unrealizedPnl }, notionalUsd: p.notionalUsd } : null,
+    };
+  }
+  const wallet = await getTradingWallet(strategy.agentId);
+  if (!wallet?.address) return { error: "This agent has no trading wallet yet." };
+  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
+  return { accountValue, network: wallet.network, held: positionFor(state, strategy.coin) };
+}
+
 /**
  * Sends the order(s) for one AI action. Opens are a fixed sizeUsd; a close
  * is reduce-only for the whole position. A flip only sends its close here and
@@ -577,19 +894,23 @@ function positionFor(state: ClearinghouseState, coin: string): { position: AiPos
 async function placeAiAction(
   strategy: Strategy,
   action: AiAction,
-  pos: { isLong: boolean; notionalUsd: number } | null,
-  privateKey: string,
-  network: HlNetwork,
+  pos: AiHeld | null,
+  signer: Signer | null,
 ): Promise<{ taskId: string; params?: AiParams } | { error: string } | null> {
   const params = strategy.params as AiParams;
-  const base = { orgId: strategy.orgId, agentId: strategy.agentId, coin: strategy.coin, privateKey, network };
+  const coin = strategy.coin;
+  const open = (isBuy: boolean) => sendStrategyOrder(strategy, signer, { coin, isBuy, sizeUsd: strategy.sizeUsd, leverage: params.leverage });
   if (action === "open-long" || action === "open-short") {
-    return enforceRiskAndEnqueue({ ...base, isBuy: action === "open-long", sizeUsd: strategy.sizeUsd, leverage: params.leverage });
+    return open(action === "open-long");
   }
   if (action === "close" || action === "flip-long" || action === "flip-short") {
     if (!pos) return null;
-    const closed = await enforceRiskAndEnqueue({ ...base, isBuy: !pos.isLong, sizeUsd: pos.notionalUsd, reduceOnly: true });
+    const closed = await sendStrategyOrder(strategy, signer, {
+      coin, isBuy: !pos.isLong, sizeUsd: pos.notionalUsd, reduceOnly: true, ...(pos.size ? { sz: Math.abs(pos.size) } : {}),
+    });
     if ("error" in closed || action === "close") return closed;
+    // A paper close has already filled, so a paper flip opens the new side right away.
+    if (strategy.paper) return open(action === "flip-long");
     const flipped: AiParams = { ...params, flipTo: action === "flip-long" ? "long" : "short" };
     await touchStrategyRun(strategy.id, flipped);
     return { ...closed, params: flipped };
@@ -601,19 +922,22 @@ async function placeAiAction(
 async function executeOrQueueAiAction(
   strategy: Strategy,
   action: AiAction,
-  pos: { isLong: boolean; notionalUsd: number } | null,
+  pos: AiHeld | null,
 ): Promise<{ taskId: string | null; error: string | null }> {
   try {
     await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
   } catch (err) {
     return { taskId: null, error: (err as Error).message };
   }
-  if (!(await getInstantTrading(strategy.agentId))) {
-    await markStrategyPending(strategy.id, { action, isLong: pos?.isLong ?? null, notionalUsd: pos?.notionalUsd ?? null });
-    return { taskId: null, error: "Waiting for the wallet passphrase to execute" };
+  let signer: Signer | null = null;
+  if (!strategy.paper) {
+    if (!(await getInstantTrading(strategy.agentId))) {
+      await markStrategyPending(strategy.id, { action, isLong: pos?.isLong ?? null, notionalUsd: pos?.notionalUsd ?? null });
+      return { taskId: null, error: "Waiting for the wallet passphrase to execute" };
+    }
+    signer = await resolveSigningKey(strategy.agentId);
   }
-  const { privateKey, network } = await resolveSigningKey(strategy.agentId);
-  const placed = await placeAiAction(strategy, action, pos, privateKey, network);
+  const placed = await placeAiAction(strategy, action, pos, signer);
   if (!placed) return { taskId: null, error: null };
   if ("error" in placed) return { taskId: null, error: placed.error };
   return { taskId: placed.taskId, error: null };
@@ -649,14 +973,13 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
     return "skipped";
   }
 
-  const wallet = await getTradingWallet(strategy.agentId);
-  if (!wallet?.address) {
+  const acct = await aiAccountState(strategy);
+  if ("error" in acct) {
     await touchStrategyRun(strategy.id);
-    await record({ error: "This agent has no trading wallet yet." });
+    await record({ error: acct.error });
     return "error";
   }
-  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
-  const held = positionFor(state, strategy.coin);
+  const { accountValue, held, network } = acct;
 
   // Second half of a flip: open the new side once the old one is gone.
   if (params.flipTo) {
@@ -687,7 +1010,7 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
   const startEquity = params.startEquity ?? (accountValue > 0 ? accountValue : undefined);
   if (startEquity != null && accountValue <= startEquity * (1 - params.maxDrawdownPct / 100)) {
     const sent = held
-      ? await executeOrQueueAiAction(strategy, "close", { isLong: held.position.isLong, notionalUsd: held.notionalUsd })
+      ? await executeOrQueueAiAction(strategy, "close", heldFor(held))
       : { taskId: null, error: null };
     await touchStrategyRun(strategy.id, { ...params, startEquity, eliminated: true });
     await toggleStrategy(strategy.id, false);
@@ -699,15 +1022,20 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
     return "decided";
   }
   if (accountValue < 10) {
-    await record({ error: `Wallet holds $${accountValue.toFixed(2)} — fund it with at least $10 on Hyperliquid ${wallet.network} to trade.`, equity: accountValue });
+    await record({
+      error: strategy.paper
+        ? `Paper account holds $${accountValue.toFixed(2)} — reset it to keep trading.`
+        : `Wallet holds $${accountValue.toFixed(2)} — fund it with at least $10 on Hyperliquid ${network} to trade.`,
+      equity: accountValue,
+    });
     return "skipped";
   }
 
   const interval = candleIntervalFor(params.intervalMs);
   const [candles, book, market] = await Promise.all([
-    fetchCandles(strategy.coin, interval, AI_SNAPSHOT_HISTORY, wallet.network),
-    hlInfo<{ levels: { px: string }[][] }>({ type: "l2Book", coin: strategy.coin }, wallet.network).catch(() => null),
-    getMarketOverview(wallet.network).catch(() => []),
+    fetchCandles(strategy.coin, interval, AI_SNAPSHOT_HISTORY, network),
+    hlInfo<{ levels: { px: string }[][] }>({ type: "l2Book", coin: strategy.coin }, network).catch(() => null),
+    getMarketOverview(network).catch(() => []),
   ]);
   if (candles.length < 20) {
     await record({ error: `Not enough ${strategy.coin} price history to decide.` });
@@ -746,18 +1074,17 @@ async function applyAiAnswer(req: AiRequest, decision: AiDecision, reasoning: st
     return { action: "hold", taskId: null, error: "Bot is stopped" };
   }
 
-  const wallet = await getTradingWallet(strategy.agentId);
-  if (!wallet?.address) {
-    await record({ decision, reasoning, error: "This agent has no trading wallet yet." });
+  const acct = await aiAccountState(strategy);
+  if ("error" in acct) {
+    await record({ decision, reasoning, error: acct.error });
     return { action: "hold", taskId: null, error: "No trading wallet" };
   }
-  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
-  const held = positionFor(state, strategy.coin);
+  const { accountValue, held, network } = acct;
   const action = decisionToAction(decision, held?.position ?? null);
   const sent = action === "hold"
     ? { taskId: null, error: null }
-    : await executeOrQueueAiAction(strategy, action, held ? { isLong: held.position.isLong, notionalUsd: held.notionalUsd } : null);
-  const price = await getMidPrice(strategy.coin, wallet.network).catch(() => null);
+    : await executeOrQueueAiAction(strategy, action, heldFor(held));
+  const price = await getMidPrice(strategy.coin, network).catch(() => null);
   await record({ decision, action, reasoning, model: "agent", price, equity: accountValue, ...sent });
   return { action, ...sent };
 }
@@ -824,9 +1151,9 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
         markedPending++;
       } else if (strategy.type === "grid") {
         const params = strategy.params as GridParams;
-        const wallet = await getTradingWallet(strategy.agentId);
-        if (!wallet) continue; // nothing to trade with yet — agent hasn't set a wallet
-        const price = await getMidPrice(strategy.coin, wallet.network);
+        const network = await strategyNetwork(strategy);
+        if (!network) continue; // nothing to trade with yet — agent hasn't set a wallet
+        const price = await getMidPrice(strategy.coin, network);
         if (price < params.lowerPrice || price > params.upperPrice) continue;
 
         const step = (params.upperPrice - params.lowerPrice) / params.levels;
@@ -838,28 +1165,28 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
         markedPending++;
       } else if (strategy.type === "sniper") {
         const params = strategy.params as SniperParams;
-        const wallet = await getTradingWallet(strategy.agentId);
-        if (!wallet) continue; // nothing to trade with yet — agent hasn't set a wallet
+        const network = await strategyNetwork(strategy);
+        if (!network) continue; // nothing to trade with yet — agent hasn't set a wallet
 
         if (params.mode === "new-listing") {
-          const known = await getKnownCoins(wallet.network);
-          const current = await getUniverseCoins(wallet.network);
+          const known = await getKnownCoins(network);
+          const current = await getUniverseCoins(network);
           if (known === null) {
             // First run for this network — seed the baseline instead of
             // treating Hyperliquid's entire existing universe as "new".
-            await setKnownCoins(wallet.network, current);
+            await setKnownCoins(network, current);
             continue;
           }
           const newCoins = current.filter((c) => !known.includes(c));
           if (newCoins.length === 0) continue;
-          await setKnownCoins(wallet.network, current);
+          await setKnownCoins(network, current);
 
           const target = strategy.coin === "ANY" ? newCoins[0] : (newCoins.includes(strategy.coin) ? strategy.coin : null);
           if (!target) continue;
           await markStrategyPending(strategy.id, { detectedCoin: target });
         } else {
           if (params.targetPrice == null) continue;
-          const price = await getMidPrice(strategy.coin, wallet.network);
+          const price = await getMidPrice(strategy.coin, network);
           const triggered = params.mode === "price-above" ? price >= params.targetPrice : price <= params.targetPrice;
           if (!triggered) continue;
           await markStrategyPending(strategy.id, { triggerPrice: price });
@@ -869,7 +1196,8 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
       // "signal" strategies never fire from the tick — only via POST /strategy/:id/signal or the public webhook.
       // Reaching here means a dca/grid/sniper strategy was just flagged (every
       // non-trigger path above `continue`s).
-      if (strategy.type !== "signal" && (await getInstantTrading(strategy.agentId))) {
+      // A paper bot needs no signer, so it always places its own trade.
+      if (strategy.type !== "signal" && (strategy.paper || (await getInstantTrading(strategy.agentId)))) {
         const flagged = await getStrategy(strategy.id); // re-read for the pendingContext just written
         if (flagged) {
           const fired = await executePendingStrategy(flagged);
@@ -1000,6 +1328,47 @@ const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "hyperliquid_paper_account",
+    description: "This agent's paper (virtual USDC) account: balance, equity, margin, open paper positions marked to mainnet prices, and resting paper limit orders. Paper trading moves no real money.",
+    method: "GET",
+    path: "paper/{agentId}",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "hyperliquid_paper_trade",
+    description: "Place a paper order: filled against the real Hyperliquid mainnet order book with real fees, on this agent's virtual account — no wallet, no real money. Same risk limits as live. A limit order that doesn't fill right away rests until the price reaches it.",
+    method: "POST",
+    path: "paper/trade",
+    input_schema: {
+      type: "object",
+      properties: {
+        coin: { type: "string", description: "Perp symbol, e.g. ETH" },
+        isBuy: { type: "boolean", description: "true = long/buy, false = short/sell" },
+        sizeUsd: { type: "number", description: "Order size in USD notional" },
+        orderType: { type: "string", enum: ["market", "limit"] },
+        limitPrice: { type: "number", description: "Required when orderType is limit" },
+        leverage: { type: "number" },
+        stopLossPct: { type: "number", description: "Stop-loss distance from entry, in percent" },
+        takeProfitPct: { type: "number", description: "Take-profit distance from entry, in percent" },
+      },
+      required: ["coin", "isBuy", "sizeUsd"],
+    },
+  },
+  {
+    name: "hyperliquid_paper_close",
+    description: "Close this agent's entire paper position in one coin at market.",
+    method: "POST",
+    path: "paper/close",
+    input_schema: { type: "object", properties: { coin: { type: "string" } }, required: ["coin"] },
+  },
+  {
+    name: "hyperliquid_paper_cancel",
+    description: "Cancel one resting paper limit order.",
+    method: "POST",
+    path: "paper/orders/{id}/cancel",
+    input_schema: { type: "object", properties: { id: { type: "string", description: "orderId from hyperliquid_paper_account" } }, required: ["id"] },
+  },
+  {
     name: "hyperliquid_ai_requests",
     description: "Questions waiting for you from your AI Trader bots and backtests: each has a system prompt and a market snapshot. Decide each one and answer with hyperliquid_ai_answer before it expires.",
     method: "GET",
@@ -1090,6 +1459,8 @@ export default defineServerMod({
         } : null,
         pendingStrategies: pending.length,
         readyToTrade: !!wallet && capabilities["hyperliquid-trade"],
+        // Paper needs no wallet — only the trade capability.
+        readyToPaperTrade: capabilities["hyperliquid-trade"],
       });
     },
 
@@ -1610,7 +1981,8 @@ export default defineServerMod({
      * Trader phase, which asks the agent's own model each round (params:
      * intervalMs ≥ 15 min, maxDrawdownPct, leverage?); signal only fires via POST /strategy/:id/signal or the
      * public POST /webhook/:id.
-     * Body: { orgId, agentId, wallet, type, coin, sizeUsd, params }
+     * Body: { orgId, agentId, wallet, type, coin, sizeUsd, params, paper? }
+     * paper: true runs the bot on the agent's paper account (no wallet needed).
      * For a sniper strategy, coin may be "ANY" (new-listing mode only, to
      * catch whichever coin lists next rather than a specific one).
      */
@@ -1619,9 +1991,10 @@ export default defineServerMod({
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
       const { wallet, type, coin, sizeUsd, params } = body;
+      const paper = body.paper === true;
 
-      if (!orgId || !agentId || !wallet || !type || !coin || !sizeUsd) {
-        return Response.json({ error: "orgId, agentId, wallet, type, coin, sizeUsd are required" }, { status: 400 });
+      if (!orgId || !agentId || (!wallet && !paper) || !type || !coin || !sizeUsd) {
+        return Response.json({ error: "orgId, agentId, wallet (unless paper), type, coin, sizeUsd are required" }, { status: 400 });
       }
       if (!["dca", "grid", "signal", "sniper", "ai"].includes(type)) {
         return Response.json({ error: "type must be dca, grid, signal, sniper, or ai" }, { status: 400 });
@@ -1667,7 +2040,7 @@ export default defineServerMod({
         return Response.json({ error: (err as Error).message }, { status: 403 });
       }
 
-      const id = await createStrategy({ orgId, agentId, wallet, type, coin, sizeUsd, enabled: true, params: storedParams });
+      const id = await createStrategy({ orgId, agentId, wallet: wallet ?? "", type, coin, sizeUsd, enabled: true, params: storedParams, paper });
       return Response.json({ id });
     },
 
@@ -1900,6 +2273,138 @@ export default defineServerMod({
       const result = await executePendingStrategy(strategy, body.masterSecret);
       if ("status" in result) return Response.json(result.body, { status: result.status });
       return Response.json(result);
+    },
+
+    // ── Paper trading ──────────────────────────────────────────────────────
+
+    /**
+     * GET /paper/:agentId — the agent's paper account marked to mainnet mids:
+     * balance, equity, margin, open positions and resting limit orders.
+     * Opens the account (PAPER_START_BALANCE virtual USDC) on first read.
+     */
+    "GET /paper/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      try {
+        const [summary, orders] = await Promise.all([
+          getPaperSummary(ctx.params.agentId, access.orgId),
+          listPaperOrders(ctx.params.agentId),
+        ]);
+        const { account, ...marked } = summary;
+        return Response.json({
+          network: PAPER_NETWORK,
+          startBalance: account.startBalance,
+          dailyPnl: account.dailyPnl,
+          ...marked,
+          orders: orders.map((o) => ({
+            orderId: o.id, coin: o.coin, isBuy: o.isBuy, sz: o.sz, limitPx: o.limitPx, leverage: o.leverage,
+            reduceOnly: o.reduceOnly, strategyId: o.strategyId, createdAt: o.createdAt?.toISOString() ?? null,
+          })),
+        });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /**
+     * POST /paper/trade — a paper order, same body and same checks (capability,
+     * risk limits) as POST /trade, but no wallet or passphrase: it fills on the
+     * agent's virtual account against the real mainnet book, synchronously.
+     * Body: { orgId, agentId, coin, isBuy, sizeUsd, orderType?, limitPrice?, leverage?, stopLossPct?, takeProfitPct? }
+     */
+    "POST /paper/trade": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const agentId = ctx.agent?.agentId ?? body.agentId;
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      const { coin, isBuy, sizeUsd, orderType = "market", limitPrice, leverage, stopLossPct, takeProfitPct } = body;
+      if (!orgId || !agentId || !coin || isBuy == null || !(Number(sizeUsd) > 0)) {
+        return Response.json({ error: "orgId, agentId, coin, isBuy, sizeUsd are required" }, { status: 400 });
+      }
+      if (orderType !== "market" && orderType !== "limit") {
+        return Response.json({ error: "orderType must be market or limit" }, { status: 400 });
+      }
+      if (orderType === "limit" && !(Number(limitPrice) > 0)) {
+        return Response.json({ error: "limitPrice is required for limit orders" }, { status: 400 });
+      }
+
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      try {
+        await enforceCapability(agentId, orgId, "hyperliquid-trade");
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 403 });
+      }
+
+      const num = (v: unknown) => (v == null || v === "" ? undefined : Number(v) || undefined);
+      const result = await placePaperOrder({
+        orgId, agentId, coin: String(coin), isBuy: Boolean(isBuy), sizeUsd: Number(sizeUsd), orderType,
+        limitPrice: num(limitPrice), leverage: num(leverage), stopLossPct: num(stopLossPct), takeProfitPct: num(takeProfitPct),
+      });
+      if ("error" in result) return Response.json(result, { status: 400 });
+      return Response.json(result);
+    },
+
+    /** POST /paper/close — close the agent's whole paper position in `coin` at market. Body: { orgId, agentId, coin } */
+    "POST /paper/close": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const agentId = ctx.agent?.agentId ?? body.agentId;
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      const { coin } = body;
+      if (!orgId || !agentId || !coin) {
+        return Response.json({ error: "orgId, agentId, coin are required" }, { status: 400 });
+      }
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      try {
+        await enforceCapability(agentId, orgId, "hyperliquid-close");
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 403 });
+      }
+
+      const open = (await listPaperPositions(agentId)).find((p) => p.coin === coin);
+      if (!open) return Response.json({ error: `No open ${coin} paper position` }, { status: 404 });
+      const result = await placePaperOrder({
+        orgId, agentId, coin, isBuy: open.szi < 0, sz: Math.abs(open.szi), sizeUsd: Math.abs(open.szi) * open.entryPx, reduceOnly: true,
+      });
+      if ("error" in result) return Response.json(result, { status: 400 });
+      return Response.json({ ...result, closing: { coin, side: open.szi > 0 ? "long" : "short", sz: Math.abs(open.szi) } });
+    },
+
+    /** POST /paper/orders/:id/cancel — cancel one resting paper limit order. */
+    "POST /paper/orders/:id/cancel": async (_req, ctx) => {
+      const order = await getPaperOrder(ctx.params.id);
+      if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
+      const access = await requireAgentOrgAccess(ctx, order.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      await deletePaperOrder(order.id);
+      return Response.json({ ok: true });
+    },
+
+    /**
+     * POST /paper/reset — back to a clean paper account: positions and resting
+     * orders dropped, balance set to startBalance (default 10,000). History is kept.
+     * Body: { orgId, agentId, startBalance? }
+     */
+    "POST /paper/reset": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const agentId = ctx.agent?.agentId ?? body.agentId;
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      if (!orgId || !agentId) return Response.json({ error: "orgId, agentId are required" }, { status: 400 });
+      const startBalance = body.startBalance == null ? PAPER_START_BALANCE : Number(body.startBalance);
+      if (!(startBalance >= 100 && startBalance <= 10_000_000)) {
+        return Response.json({ error: "startBalance must be between 100 and 10,000,000" }, { status: 400 });
+      }
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      await resetPaperAccount(agentId, orgId, startBalance);
+      return Response.json({ ok: true, balance: startBalance });
+    },
+
+    /** GET /paper/history/:agentId — paper fills (newest first) and PnL net of fees, win rate. */
+    "GET /paper/history/:agentId": async (_req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      return Response.json(await getPaperTradeHistory(ctx.params.agentId));
     },
 
     // ── Referrals ──────────────────────────────────────────────────────────

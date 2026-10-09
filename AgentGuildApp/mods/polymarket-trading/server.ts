@@ -1,6 +1,5 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { enforceCapability, getAgentCapabilities } from "@/lib/skills";
-import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { enableModCapabilities, enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getModInstallStatus, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -80,6 +79,8 @@ import {
 import { checkGeoblock, ensureApprovals, getLiveWalletState, placeLiveOrder, getLiveOpenOrders, cancelLiveOrder } from "./live";
 
 const MOD_ID = "polymarket-trading";
+/** The id installs are stored under (skills.ts prefixes registry entries with "mod-"). */
+const REGISTRY_MOD_ID = `mod-${MOD_ID}`;
 const CAP_TRADE = "polymarket-trade";
 const CAP_BOTS = "polymarket-run-bots";
 const TRADING_CAPABILITIES = [CAP_TRADE, CAP_BOTS] as const;
@@ -268,7 +269,7 @@ export async function executeOrder(req: OrderRequest): Promise<OrderResult> {
     }
     let realized: number;
     try {
-      ({ realized } = await applyPaperFill(account.agentId, account.orgId, ref, side, fill));
+      ({ realized } = await applyPaperFill(account.agentId, account.orgId, ref, side, fill, req.strategyId ?? null));
     } catch (err) {
       if (err instanceof PaperError) throw new OrderError(err.message);
       throw err;
@@ -332,8 +333,14 @@ export async function resolvePaperPositions(now = Date.now()): Promise<{ checked
       await recordTrade({
         agentId: p.agentId, orgId: p.orgId, mode: "paper", conditionId, question: p.question, tokenId: p.tokenId,
         outcome: p.outcome, side: "resolve", shares: p.shares, price: won ? 1 : 0, notional: result.payout, fee: 0,
-        realizedPnl: result.realized, strategyId: null, orderId: null, status: won ? "won" : "lost",
+        realizedPnl: result.realized, strategyId: p.strategyId, orderId: null, status: won ? "won" : "lost",
       });
+      if (p.strategyId) {
+        await addBotLog(p.strategyId, {
+          kind: "resolve", reason: `${p.question}: ${p.outcome} ${won ? "won" : "lost"}, PnL ${result.realized >= 0 ? "+" : ""}${result.realized.toFixed(2)} (paper)`,
+          price: won ? 1 : 0, shares: p.shares, usd: result.payout,
+        });
+      }
     }
   }));
   return { checked: markets.length, settled };
@@ -657,6 +664,18 @@ async function applyAiAnswer(req: PmAiRequest, decision: PredictorDecision, reas
   }
 }
 
+/** Stops a bot whose realized loss in the account's current mode has reached its maxLossUsd. */
+export async function enforceBotLossLimit(bot: PmBot): Promise<boolean> {
+  if (bot.maxLossUsd == null) return false;
+  const mode = (await getAccount(bot.agentId))?.mode ?? "paper";
+  const pnl = bot.stats[mode].realizedPnl;
+  if (pnl > -bot.maxLossUsd) return false;
+  const reason = `Loss limit hit: ${mode} realized PnL ${pnl.toFixed(2)} ≤ −${bot.maxLossUsd}. Bot stopped.`;
+  await updateBot(bot.id, { enabled: false, state: { lastReason: reason } });
+  await addBotLog(bot.id, { kind: "exit", reason });
+  return true;
+}
+
 /**
  * Hub tick (every ~30s, see /api/internal/tick): pays out resolved paper
  * positions, then runs every enabled bot. BTC data is fetched once and shared.
@@ -669,7 +688,9 @@ export async function runPolymarketTick(now = Date.now()): Promise<{ bots: numbe
     return { checked: 0, settled: 0 };
   });
 
-  const bots = (await listEnabledBots()).filter((b) => !b.state.eliminated);
+  const enabled = (await listEnabledBots()).filter((b) => !b.state.eliminated);
+  const stopped = await Promise.all(enabled.map((b) => enforceBotLossLimit(b).catch(() => false)));
+  const bots = enabled.filter((_, i) => !stopped[i]);
   const needsBtc = bots.some((b) => b.type === "mid-price" || b.type === "streak-fade" || (b.type === "ai" && b.params.target === "btc-5m"));
   const btc = needsBtc ? await loadBtcContext(now).catch((err: Error) => `BTC data failed: ${err.message}`) : null;
 
@@ -747,6 +768,44 @@ const AGENT_TOOLS = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "polymarket_bots",
+    description: "Your trading bots with their settings, status, last check and results (entries, wins/losses, realized PnL) per mode.",
+    method: "GET", path: "bots/{agentId}",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "polymarket_bot_create",
+    description:
+      "Start a bot that trades from your account. Types: 'mid-price' and 'streak-fade' trade each BTC 5-minute Up/Down window; " +
+      "'ai' asks you (via polymarket_ai_requests) to decide each round, params { target: 'btc-5m' | 'market', intervalMs }; " +
+      "'price-trigger' buys when an outcome's ask crosses a price, params { outcomeIndex, when: 'ask-below'|'ask-above', price, takeProfit?, stopLoss? }. " +
+      "conditionId is required for price-trigger and for ai with target 'market'. maxLossUsd stops the bot once its realized loss reaches it.",
+    method: "POST", path: "bots",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["ai", "mid-price", "streak-fade", "price-trigger"] },
+        sizeUsd: { type: "number", description: "USD per trade" },
+        conditionId: { type: "string" },
+        maxLossUsd: { type: "number" },
+        params: { type: "object" },
+      },
+      required: ["type", "sizeUsd"],
+    },
+  },
+  {
+    name: "polymarket_bot_toggle",
+    description: "Start (enabled: true) or stop (enabled: false) one of your bots.",
+    method: "POST", path: "bots/{id}/toggle",
+    input_schema: { type: "object", properties: { id: { type: "string" }, enabled: { type: "boolean" } }, required: ["id", "enabled"] },
+  },
+  {
+    name: "polymarket_bot_log",
+    description: "One bot's recent log: entries, exits, resolutions, skipped windows with the reason, errors.",
+    method: "GET", path: "bots/{id}/log",
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
     name: "polymarket_ai_requests",
     description: "Questions waiting for you from your AI Predictor bots. Decide each and answer with polymarket_ai_answer before it expires.",
     method: "GET", path: "ai/requests",
@@ -796,9 +855,54 @@ function toBotMarket(m: PmMarket): BotMarket {
 function publicBot(b: PmBot) {
   return {
     id: b.id, type: b.type, enabled: b.enabled, sizeUsd: b.sizeUsd, market: b.market, params: b.params,
+    maxLossUsd: b.maxLossUsd, stats: b.stats,
     lastReason: b.state.lastReason ?? null, lastEvalAt: b.state.lastEvalAt ?? null, waitingOnAgent: !!b.state.openRequestId,
     lastRunAt: b.lastRunAt?.toISOString() ?? null, createdAt: b.createdAt?.toISOString() ?? null,
   };
+}
+
+const num = (v: unknown, lo: number, hi: number) => (typeof v === "number" && v >= lo && v <= hi ? v : undefined);
+
+/** maxLossUsd: undefined → invalid, null → no limit. */
+function parseMaxLoss(v: unknown): number | null | undefined {
+  if (v == null || v === "") return null;
+  const x = Number(v);
+  return Number.isFinite(x) && x > 0 && x <= 1_000_000 ? x : undefined;
+}
+
+/** Validated, defaulted params for a bot type, or an error message. */
+export function parseBotParams(type: BotType, raw: Record<string, unknown>): Record<string, unknown> | string {
+  let params: Record<string, unknown>;
+  if (type === "ai") {
+    const target = raw.target === "btc-5m" ? "btc-5m" : "market";
+    params = { target, intervalMs: Math.max(AI_MIN_INTERVAL_MS, num(raw.intervalMs, AI_MIN_INTERVAL_MS, 7 * 86_400_000) ?? 3_600_000) };
+  } else if (type === "price-trigger") {
+    const price = num(raw.price, 0.01, 0.99);
+    if (price == null) return "params.price must be between 0.01 and 0.99";
+    const outcomeIndex = raw.outcomeIndex === 1 ? 1 : 0;
+    const when = raw.when === "ask-above" ? "ask-above" : "ask-below";
+    const takeProfit = num(raw.takeProfit, 0.01, 0.99) ?? null;
+    const stopLoss = num(raw.stopLoss, 0.01, 0.99) ?? null;
+    if (takeProfit != null && takeProfit <= price) return "takeProfit must be above the entry price";
+    if (stopLoss != null && stopLoss >= price) return "stopLoss must be below the entry price";
+    params = { outcomeIndex, when, price, takeProfit, stopLoss, phase: "armed" } satisfies TriggerParams;
+  } else if (type === "mid-price") {
+    params = {
+      minMovePct: num(raw.minMovePct, 0.001, 5) ?? MID_PRICE_DEFAULTS.minMovePct,
+      minAsk: num(raw.minAsk, 0.01, 0.99) ?? MID_PRICE_DEFAULTS.minAsk,
+      maxAsk: num(raw.maxAsk, 0.01, 0.99) ?? MID_PRICE_DEFAULTS.maxAsk,
+      entryUntilMs: num(raw.entryUntilMs, 10_000, 290_000) ?? MID_PRICE_DEFAULTS.entryUntilMs,
+    } satisfies MidPriceParams;
+    if ((params.minAsk as number) >= (params.maxAsk as number)) return "minAsk must be below maxAsk";
+  } else {
+    params = {
+      minStreak: num(raw.minStreak, 2, 12) ?? STREAK_DEFAULTS.minStreak,
+      atrMult: num(raw.atrMult, 0, 20) ?? STREAK_DEFAULTS.atrMult,
+      maxAsk: num(raw.maxAsk, 0.01, 0.99) ?? STREAK_DEFAULTS.maxAsk,
+      entryUntilMs: num(raw.entryUntilMs, 10_000, 290_000) ?? STREAK_DEFAULTS.entryUntilMs,
+    } satisfies StreakParams;
+  }
+  return params;
 }
 
 const BOT_TYPES: BotType[] = ["ai", "mid-price", "streak-fade", "price-trigger"];
@@ -830,10 +934,32 @@ export default defineServerMod({
       const agentId = ctx.agent?.agentId ?? new URL(req.url).searchParams.get("agentId");
       const access = await requireAgentAccess(ctx, agentId);
       if ("error" in access) return fail(access.error, access.status);
-      const [caps, account] = await Promise.all([getAgentCapabilities(agentId!, access.orgId), ensureAccount(agentId!, access.orgId)]);
+      const [caps, account, install] = await Promise.all([
+        getAgentCapabilities(agentId!, access.orgId),
+        ensureAccount(agentId!, access.orgId),
+        getModInstallStatus(access.orgId, REGISTRY_MOD_ID),
+      ]);
       const granted = new Set(caps.map((c) => c.key));
       const capabilities = Object.fromEntries(TRADING_CAPABILITIES.map((k) => [k, granted.has(k)]));
-      return json({ agentId, orgId: access.orgId, via: ctx.agent ? "agent" : "session", capabilities, account: publicAccount(account) });
+      return json({
+        agentId, orgId: access.orgId, via: ctx.agent ? "agent" : "session", capabilities,
+        install: { installed: install.installed, enabled: install.enabled },
+        account: publicAccount(account),
+      });
+    },
+
+    /**
+     * POST /grant { agentId } — turn on this mod's trading capabilities for the
+     * agent's org (they're org-wide). Owner only, and only for an org that has
+     * already installed the mod from the Market.
+     */
+    "POST /grant": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const access = await requireOwner(ctx, body.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const out = await enableModCapabilities(access.orgId, REGISTRY_MOD_ID, TRADING_CAPABILITIES);
+      if (!out.installed) return fail("This org hasn't installed Polymarket Trading. Install it from the Market first.", 404);
+      return json(out);
     },
 
     /** GET /my-agents — agents in the operator's orgs, with their Polymarket mode, for the panel's picker. Session only. */
@@ -1156,39 +1282,12 @@ export default defineServerMod({
         if (market.outcomes.length !== 2) return fail("Only two-outcome markets are supported");
       }
 
-      let params: Record<string, unknown>;
-      const n = (v: unknown, lo: number, hi: number) => (typeof v === "number" && v >= lo && v <= hi ? v : undefined);
-      if (type === "ai") {
-        const target = raw.target === "btc-5m" ? "btc-5m" : "market";
-        params = { target, intervalMs: Math.max(AI_MIN_INTERVAL_MS, n(raw.intervalMs, AI_MIN_INTERVAL_MS, 7 * 86_400_000) ?? 3_600_000) };
-      } else if (type === "price-trigger") {
-        const price = n(raw.price, 0.01, 0.99);
-        if (price == null) return fail("params.price must be between 0.01 and 0.99");
-        const outcomeIndex = raw.outcomeIndex === 1 ? 1 : 0;
-        const when = raw.when === "ask-above" ? "ask-above" : "ask-below";
-        const takeProfit = n(raw.takeProfit, 0.01, 0.99) ?? null;
-        const stopLoss = n(raw.stopLoss, 0.01, 0.99) ?? null;
-        if (takeProfit != null && takeProfit <= price) return fail("takeProfit must be above the entry price");
-        if (stopLoss != null && stopLoss >= price) return fail("stopLoss must be below the entry price");
-        params = { outcomeIndex, when, price, takeProfit, stopLoss, phase: "armed" } satisfies TriggerParams;
-      } else if (type === "mid-price") {
-        params = {
-          minMovePct: n(raw.minMovePct, 0.001, 5) ?? MID_PRICE_DEFAULTS.minMovePct,
-          minAsk: n(raw.minAsk, 0.01, 0.99) ?? MID_PRICE_DEFAULTS.minAsk,
-          maxAsk: n(raw.maxAsk, 0.01, 0.99) ?? MID_PRICE_DEFAULTS.maxAsk,
-          entryUntilMs: n(raw.entryUntilMs, 10_000, 290_000) ?? MID_PRICE_DEFAULTS.entryUntilMs,
-        } satisfies MidPriceParams;
-        if ((params.minAsk as number) >= (params.maxAsk as number)) return fail("minAsk must be below maxAsk");
-      } else {
-        params = {
-          minStreak: n(raw.minStreak, 2, 12) ?? STREAK_DEFAULTS.minStreak,
-          atrMult: n(raw.atrMult, 0, 20) ?? STREAK_DEFAULTS.atrMult,
-          maxAsk: n(raw.maxAsk, 0.01, 0.99) ?? STREAK_DEFAULTS.maxAsk,
-          entryUntilMs: n(raw.entryUntilMs, 10_000, 290_000) ?? STREAK_DEFAULTS.entryUntilMs,
-        } satisfies StreakParams;
-      }
+      const params = parseBotParams(type, raw);
+      if (typeof params === "string") return fail(params);
+      const maxLossUsd = parseMaxLoss(body.maxLossUsd);
+      if (maxLossUsd === undefined) return fail("maxLossUsd must be a positive number");
 
-      const id = await createBot({ agentId, orgId: access.orgId, type, sizeUsd, market: market ? toBotMarket(market) : null, params });
+      const id = await createBot({ agentId, orgId: access.orgId, type, sizeUsd, market: market ? toBotMarket(market) : null, params, maxLossUsd });
       return json({ ok: true, bot: publicBot((await getBot(id))!) });
     },
 
@@ -1199,12 +1298,64 @@ export default defineServerMod({
       if ("error" in access) return fail(access.error, access.status);
       const body = await req.json().catch(() => ({}));
       const enabled = body.enabled === true;
+      if (enabled) {
+        try {
+          await enforceCapability(bot.agentId, access.orgId, CAP_BOTS);
+        } catch (err) {
+          return fail((err as Error).message, 403);
+        }
+        const mode = (await getAccount(bot.agentId))?.mode ?? "paper";
+        if (bot.maxLossUsd != null && bot.stats[mode].realizedPnl <= -bot.maxLossUsd) {
+          return fail(`This bot hit its $${bot.maxLossUsd} loss limit in ${mode}. Raise or clear the limit to restart it.`);
+        }
+      }
       if (enabled && bot.type === "price-trigger" && (bot.params as unknown as TriggerParams).phase === "done") {
         await updateBot(bot.id, { enabled, params: { ...bot.params, phase: "armed" } });
       } else {
         await updateBot(bot.id, { enabled, ...(enabled ? { state: { openRequestId: null } } : {}) });
       }
       return json({ ok: true, enabled });
+    },
+
+    /**
+     * POST /bots/:id/update { sizeUsd?, maxLossUsd?, params? } — params are merged over the current
+     * ones and re-validated. An agent may tighten its bot's loss limit but not loosen or clear it.
+     */
+    "POST /bots/:id/update": async (req, ctx) => {
+      const bot = await getBot(ctx.params.id);
+      if (!bot) return fail("Bot not found", 404);
+      const access = await requireAgentAccess(ctx, bot.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const body = await req.json().catch(() => ({}));
+      const patch: { sizeUsd?: number; maxLossUsd?: number | null; params?: Record<string, unknown> } = {};
+
+      if (body.sizeUsd != null) {
+        const sizeUsd = Number(body.sizeUsd);
+        if (!(sizeUsd >= MIN_ORDER_USD)) return fail(`sizeUsd must be at least $${MIN_ORDER_USD}`);
+        const account = await ensureAccount(bot.agentId, access.orgId);
+        if (sizeUsd > account.risk.maxOrderUsd) return fail(`sizeUsd exceeds the max order size of $${account.risk.maxOrderUsd}`);
+        patch.sizeUsd = sizeUsd;
+      }
+      if ("maxLossUsd" in body) {
+        const maxLossUsd = parseMaxLoss(body.maxLossUsd);
+        if (maxLossUsd === undefined) return fail("maxLossUsd must be a positive number");
+        if (ctx.agent && bot.maxLossUsd != null && (maxLossUsd == null || maxLossUsd > bot.maxLossUsd)) {
+          return fail("An agent can tighten its bot's loss limit, not loosen it", 403);
+        }
+        patch.maxLossUsd = maxLossUsd;
+      }
+      if (body.params && typeof body.params === "object") {
+        const current = bot.params as Record<string, unknown>;
+        if (bot.type === "price-trigger" && current.phase === "holding") return fail("Can't change a price trigger while it holds a position");
+        // The AI target decides whether the bot needs a fixed market, so it can't change here.
+        const raw = { ...current, ...(body.params as Record<string, unknown>), ...(bot.type === "ai" ? { target: current.target } : {}) };
+        const params = parseBotParams(bot.type, raw);
+        if (typeof params === "string") return fail(params);
+        patch.params = params;
+      }
+      if (!Object.keys(patch).length) return fail("Nothing to update");
+      await updateBot(bot.id, patch);
+      return json({ ok: true, bot: publicBot((await getBot(bot.id))!) });
     },
 
     "DELETE /bots/:id": async (_req, ctx) => {

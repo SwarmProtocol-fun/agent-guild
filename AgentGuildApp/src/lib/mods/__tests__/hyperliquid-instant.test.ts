@@ -20,9 +20,10 @@ vi.mock("@/lib/mods/hyperliquid-store", () => store);
 vi.mock("@/lib/agent-wallets", () => wallets);
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));
-vi.mock("@/lib/skills", () => ({ enforceCapability: vi.fn(async () => ({})), getAgentCapabilities: vi.fn(async () => []) }));
 vi.mock("@/lib/secrets", () => ({ encryptValue: vi.fn(), decryptValue: vi.fn() }));
 vi.mock("@/lib/firestore-admin", () => ({
+  enforceCapability: vi.fn(async () => ({})),
+  getAgentCapabilities: vi.fn(async () => []),
   getAgent: vi.fn(async (id: string) => ({ id, orgId: "org1", name: "Trader" })),
   getAgentsByOrg: vi.fn(),
   getOrganizationsByWalletAdmin: vi.fn(),

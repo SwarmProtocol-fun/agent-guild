@@ -144,9 +144,8 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@/lib/skills", () => ({ enforceCapability: mocks.enforceCapability }));
 vi.mock("@/lib/auth-guard", () => ({ requireOrgMembershipByAddress: mocks.requireOrgMembershipByAddress }));
-vi.mock("@/lib/firestore-admin", () => ({ getOrganizationsByWalletAdmin: vi.fn(async () => [{ id: "org1", name: "Org" }]) }));
+vi.mock("@/lib/firestore-admin", () => ({ enforceCapability: mocks.enforceCapability, getOrganizationsByWalletAdmin: vi.fn(async () => [{ id: "org1", name: "Org" }]) }));
 vi.mock("@/lib/vault/egress", () => ({ sendUpstream: mocks.sendUpstream }));
 vi.mock("../../../../mods/opengym/store", () => {
   const s = mocks.store;

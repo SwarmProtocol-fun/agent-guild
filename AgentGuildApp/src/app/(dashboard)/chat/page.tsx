@@ -148,6 +148,10 @@ export default function ChatPage() {
   const [dmChannels, setDmChannels] = useState<Channel[]>([]);
   const [projectChannels, setProjectChannels] = useState<Channel[]>([]);
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null);
+  // /chat?agent=<id> opens that agent's DM (mod panels link here). Cleared once applied.
+  const wantedAgentRef = useRef<string | null>(
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("agent"),
+  );
   const [lastMsgTs, setLastMsgTs] = useState<Map<string, number>>(new Map());
 
   // Channel drag-and-drop
@@ -231,9 +235,13 @@ export default function ChatPage() {
       setDmChannels(dmChs);
       setProjectChannels(projChs);
 
-      // Auto-select first if nothing selected
+      // Auto-select the requested agent's DM, else the first if nothing selected
       const allVisible = [...chatChs, ...dmChs, ...projChs];
-      if (!activeChannel && allVisible.length > 0) {
+      const wanted = wantedAgentRef.current ? dmChs.find(c => c.agentId === wantedAgentRef.current) : undefined;
+      if (wanted) {
+        wantedAgentRef.current = null;
+        setActiveChannel(wanted);
+      } else if (!activeChannel && allVisible.length > 0) {
         const sorted = sortByLatest(allVisible, lastMsgTs);
         setActiveChannel(sorted[0]);
       }
@@ -271,6 +279,12 @@ export default function ChatPage() {
             return true;
           });
           setDmChannels(dmChs);
+          // A brand-new DM only exists after ensureAgentPrivateChannel.
+          const wanted = wantedAgentRef.current ? dmChs.find(c => c.agentId === wantedAgentRef.current) : undefined;
+          if (wanted) {
+            wantedAgentRef.current = null;
+            setActiveChannel(wanted);
+          }
         }
       } catch (err) {
         console.error("Failed to ensure agent DM channels:", err);

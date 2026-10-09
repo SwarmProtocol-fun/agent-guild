@@ -509,12 +509,12 @@ export const SKILL_REGISTRY: Skill[] = [
     {
         id: "tempo-settlement",
         name: "Tempo Payouts",
-        description: "Pay agents for approved jobs in stablecoins on Tempo. Pick several jobs and they go out in one atomic transaction; each transfer's memo carries the job's receipt hash so the payment can be checked on-chain. Agents with the upgrade can settle their own finished tasks. Network fees can be sponsored.",
+        description: "Pay your agents for approved jobs in stablecoins on Tempo, from your own wallet into each agent's wallet. Each payment's memo carries a fingerprint of the job's delivery, and the payment is only marked done once it's found on-chain.",
         type: "mod",
         source: "verified",
         category: "Settlement",
         icon: "⚡",
-        version: "2.0.0",
+        version: "3.0.0",
         author: "Agent Guild",
         tags: ["tempo", "payouts", "settlement", "stablecoin", "payments"],
         pricing: { model: "free" },
@@ -524,10 +524,8 @@ export const SKILL_REGISTRY: Skill[] = [
             tools: [],
             workflows: [],
             examples: [],
-            // Capability key — mods/tempo-settlement/server.ts CAP_SETTLE must match.
-            agentSkills: [
-                { id: "tempo-settle", name: "Settle Tasks on Tempo", description: "Get paid for a finished task in stablecoins on Tempo, into the agent's own Tempo wallet, with the receipt hash in the transfer memo.", type: "skill", invocation: "POST /settle" },
-            ],
+            // Agents are paid by their org owner; they don't pay themselves, so no agent skills.
+            agentSkills: [],
         },
     },
     {

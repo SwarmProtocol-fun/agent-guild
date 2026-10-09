@@ -24,7 +24,7 @@ export type HlNetwork = "testnet" | "mainnet";
 
 export const MARKET_SLIPPAGE = 0.01;
 const MAX_PERP_PRICE_DECIMALS = 6;
-const MIN_ORDER_USD = 10;
+export const MIN_ORDER_USD = 10;
 
 export interface PlaceOrderParams {
   coin: string;

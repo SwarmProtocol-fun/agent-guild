@@ -61,11 +61,21 @@ const wallets = {
   getAgentWalletEvmPrivateKey: vi.fn(async () => "0xkey"),
 };
 const enforceCapability = vi.fn(async () => ({}));
+const getModInstallStatus = vi.fn(async () => ({ installed: true, enabled: true, installationId: "i1" as string | null, enabledCapabilities: [] as string[] }));
+const enableModCapabilities = vi.fn(async () => ({ installed: true, enabled: ["polymarket-trade", "polymarket-run-bots"] }));
 
 vi.mock("@/lib/mods/polymarket-store", () => store);
 vi.mock("@/lib/agent-wallets", () => wallets);
-vi.mock("@/lib/skills", () => ({ enforceCapability, getAgentCapabilities: vi.fn(async () => []) }));
+// Capability checks must go through the admin SDK; the client SDK in @/lib/skills is unauthenticated on the server.
+vi.mock("@/lib/skills", () => ({
+  enforceCapability: vi.fn(async () => { throw new Error("Missing or insufficient permissions."); }),
+  getAgentCapabilities: vi.fn(async () => { throw new Error("Missing or insufficient permissions."); }),
+}));
 vi.mock("@/lib/firestore-admin", () => ({
+  enforceCapability,
+  getModInstallStatus,
+  enableModCapabilities,
+  getAgentCapabilities: vi.fn(async () => []),
   getAgent: vi.fn(async (id: string) => ({ id, orgId: "org1", name: "Trader" })),
   getAgentsByOrg: vi.fn(),
   getOrganizationsByWalletAdmin: vi.fn(),
@@ -84,7 +94,7 @@ vi.mock("../../../../mods/polymarket-trading/markets", async (orig) => ({
   getWalletPositions: vi.fn(async () => []),
 }));
 
-const { default: mod, checkBuyRisk } = await import("../../../../mods/polymarket-trading/server");
+const { default: mod, checkBuyRisk, runPolymarketTick, resolvePaperPositions } = await import("../../../../mods/polymarket-trading/server");
 
 type Handler = (req: Request, ctx: unknown) => Promise<Response>;
 function route(key: string): Handler {
@@ -98,6 +108,12 @@ const post = (body: unknown) => new Request("http://x/", { method: "POST", body:
 const asOwner = ctx({ session: { address: OWNER, role: "operator" } });
 const asMember = ctx({ session: { address: MEMBER, role: "operator" } });
 const asAgent = ctx({ agent: { agentId: "a1", orgId: "org1" } });
+
+const ZERO = { entries: 0, wins: 0, losses: 0, realizedPnl: 0, volumeUsd: 0 };
+const makeBot = (over: Record<string, unknown> = {}) => ({
+  id: "b1", agentId: "a1", orgId: "org1", type: "mid-price", enabled: true, sizeUsd: 5, market: null, params: {},
+  maxLossUsd: null, stats: { paper: { ...ZERO }, live: { ...ZERO } }, state: {}, lastRunAt: null, createdAt: null, ...over,
+});
 
 describe("polymarket mod routes", () => {
   beforeEach(() => {
@@ -119,6 +135,31 @@ describe("polymarket mod routes", () => {
     expect(store.updateAccount).toHaveBeenCalledWith("a1", expect.objectContaining({ mode: "live", live: expect.objectContaining({ address: "0xagent" }) }));
   });
 
+  it("only the signed-in org owner can grant the trading capabilities, and only on an existing install", async () => {
+    const grant = route("POST /grant");
+    expect((await grant(post({ agentId: "a1" }), asAgent)).status).toBe(403);
+    expect((await grant(post({ agentId: "a1" }), asMember)).status).toBe(403);
+    expect(enableModCapabilities).not.toHaveBeenCalled();
+
+    const ok = await grant(post({ agentId: "a1" }), asOwner);
+    expect(ok.status).toBe(200);
+    expect(enableModCapabilities).toHaveBeenCalledWith("org1", "mod-polymarket-trading", ["polymarket-trade", "polymarket-run-bots"]);
+
+    enableModCapabilities.mockResolvedValueOnce({ installed: false, enabled: [] });
+    const missing = await grant(post({ agentId: "a1" }), asOwner);
+    expect(missing.status).toBe(404);
+    expect((await missing.json()).error).toMatch(/Install it from the Market/);
+  });
+
+  it("GET /me reports whether the org installed the mod", async () => {
+    getModInstallStatus.mockResolvedValueOnce({ installed: false, enabled: false, installationId: null, enabledCapabilities: [] });
+    const res = await route("GET /me")(new Request("http://x/"), asAgent);
+    const body = await res.json();
+    expect(body.install).toEqual({ installed: false, enabled: false });
+    expect(body.capabilities).toEqual({ "polymarket-trade": false, "polymarket-run-bots": false });
+    expect(getModInstallStatus).toHaveBeenCalledWith("org1", "mod-polymarket-trading");
+  });
+
   it("any member (or the agent) can switch live off", async () => {
     expect((await route("POST /live/disable")(post({ agentId: "a1" }), asAgent)).status).toBe(200);
     expect(store.updateAccount).toHaveBeenCalledWith("a1", { mode: "paper", live: null });
@@ -136,7 +177,7 @@ describe("polymarket mod routes", () => {
     const body = await resp.json();
     expect(resp.status).toBe(200);
     expect(body).toMatchObject({ mode: "paper", shares: 25, avgPrice: 0.4 });
-    expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.objectContaining({ tokenId: "t-yes" }), "buy", expect.objectContaining({ shares: 25 }));
+    expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.objectContaining({ tokenId: "t-yes" }), "buy", expect.objectContaining({ shares: 25 }), null);
     expect(store.recordTrade).toHaveBeenCalledWith(expect.objectContaining({ mode: "paper", side: "buy", shares: 25 }));
   });
 
@@ -188,7 +229,7 @@ describe("polymarket mod routes", () => {
 
     const resp = await route("POST /ai/requests/:id/answer")(post({ text: "Underpriced at 40¢.\nBUY_YES" }), ctx({ agent: { agentId: "a1", orgId: "org1" }, params: { id: "r1" } }));
     expect(await resp.json()).toMatchObject({ ok: true, decision: "BUY_YES", action: "buy-yes", error: null });
-    expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.objectContaining({ tokenId: "t-yes" }), "buy", expect.anything());
+    expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.objectContaining({ tokenId: "t-yes" }), "buy", expect.anything(), "b1");
     expect(store.addBotLog).toHaveBeenCalledWith("b1", expect.objectContaining({ kind: "decision", decision: "BUY_YES" }));
   });
 
@@ -213,5 +254,82 @@ describe("polymarket mod routes", () => {
     expect(store.createBot).toHaveBeenCalledWith(expect.objectContaining({
       type: "price-trigger", params: { outcomeIndex: 0, when: "ask-below", price: 0.3, takeProfit: 0.5, stopLoss: 0.2, phase: "armed" },
     }));
+  });
+
+  it("passes the bot id through to the paper fill and the trade", async () => {
+    const { default: _m, ...server } = await import("../../../../mods/polymarket-trading/server");
+    void _m;
+    await server.executeOrder({
+      account: paperAccount() as never, market: market as never, outcomeIndex: 0, side: "buy", usd: 10, kind: "market", strategyId: "b1",
+    });
+    expect(store.applyPaperFill).toHaveBeenCalledWith("a1", "org1", expect.anything(), "buy", expect.anything(), "b1");
+    expect(store.recordTrade).toHaveBeenCalledWith(expect.objectContaining({ strategyId: "b1" }));
+  });
+
+  it("credits a paper resolution to the bot that bought the position", async () => {
+    store.listAllOpenPaperPositions.mockResolvedValueOnce([{
+      id: "a1_t-yes", agentId: "a1", orgId: "org1", conditionId: "0xc", question: "Will it?", slug: "m", endDate: "2000-01-01T00:00:00Z",
+      tokenId: "t-yes", outcomeIndex: 0, outcome: "Yes", shares: 10, avgPrice: 0.4, realizedPnl: 0, open: true, strategyId: "b1",
+    }] as never);
+    const markets = await import("../../../../mods/polymarket-trading/markets");
+    vi.mocked(markets.getMarketByConditionId).mockResolvedValueOnce({ ...market, closed: true, winnerIndex: 0 } as never);
+    store.settlePaperPosition.mockResolvedValueOnce({ payout: 10, realized: 6 });
+    expect(await resolvePaperPositions()).toMatchObject({ settled: 1 });
+    expect(store.recordTrade).toHaveBeenCalledWith(expect.objectContaining({ side: "resolve", strategyId: "b1", realizedPnl: 6 }));
+    expect(store.addBotLog).toHaveBeenCalledWith("b1", expect.objectContaining({ kind: "resolve" }));
+  });
+
+  it("the tick stops a bot that has hit its loss limit and doesn't run it", async () => {
+    store.getAccount.mockResolvedValue(paperAccount());
+    store.listEnabledBots.mockResolvedValueOnce([
+      makeBot({ type: "price-trigger", maxLossUsd: 10, stats: { paper: { ...ZERO, realizedPnl: -10.5 }, live: { ...ZERO } } }),
+    ] as never);
+    const result = await runPolymarketTick();
+    expect(result.bots).toBe(0);
+    expect(store.updateBot).toHaveBeenCalledWith("b1", expect.objectContaining({ enabled: false }));
+    expect(store.addBotLog).toHaveBeenCalledWith("b1", expect.objectContaining({ reason: expect.stringMatching(/Loss limit hit/) }));
+  });
+
+  it("starting a bot needs the bots capability and refuses one past its loss limit", async () => {
+    const toggle = route("POST /bots/:id/toggle");
+    store.getAccount.mockResolvedValue(paperAccount());
+    store.getBot.mockResolvedValue(makeBot({ enabled: false }));
+    enforceCapability.mockRejectedValueOnce(new Error('Agent a1 does not have capability "polymarket-run-bots"'));
+    expect((await toggle(post({ enabled: true }), ctx({ ...asMember, params: { id: "b1" } }))).status).toBe(403);
+
+    store.getBot.mockResolvedValue(makeBot({ enabled: false, maxLossUsd: 5, stats: { paper: { ...ZERO, realizedPnl: -6 }, live: { ...ZERO } } }));
+    const refused = await toggle(post({ enabled: true }), ctx({ ...asMember, params: { id: "b1" } }));
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error).toMatch(/loss limit/);
+
+    // Stopping never needs the capability.
+    enforceCapability.mockRejectedValue(new Error("no"));
+    expect((await toggle(post({ enabled: false }), ctx({ ...asMember, params: { id: "b1" } }))).status).toBe(200);
+    enforceCapability.mockReset();
+    enforceCapability.mockResolvedValue({});
+  });
+
+  it("edits a bot: re-validates params, and an agent can only tighten its loss limit", async () => {
+    const update = route("POST /bots/:id/update");
+    store.getBot.mockResolvedValue(makeBot({ maxLossUsd: 20, params: { minStreak: 4, atrMult: 3, maxAsk: 0.52, entryUntilMs: 60_000 }, type: "streak-fade" }));
+    const asAgentOn = ctx({ agent: { agentId: "a1", orgId: "org1" }, params: { id: "b1" } });
+
+    expect((await update(post({ maxLossUsd: 50 }), asAgentOn)).status).toBe(403);
+    expect((await update(post({ maxLossUsd: null }), asAgentOn)).status).toBe(403);
+    expect((await update(post({ sizeUsd: 100 }), asAgentOn)).status).toBe(400); // over maxOrderUsd
+    expect(store.updateBot).not.toHaveBeenCalled();
+
+    expect((await update(post({ maxLossUsd: 10, params: { minStreak: 6 } }), asAgentOn)).status).toBe(200);
+    expect(store.updateBot).toHaveBeenCalledWith("b1", {
+      maxLossUsd: 10, params: { minStreak: 6, atrMult: 3, maxAsk: 0.52, entryUntilMs: 60_000 },
+    });
+    // A person may loosen or clear it.
+    expect((await update(post({ maxLossUsd: null }), ctx({ ...asMember, params: { id: "b1" } }))).status).toBe(200);
+  });
+
+  it("lists the bot tools for agents", async () => {
+    const resp = await route("GET /agent/tools")(new Request("http://x/"), ctx({}));
+    const names = (await resp.json()).tools.map((t: { name: string }) => t.name);
+    expect(names).toEqual(expect.arrayContaining(["polymarket_bots", "polymarket_bot_create", "polymarket_bot_toggle", "polymarket_bot_log"]));
   });
 });

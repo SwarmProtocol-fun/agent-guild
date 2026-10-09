@@ -177,6 +177,13 @@ function modLine() {
       `Hyperliquid (testnet only) — run these in the shell: \`${run} hyperliquid status\`, \`${run} hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>\`, \`${run} hyperliquid strategy dca --coin <COIN> --size-usd <n> --interval-ms <n>\`, \`${run} hyperliquid pending\`. Report the taskId. Risk limits are enforced by the hub.`,
     );
   }
+  if (caps.includes("polymarket-trade") || caps.includes("polymarket-run-bots")) {
+    lines.push(
+      `Polymarket (paper unless your owner turned live on) — run in the shell: \`${run} mod tools polymarket-trading\` lists the tools; \`${run} mod call polymarket-trading <tool> '<json>'\` runs one. ` +
+      `Start with polymarket_account (mode, cash), find markets with polymarket_markets '{"q":"<topic>"}', check polymarket_book, then polymarket_order '{"conditionId":"…","outcomeIndex":0,"side":"buy","usd":10}'. ` +
+      `Bots: polymarket_bot_create, polymarket_bot_toggle, polymarket_bot_log. Report the fill (shares, avg price) or the exact error. Risk limits are enforced by the hub.`,
+    );
+  }
   const keys = (process.env.AGENT_GUILD_TOOL_KEYS || "").split(",").filter(Boolean);
   if (keys.length) lines.push(`Tool keys in your environment: ${keys.join(", ")}.`);
   return lines.join("\n");

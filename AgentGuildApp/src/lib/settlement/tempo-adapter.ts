@@ -1,7 +1,8 @@
-import { decodeEventLog, type Hex } from "viem";
+import { decodeEventLog, getAbiItem, isAddress, type Hex } from "viem";
 import { Abis, Account, Actions, createClient, http, withRelay } from "viem/tempo";
 import { tempoModerato } from "viem/tempo/chains";
 import { getChain } from "@/lib/chains";
+import type { EvmChainParams } from "@/lib/wallet/types";
 import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResult } from "./types";
 
 /**
@@ -18,22 +19,51 @@ import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResul
  *    (TEMPO_FEE_PAYER_KEY) or Tempo's relay service (TEMPO_FEE_PAYER_URL,
  *    e.g. the public testnet sponsor) — so the platform wallet doesn't need
  *    to hold *any* balance to settle jobs.
+ *
+ * The Tempo Payouts mod doesn't sign anything here: org owners pay from
+ * their own wallets, and the mod only uses the read side (payoutToken,
+ * findMemoTransfer) to check those payments landed.
  */
 
-export interface TempoPayoutStatus {
+export interface TempoPayoutToken {
   network: string;
+  /** What the owner's wallet switches to (or adds) before paying. */
+  chain: EvmChainParams;
   /** TIP-20 token payouts are sent in (TEMPO_USDC_ADDRESS). */
   token: string | null;
   tokenSymbol: string | null;
-  /** The platform wallet payouts come from (PLATFORM_SETTLEMENT_KEY's address). */
-  payoutWallet: string | null;
-  payoutWalletUrl: string | null;
+  decimals: number;
+  /** The holder's balance of `token`, when one was asked for. */
   balance: number | null;
-  /** Who pays the network fee: a local sponsor key, a relay sponsor, or the payout wallet itself (in the fee token). */
-  feeMode: "sponsor-account" | "sponsor-relay" | "payout-wallet";
   /** Env vars that must be set before payouts can be sent. */
   missing: string[];
   error: string | null;
+}
+
+/** A TIP-20 TransferWithMemo found on-chain. */
+export interface MemoTransfer {
+  from: Hex;
+  to: Hex;
+  amount: bigint;
+  memo: Hex;
+  txHash: Hex;
+  blockNumber: bigint;
+}
+
+const LOG_WINDOW = 100_000n;
+/** ~60 days of Tempo blocks; older reservations need the tx hash. */
+const MAX_LOG_WINDOWS = 100;
+
+const TRANSFER_WITH_MEMO = getAbiItem({ abi: Abis.tip20, name: "TransferWithMemo" });
+
+function decodeMemoLog(log: { data: Hex; topics: [Hex, ...Hex[]] | [] }) {
+  try {
+    const d = decodeEventLog({ abi: [TRANSFER_WITH_MEMO], data: log.data, topics: log.topics });
+    const a = d.args as { from: Hex; to: Hex; amount: bigint; memo: Hex };
+    return { from: a.from, to: a.to, amount: a.amount, memo: a.memo };
+  } catch {
+    return null;
+  }
 }
 
 function readClient() {
@@ -97,95 +127,99 @@ export class TempoSettlementAdapter implements SettlementAdapter {
   }
 
   /**
-   * Pay several jobs in ONE atomic Tempo transaction, via the `calls` array
-   * on a Tempo transaction — not N sequential transactions. Each item is its
-   * own TIP-20 transferWithMemo (so recipients can differ), and every
-   * transfer either lands or reverts together.
+   * What the payouts panel needs before the org owner pays from their own
+   * wallet: the chain to switch to, the token, and (given `holder`) how much
+   * of it that wallet has. Never throws — problems come back in `missing`/`error`.
    */
-  async settleBatch(
-    items: { to: string; resultHash: string; amountUsdc: number }[],
-  ): Promise<{ txSig: string; explorerUrl: string }> {
-    const chain = getChain("tempo");
-    if (!chain) throw new Error("Unknown chain: tempo");
-    if (!chain.contracts.usdc) throw new Error("TEMPO_USDC_ADDRESS not configured");
-
-    const privateKey = process.env.PLATFORM_SETTLEMENT_KEY as Hex | undefined;
-    if (!privateKey) throw new Error("PLATFORM_SETTLEMENT_KEY not configured");
-
-    const usdc = chain.contracts.usdc as Hex;
-    const feeToken = (process.env.TEMPO_FEE_TOKEN as Hex | undefined) ?? usdc;
-    const feePayerKey = process.env.TEMPO_FEE_PAYER_KEY as Hex | undefined;
-    const feePayerUrl = process.env.TEMPO_FEE_PAYER_URL;
-
-    const client = writeClient(privateKey, feeToken);
-
-    const calls = items.map((item) =>
-      Actions.token.transfer.call({
-        to: item.to as Hex,
-        amount: BigInt(Math.round(item.amountUsdc * 1_000_000)), // TIP-20 stablecoins use 6 decimals
-        token: usdc,
-        memo: `0x${item.resultHash}` as Hex,
-      }),
-    );
-
-    const receipt = await client.sendTransactionSync({
-      calls,
-      feeToken,
-      feePayer: feePayerKey ? Account.fromSecp256k1(feePayerKey) : feePayerFor(feePayerUrl),
-    });
-
-    return { txSig: receipt.transactionHash, explorerUrl: chain.explorer.txUrl(receipt.transactionHash) };
-  }
-
-  /**
-   * What the payout panel shows before anyone pays: which wallet sends the
-   * money, what token it is, how much is left, and who pays the network fee.
-   * Never throws — anything missing comes back in `missing`.
-   */
-  async payoutStatus(): Promise<TempoPayoutStatus> {
+  async payoutToken(holder?: string): Promise<TempoPayoutToken> {
     const chain = getChain("tempo");
     const missing: string[] = [];
     if (!chain?.contracts.usdc) missing.push("TEMPO_USDC_ADDRESS");
-    const privateKey = process.env.PLATFORM_SETTLEMENT_KEY as Hex | undefined;
-    if (!privateKey) missing.push("PLATFORM_SETTLEMENT_KEY");
 
-    const feeMode: TempoPayoutStatus["feeMode"] = process.env.TEMPO_FEE_PAYER_KEY
-      ? "sponsor-account"
-      : process.env.TEMPO_FEE_PAYER_URL
-        ? "sponsor-relay"
-        : "payout-wallet";
-
-    let payoutWallet: string | null = null;
-    try {
-      if (privateKey) payoutWallet = Account.fromSecp256k1(privateKey).address;
-    } catch {
-      missing.push("PLATFORM_SETTLEMENT_KEY (invalid key)");
-    }
-
-    const status: TempoPayoutStatus = {
+    const info: TempoPayoutToken = {
       network: chain?.name ?? "Tempo",
+      chain: {
+        chainId: tempoModerato.id,
+        name: chain?.name ?? tempoModerato.name,
+        rpcUrl: chain?.rpc ?? tempoModerato.rpcUrls.default.http[0],
+        nativeCurrency: tempoModerato.nativeCurrency,
+        explorerUrl: chain?.explorer.baseUrl,
+      },
       token: chain?.contracts.usdc ?? null,
       tokenSymbol: null,
-      payoutWallet,
-      payoutWalletUrl: payoutWallet && chain ? chain.explorer.addressUrl(payoutWallet) : null,
+      decimals: 6,
       balance: null,
-      feeMode,
       missing,
       error: null,
     };
-    if (!chain?.contracts.usdc) return status;
+    if (!chain?.contracts.usdc) return info;
 
     const client = readClient();
     const token = chain.contracts.usdc as Hex;
     const [meta, balance] = await Promise.allSettled([
       Actions.token.getMetadata(client, { token }),
-      payoutWallet ? Actions.token.getBalance(client, { account: payoutWallet as Hex, token }) : Promise.resolve(null),
+      holder && isAddress(holder) ? Actions.token.getBalance(client, { account: holder as Hex, token }) : Promise.resolve(null),
     ]);
-    if (meta.status === "fulfilled") status.tokenSymbol = meta.value.symbol;
-    if (balance.status === "fulfilled" && balance.value) status.balance = Number(balance.value.formatted);
+    if (meta.status === "fulfilled") {
+      info.tokenSymbol = meta.value.symbol;
+      info.decimals = meta.value.decimals ?? 6;
+    }
+    if (balance.status === "fulfilled" && balance.value) info.balance = Number(balance.value.formatted);
     const failed = [meta, balance].find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
-    if (failed) status.error = (failed.reason as Error)?.message ?? "Tempo RPC unreachable";
-    return status;
+    if (failed) info.error = (failed.reason as Error)?.message ?? "Tempo RPC unreachable";
+    return info;
+  }
+
+  async blockNumber(): Promise<bigint> {
+    return readClient().getBlockNumber();
+  }
+
+  /**
+   * Find a TIP-20 transfer of the payout token that carries `memo`, went to
+   * `to`, and moved at least `minAmount` base units. Memos aren't unique
+   * on-chain — anyone can copy one — so a match on memo alone proves
+   * nothing; only a transfer that actually paid the recipient in full counts.
+   *
+   * With a tx hash, only that transaction is read. Without one, the token's
+   * TransferWithMemo logs are searched (memo and recipient are indexed
+   * topics) from `fromBlock`, so a payment whose hash the browser lost is
+   * still found.
+   */
+  async findMemoTransfer(p: { memo: Hex; to: string; minAmount: bigint; txHash?: Hex; fromBlock?: bigint }): Promise<MemoTransfer | null> {
+    const chain = getChain("tempo");
+    if (!chain?.contracts.usdc) throw new Error("TEMPO_USDC_ADDRESS not configured");
+    const token = (chain.contracts.usdc as string).toLowerCase();
+    const client = readClient();
+    const pays = (t: { to: Hex; amount: bigint; memo: Hex }) =>
+      t.memo.toLowerCase() === p.memo.toLowerCase() && t.to.toLowerCase() === p.to.toLowerCase() && t.amount >= p.minAmount;
+
+    if (p.txHash) {
+      const receipt = await client.getTransactionReceipt({ hash: p.txHash }).catch(() => null);
+      if (!receipt || receipt.status !== "success") return null;
+      for (const log of receipt.logs) {
+        if (log.address.toLowerCase() !== token) continue;
+        const decoded = decodeMemoLog(log);
+        if (decoded && pays(decoded)) return { ...decoded, txHash: receipt.transactionHash, blockNumber: receipt.blockNumber };
+      }
+      return null;
+    }
+
+    // The public RPC caps eth_getLogs at 100k blocks (~14h at Tempo's block
+    // time), so walk forward from when the payment started, window by window.
+    if (p.fromBlock == null) throw new Error("fromBlock is required to search by memo");
+    const head = await client.getBlockNumber();
+    for (let from = p.fromBlock, windows = 0; from <= head; from += LOG_WINDOW, windows++) {
+      if (windows >= MAX_LOG_WINDOWS) throw new Error("Payment started too long ago to search for — pass the transaction hash");
+      const to = from + LOG_WINDOW - 1n < head ? from + LOG_WINDOW - 1n : head;
+      const logs = await client.getLogs({
+        address: token as Hex, event: TRANSFER_WITH_MEMO, args: { to: p.to as Hex, memo: p.memo }, fromBlock: from, toBlock: to,
+      });
+      for (const log of logs) {
+        const t = { from: log.args.from!, to: log.args.to!, amount: log.args.amount!, memo: log.args.memo! };
+        if (log.transactionHash && log.blockNumber != null && pays(t)) return { ...t, txHash: log.transactionHash, blockNumber: log.blockNumber };
+      }
+    }
+    return null;
   }
 
   async getBalance(wallet: string): Promise<{ usdc: number }> {

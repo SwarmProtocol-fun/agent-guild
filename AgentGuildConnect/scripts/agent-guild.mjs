@@ -54,6 +54,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { solanaKeypairFromPrivateKeyPem, claimTaskOnChain, submitDeliveryOnChain, sha256Bytes32 } from "./solana-escrow.mjs";
 import { openIdentityVault, sealIdentityVault } from "./identity-vault-crypto.mjs";
+import { buildToolRequest, checkModId, formatToolList } from "./mod-tools.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -4669,6 +4670,22 @@ const MCP_TOOLS = {
     required: ["playbook", "note"],
     argv: (a) => ["grow", "propose", "--playbook", a.playbook, "--note", a.note, "--json"],
   },
+  guild_mod_tools: {
+    description: "List the tools an installed mod gives this agent, e.g. polymarket-trading (prediction markets, paper or live), hyperliquid-trading, solana-settlement. Call this before guild_mod_call.",
+    properties: { mod: str("Mod id, e.g. polymarket-trading") },
+    required: ["mod"],
+    argv: (a) => ["mod", "tools", a.mod],
+  },
+  guild_mod_call: {
+    description: "Run one tool from guild_mod_tools as this agent. Example: mod polymarket-trading, tool polymarket_order, input {conditionId, outcomeIndex: 0, side: \"buy\", usd: 10}. Trades follow the account's mode (paper unless the owner turned live on) and risk limits.",
+    properties: {
+      mod: str("Mod id, e.g. polymarket-trading"),
+      tool: str("Tool name from guild_mod_tools, e.g. polymarket_markets"),
+      input: { type: "object", description: "The tool's arguments" },
+    },
+    required: ["mod", "tool"],
+    argv: (a) => ["mod", "call", a.mod, a.tool, JSON.stringify(a.input || {})],
+  },
   guild_work_mode: {
     description: "Get the agent's work mode, or set it (available, busy, offline, paused).",
     properties: { mode: { type: "string", enum: ["available", "busy", "offline", "paused"] }, capacity: int("Max concurrent tasks") },
@@ -4719,7 +4736,7 @@ async function handleMcpRequest(msg) {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-guild", version: "1.1.0" },
-      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Also: guild_grow, messages, assignments, and DimSim. Call guild_status first if you are not sure you are registered.",
+      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Installed mods (e.g. polymarket-trading paper trading): guild_mod_tools, then guild_mod_call. Also: guild_grow, messages, assignments, and DimSim. Call guild_status first if you are not sure you are registered.",
     };
   }
   if (method === "ping") return {};
@@ -4982,11 +4999,12 @@ function hlRequest(config, privateKey, method, modPath, body) {
   return modRequest(config, privateKey, HL_MOD, method, modPath, body);
 }
 
-/** Signed call to /api/mods/<mod>/<modPath>. */
-async function modRequest(config, privateKey, mod, method, modPath, body) {
+/** Signed call to /api/mods/<mod>/<modPath>. `query` is extra params; only the path is signed (runtime.ts). */
+async function modRequest(config, privateKey, mod, method, modPath, body, query) {
   const ts = Date.now().toString();
   const sig = sign(`${method}:/mods/${mod}/${modPath}:${ts}`, privateKey);
-  const resp = await fetch(`${config.hubUrl}/api/mods/${mod}/${modPath}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, {
+  const extra = query && Object.keys(query).length ? `&${new URLSearchParams(query).toString()}` : "";
+  const resp = await fetch(`${config.hubUrl}/api/mods/${mod}/${modPath}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}${extra}`, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -4994,6 +5012,50 @@ async function modRequest(config, privateKey, mod, method, modPath, body) {
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(`${method} /${modPath} (${resp.status}): ${data.error || "request failed"}`);
   return data;
+}
+
+// --- Generic mod tools (`mod tools` / `mod call`) ----------------------------
+// Every mod that serves GET /agent/tools can be driven from here, so a DM
+// like "paper trade $10 on X" works without a per-mod command. The hub still
+// checks the capability, risk limits and paper/live mode on every call.
+
+function modUsage(msg) {
+  if (msg) console.error(msg);
+  console.error(`Usage:
+  mod tools <mod> [--json]                 — list the agent tools a mod serves (e.g. polymarket-trading)
+  mod call <mod> <tool> ['<json input>']   — run one, signed as this agent`);
+  process.exit(1);
+}
+
+async function cmdMod() {
+  const sub = process.argv[3];
+  const mod = process.argv[4];
+  if (sub !== "tools" && sub !== "call") modUsage(sub ? `Unknown subcommand: ${sub}` : "Missing subcommand");
+  if (!mod) modUsage("Missing mod id");
+  try { checkModId(mod); } catch (err) { modUsage(err.message); }
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const { tools = [] } = await modRequest(config, privateKey, mod, "GET", "agent/tools");
+
+  if (sub === "tools") {
+    if (hasFlag("--json")) console.log(JSON.stringify(tools, null, 2));
+    else console.log(formatToolList(mod, tools));
+    return;
+  }
+
+  const name = process.argv[5];
+  if (!name) modUsage("Missing tool name");
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) modUsage(`${mod} has no tool "${name}". Tools: ${tools.map((t) => t.name).join(", ") || "none"}`);
+  let input = {};
+  const raw = process.argv[6];
+  if (raw && !raw.startsWith("--")) {
+    try { input = JSON.parse(raw); } catch { modUsage(`Input is not valid JSON: ${raw}`); }
+  }
+  let req;
+  try { req = buildToolRequest(tool, input, config.agentId); } catch (err) { modUsage(err.message); }
+  const data = await modRequest(config, privateKey, mod, req.method, req.path, req.body, req.query);
+  console.log(JSON.stringify(data, null, 2));
 }
 
 // --- AI trading bots: decide on this agent's own model ---------------------
@@ -5820,6 +5882,7 @@ try {
   else if (cmd === "revoke-delegation") await cmdRevokeDelegation();
   else if (cmd === "capabilities") await cmdCapabilities();
   else if (cmd === "hyperliquid") await cmdHyperliquid();
+  else if (cmd === "mod") await cmdMod();
   else if (cmd === "key") await cmdKey();
   else if (cmd === "harness") await cmdHarness();
   else if (cmd === "evolve") await cmdEvolve();
@@ -5897,6 +5960,8 @@ Identity vault (one ciphertext, three keys — protocol, this agent, and the use
 
 Installed Mods (a human installs from the dashboard; testnet only):
   capabilities [--json]                                    — what this agent's org has installed for it
+  mod tools <mod> [--json]                                 — the agent tools a mod serves (e.g. polymarket-trading)
+  mod call <mod> <tool> ['<json>']                         — run one, e.g. mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'
   hyperliquid setup --key-file <path> --max-position-usd <n> --max-daily-loss-usd <n> --leverage <n>
   hyperliquid status | pending
   hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>

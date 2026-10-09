@@ -29,9 +29,8 @@ vi.mock("@/lib/agent-wallets", () => ({
 }));
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));
-vi.mock("@/lib/skills", () => ({ enforceCapability: vi.fn(async () => ({})), getAgentCapabilities: vi.fn(async () => []) }));
 vi.mock("@/lib/secrets", () => ({ encryptValue: vi.fn(), decryptValue: vi.fn() }));
-vi.mock("@/lib/firestore-admin", () => ({ getAgent: vi.fn(), getAgentsByOrg: vi.fn(), getOrganizationsByWalletAdmin: vi.fn() }));
+vi.mock("@/lib/firestore-admin", () => ({ enforceCapability: vi.fn(async () => ({})), getAgentCapabilities: vi.fn(async () => []), getAgent: vi.fn(), getAgentsByOrg: vi.fn(), getOrganizationsByWalletAdmin: vi.fn() }));
 vi.mock("@/lib/auth-guard", () => ({ requireOrgMembershipByAddress: vi.fn() }));
 
 const { default: mod, runAiTraderTick } = await import("../../../../mods/hyperliquid-trading/server");

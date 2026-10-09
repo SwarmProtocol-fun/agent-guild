@@ -1,7 +1,6 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { enforceCapability } from "@/lib/skills";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
-import { getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { enforceCapability, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { sendUpstream } from "@/lib/vault/egress";
 import {
   computeStats,

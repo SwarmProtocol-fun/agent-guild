@@ -3,12 +3,15 @@
  *
  *   tempoPayouts/{sha256(unit)}   one doc per thing that gets paid
  *
- * A "unit" is either an approved job ("job:<jobId>") or an agent-settled
- * task ("task:<agentId>:<taskId>"). The doc is created as `pending` before
- * the transfer, so a double click or a retried request can't pay twice:
- * the second caller finds the doc and is told it's paid or in flight.
- * After the transfer it flips to `paid` with the tx hash. Several units paid
- * in one atomic batch share a tx hash.
+ * A "unit" is an approved job ("job:<jobId>"). Older docs may also be
+ * agent-settled tasks ("task:<agentId>:<taskId>") from before payouts moved
+ * to the owner's own wallet; they're kept for history only.
+ *
+ * The doc is created as `pending` when the org owner starts a payment —
+ * that reserves the job, so a second tab or a double click can't pay it
+ * twice. The owner's wallet then sends the transfer itself; the server finds
+ * it on-chain by its memo and flips the doc to `paid` with the tx hash. A
+ * pending doc is only deleted (cancelled) after the chain shows no transfer.
  *
  * Lookups are single-field equality on `orgId`; sorting happens here so
  * this does not need a composite index. Admin SDK only.
@@ -34,13 +37,18 @@ export interface TempoPayout {
   /** Recipient wallet. */
   to: string;
   amountUsdc: number;
-  /** Carried in the TIP-20 transfer memo; /verify re-reads it from the chain. */
+  /** amountUsdc in the token's base units — what the on-chain transfer must carry. */
+  amountBase?: string;
+  /** Carried in the TIP-20 transfer memo (as 0x…); /verify re-reads it from the chain. */
   resultHash: string;
+  /** `pending` = reserved, waiting for the owner's wallet to send it; `paid` = found on-chain. */
   status: "pending" | "paid";
   txSig?: string;
   explorerUrl?: string;
-  /** Who sent it: an operator wallet, or "agent:<id>". */
+  /** The wallet that pays: the org owner's own wallet (older docs: "agent:<id>" or the platform). */
   paidBy: string;
+  /** Tempo block when the payment was started — the on-chain search for the memo starts here. */
+  fromBlock?: string;
   createdAt: string;
   paidAt?: string;
 }
@@ -80,7 +88,12 @@ export async function claimPayout(unit: PayoutUnit, payout: TempoPayout): Promis
   return { state: "pending" };
 }
 
-/** Drop claims when the chain call failed before any transfer. */
+export async function getPayout(unit: PayoutUnit): Promise<TempoPayout | null> {
+  const snap = await col().doc(unitKey(unit)).get();
+  return snap.exists ? (snap.data() as TempoPayout) : null;
+}
+
+/** Drop reservations — only once the chain shows nothing was sent for them. */
 export async function releasePayouts(units: PayoutUnit[]): Promise<void> {
   const batch = adminDb().batch();
   for (const unit of units) batch.delete(col().doc(unitKey(unit)));
@@ -88,16 +101,18 @@ export async function releasePayouts(units: PayoutUnit[]): Promise<void> {
 }
 
 /**
- * The transfer landed — record the tx hash. Retried once: if both writes
- * fail the docs stay `pending`, which still blocks a second payment.
+ * The transfer was found on-chain — record the tx hash. Retried once: if both
+ * writes fail the docs stay `pending`, which still blocks a second payment,
+ * and the next confirm finds the same transfer again.
  */
-export async function markPayoutsPaid(units: PayoutUnit[], tx: { txSig: string; explorerUrl: string }): Promise<boolean> {
+export async function markPayoutsPaid(units: PayoutUnit[], tx: { txSig: string; explorerUrl: string; paidBy?: string }): Promise<boolean> {
   const paidAt = new Date().toISOString();
+  const update = { status: "paid", txSig: tx.txSig, explorerUrl: tx.explorerUrl, paidAt, ...(tx.paidBy ? { paidBy: tx.paidBy } : {}) };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const batch = adminDb().batch();
       for (const unit of units) {
-        batch.update(col().doc(unitKey(unit)), { status: "paid", txSig: tx.txSig, explorerUrl: tx.explorerUrl, paidAt });
+        batch.update(col().doc(unitKey(unit)), update);
       }
       await batch.commit();
       return true;

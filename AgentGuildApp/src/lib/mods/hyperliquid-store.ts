@@ -11,6 +11,10 @@
  *   hyperliquidInstant     — per-agent opt-in to passphrase-free (custodial) trading
  *   hyperliquidStrategies/{id}/decisions — AI Trader decision log (reasoning + action)
  *   hyperliquidAiRequests  — AI Trader decision requests waiting for the agent's own model to answer
+ *   hyperliquidPaperAccounts  — per-agent paper balance (virtual USDC) and today's realized PnL
+ *   hyperliquidPaperPositions — open paper positions, one doc per agent × coin
+ *   hyperliquidPaperOrders    — resting paper limit orders, filled by the tick
+ *   hyperliquidPaperTrades    — every paper fill, the paper trade history
  *
  * Server-only (Firebase Admin SDK) — mirrors the pattern in
  * `@/lib/gateway/store.ts`. Only import from the mod's server.ts / API routes.
@@ -18,6 +22,14 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import {
+  PAPER_START_BALANCE,
+  bookOrder,
+  type BookedOrder,
+  type CoinMeta,
+  type PaperOrder,
+  type PaperPosition,
+} from "../../../mods/hyperliquid-trading/paper";
 
 const RISK_CONFIG = "hyperliquidRiskConfig";
 const TRADES = "hyperliquidTrades";
@@ -28,6 +40,10 @@ const REFERRALS = "hyperliquidReferrals";
 const INSTANT = "hyperliquidInstant";
 const DECISIONS = "decisions"; // subcollection of each AI strategy
 const AI_REQUESTS = "hyperliquidAiRequests";
+const PAPER_ACCOUNTS = "hyperliquidPaperAccounts";
+const PAPER_POSITIONS = "hyperliquidPaperPositions";
+const PAPER_ORDERS = "hyperliquidPaperOrders";
+const PAPER_TRADES = "hyperliquidPaperTrades";
 
 function db() {
   return adminDb();
@@ -323,6 +339,8 @@ export interface Strategy {
    * same trust level as a Stripe/GitHub webhook signing secret.
    */
   webhookToken: string | null;
+  /** Trades the agent's paper account instead of its wallet — no signer needed, so it always runs itself. */
+  paper: boolean;
 }
 
 function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
@@ -343,6 +361,7 @@ function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
     pendingSince: data.pendingSince?.toDate() ?? null,
     pendingContext: data.pendingContext ?? null,
     webhookToken: data.webhookToken ?? null,
+    paper: data.paper === true,
   };
 }
 
@@ -690,4 +709,268 @@ export async function accrueReferralReward(agentId: string, sizeUsd: number): Pr
     },
     { merge: true },
   );
+}
+
+// ── Paper trading ───────────────────────────────────────────────────────────
+//
+// A virtual-USDC account per agent, filled against the real mainnet book (see
+// mods/hyperliquid-trading/paper.ts). Separate collections from the live
+// trade log, so paper results never count toward a live daily-loss limit.
+
+export interface PaperAccount {
+  agentId: string;
+  orgId: string;
+  balance: number;
+  startBalance: number;
+  /** Today's (UTC) realized PnL net of fees and funding — the paper daily-loss check. */
+  dailyPnl: number;
+}
+
+function utcDay(d = new Date()): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function docToPaperAccount(agentId: string, data: FirebaseFirestore.DocumentData): PaperAccount {
+  return {
+    agentId,
+    orgId: data.orgId,
+    balance: Number(data.balance ?? 0),
+    startBalance: Number(data.startBalance ?? PAPER_START_BALANCE),
+    dailyPnl: data.dailyPnlDay === utcDay() ? Number(data.dailyPnl ?? 0) : 0,
+  };
+}
+
+/** The agent's paper account, opened with PAPER_START_BALANCE on first use. */
+export async function getPaperAccount(agentId: string, orgId: string): Promise<PaperAccount> {
+  const ref = db().collection(PAPER_ACCOUNTS).doc(agentId);
+  const snap = await ref.get();
+  if (snap.exists) return docToPaperAccount(agentId, snap.data()!);
+  const fresh = { orgId, balance: PAPER_START_BALANCE, startBalance: PAPER_START_BALANCE, dailyPnl: 0, dailyPnlDay: utcDay(), createdAt: FieldValue.serverTimestamp() };
+  await ref.set(fresh);
+  return docToPaperAccount(agentId, fresh);
+}
+
+/** Back to a clean account: fresh balance, positions and resting orders gone (trade history is kept). */
+export async function resetPaperAccount(agentId: string, orgId: string, startBalance = PAPER_START_BALANCE): Promise<void> {
+  const [positions, orders] = await Promise.all([
+    db().collection(PAPER_POSITIONS).where("agentId", "==", agentId).get(),
+    db().collection(PAPER_ORDERS).where("agentId", "==", agentId).get(),
+  ]);
+  const batch = db().batch();
+  positions.docs.forEach((d) => batch.delete(d.ref));
+  orders.docs.forEach((d) => batch.delete(d.ref));
+  batch.set(db().collection(PAPER_ACCOUNTS).doc(agentId), {
+    orgId, balance: startBalance, startBalance, dailyPnl: 0, dailyPnlDay: utcDay(), resetAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+  await batch.commit();
+}
+
+export interface PaperPositionDoc extends PaperPosition {
+  id: string;
+  agentId: string;
+  orgId: string;
+  fundingPaid: number;
+  lastFundingAt: Date | null;
+}
+
+function paperPositionId(agentId: string, coin: string): string {
+  return `${agentId}_${coin}`;
+}
+
+function docToPaperPosition(d: FirebaseFirestore.DocumentSnapshot): PaperPositionDoc {
+  const x = d.data()!;
+  return {
+    id: d.id, agentId: x.agentId, orgId: x.orgId, coin: x.coin, szi: Number(x.szi), entryPx: Number(x.entryPx),
+    leverage: Number(x.leverage ?? 1), slPx: x.slPx ?? null, tpPx: x.tpPx ?? null,
+    fundingPaid: Number(x.fundingPaid ?? 0), lastFundingAt: x.lastFundingAt?.toDate?.() ?? null,
+  };
+}
+
+export async function listPaperPositions(agentId: string): Promise<PaperPositionDoc[]> {
+  const snap = await db().collection(PAPER_POSITIONS).where("agentId", "==", agentId).get();
+  return snap.docs.map(docToPaperPosition);
+}
+
+/** Every open paper position across all agents — the tick's TP/SL, funding and liquidation work list. */
+export async function listAllPaperPositions(): Promise<PaperPositionDoc[]> {
+  const snap = await db().collection(PAPER_POSITIONS).get();
+  return snap.docs.map(docToPaperPosition);
+}
+
+export interface PaperRestingOrder {
+  id: string;
+  agentId: string;
+  orgId: string;
+  coin: string;
+  isBuy: boolean;
+  sz: number;
+  limitPx: number;
+  leverage: number;
+  reduceOnly: boolean;
+  stopLossPct: number | null;
+  takeProfitPct: number | null;
+  strategyId: string | null;
+  createdAt: Date | null;
+}
+
+function docToPaperOrder(d: FirebaseFirestore.DocumentSnapshot): PaperRestingOrder {
+  const x = d.data()!;
+  return {
+    id: d.id, agentId: x.agentId, orgId: x.orgId, coin: x.coin, isBuy: x.isBuy, sz: Number(x.sz), limitPx: Number(x.limitPx),
+    leverage: Number(x.leverage ?? 1), reduceOnly: !!x.reduceOnly, stopLossPct: x.stopLossPct ?? null, takeProfitPct: x.takeProfitPct ?? null,
+    strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
+  };
+}
+
+export async function createPaperOrder(data: Omit<PaperRestingOrder, "id" | "createdAt">): Promise<string> {
+  const ref = await db().collection(PAPER_ORDERS).add({ ...data, createdAt: FieldValue.serverTimestamp() });
+  return ref.id;
+}
+
+export async function getPaperOrder(id: string): Promise<PaperRestingOrder | null> {
+  const snap = await db().collection(PAPER_ORDERS).doc(id).get();
+  return snap.exists ? docToPaperOrder(snap) : null;
+}
+
+export async function listPaperOrders(agentId: string): Promise<PaperRestingOrder[]> {
+  const snap = await db().collection(PAPER_ORDERS).where("agentId", "==", agentId).get();
+  return snap.docs.map(docToPaperOrder).sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+}
+
+export async function listAllPaperOrders(): Promise<PaperRestingOrder[]> {
+  const snap = await db().collection(PAPER_ORDERS).get();
+  return snap.docs.map(docToPaperOrder);
+}
+
+export async function deletePaperOrder(id: string): Promise<void> {
+  await db().collection(PAPER_ORDERS).doc(id).delete();
+}
+
+export type PaperTradeReason = "manual" | "limit" | "sl" | "tp" | "liquidation" | "strategy";
+
+export interface PaperTradeRecord {
+  id: string;
+  agentId: string;
+  coin: string;
+  isBuy: boolean;
+  sz: number;
+  px: number;
+  sizeUsd: number;
+  fee: number;
+  realizedPnl: number;
+  reduceOnly: boolean;
+  reason: PaperTradeReason;
+  strategyId: string | null;
+  createdAt: Date | null;
+}
+
+export interface PaperFillContext {
+  orgId: string;
+  reason: PaperTradeReason;
+  strategyId?: string | null;
+  /** A resting order being filled: claimed in the same transaction, so a fill can never happen twice. */
+  restingOrderId?: string;
+}
+
+/**
+ * Books one paper fill: balance, position, today's PnL and the trade record
+ * move together in one transaction that re-reads the account and every
+ * position, so racing orders can't spend the same margin twice.
+ */
+export async function bookPaperFill(
+  agentId: string,
+  order: PaperOrder,
+  marks: Record<string, number>,
+  meta: Record<string, CoinMeta>,
+  ctx: PaperFillContext,
+): Promise<(BookedOrder & { tradeId: string }) | { error: string }> {
+  const accountRef = db().collection(PAPER_ACCOUNTS).doc(agentId);
+  const posRef = db().collection(PAPER_POSITIONS).doc(paperPositionId(agentId, order.coin));
+  const restingRef = ctx.restingOrderId ? db().collection(PAPER_ORDERS).doc(ctx.restingOrderId) : null;
+  const tradeRef = db().collection(PAPER_TRADES).doc();
+  return db().runTransaction(async (tx) => {
+    const [accSnap, posSnap, restingSnap] = await Promise.all([
+      tx.get(accountRef),
+      tx.get(db().collection(PAPER_POSITIONS).where("agentId", "==", agentId)),
+      restingRef ? tx.get(restingRef) : Promise.resolve(null),
+    ]);
+    if (restingRef && !restingSnap?.exists) return { error: "Order is no longer open" };
+    const account = accSnap.exists
+      ? docToPaperAccount(agentId, accSnap.data()!)
+      : { agentId, orgId: ctx.orgId, balance: PAPER_START_BALANCE, startBalance: PAPER_START_BALANCE, dailyPnl: 0 };
+    const positions = posSnap.docs.map(docToPaperPosition);
+    const booked = bookOrder(account.balance, positions, order, marks, meta);
+    if ("error" in booked) return booked;
+
+    const prev = positions.find((p) => p.coin === order.coin);
+    if (booked.position) {
+      tx.set(posRef, {
+        agentId, orgId: ctx.orgId, ...booked.position,
+        fundingPaid: prev?.fundingPaid ?? 0,
+        lastFundingAt: prev?.lastFundingAt ?? FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } else if (prev) {
+      tx.delete(posRef);
+    }
+    tx.set(accountRef, {
+      orgId: account.orgId ?? ctx.orgId,
+      balance: booked.balance,
+      startBalance: account.startBalance,
+      dailyPnl: account.dailyPnl + booked.realized - booked.fee,
+      dailyPnlDay: utcDay(),
+    }, { merge: true });
+    tx.set(tradeRef, {
+      agentId, orgId: ctx.orgId, coin: order.coin, isBuy: order.isBuy, sz: booked.sz, px: order.px,
+      sizeUsd: booked.sz * order.px, fee: booked.fee, realizedPnl: booked.realized, reduceOnly: order.reduceOnly,
+      reason: ctx.reason, strategyId: ctx.strategyId ?? null, createdAt: FieldValue.serverTimestamp(),
+    });
+    if (restingRef) tx.delete(restingRef);
+    return { ...booked, tradeId: tradeRef.id };
+  });
+}
+
+/** Credits (or charges) accrued funding on one position and moves its funding clock forward. */
+export async function applyPaperFunding(agentId: string, coin: string, amount: number, at: Date): Promise<void> {
+  const accountRef = db().collection(PAPER_ACCOUNTS).doc(agentId);
+  const posRef = db().collection(PAPER_POSITIONS).doc(paperPositionId(agentId, coin));
+  await db().runTransaction(async (tx) => {
+    const [accSnap, posSnap] = await Promise.all([tx.get(accountRef), tx.get(posRef)]);
+    if (!accSnap.exists || !posSnap.exists) return;
+    const account = docToPaperAccount(agentId, accSnap.data()!);
+    tx.update(accountRef, { balance: account.balance + amount, dailyPnl: account.dailyPnl + amount, dailyPnlDay: utcDay() });
+    tx.update(posRef, { fundingPaid: Number(posSnap.data()!.fundingPaid ?? 0) - amount, lastFundingAt: at });
+  });
+}
+
+export interface PaperTradeHistory {
+  trades: PaperTradeRecord[];
+  stats: { totalPnl: number; fees: number; winRate: number; count: number };
+}
+
+export async function getPaperTradeHistory(agentId: string, limit = 100): Promise<PaperTradeHistory> {
+  const snap = await db().collection(PAPER_TRADES)
+    .where("agentId", "==", agentId)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  const trades: PaperTradeRecord[] = snap.docs.map((d) => {
+    const x = d.data();
+    return {
+      id: d.id, agentId: x.agentId, coin: x.coin, isBuy: x.isBuy, sz: Number(x.sz), px: Number(x.px), sizeUsd: Number(x.sizeUsd),
+      fee: Number(x.fee ?? 0), realizedPnl: Number(x.realizedPnl ?? 0), reduceOnly: !!x.reduceOnly, reason: x.reason ?? "manual",
+      strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
+    };
+  });
+  const closing = trades.filter((t) => t.realizedPnl !== 0);
+  const fees = trades.reduce((sum, t) => sum + t.fee, 0);
+  return {
+    trades,
+    stats: {
+      totalPnl: closing.reduce((sum, t) => sum + t.realizedPnl, 0) - fees,
+      fees,
+      winRate: closing.length ? closing.filter((t) => t.realizedPnl > 0).length / closing.length : 0,
+      count: closing.length,
+    },
+  };
 }

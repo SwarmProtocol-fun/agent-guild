@@ -558,6 +558,58 @@ export async function getAgentCapabilities(
   return resolved;
 }
 
+/**
+ * Server-side twin of skills.ts's enforceCapability. That one reads through the
+ * client SDK, which has no auth on the server, so Firestore rules deny it.
+ */
+export async function enforceCapability(
+  agentId: string,
+  orgId: string,
+  requiredCapabilityKey: string,
+): Promise<ResolvedCapability> {
+  const capabilities = await getAgentCapabilities(agentId, orgId);
+  const match = capabilities.find((c) => c.key === requiredCapabilityKey);
+  if (!match) {
+    throw new Error(
+      `Agent ${agentId} does not have capability "${requiredCapabilityKey}". ` +
+      `Install the required mod or assign the capability to this agent.`,
+    );
+  }
+  return match;
+}
+
+/** Where an org's install of one registry mod stands: missing, switched off, or on with these capabilities. */
+export async function getModInstallStatus(
+  orgId: string,
+  registryModId: string,
+): Promise<{ installed: boolean; enabled: boolean; installationId: string | null; enabledCapabilities: string[] }> {
+  const install = (await getModInstallations(orgId)).find((i) => i.modId === registryModId);
+  if (!install) return { installed: false, enabled: false, installationId: null, enabledCapabilities: [] };
+  return { installed: true, enabled: install.enabled, installationId: install.id, enabledCapabilities: install.enabledCapabilities };
+}
+
+/**
+ * Turn on capabilities (and the install itself) for an org's existing install
+ * of a mod. Never installs: that stays a human action in the Market. Callers
+ * check the org owner first.
+ */
+export async function enableModCapabilities(
+  orgId: string,
+  registryModId: string,
+  capabilityIds: readonly string[],
+): Promise<{ installed: boolean; enabled: string[] }> {
+  const status = await getModInstallStatus(orgId, registryModId);
+  if (!status.installed || !status.installationId) return { installed: false, enabled: [] };
+  const missing = capabilityIds.filter((c) => !status.enabledCapabilities.includes(c));
+  if (missing.length || !status.enabled) {
+    await adminDb().collection(MOD_INSTALL_COLLECTION).doc(status.installationId).update({
+      enabled: true,
+      enabledCapabilities: [...status.enabledCapabilities, ...missing],
+    });
+  }
+  return { installed: true, enabled: missing };
+}
+
 export async function publishAgentPackage(
   pkg: Omit<AgentPackage, "id" | "publishedAt" | "updatedAt" | "installCount" | "rentalCount" | "hireCount" | "avgRating" | "ratingCount" | "status">,
 ): Promise<string> {
