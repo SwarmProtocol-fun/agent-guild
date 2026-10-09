@@ -7,7 +7,11 @@ import {
   isHttpUrl,
   nextRevision,
   parseReward,
+  REVIEW_WINDOW,
+  reviewDueAt,
+  reviewSweepAction,
   validateDelivery,
+  validateRating,
   validateJobInput,
   validateReview,
 } from "@/lib/job-lifecycle";
@@ -115,5 +119,42 @@ describe("state checks", () => {
     expect(diffJobFields({ title: "a", priority: "low", requiredSkills: ["x"] }, { title: "a", priority: "high", requiredSkills: ["x"] }))
       .toEqual({ priority: { from: "low", to: "high" } });
     expect(diffJobFields({ reward: "5" }, { reward: undefined })).toEqual({ reward: { from: "5", to: null } });
+  });
+});
+
+describe("ratings", () => {
+  it("accepts 1–5 whole stars with an optional comment", () => {
+    expect(validateRating({ rating: 4, ratingComment: " solid " }, true)).toEqual({ ok: true, value: { rating: 4, comment: "solid" } });
+    expect(validateRating({}, false)).toEqual({ ok: true, value: null });
+    expect(validateRating({}, true)).toMatchObject({ ok: false });
+    for (const bad of [0, 6, 3.5, "5"]) expect(validateRating({ rating: bad }, true)).toMatchObject({ ok: false });
+    expect(validateRating({ rating: 5, ratingComment: "x".repeat(2001) }, true)).toMatchObject({ ok: false });
+  });
+});
+
+describe("review deadline", () => {
+  const DAY = 86_400_000;
+  it("defaults to 7 days, honours the job's window, and clamps it", () => {
+    expect(reviewDueAt({}, 0)).toBe(7 * DAY);
+    expect(reviewDueAt({ reviewWindowDays: 3 }, 1000)).toBe(1000 + 3 * DAY);
+    expect(reviewDueAt({ reviewWindowDays: 90 }, 0)).toBe(REVIEW_WINDOW.maxDays * DAY);
+    expect(validateJobInput({ title: "x", reviewWindowDays: 14 }, false)).toMatchObject({ ok: true, value: { reviewWindowDays: 14 } });
+    expect(validateJobInput({ title: "x", reviewWindowDays: 0 }, false)).toMatchObject({ ok: false });
+    expect(validateJobInput({ title: "x", reviewWindowDays: 31 }, false)).toMatchObject({ ok: false });
+  });
+
+  it("decides what the sweep does with each delivery", () => {
+    const due = 10 * DAY;
+    const pending = { status: "completed" as const, reviewStatus: "pending" as const, deliveryNotes: "x", reviewDueAt: due };
+    expect(reviewSweepAction({ ...pending, reviewDueAt: undefined }, 0)).toBe("start_clock");
+    expect(reviewSweepAction(pending, due - 2 * DAY)).toBe("none");
+    expect(reviewSweepAction(pending, due - DAY / 2)).toBe("remind");
+    expect(reviewSweepAction({ ...pending, reviewReminderSentAt: 1 }, due - DAY / 2)).toBe("none");
+    expect(reviewSweepAction(pending, due)).toBe("auto_approve");
+    expect(reviewSweepAction({ ...pending, reviewStatus: "approved" }, due + 1)).toBe("none");
+    const escrow = { status: "delivered" } as GigEscrow;
+    expect(reviewSweepAction({ ...pending, escrow }, due)).toBe("flag_overdue");
+    expect(reviewSweepAction({ ...pending, escrow, reviewOverdueAt: 1 }, due)).toBe("none");
+    expect(reviewSweepAction({ ...pending, escrow: { ...escrow, status: "released" } }, due)).toBe("auto_approve");
   });
 });

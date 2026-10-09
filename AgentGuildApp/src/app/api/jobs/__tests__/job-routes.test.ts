@@ -31,6 +31,7 @@ vi.mock("@/lib/solana/escrow-tx-verify", async () => {
 vi.mock("@/lib/auth-guard", () => ({
   getWalletAddress: (req: NextRequest) => req.headers.get("x-wallet-address"),
   requirePlatformAdmin: (req: NextRequest) => ({ ok: req.headers.get("x-wallet-address") === "0xadmin" }),
+  requireInternalService: (req: NextRequest) => ({ ok: req.headers.get("x-service-secret") === "svc" }),
   requireOrgMember: async (req: NextRequest, orgId: string) => {
     const w = req.headers.get("x-wallet-address");
     if (!w) return { ok: false, status: 401, error: "auth" };
@@ -51,6 +52,8 @@ vi.mock("@/lib/jobs-admin", async () => {
     dispatchJob: async (...a: unknown[]) => { state.calls.push(["dispatch", ...a]); return { jobId: "d1", taskIds: ["t1"] }; },
     reopenJob: async (...a: unknown[]) => { state.calls.push(["reopen", ...a]); },
     recordEscrowResolved: async (...a: unknown[]) => { state.calls.push(["resolved", ...a]); },
+    rateJob: async (...a: unknown[]) => { state.calls.push(["rate", ...a]); return { ...state.jobs[a[0] as string], rating: (a[1] as { rating: number }).rating }; },
+    sweepReviews: async () => { state.calls.push(["sweep"]); return { checked: 1, autoApproved: ["x"], reminded: [], clockStarted: [], flaggedOverdue: [], errors: [] }; },
     cancelJob: async (id: string) => {
       if (state.jobs[id].status === "completed") throw new JobActionError("A completed job can't be cancelled", 409);
       state.calls.push(["cancel", id]);
@@ -65,6 +68,8 @@ import { POST as create } from "@/app/api/jobs/route";
 import { POST as dispatch } from "@/app/api/jobs/dispatch/route";
 import { POST as reopen } from "@/app/api/jobs/[jobId]/reopen/route";
 import { POST as resolveEscrow } from "@/app/api/admin/jobs/[jobId]/escrow-resolve/route";
+import { POST as rate } from "@/app/api/jobs/[jobId]/rating/route";
+import { POST as sweep } from "@/app/api/cron/job-review-sweep/route";
 
 const req = (wallet: string | null, body: unknown) =>
   new NextRequest("https://agent-guild.com/api/jobs/x", {
@@ -221,5 +226,38 @@ describe("POST /api/admin/jobs/:jobId/escrow-resolve", () => {
     state.verify = { verified: false, reason: "bad" };
     expect((await resolveEscrow(req("0xadmin", { resolveTxSig: "s" }), ctx("escrowed"))).status).toBe(422);
     expect((await resolveEscrow(req("0xadmin", { resolveTxSig: "s" }), ctx("internal"))).status).toBe(409);
+  });
+});
+
+describe("ratings", () => {
+  it("approve can carry stars, which are saved after the approval", async () => {
+    const res = await review(req("0xbuyer", { decision: "approve", rating: 4, ratingComment: "good" }), ctx("gig"));
+    expect(res.status).toBe(200);
+    expect(state.calls.map((c) => c[0])).toEqual(["review", "rate"]);
+    expect(state.calls[1]).toEqual(["rate", "gig", { rating: 4, comment: "good" }, { type: "user", id: "0xbuyer" }]);
+  });
+
+  it("stars only go with an approval, and must be 1–5", async () => {
+    expect((await review(req("0xbuyer", { decision: "reject", notes: "redo", rating: 2 }), ctx("gig"))).status).toBe(400);
+    expect((await review(req("0xbuyer", { decision: "approve", rating: 9 }), ctx("gig"))).status).toBe(400);
+    expect(state.calls).toEqual([]);
+  });
+
+  it("POST /rating is the poster's, once approved", async () => {
+    expect((await rate(req("0xbuyer", { rating: 5 }), ctx("gig"))).status).toBe(200);
+    expect((await rate(req("0xseller", { rating: 5 }), ctx("gig"))).status).toBe(403); // the seller can't rate itself
+    expect((await rate(req("0xbuyer", {}), ctx("gig"))).status).toBe(400);
+  });
+});
+
+describe("POST /api/cron/job-review-sweep", () => {
+  const cron = (headers: Record<string, string>) =>
+    new NextRequest("https://agent-guild.com/api/cron/job-review-sweep", { method: "POST", headers });
+  it("runs only for the internal service or a platform admin", async () => {
+    expect((await sweep(cron({}))).status).toBe(403);
+    expect((await sweep(cron({ "x-wallet-address": "0xbuyer" }))).status).toBe(403);
+    const res = await sweep(cron({ "x-service-secret": "svc" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ autoApproved: ["x"] });
   });
 });

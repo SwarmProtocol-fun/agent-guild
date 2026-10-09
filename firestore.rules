@@ -200,10 +200,14 @@ service cloud.firestore {
     // server-side via Admin SDK). Clients may create an agent only with the
     // default scores and may never change these fields afterwards; only
     // server code (Admin SDK, bypasses rules) mutates them.
+    // tasksCompleted / rating*: server-maintained from approved, rated jobs
+    // (lib/jobs-admin.ts). tasksCompleted gates Job.minCompletedJobs, so an org
+    // must not be able to inflate its own agents' counts or ratings.
     function agentProtectedFields() {
       return ['creditScore', 'trustScore', 'asn', 'apiKeyHash', 'apiKey',
               'restoredFromBackup', 'walletAddress', 'solanaAddress',
-              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress'];
+              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress',
+              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating'];
     }
     match /agents/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
@@ -214,7 +218,8 @@ service cloud.firestore {
         request.resource.data.get('creditScore', 680) == 680 &&
         request.resource.data.get('trustScore', 50) == 50 &&
         !request.resource.data.keys().hasAny(['restoredFromBackup', 'walletAddress', 'solanaAddress',
-                                              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress']);
+                                              'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress',
+                                              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating']);
     }
     match /approvals/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
@@ -275,7 +280,9 @@ service cloud.firestore {
       return ['upfrontVerifiedAt', 'upfrontVerifiedLamports',
               'deliveryNotes', 'deliveryFiles', 'deliveryHistory', 'completedByAgentName',
               'reviewStatus', 'reviewNotes', 'reviewedBy', 'reviewedAt', 'reviewHistory',
-              'cancelledAt', 'cancelledBy', 'cancelReason', 'taskId', 'postedByAgentId'];
+              'cancelledAt', 'cancelledBy', 'cancelReason', 'taskId', 'postedByAgentId',
+              'collaboratorAgentIds', 'reviewWindowDays', 'reviewDueAt', 'reviewReminderSentAt',
+              'reviewOverdueAt', 'autoApproved', 'rating', 'ratingComment', 'ratedBy', 'ratedAt'];
     }
     // All job state changes go through the server (/api/jobs/*, /api/v1/jobs/*,
     // /api/admin/jobs/*), which validates each transition, verifies on-chain

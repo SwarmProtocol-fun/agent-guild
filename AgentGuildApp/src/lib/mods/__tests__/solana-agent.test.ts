@@ -136,6 +136,27 @@ describe("agent picker", () => {
     expect(agents.map((a: { name: string }) => a.name)).toEqual(["chef", "scout"]);
     expect(agents[0].isOwner).toBe(true);
   });
+
+  it("includes every Solana wallet the agent has — identity first, then this org's custodial ones", async () => {
+    const fa = await import("@/lib/firestore-admin");
+    const aw = await import("@/lib/agent-wallets");
+    vi.mocked(fa.getAgentsByOrg).mockResolvedValueOnce([{ id: "a1", name: "chef", solanaAddress: "IDENTITY" }] as never);
+    vi.mocked(aw.listAgentWallets).mockResolvedValueOnce([
+      { id: "w1", chain: "solana", label: "solana-dev", orgId: "o1", publicKey: "DEV" },
+      { id: "w2", chain: "solana", label: "trading", orgId: "o1", publicKey: "TRADING" },
+      { id: "w3", chain: "solana", orgId: "o1", publicKey: "PAYOUT" },
+      { id: "w4", chain: "evm", orgId: "o1", publicKey: "0xEVM" },
+      { id: "w5", chain: "solana", orgId: "other", publicKey: "FOREIGN" },
+    ] as never);
+    const { agents } = await (await call("GET", "/my-agents", SESSION_CTX())).json();
+    expect(agents[0].devWallet).toBe("DEV");
+    expect(agents[0].wallets).toEqual([
+      { address: "IDENTITY", label: "Identity wallet", custodial: false },
+      { address: "DEV", label: "Dev wallet", custodial: true },
+      { address: "TRADING", label: "trading", custodial: true },
+      { address: "PAYOUT", label: null, custodial: true },
+    ]);
+  });
 });
 
 describe("discovery and upgrades", () => {

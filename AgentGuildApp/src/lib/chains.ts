@@ -240,8 +240,8 @@ export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
         },
         contracts: {
             treasury: process.env.TEMPO_TREASURY_ADDRESS,
-            // No AgentRegistry deployed on Tempo yet — settlement falls back
-            // to the calldata-memo path (see settlement/evm-adapter.ts).
+            // TIP-20 stablecoin payouts are sent in. The receipt hash rides in
+            // the transfer's memo (see settlement/tempo-adapter.ts).
             usdc: process.env.TEMPO_USDC_ADDRESS,
         },
         enabled: true,

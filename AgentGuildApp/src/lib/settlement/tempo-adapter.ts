@@ -20,6 +20,22 @@ import type { SettleJobParams, SettlementAdapter, SettlementReceipt, VerifyResul
  *    to hold *any* balance to settle jobs.
  */
 
+export interface TempoPayoutStatus {
+  network: string;
+  /** TIP-20 token payouts are sent in (TEMPO_USDC_ADDRESS). */
+  token: string | null;
+  tokenSymbol: string | null;
+  /** The platform wallet payouts come from (PLATFORM_SETTLEMENT_KEY's address). */
+  payoutWallet: string | null;
+  payoutWalletUrl: string | null;
+  balance: number | null;
+  /** Who pays the network fee: a local sponsor key, a relay sponsor, or the payout wallet itself (in the fee token). */
+  feeMode: "sponsor-account" | "sponsor-relay" | "payout-wallet";
+  /** Env vars that must be set before payouts can be sent. */
+  missing: string[];
+  error: string | null;
+}
+
 function readClient() {
   const chain = getChain("tempo");
   if (!chain) throw new Error("Unknown chain: tempo");
@@ -81,14 +97,13 @@ export class TempoSettlementAdapter implements SettlementAdapter {
   }
 
   /**
-   * Settle several jobs to the same wallet in ONE atomic Tempo transaction —
-   * real support for this, via the `calls` array on a Tempo transaction,
-   * not N sequential transactions. Every transfer either all lands or all
-   * reverts together.
+   * Pay several jobs in ONE atomic Tempo transaction, via the `calls` array
+   * on a Tempo transaction — not N sequential transactions. Each item is its
+   * own TIP-20 transferWithMemo (so recipients can differ), and every
+   * transfer either lands or reverts together.
    */
   async settleBatch(
-    agentWallet: string,
-    items: { resultHash: string; amountUsdc: number }[],
+    items: { to: string; resultHash: string; amountUsdc: number }[],
   ): Promise<{ txSig: string; explorerUrl: string }> {
     const chain = getChain("tempo");
     if (!chain) throw new Error("Unknown chain: tempo");
@@ -106,8 +121,8 @@ export class TempoSettlementAdapter implements SettlementAdapter {
 
     const calls = items.map((item) =>
       Actions.token.transfer.call({
-        to: agentWallet as Hex,
-        amount: BigInt(Math.round(item.amountUsdc * 1_000_000)), // USDC, 6 decimals
+        to: item.to as Hex,
+        amount: BigInt(Math.round(item.amountUsdc * 1_000_000)), // TIP-20 stablecoins use 6 decimals
         token: usdc,
         memo: `0x${item.resultHash}` as Hex,
       }),
@@ -120,6 +135,57 @@ export class TempoSettlementAdapter implements SettlementAdapter {
     });
 
     return { txSig: receipt.transactionHash, explorerUrl: chain.explorer.txUrl(receipt.transactionHash) };
+  }
+
+  /**
+   * What the payout panel shows before anyone pays: which wallet sends the
+   * money, what token it is, how much is left, and who pays the network fee.
+   * Never throws — anything missing comes back in `missing`.
+   */
+  async payoutStatus(): Promise<TempoPayoutStatus> {
+    const chain = getChain("tempo");
+    const missing: string[] = [];
+    if (!chain?.contracts.usdc) missing.push("TEMPO_USDC_ADDRESS");
+    const privateKey = process.env.PLATFORM_SETTLEMENT_KEY as Hex | undefined;
+    if (!privateKey) missing.push("PLATFORM_SETTLEMENT_KEY");
+
+    const feeMode: TempoPayoutStatus["feeMode"] = process.env.TEMPO_FEE_PAYER_KEY
+      ? "sponsor-account"
+      : process.env.TEMPO_FEE_PAYER_URL
+        ? "sponsor-relay"
+        : "payout-wallet";
+
+    let payoutWallet: string | null = null;
+    try {
+      if (privateKey) payoutWallet = Account.fromSecp256k1(privateKey).address;
+    } catch {
+      missing.push("PLATFORM_SETTLEMENT_KEY (invalid key)");
+    }
+
+    const status: TempoPayoutStatus = {
+      network: chain?.name ?? "Tempo",
+      token: chain?.contracts.usdc ?? null,
+      tokenSymbol: null,
+      payoutWallet,
+      payoutWalletUrl: payoutWallet && chain ? chain.explorer.addressUrl(payoutWallet) : null,
+      balance: null,
+      feeMode,
+      missing,
+      error: null,
+    };
+    if (!chain?.contracts.usdc) return status;
+
+    const client = readClient();
+    const token = chain.contracts.usdc as Hex;
+    const [meta, balance] = await Promise.allSettled([
+      Actions.token.getMetadata(client, { token }),
+      payoutWallet ? Actions.token.getBalance(client, { account: payoutWallet as Hex, token }) : Promise.resolve(null),
+    ]);
+    if (meta.status === "fulfilled") status.tokenSymbol = meta.value.symbol;
+    if (balance.status === "fulfilled" && balance.value) status.balance = Number(balance.value.formatted);
+    const failed = [meta, balance].find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+    if (failed) status.error = (failed.reason as Error)?.message ?? "Tempo RPC unreachable";
+    return status;
   }
 
   async getBalance(wallet: string): Promise<{ usdc: number }> {
@@ -137,7 +203,8 @@ export class TempoSettlementAdapter implements SettlementAdapter {
     const receipt = await client.getTransactionReceipt({ hash: txSig as Hex }).catch(() => null);
     if (!receipt || receipt.status !== "success") return { found: false, hashVerified: false };
 
-    const memo = receipt.logs
+    // A batch payout carries one TransferWithMemo per job — match any of them.
+    const memos = receipt.logs
       .map((log) => {
         try {
           return decodeEventLog({ abi: Abis.tip20, data: log.data, topics: log.topics });
@@ -145,9 +212,10 @@ export class TempoSettlementAdapter implements SettlementAdapter {
           return null;
         }
       })
-      .find((decoded) => decoded?.eventName === "TransferWithMemo")?.args as { memo?: Hex } | undefined;
+      .filter((decoded) => decoded?.eventName === "TransferWithMemo")
+      .map((decoded) => (decoded!.args as { memo?: Hex }).memo);
 
-    const hashVerified = memo?.memo === `0x${resultHash}`;
+    const hashVerified = memos.includes(`0x${resultHash}`);
     const block = await client.getBlock({ blockNumber: receipt.blockNumber });
     return { found: true, hashVerified, confirmedAt: new Date(Number(block.timestamp) * 1000).toISOString() };
   }

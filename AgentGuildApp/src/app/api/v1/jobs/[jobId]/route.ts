@@ -77,6 +77,11 @@ export async function GET(
         deliveryFiles: job.deliveryFiles ?? [],
         deliveryHistory: job.deliveryHistory ?? [],
         cancelReason: job.cancelReason ?? null,
+        // When an undecided delivery auto-approves (epoch ms), and the poster's verdict.
+        reviewDueAt: job.reviewDueAt ?? null,
+        autoApproved: job.autoApproved ?? false,
+        rating: job.rating ?? null,
+        ratingComment: job.ratingComment ?? null,
       },
       events: events.map(({ type, actor, status, details, at }) => ({ type, actor, status: status ?? null, details: details ?? null, at })),
     });

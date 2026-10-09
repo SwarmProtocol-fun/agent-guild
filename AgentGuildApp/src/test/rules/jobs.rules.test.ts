@@ -51,10 +51,14 @@ describe.skipIf(!emulator)("firestore.rules — jobs", () => {
       await setDoc(doc(db, "jobs/gig1"), { orgId: "buyerOrg", sellerOrgId: "sellerOrg", gigId: "g", status: "in_progress", escrow: { status: "funded" } });
       await setDoc(doc(db, "jobApplications/a1"), { orgId: "buyerOrg", jobId: "j1", agentId: "x", status: "pending" });
       await setDoc(doc(db, "jobEvents/e1"), { orgId: "buyerOrg", jobId: "j1", type: "created" });
+      await setDoc(doc(db, "agents/ag1"), { orgId: "buyerOrg", name: "Ada", tasksCompleted: 2, avgRating: 3, ratingCount: 1, ratingSum: 3 });
     });
-    alice = env.authenticatedContext("alice").firestore();
-    bob = env.authenticatedContext("bob").firestore();
-    eve = env.authenticatedContext("eve").firestore();
+    // The test context hands back the compat Firestore type; it's the same
+    // instance the modular functions (doc, getDoc, ...) accept.
+    const as = (uid: string) => env.authenticatedContext(uid).firestore() as unknown as Firestore;
+    alice = as("alice");
+    bob = as("bob");
+    eve = as("eve");
   });
 
   afterAll(async () => {
@@ -98,5 +102,18 @@ describe.skipIf(!emulator)("firestore.rules — jobs", () => {
   describe("audit log", () => {
     it("isn't readable from the browser", () => assertFails(getDoc(doc(alice, "jobEvents/e1"))));
     it("isn't writable from the browser", () => assertFails(addDoc(collection(alice, "jobEvents"), { orgId: "buyerOrg", jobId: "j1" })));
+  });
+
+  describe("reputation is server-maintained", () => {
+    it("org can still edit its agent's ordinary fields", () => assertSucceeds(updateDoc(doc(alice, "agents/ag1"), { name: "Ada 2" })));
+    it("can't inflate completed jobs (gates minCompletedJobs)", () => assertFails(updateDoc(doc(alice, "agents/ag1"), { tasksCompleted: 99 })));
+    it("can't set its own rating", () => assertFails(updateDoc(doc(alice, "agents/ag1"), { avgRating: 5, ratingCount: 100 })));
+    it("can't create an agent with a head start", () =>
+      assertFails(addDoc(collection(alice, "agents"), { orgId: "buyerOrg", name: "x", tasksCompleted: 50 })));
+    it("gig order can't arrive pre-rated or with its own deadline", async () => {
+      await assertFails(addDoc(collection(alice, "jobs"), gigOrder({ rating: 5 })));
+      await assertFails(addDoc(collection(alice, "jobs"), gigOrder({ reviewDueAt: 1 })));
+      await assertFails(addDoc(collection(alice, "jobs"), gigOrder({ autoApproved: true })));
+    });
   });
 });

@@ -95,7 +95,7 @@ const summarizeJob = (j: Job, full = false) => ({
   reward: j.reward ?? null,
   hiringMode: j.hiringMode ?? "instant",
   takenByAgentId: j.takenByAgentId ?? null,
-  ...(full ? { reviewStatus: j.reviewStatus ?? null, reviewNotes: j.reviewNotes ?? null, requirements: { minCompletedJobs: j.minCompletedJobs ?? null, minTrustScore: j.minTrustScore ?? null } } : {}),
+  ...(full ? { reviewStatus: j.reviewStatus ?? null, reviewNotes: j.reviewNotes ?? null, reviewDueAt: j.reviewDueAt ?? null, rating: j.rating ?? null, requirements: { minCompletedJobs: j.minCompletedJobs ?? null, minTrustScore: j.minTrustScore ?? null } } : {}),
 });
 
 const identity = (a: AgentTokenClaims) => ({ agentId: a.agentId, orgId: a.orgId, agentName: a.agentName });

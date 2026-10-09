@@ -33,6 +33,9 @@ import {
   canEdit,
   diffJobFields,
   isAwaitingReview,
+  reviewDueAt,
+  reviewSweepAction,
+  type RatingInput,
   nextRevision,
   type JobActor,
   type JobInput,
@@ -226,19 +229,25 @@ export async function submitJobDelivery(jobId: string, data: {
 }, actor?: JobActor): Promise<void> {
   const before = await getJob(jobId);
   if (!before) throw new JobActionError("Job not found", 404);
+  const now = Date.now();
+  const dueAt = reviewDueAt(before, now);
   await jobs().doc(jobId).update({
     status: "completed",
+    // Each delivery restarts the poster's review clock (see sweepReviews).
+    reviewDueAt: dueAt,
+    reviewReminderSentAt: FieldValue.delete(),
+    reviewOverdueAt: FieldValue.delete(),
     deliveryNotes: data.deliveryNotes,
     deliveryFiles: data.deliveryFiles ?? [],
     completedByAgentName: data.completedByAgentName,
     completedAt: FieldValue.serverTimestamp(),
     reviewStatus: "pending",
-    deliveryHistory: FieldValue.arrayUnion({ notes: data.deliveryNotes, files: data.deliveryFiles ?? [], at: Date.now() }),
+    deliveryHistory: FieldValue.arrayUnion({ notes: data.deliveryNotes, files: data.deliveryFiles ?? [], at: now }),
     updatedAt: FieldValue.serverTimestamp(),
   });
   await recordJobEvent(before, "delivered", actor ?? agentActor({ agentId: before.takenByAgentId ?? "unknown", agentName: data.completedByAgentName }), {
     status: "completed",
-    details: { revision: nextRevision(before), fileCount: data.deliveryFiles?.length ?? 0 },
+    details: { revision: nextRevision(before), fileCount: data.deliveryFiles?.length ?? 0, reviewDueAt: dueAt },
   });
 }
 
@@ -335,7 +344,12 @@ export async function cancelJob(jobId: string, reason: string, actor: JobActor):
  * Transactional on the delivery still being pending, so two reviewers
  * clicking at once can't both act.
  */
-export async function reviewDelivery(jobId: string, decision: ReviewInput, actor: JobActor): Promise<Job> {
+export async function reviewDelivery(
+  jobId: string,
+  decision: ReviewInput,
+  actor: JobActor,
+  opts: { auto?: boolean } = {},
+): Promise<Job> {
   const ref = jobs().doc(jobId);
   const status = decision.approve ? "approved" : "rejected";
   const before = await adminDb().runTransaction(async (tx) => {
@@ -351,6 +365,7 @@ export async function reviewDelivery(jobId: string, decision: ReviewInput, actor
       reviewedAt: FieldValue.serverTimestamp(),
       status: decision.approve ? "completed" : "in_progress",
       reviewHistory: FieldValue.arrayUnion(event),
+      ...(opts.auto ? { autoApproved: true } : {}),
       updatedAt: FieldValue.serverTimestamp(),
     });
     if (decision.approve && job.takenByAgentId) {
@@ -360,7 +375,7 @@ export async function reviewDelivery(jobId: string, decision: ReviewInput, actor
   });
 
   if (decision.approve) await closeJobTasks(before);
-  await recordJobEvent(before, decision.approve ? "approved" : "revision_requested", actor, {
+  await recordJobEvent(before, opts.auto ? "auto_approved" : decision.approve ? "approved" : "revision_requested", actor, {
     status: decision.approve ? "completed" : "in_progress",
     details: {
       revision: before.deliveryHistory?.length ?? 1,
@@ -450,6 +465,164 @@ export async function reopenJob(jobId: string, reason: string, actor: JobActor):
     status: "open",
     details: { agentId: before.takenByAgentId ?? null, collaboratorAgentIds: before.collaboratorAgentIds ?? [], reason: reason || null },
   });
+}
+
+/**
+ * The poster's 1–5 star rating of approved work — once per job. Rolls into
+ * the agent's average (agents.avgRating, shown to future posters when they
+ * hire) and, for gig orders, into the gig listing's average via the same
+ * gigReviews record the gig page reads. Averages are recomputed from stored
+ * sums, never taken from the caller. Ratings on auto-approved jobs are
+ * allowed: the poster may still weigh in after the deadline.
+ */
+export async function rateJob(jobId: string, input: RatingInput, actor: JobActor): Promise<Job> {
+  const ref = jobs().doc(jobId);
+  const peek = await getJob(jobId);
+  if (!peek) throw new JobActionError("Job not found", 404);
+  // Gig reviews written before this path existed have random ids — check by jobId.
+  if (peek.gigId) {
+    const legacy = await adminDb().collection("gigReviews").where("jobId", "==", jobId).limit(1).get();
+    if (!legacy.empty) throw new JobActionError("This order has already been reviewed", 409);
+  }
+
+  const before = await adminDb().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new JobActionError("Job not found", 404);
+    const job = { id: snap.id, ...snap.data() } as Job;
+    if (job.reviewStatus !== "approved") throw new JobActionError("You can rate a job once its delivery is approved", 409);
+    if (typeof job.rating === "number") throw new JobActionError("This job has already been rated", 409);
+
+    // All reads before any write (Firestore transactions require it).
+    const agentRef = job.takenByAgentId ? adminDb().collection("agents").doc(job.takenByAgentId) : null;
+    const agentSnap = agentRef ? await tx.get(agentRef) : null;
+    const gigRef = job.gigId ? adminDb().collection("gigs").doc(job.gigId) : null;
+    const gigSnap = gigRef ? await tx.get(gigRef) : null;
+
+    tx.update(ref, {
+      rating: input.rating,
+      ...(input.comment ? { ratingComment: input.comment } : {}),
+      ratedBy: actor.id,
+      ratedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    if (agentRef && agentSnap?.exists) {
+      const a = agentSnap.data() as { ratingSum?: number; ratingCount?: number };
+      const sum = (a.ratingSum ?? 0) + input.rating;
+      const count = (a.ratingCount ?? 0) + 1;
+      tx.update(agentRef, { ratingSum: sum, ratingCount: count, avgRating: Math.round((sum / count) * 100) / 100 });
+    }
+    if (gigRef && gigSnap?.exists) {
+      const g = gigSnap.data() as { avgRating?: number; ratingCount?: number };
+      const prevCount = g.ratingCount ?? 0;
+      const nextCount = prevCount + 1;
+      // create() fails if this order already has a review — the once-per-order guarantee.
+      tx.create(adminDb().collection("gigReviews").doc(jobId), {
+        gigId: job.gigId,
+        jobId,
+        orgId: job.orgId,
+        authorAddress: actor.id,
+        rating: input.rating,
+        ...(input.comment ? { review: input.comment } : {}),
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      tx.update(gigRef, { avgRating: ((g.avgRating ?? 0) * prevCount + input.rating) / nextCount, ratingCount: nextCount });
+    }
+    return job;
+  }).catch((err) => {
+    if ((err as { code?: number }).code === 6) throw new JobActionError("This order has already been reviewed", 409);
+    throw err;
+  });
+
+  await recordJobEvent(before, "rated", actor, {
+    details: { rating: input.rating, agentId: before.takenByAgentId ?? null, ...(input.comment ? { comment: input.comment } : {}) },
+  });
+  return (await getJob(jobId))!;
+}
+
+export interface ReviewSweepResult {
+  checked: number;
+  autoApproved: string[];
+  reminded: string[];
+  clockStarted: string[];
+  flaggedOverdue: string[];
+  errors: { jobId: string; error: string }[];
+}
+
+/**
+ * Hourly (netlify/functions/job-review-sweep.mts → /api/cron/job-review-sweep).
+ * For every delivery awaiting review: remind the poster a day before the
+ * deadline, auto-approve once it passes — so an agent's finished work can't
+ * sit in limbo because nobody looked — and flag escrowed orders that can't
+ * be auto-released. Deliveries from before deadlines existed get a fresh
+ * window from now instead of being approved the moment this first runs.
+ */
+export async function sweepReviews(now = Date.now()): Promise<ReviewSweepResult> {
+  const result: ReviewSweepResult = { checked: 0, autoApproved: [], reminded: [], clockStarted: [], flaggedOverdue: [], errors: [] };
+  // Single equality filter — served by the automatic index, no composite needed.
+  const snap = await jobs().where("reviewStatus", "==", "pending").get();
+  const system: JobActor = { type: "system", id: "review-deadline", name: "Review deadline" };
+
+  for (const d of snap.docs) {
+    const job = { id: d.id, ...d.data() } as Job;
+    result.checked++;
+    try {
+      switch (reviewSweepAction(job, now)) {
+        case "start_clock":
+          await d.ref.update({ reviewDueAt: reviewDueAt(job, now) });
+          result.clockStarted.push(job.id);
+          break;
+        case "remind":
+          await d.ref.update({ reviewReminderSentAt: now });
+          await recordJobEvent(job, "review_reminder", system, { details: { reviewDueAt: job.reviewDueAt } });
+          await postProjectNotice(job, `⏰ **Review due soon**\n\nJob: "${job.title}" auto-approves ${new Date(job.reviewDueAt!).toUTCString()} unless it's reviewed first.`);
+          result.reminded.push(job.id);
+          break;
+        case "flag_overdue":
+          await d.ref.update({ reviewOverdueAt: now });
+          await recordJobEvent(job, "review_overdue", system, {
+            details: { reviewDueAt: job.reviewDueAt, reason: "Escrowed order — release needs the buyer's signature, so it can't auto-approve" },
+          });
+          result.flaggedOverdue.push(job.id);
+          break;
+        case "auto_approve":
+          await reviewDelivery(job.id, {
+            approve: true,
+            notes: `Auto-approved: no review within ${job.reviewWindowDays ?? 7} days of delivery.`,
+          }, system, { auto: true });
+          await postProjectNotice(job, `✅ **Job auto-approved**\n\nJob: "${job.title}" wasn't reviewed before its deadline, so the delivery was approved.`);
+          result.autoApproved.push(job.id);
+          break;
+        default:
+          break;
+      }
+    } catch (err) {
+      // 409 = someone reviewed it between the query and now — that's fine.
+      if (err instanceof JobActionError && err.status === 409) continue;
+      result.errors.push({ jobId: job.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return result;
+}
+
+/** Best-effort system message in the job's project channel, if it has one. */
+async function postProjectNotice(job: Pick<Job, "orgId" | "projectId">, content: string): Promise<void> {
+  if (!job.projectId) return;
+  try {
+    const channels = await adminDb().collection("channels")
+      .where("orgId", "==", job.orgId).where("projectId", "==", job.projectId).limit(1).get();
+    if (channels.empty) return;
+    await adminDb().collection("messages").add({
+      channelId: channels.docs[0].id,
+      senderId: "system",
+      senderName: "Agent Guild",
+      senderType: "system",
+      content,
+      orgId: job.orgId,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  } catch (err) {
+    console.error("Failed to post project notice:", err);
+  }
 }
 
 /**

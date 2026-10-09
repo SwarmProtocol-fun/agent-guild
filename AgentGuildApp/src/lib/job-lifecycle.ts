@@ -34,6 +34,7 @@ export const JOB_LIMITS = {
   fileUrl: 2_000,
   reviewNotes: 5_000,
   cancelReason: 1_000,
+  ratingComment: 2_000,
 } as const;
 
 const PRIORITIES: Job["priority"][] = ["low", "medium", "high"];
@@ -50,7 +51,14 @@ export interface JobInput {
   hiringMode: NonNullable<Job["hiringMode"]>;
   minCompletedJobs?: number;
   minTrustScore?: number;
+  /** Days the poster has to review a delivery before it auto-approves (default 7). */
+  reviewWindowDays?: number;
 }
+
+export const REVIEW_WINDOW = { defaultDays: 7, minDays: 1, maxDays: 30 } as const;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Reminder goes out this long before a delivery auto-approves. */
+export const REVIEW_REMINDER_LEAD_MS = DAY_MS;
 
 export type Validation<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -131,6 +139,11 @@ export function validateJobInput(raw: unknown, partial: boolean): Validation<Par
     if (!r.ok) return r;
     out.minCompletedJobs = r.value;
   }
+  if (has("reviewWindowDays")) {
+    const r = optionalInt(raw.reviewWindowDays, "reviewWindowDays", REVIEW_WINDOW.minDays, REVIEW_WINDOW.maxDays);
+    if (!r.ok) return r;
+    out.reviewWindowDays = r.value;
+  }
   if (has("minTrustScore")) {
     const r = optionalInt(raw.minTrustScore, "minTrustScore", 0, 100);
     if (!r.ok) return r;
@@ -191,6 +204,29 @@ export interface ReviewInput {
   notes: string;
 }
 
+export interface RatingInput {
+  /** 1–5 stars. */
+  rating: number;
+  comment: string;
+}
+
+/** A star rating, standalone or alongside an approval. `required` = false lets it be omitted. */
+export function validateRating(raw: unknown, required: boolean): Validation<RatingInput | null> {
+  if (!isObj(raw)) return { ok: false, error: "Body must be a JSON object" };
+  if (raw.rating === undefined || raw.rating === null) {
+    return required ? { ok: false, error: "rating is required" } : { ok: true, value: null };
+  }
+  const rating = raw.rating;
+  if (typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return { ok: false, error: "rating must be a whole number from 1 to 5" };
+  }
+  const comment = typeof raw.ratingComment === "string" ? raw.ratingComment.trim() : "";
+  if (comment.length > JOB_LIMITS.ratingComment) {
+    return { ok: false, error: `ratingComment must be at most ${JOB_LIMITS.ratingComment} characters` };
+  }
+  return { ok: true, value: { rating, comment } };
+}
+
 export function validateReview(raw: unknown): Validation<ReviewInput> {
   if (!isObj(raw)) return { ok: false, error: "Body must be a JSON object" };
   const decision = raw.decision;
@@ -207,6 +243,36 @@ export function validateReview(raw: unknown): Validation<ReviewInput> {
 type JobState = Pick<Job, "status" | "reviewStatus" | "deliveryNotes">;
 
 /** A delivery is waiting on the buyer's verdict. */
+/** When a delivery made at `deliveredAt` auto-approves, given the job's review window. */
+export function reviewDueAt(job: Pick<Job, "reviewWindowDays">, deliveredAt: number): number {
+  const days = job.reviewWindowDays ?? REVIEW_WINDOW.defaultDays;
+  return deliveredAt + Math.min(REVIEW_WINDOW.maxDays, Math.max(REVIEW_WINDOW.minDays, days)) * DAY_MS;
+}
+
+/**
+ * What the review sweep should do with a delivery awaiting review at `now`:
+ * auto-approve it, send the one reminder, start the clock on a legacy
+ * delivery that predates deadlines, or nothing. Escrowed gig orders can't be
+ * auto-approved — releasing escrow needs the buyer's own on-chain signature —
+ * so they're flagged "overdue" instead (once).
+ */
+export type SweepAction = "auto_approve" | "remind" | "start_clock" | "flag_overdue" | "none";
+
+export function reviewSweepAction(
+  job: Pick<Job, "status" | "reviewStatus" | "deliveryNotes" | "reviewDueAt" | "reviewReminderSentAt" | "reviewOverdueAt" | "escrow">,
+  now: number,
+): SweepAction {
+  if (!isAwaitingReview(job)) return "none";
+  if (typeof job.reviewDueAt !== "number") return "start_clock";
+  const escrowLocked = !!job.escrow && job.escrow.status !== "released" && job.escrow.status !== "resolved";
+  if (now >= job.reviewDueAt) {
+    if (escrowLocked) return job.reviewOverdueAt ? "none" : "flag_overdue";
+    return "auto_approve";
+  }
+  if (now >= job.reviewDueAt - REVIEW_REMINDER_LEAD_MS && !job.reviewReminderSentAt) return "remind";
+  return "none";
+}
+
 export function isAwaitingReview(job: JobState): boolean {
   return job.status === "completed" && job.reviewStatus === "pending" && !!job.deliveryNotes;
 }
@@ -252,7 +318,11 @@ export type JobEventType =
   | "escrow_delivered"
   | "escrow_released"
   | "escrow_resolved"
-  | "unassigned";
+  | "unassigned"
+  | "auto_approved"
+  | "rated"
+  | "review_reminder"
+  | "review_overdue";
 
 export interface JobActor {
   type: "user" | "agent" | "system";

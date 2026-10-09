@@ -4,18 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import type { Idl } from "@coral-xyz/anchor";
 import {
-  Activity, Bug, Calculator, CircleCheck, CircleX, Download, Droplets, FileCode, Fingerprint, Gauge, Plus, Receipt, Trash2, Wallet,
+  Activity, Bug, Calculator, CircleCheck, CircleX, Coins, Download, Droplets, FileCode, Fingerprint, Gauge, Plus, Receipt, RefreshCw, Trash2, Wallet,
 } from "lucide-react";
 import {
   SEED_TYPES, PROGRAM_DATA_HEADER, TOKEN_PROGRAM,
-  inspectAccount, inspectTransaction, fetchIdl, derivePda, pdaSnippet,
+  inspectAccount, inspectTransaction, walletHoldings, fetchIdl, derivePda, pdaSnippet,
   decodeProgramError, parseErrorCode, priorityFees, rentExempt, parsePubkey,
   type ClusterStatus, type AccountReport, type TxReport, type DecodedError,
-  type PriorityFeeReport, type SeedSpec, type SeedType,
+  type PriorityFeeReport, type SeedSpec, type SeedType, type WalletHoldings,
 } from "./devtools";
 import {
   Addr, Badge, Button, Card, CodeBlock, CopyButton, EmptyState, ErrorNote, Examples, Field, Json, Notice, PageHeader, Row, Select, Skeleton, Stat,
-  SubHeading, TextInput, ToolForm, cx, linkClass, logLineClass, muted, sol, timeAgo, useRunner, useSeededInput, type Env, type Seed,
+  SubHeading, TextInput, ToolForm, cx, linkClass, logLineClass, muted, sol, timeAgo, useRunner, useSeededInput, type AgentSolanaWallet, type Env, type Seed,
 } from "./ui";
 
 // The read & debug tools. They talk to the RPC straight from the browser:
@@ -188,13 +188,98 @@ export function TxTool({ env, seed }: { env: Env; seed?: Seed }) {
 
 // ── Account ──────────────────────────────────────────────────────────────
 
+// ── Agent wallets (Account tab, when acting as an agent) ────────────────
+
+const TOKENS_SHOWN = 6;
+
+type HoldingsState = { status: "loading" } | { status: "ready"; data: WalletHoldings } | { status: "error"; error: string };
+
+function AgentWallets({ env, wallets }: { env: Env; wallets: AgentSolanaWallet[] }) {
+  const [holdings, setHoldings] = useState<Record<string, HoldingsState>>({});
+  const [nonce, setNonce] = useState(0);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    setHoldings(Object.fromEntries(wallets.map((w) => [w.address, { status: "loading" } as HoldingsState])));
+    // Each wallet resolves on its own so one slow or failing lookup doesn't hold up the rest.
+    for (const w of wallets) {
+      walletHoldings(env.conn, w.address)
+        .then((data): HoldingsState => ({ status: "ready", data }))
+        .catch((err: Error): HoldingsState => ({
+          status: "error",
+          error: /429|too many requests/i.test(err.message) ? "The RPC is rate-limiting requests — retry in a moment, or use a Custom RPC." : err.message,
+        }))
+        .then((next) => { if (!cancelled) setHoldings((h) => ({ ...h, [w.address]: next })); });
+    }
+    return () => { cancelled = true; };
+  }, [env.conn, wallets, nonce]);
+
+  const ready = Object.values(holdings).filter((h): h is Extract<HoldingsState, { status: "ready" }> => h.status === "ready");
+  const totalLamports = ready.reduce((sum, h) => sum + h.data.lamports, 0);
+  const loading = Object.values(holdings).some((h) => h.status === "loading");
+
+  return (
+    <Card
+      title={`${env.agent!.name}'s wallets`}
+      description={`${wallets.length} Solana wallet${wallets.length === 1 ? "" : "s"} on ${env.cluster}${ready.length ? ` · ${sol(totalLamports)} total` : ""}`}
+      actions={<Button icon={RefreshCw} loading={loading} onClick={() => setNonce((n) => n + 1)}>Refresh</Button>}
+    >
+      <ul className="divide-y divide-[hsl(var(--border))]/60 rounded-lg border border-[hsl(var(--border))]">
+        {wallets.map((w) => {
+          const h = holdings[w.address];
+          return (
+            <li key={w.address} className="space-y-2 px-3 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium">{w.label ?? "Custodial wallet"}</span>
+                <Badge tone={w.custodial ? "neutral" : "info"}>{w.custodial ? "Custodial" : "Identity"}</Badge>
+                <span className="ml-auto text-sm font-medium tabular-nums">
+                  {h?.status === "ready" ? sol(h.data.lamports) : h?.status === "error" ? <span className="text-red-600 dark:text-red-400">Unavailable</span> : <Skeleton className="inline-block h-4 w-20" />}
+                </span>
+              </div>
+              <Addr value={w.address} env={env} />
+              {h?.status === "error" && <ErrorNote message={h.error} onRetry={() => setNonce((n) => n + 1)} />}
+              {h?.status === "ready" && h.data.tokens.length > 0 && (
+                <ul className="space-y-1 rounded-md bg-[hsl(var(--muted))]/40 p-2">
+                  {(expanded.has(w.address) ? h.data.tokens : h.data.tokens.slice(0, TOKENS_SHOWN)).map((t) => (
+                    <li key={t.tokenAccount} className="flex items-center gap-2 text-xs">
+                      <Coins className={cx("h-3.5 w-3.5 shrink-0", muted)} aria-hidden />
+                      <span className="min-w-0 flex-1 truncate">
+                        {t.symbol ? <span className="font-medium">{t.symbol}</span> : <Addr value={t.mint} env={env} />}
+                        {t.program === "spl-token-2022" && <span className="ml-1.5"><Badge>Token-2022</Badge></span>}
+                      </span>
+                      <span className="font-mono tabular-nums">{Number(t.uiAmount).toLocaleString(undefined, { maximumFractionDigits: t.decimals })}</span>
+                    </li>
+                  ))}
+                  {h.data.tokens.length > TOKENS_SHOWN && (
+                    <li>
+                      <button type="button" className={cx("text-xs", linkClass)}
+                        onClick={() => setExpanded((e) => { const next = new Set(e); if (!next.delete(w.address)) next.add(w.address); return next; })}>
+                        {expanded.has(w.address) ? "Show fewer" : `Show all ${h.data.tokens.length} tokens`}
+                      </button>
+                    </li>
+                  )}
+                </ul>
+              )}
+              {h?.status === "ready" && h.data.tokens.length === 0 && <p className={cx("text-xs", muted)}>No tokens</p>}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
+
 export function AccountTool({ env, seed }: { env: Env; seed?: Seed }) {
   const r = useRunner<AccountReport>();
   const lookup = (v: string) => r.run(() => inspectAccount(env.conn, v, { decodeAnchor: true }));
   const [value, setValue] = useSeededInput(seed, lookup);
   const a = r.data;
+  const agentWallets = env.agent?.wallets ?? [];
   const examples = [
-    ...(env.agent?.devWallet ? [{ label: `${env.agent.name}'s wallet`, value: env.agent.devWallet }] : []),
+    ...(agentWallets.length
+      ? agentWallets.map((w) => ({ label: w.label ?? `Wallet ${w.address.slice(0, 4)}…`, value: w.address }))
+      : env.agent?.devWallet ? [{ label: `${env.agent.name}'s wallet`, value: env.agent.devWallet }] : []),
     { label: "Agent Guild program", value: AGENT_GUILD_PROGRAM },
     { label: "SPL Token program", value: TOKEN_PROGRAM },
   ];
@@ -202,6 +287,7 @@ export function AccountTool({ env, seed }: { env: Env; seed?: Seed }) {
   return (
     <div className="space-y-4">
       <PageHeader icon={Wallet} title="Account" description="Balance, owner, rent status, token data, program upgrade authority — and Anchor accounts decoded with the owner's IDL." />
+      {agentWallets.length > 0 && <AgentWallets env={env} wallets={agentWallets} />}
       <ToolForm label="Address" value={value} onChange={setValue} onSubmit={lookup} placeholder="Wallet, program, mint or PDA address" loading={r.loading} action="Inspect" examples={examples} />
       {r.error && <ErrorNote message={r.error} onRetry={() => lookup(value)} />}
       {r.loading && !a && <ResultSkeleton />}

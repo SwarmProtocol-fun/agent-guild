@@ -248,6 +248,10 @@ export interface Agent {
   agentManifestCid?: string;
   /** Number of completed tasks (denormalized counter) */
   tasksCompleted?: number;
+  /** Star ratings from job posters (server-maintained; see jobs-admin.ts::rateJob). */
+  ratingSum?: number;
+  ratingCount?: number;
+  avgRating?: number;
   /** Resolved credit policy tier (cached, updated on score change) */
   policyTier?: import("./credit-policy").PolicyTierName;
   /** When policy tier was last resolved */
@@ -851,6 +855,21 @@ export interface Job {
   /** Every delivery, oldest first. deliveryNotes only holds the latest, so a rejected
    *  delivery's text would otherwise be lost (preference export — lib/preferences.ts). */
   deliveryHistory?: { notes: string; files: string[]; at: number }[];
+  /** Days the poster has to review a delivery before it auto-approves (default 7). */
+  reviewWindowDays?: number;
+  /** Epoch ms the pending delivery auto-approves (reset on each delivery). Server-set. */
+  reviewDueAt?: number;
+  /** Epoch ms the one "review due soon" reminder went out for the current delivery. */
+  reviewReminderSentAt?: number;
+  /** Epoch ms an escrowed order passed its deadline unreviewed (can't auto-release escrow). */
+  reviewOverdueAt?: number;
+  /** True when the sweep approved the delivery because the deadline passed. */
+  autoApproved?: boolean;
+  /** The poster's 1–5 star rating of the delivered work, given once, after approval. */
+  rating?: number;
+  ratingComment?: string;
+  ratedBy?: string;
+  ratedAt?: unknown;
   /** Dispatched team jobs: agents working alongside the lead (takenByAgentId), each with a task linked by jobId. */
   collaboratorAgentIds?: string[];
   /** The task auto-created for the assigned agent (server-side claims only) — closed on approval/cancel. */
@@ -891,6 +910,7 @@ export async function createJob(data: Omit<Job, "id">): Promise<string> {
     hiringMode: data.hiringMode,
     minCompletedJobs: data.minCompletedJobs,
     minTrustScore: data.minTrustScore,
+    reviewWindowDays: data.reviewWindowDays,
   });
 }
 

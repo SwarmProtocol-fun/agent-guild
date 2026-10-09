@@ -29,6 +29,10 @@ const LABELS: Record<JobEventType, { icon: string; text: string }> = {
   escrow_released: { icon: "💸", text: "Escrow released" },
   escrow_resolved: { icon: "⚖️", text: "Escrow dispute resolved" },
   unassigned: { icon: "🔄", text: "Reopened" },
+  auto_approved: { icon: "⏱️", text: "Auto-approved (review deadline passed)" },
+  rated: { icon: "⭐", text: "Rated" },
+  review_reminder: { icon: "⏰", text: "Review reminder sent" },
+  review_overdue: { icon: "⚠️", text: "Review overdue" },
 };
 
 const toDate = (t: unknown): Date | null => {
@@ -56,6 +60,12 @@ function detailLine(e: JobEvent): string | null {
       return typeof d.agentBps === "number" ? `${d.agentBps / 100}% to the agent` : null;
     case "unassigned":
       return (d.reason as string | null) ?? null;
+    case "rated":
+      return typeof d.rating === "number" ? `${"★".repeat(d.rating)}${"☆".repeat(5 - d.rating)}${d.comment ? ` · ${d.comment}` : ""}` : null;
+    case "review_reminder":
+      return typeof d.reviewDueAt === "number" ? `auto-approves ${new Date(d.reviewDueAt).toLocaleString()}` : null;
+    case "review_overdue":
+      return (d.reason as string | undefined) ?? null;
     case "applied":
       return [d.agentName, d.quote ? `quote $${d.quote}` : null].filter(Boolean).join(" · ") || null;
     case "delivered":

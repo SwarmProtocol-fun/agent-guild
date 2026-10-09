@@ -327,6 +327,61 @@ export async function inspectAccount(conn: Connection, address: string, opts: { 
   return report;
 }
 
+// ── Wallet holdings ──────────────────────────────────────────────────────
+
+/** Well-known mints so a holdings list reads as "USDC" rather than a bare address. */
+export const KNOWN_MINTS: Record<string, string> = {
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC",
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU": "USDC (devnet)",
+  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "USDT",
+  So11111111111111111111111111111111111111112: "Wrapped SOL",
+};
+
+export interface TokenHolding {
+  mint: string;
+  symbol: string | null;
+  tokenAccount: string;
+  program: "spl-token" | "spl-token-2022";
+  amount: string;
+  uiAmount: string;
+  decimals: number;
+}
+
+export interface WalletHoldings {
+  address: string;
+  lamports: number;
+  /** Non-empty token accounts, largest first; empty accounts are left out. */
+  tokens: TokenHolding[];
+}
+
+/** SOL balance plus every non-empty SPL Token and Token-2022 account a wallet owns. */
+export async function walletHoldings(conn: Connection, address: string): Promise<WalletHoldings> {
+  const owner = parsePubkey(address);
+  const [lamports, ...byProgram] = await Promise.all([
+    conn.getBalance(owner),
+    ...[TOKEN_PROGRAM, TOKEN_2022_PROGRAM].map((programId) =>
+      conn.getParsedTokenAccountsByOwner(owner, { programId: new PublicKey(programId) })),
+  ]);
+  const tokens: TokenHolding[] = byProgram.flatMap((res, i) =>
+    res.value.flatMap(({ pubkey, account }) => {
+      const data = account.data as { parsed?: { info?: { mint?: string; tokenAmount?: { amount: string; decimals: number; uiAmountString?: string } } } };
+      const info = data.parsed?.info;
+      const amt = info?.tokenAmount;
+      if (!info?.mint || !amt || amt.amount === "0") return [];
+      return [{
+        mint: info.mint,
+        symbol: KNOWN_MINTS[info.mint] ?? null,
+        tokenAccount: pubkey.toBase58(),
+        program: i === 0 ? "spl-token" as const : "spl-token-2022" as const,
+        amount: amt.amount,
+        uiAmount: amt.uiAmountString ?? amt.amount,
+        decimals: amt.decimals,
+      }];
+    }));
+  tokens.sort((a, b) => Number(b.uiAmount) - Number(a.uiAmount));
+  return { address: owner.toBase58(), lamports, tokens };
+}
+
 // ── Transaction inspector ────────────────────────────────────────────────
 
 export interface TxReport {

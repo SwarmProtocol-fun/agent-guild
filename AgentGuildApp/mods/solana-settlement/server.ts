@@ -18,10 +18,11 @@ import {
 import type { InstructionSpec } from "./txbuilder";
 import {
   CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, requireCaller, resolveCaller, capabilityMap, hasCapability,
-  logActivity, activityFor, getDevWallet, ensureDevWallet, sendAsAgent, simulateAsAgent, airdropToAgent,
+  logActivity, activityFor, getDevWallet, DEV_WALLET_LABEL, ensureDevWallet, sendAsAgent, simulateAsAgent, airdropToAgent,
   createTokenAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
 } from "./agent";
 import { AGENT_TOOLS } from "./tools";
+import { listAgentWallets } from "@/lib/agent-wallets";
 
 // ── Request helpers ──────────────────────────────────────────────────────
 
@@ -316,7 +317,7 @@ export default defineServerMod({
         };
       }),
 
-    /** GET /my-agents — the signed-in operator's agents, with each one's Solana upgrades and dev wallet. Session only. */
+    /** GET /my-agents — the signed-in operator's agents, with each one's Solana upgrades, dev wallet and every Solana wallet it has. Session only. */
     "GET /my-agents": (_req, ctx) =>
       handle(async () => {
         if (!ctx.session) throw new AccessError("Sign in to list your agents", 401);
@@ -324,17 +325,23 @@ export default defineServerMod({
         const perOrg = await Promise.all(orgs.map(async (org) => {
           const agents = await getAgentsByOrg(org.id);
           return Promise.all(agents.map(async (agent) => {
-            const caller: Caller = { agentId: agent.id, orgId: org.id, via: "session" };
             // One agent's lookup failing must not hide every agent from the picker.
-            const [capabilities, wallet] = await Promise.all([
+            const [capabilities, custodial] = await Promise.all([
               capabilityMap(agent.id, org.id).catch((err) => {
                 console.warn(`[solana] capabilities for ${agent.id} failed:`, err);
                 return {} as Awaited<ReturnType<typeof capabilityMap>>;
               }),
-              getDevWallet(caller).catch(() => null),
+              listAgentWallets(agent.id).catch(() => []),
             ]);
+            const solanaCustodial = custodial.filter((w) => w.chain === "solana" && w.orgId === org.id);
+            const devWallet = solanaCustodial.find((w) => w.label === DEV_WALLET_LABEL)?.publicKey ?? null;
+            // Every Solana wallet the agent has: its own identity wallet first, then custodial ones, oldest first.
+            const wallets = [
+              ...(agent.solanaAddress ? [{ address: agent.solanaAddress, label: "Identity wallet", custodial: false }] : []),
+              ...solanaCustodial.map((w) => ({ address: w.publicKey, label: w.label === DEV_WALLET_LABEL ? "Dev wallet" : w.label ?? null, custodial: true })),
+            ];
             const isOwner = !!org.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(ctx.session!.address);
-            return { agentId: agent.id, name: agent.name, orgId: org.id, orgName: org.name || org.id, isOwner, capabilities, devWallet: wallet?.address ?? null };
+            return { agentId: agent.id, name: agent.name, orgId: org.id, orgName: org.name || org.id, isOwner, capabilities, devWallet, wallets };
           }));
         }));
         return { agents: perOrg.flat() };

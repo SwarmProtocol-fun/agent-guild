@@ -20,6 +20,15 @@ export interface SelectedAgent {
   isOwner: boolean;
   capabilities: Record<string, boolean>;
   devWallet: string | null;
+  /** Every Solana wallet the agent has — identity wallet first, then custodial ones. */
+  wallets?: AgentSolanaWallet[];
+}
+
+export interface AgentSolanaWallet {
+  address: string;
+  label: string | null;
+  /** Platform-held key (agentWallets) vs. the agent's own identity key. */
+  custodial: boolean;
 }
 
 export interface Env {

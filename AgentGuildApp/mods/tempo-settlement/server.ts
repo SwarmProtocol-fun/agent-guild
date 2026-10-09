@@ -1,13 +1,140 @@
-import { ethers } from "ethers";
 import { Mppx, tempo as mppTempo } from "mppx/server";
-import { defineServerMod } from "@agent-guild/sdk";
-import { settleOnChains, hashJobResult, getBalance, verifyReceipt, tempoAdapter } from "@/lib/settlement/registry";
-import { enforceCapability } from "@/lib/skills";
+import { isAddress } from "viem";
+import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
+import { hashJobResult, verifyReceipt, tempoAdapter } from "@/lib/settlement/registry";
 import { getChain, USDC_DECIMALS } from "@/lib/chains";
+// Admin SDK on the server: lib/skills.ts's resolver uses the browser
+// Firestore SDK, which is unauthenticated here and denied by the rules.
+import { getAgentCapabilities, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { listOrgJobsByStatus } from "@/lib/jobs-admin";
+import { generateAgentWallet, listAgentWallets } from "@/lib/agent-wallets";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
+import type { Job, Organization } from "@/lib/firestore";
+import {
+  claimPayout, getPayoutsByTx, listPayouts, markPayoutsPaid, releasePayouts,
+  type PayoutUnit, type TempoPayout,
+} from "@/lib/mods/tempo-payouts-store";
 
-// Machine Payments Protocol (Stripe/Tempo's HTTP 402 payment standard) —
-// lazily built so a missing MPP_SECRET_KEY degrades /paid/ping to a clear
-// 501 instead of crashing mod setup.
+/**
+ * Tempo payouts. An org owner pays agents for approved jobs in a TIP-20
+ * stablecoin on Tempo; several jobs go out in ONE atomic transaction, and
+ * each transfer's memo carries the job's receipt hash so anyone can check
+ * the payment against the work on-chain. Agents with the "tempo-settle"
+ * upgrade can also settle their own finished tasks (POST /settle).
+ *
+ * Money comes from the platform payout wallet (PLATFORM_SETTLEMENT_KEY) —
+ * testnet funds today. Every unit is claimed in Firestore before the
+ * transfer, so nothing is ever paid twice.
+ */
+
+/** Capability key — must match the agentSkills id on this mod's entry in lib/skills.ts. */
+export const CAP_SETTLE = "tempo-settle";
+const MAX_BATCH = 25;
+
+/** Per-payout ceiling, so one bad request can't drain the payout wallet. */
+function maxPayout(): number {
+  const n = Number(process.env.TEMPO_MAX_PAYOUT_USDC);
+  return Number.isFinite(n) && n > 0 ? n : 100;
+}
+
+class HttpError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
+async function handle(fn: () => Promise<unknown>): Promise<Response> {
+  try {
+    const out = await fn();
+    return out instanceof Response ? out : Response.json(out);
+  } catch (err) {
+    if (err instanceof HttpError) return Response.json({ error: err.message }, { status: err.status });
+    if (err instanceof SyntaxError) return Response.json({ error: "Request body must be JSON" }, { status: 400 });
+    return Response.json({ error: (err as Error).message }, { status: 502 });
+  }
+}
+
+// ── Who's calling ────────────────────────────────────────────────────────
+
+interface CallerOrg { org: Organization; isOwner: boolean }
+
+/** A browser session sees every org its wallet belongs to; a signed agent only its own org. */
+async function callerOrgs(ctx: RouteContext): Promise<CallerOrg[]> {
+  if (!ctx.session?.address) return [];
+  const me = canonicalizeWalletAddress(ctx.session.address);
+  const orgs = await getOrganizationsByWalletAdmin(ctx.session.address);
+  return orgs.map((org) => ({ org, isOwner: !!org.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === me }));
+}
+
+async function callerOrgIds(ctx: RouteContext): Promise<string[]> {
+  if (ctx.agent?.orgId) return [ctx.agent.orgId];
+  return (await callerOrgs(ctx)).map((o) => o.org.id);
+}
+
+async function requireOwner(ctx: RouteContext, orgId: unknown): Promise<Organization> {
+  if (ctx.agent) throw new HttpError("Payouts are sent by an org owner, not an agent", 403);
+  if (typeof orgId !== "string" || !orgId) throw new HttpError("orgId is required", 400);
+  const match = (await callerOrgs(ctx)).find((o) => o.org.id === orgId);
+  if (!match) throw new HttpError("Not a member of this organization", 403);
+  if (!match.isOwner) throw new HttpError("Only the org owner can send payouts", 403);
+  return match.org;
+}
+
+// ── Amounts ──────────────────────────────────────────────────────────────
+
+/**
+ * A job's reward is free text ("150", "$50", "25 USDC", "0.5 SOL"). Only
+ * dollar amounts become a suggested payout; anything else is left for the
+ * owner to type, rather than guessing an exchange rate.
+ */
+export function parseUsdReward(reward: string | undefined): number | null {
+  if (!reward) return null;
+  const m = reward.trim().match(/^\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(usd|usdc|usdt|pathusd|dollars?)?$/i);
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function checkAmount(value: unknown, label: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n <= 0) throw new HttpError(`${label}: amount must be a positive number`, 400);
+  if (Math.round(n * 1_000_000) / 1_000_000 !== n) throw new HttpError(`${label}: amount has more than 6 decimals`, 400);
+  const cap = maxPayout();
+  if (n > cap) throw new HttpError(`${label}: amount is over the ${cap} per-payout limit`, 400);
+  return n;
+}
+
+const evmWallets = async (agentId: string) =>
+  (await listAgentWallets(agentId)).filter((w) => w.chain === "evm").map((w) => ({ address: w.publicKey, label: w.label ?? null }));
+
+/** Approved jobs this org posted that went to an agent and were not already paid some other way. */
+function isPayable(job: Job): boolean {
+  if (!job.takenByAgentId) return false;
+  // Delivery marks a job "completed" with review pending — pay only once the
+  // poster approved it (jobs from before reviews existed have no reviewStatus).
+  if (job.reviewStatus && job.reviewStatus !== "approved") return false;
+  // Escrowed or prepaid gig orders, and Hedera bounties, already moved money.
+  if (job.escrow || job.upfrontVerifiedAt || job.hederaScheduledTxId) return false;
+  return true;
+}
+
+/** Send one atomic batch and record it. Claims must already be held for every unit. */
+async function sendBatch(units: PayoutUnit[], items: { to: string; resultHash: string; amountUsdc: number }[]) {
+  let tx: { txSig: string; explorerUrl: string };
+  try {
+    tx = await tempoAdapter.settleBatch(items);
+  } catch (err) {
+    await releasePayouts(units).catch(() => {});
+    throw new HttpError(`Tempo transaction failed: ${(err as Error).message}`, 502);
+  }
+  const persisted = await markPayoutsPaid(units, tx);
+  return { ...tx, persisted };
+}
+
+function csvEscape(v: string): string {
+  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+// Machine Payments Protocol (HTTP 402) — lazily built so a missing
+// MPP_SECRET_KEY degrades /paid/ping to a clear 501 instead of crashing setup.
 function createMppPayment(secretKey: string) {
   return Mppx.create({ methods: [mppTempo.charge({ testnet: true })], secretKey });
 }
@@ -18,462 +145,208 @@ function getMppPayment() {
   return mppPayment;
 }
 
-interface SettlementRecord {
-  agentId: string;
-  taskId: string;
-  txSig: string;
-  explorerUrl: string;
-  amountUsdc: number;
-  resultHash: string;
-  /** Tempo's API supports payments metadata for invoice reconciliation —
-   *  kept here (not embedded in the on-chain memo) so /verify's on-chain
-   *  comparison stays a simple exact match against the receipt hash. */
-  invoiceRef?: string;
-  /** Client-supplied dedupe key (e.g. a webhook delivery id) — a retried
-   *  webhook with the same key returns the original receipt instead of
-   *  attempting a second on-chain settlement. */
-  idempotencyKey?: string;
-  /** Set when an operator voids/disputes a settlement after the fact.
-   *  Voided records are excluded from totals, stats, and history by
-   *  default but never deleted — the on-chain transaction already happened. */
-  void?: boolean;
-  voidReason?: string;
-  at: string;
-}
-
-// In-memory for the demo panel — see solana-settlement mod for the same note.
-const history: SettlementRecord[] = [];
-const idempotencyIndex = new Map<string, SettlementRecord>();
-
-// Per-agent micropayment meter: accrues small amounts off-chain (e.g. one
-// per request/tick) so a stream of sub-cent charges can be flushed to a
-// single on-chain settlement instead of paying gas per micro-charge —
-// Tempo's stablecoin-native design is built for exactly this pattern.
-interface MeterEntry {
-  agentId: string;
-  orgId: string;
-  pendingUsdc: number;
-  taskIds: string[];
-}
-const meters = new Map<string, MeterEntry>();
-
-interface SettleItem {
-  taskId: string;
-  exitCode?: number;
-  executionTimeMs?: number;
-  stdout?: string;
-  amountUsdc: number;
-  invoiceRef?: string;
-  idempotencyKey?: string;
-}
-
-async function settleOne(
-  agentId: string,
-  agentWallet: string,
-  creditScore: number,
-  trustScore: number,
-  item: SettleItem,
-): Promise<{ ok: true; record: SettlementRecord } | { ok: false; taskId: string; error: string }> {
-  if (item.idempotencyKey) {
-    const existing = idempotencyIndex.get(item.idempotencyKey);
-    if (existing) return { ok: true, record: existing };
-  }
-
-  const resultHash = hashJobResult({
-    taskId: item.taskId,
-    exitCode: item.exitCode ?? 0,
-    executionTimeMs: item.executionTimeMs ?? 0,
-    stdout: item.stdout,
-  });
-
-  const { receipts, errors } = await settleOnChains(["tempo"], {
-    agentId,
-    agentWallet,
-    taskId: item.taskId,
-    resultHash,
-    amountUsdc: item.amountUsdc,
-    creditScore,
-    trustScore,
-  });
-
-  if (receipts.length === 0) {
-    return { ok: false, taskId: item.taskId, error: errors[0]?.error ?? "Settlement failed" };
-  }
-
-  const receipt = receipts[0];
-  const record: SettlementRecord = {
-    agentId,
-    taskId: item.taskId,
-    txSig: receipt.txSig,
-    explorerUrl: receipt.explorerUrl,
-    amountUsdc: item.amountUsdc,
-    resultHash: receipt.receiptHash,
-    invoiceRef: item.invoiceRef,
-    idempotencyKey: item.idempotencyKey,
-    at: new Date().toISOString(),
-  };
-  history.unshift(record);
-  if (history.length > 500) history.length = 500;
-  if (item.idempotencyKey) idempotencyIndex.set(item.idempotencyKey, record);
-
-  return { ok: true, record };
-}
-
-function csvEscape(v: string): string {
-  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-}
-
 export default defineServerMod({
   setup(ctx) {
     ctx.log.info("tempo-settlement mod loaded");
   },
 
   routes: {
-    /**
-     * POST /settle — same contract as the Solana mod's /settle, routed to
-     * Tempo instead. Tempo has no Swarm AgentRegistry deployed yet, so
-     * EvmSettlementAdapter falls back to its calldata-memo path — payment
-     * and receipt still land in one transaction, just without the on-chain
-     * reputation write until a contract is deployed there.
-     *
-     * Body: { orgId, agentId, agentWallet, taskId, exitCode, executionTimeMs,
-     *         stdout?, amountUsdc, creditScore, trustScore, invoiceRef?,
-     *         idempotencyKey? }
-     *
-     * Requires the calling agent to hold the "tempo-settle" capability.
-     * orgId/agentId fall back to the body only for browser-session calls —
-     * a verified agent signature (ctx.agent) always takes precedence.
-     */
-    "POST /settle": async (req, ctx) => {
-      const body = await req.json();
-      const agentId = ctx.agent?.agentId ?? body.agentId;
-      const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { agentWallet, taskId, exitCode, executionTimeMs, stdout, amountUsdc, creditScore, trustScore, invoiceRef, idempotencyKey } = body;
-
-      if (!orgId || !agentId || !agentWallet || !taskId || amountUsdc == null) {
-        return Response.json({ error: "orgId, agentId, agentWallet, taskId, amountUsdc are required" }, { status: 400 });
-      }
-
-      try {
-        await enforceCapability(agentId, orgId, "tempo-settle");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
-
-      const result = await settleOne(agentId, agentWallet, creditScore ?? 680, trustScore ?? 50, {
-        taskId, exitCode, executionTimeMs, stdout, amountUsdc, invoiceRef, idempotencyKey,
-      });
-
-      if (!result.ok) return Response.json({ error: "Settlement failed", details: result.error }, { status: 502 });
-      return Response.json({ receipt: result.record });
-    },
+    /** GET /overview — the payout wallet, its balance, the token, who pays fees, and what's not configured. */
+    "GET /overview": (_req, ctx) => handle(async () => {
+      const [status, orgs] = await Promise.all([tempoAdapter.payoutStatus(), callerOrgs(ctx)]);
+      return {
+        ...status,
+        maxPayoutUsdc: maxPayout(),
+        orgs: orgs.map(({ org, isOwner }) => ({ id: org.id, name: org.name, isOwner })),
+      };
+    }),
 
     /**
-     * POST /settle/batch — settle several completed jobs from the same
-     * agent in ONE atomic Tempo transaction (via the `calls` array on a
-     * Tempo transaction — every transfer+memo either all lands or all
-     * revert together), instead of N sequential transactions. Items with a
-     * previously-used idempotencyKey are resolved from history and skipped
-     * on-chain rather than re-settled.
-     *
-     * Body: { orgId, agentId, agentWallet, settlements: SettleItem[] }
+     * GET /payable?orgId= — approved jobs in this org waiting to be paid,
+     * with the agent's Tempo (EVM) wallets and a suggested amount from the
+     * job's reward. Jobs already paid or in flight are left out.
      */
-    "POST /settle/batch": async (req, ctx) => {
+    "GET /payable": (req, ctx) => handle(async () => {
+      const orgId = new URL(req.url).searchParams.get("orgId");
+      const orgs = await callerOrgs(ctx);
+      const match = orgs.find((o) => o.org.id === orgId);
+      if (!match) throw new HttpError("Not a member of this organization", 403);
+
+      const [{ jobs }, agents, payouts] = await Promise.all([
+        listOrgJobsByStatus(match.org.id, "completed", { limit: 100 }),
+        getAgentsByOrg(match.org.id),
+        listPayouts([match.org.id], 1000),
+      ]);
+      const handled = new Set(payouts.filter((p) => p.jobId).map((p) => p.jobId));
+      const names = new Map(agents.map((a) => [a.id, a.name]));
+      const open = jobs.filter((j) => isPayable(j) && !handled.has(j.id));
+
+      const agentIds = [...new Set(open.map((j) => j.takenByAgentId!))];
+      const wallets = new Map(await Promise.all(agentIds.map(async (id) => [id, await evmWallets(id)] as const)));
+
+      return {
+        jobs: open.map((j) => ({
+          jobId: j.id,
+          title: j.title,
+          reward: j.reward ?? null,
+          suggestedUsdc: parseUsdReward(j.reward),
+          agentId: j.takenByAgentId!,
+          agentName: names.get(j.takenByAgentId!) ?? j.completedByAgentName ?? j.claimedByAgentName ?? null,
+          wallets: wallets.get(j.takenByAgentId!) ?? [],
+        })),
+      };
+    }),
+
+    /**
+     * POST /payouts — pay approved jobs in one atomic Tempo transaction.
+     * Org owner only. Body: { orgId, items: [{ jobId, to, amountUsdc }] }.
+     * `to` must be one of the job's agent's Tempo wallets.
+     */
+    "POST /payouts": (req, ctx) => handle(async () => {
       const body = await req.json();
-      const agentId = ctx.agent?.agentId ?? body.agentId;
-      const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { agentWallet, settlements } = body;
+      const org = await requireOwner(ctx, body.orgId);
+      const raw = Array.isArray(body.items) ? body.items : [];
+      if (raw.length === 0) throw new HttpError("Pick at least one job to pay", 400);
+      if (raw.length > MAX_BATCH) throw new HttpError(`At most ${MAX_BATCH} jobs per payout`, 400);
 
-      if (!orgId || !agentId || !agentWallet || !Array.isArray(settlements) || settlements.length === 0) {
-        return Response.json({ error: "orgId, agentId, agentWallet, settlements[] are required" }, { status: 400 });
-      }
-      if (settlements.length > 25) {
-        return Response.json({ error: "Batch is limited to 25 settlements per call" }, { status: 400 });
-      }
-      if (settlements.some((s: SettleItem) => !s.taskId || s.amountUsdc == null)) {
-        return Response.json({ error: "Every settlement needs taskId and amountUsdc" }, { status: 400 });
-      }
+      const { jobs } = await listOrgJobsByStatus(org.id, "completed", { limit: 100 });
+      const byId = new Map(jobs.map((j) => [j.id, j]));
+      const agents = new Map((await getAgentsByOrg(org.id)).map((a) => [a.id, a.name]));
+      const walletCache = new Map<string, Set<string>>();
 
-      try {
-        await enforceCapability(agentId, orgId, "tempo-settle");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
-
-      const items = settlements as SettleItem[];
-      const already = new Map<string, SettlementRecord>();
-      const pending = items.filter((item) => {
-        if (!item.idempotencyKey) return true;
-        const existing = idempotencyIndex.get(item.idempotencyKey);
-        if (existing) already.set(item.taskId, existing);
-        return !existing;
-      });
-
-      const resultHashes = pending.map((item) => ({
-        item,
-        resultHash: hashJobResult({
-          taskId: item.taskId,
-          exitCode: item.exitCode ?? 0,
-          executionTimeMs: item.executionTimeMs ?? 0,
-          stdout: item.stdout,
-        }),
-      }));
-
-      let receipts: SettlementRecord[] = [...already.values()];
-      let batchError: string | null = null;
-
-      if (resultHashes.length > 0) {
-        try {
-          const { txSig, explorerUrl } = await tempoAdapter.settleBatch(
-            agentWallet,
-            resultHashes.map(({ resultHash, item }) => ({ resultHash, amountUsdc: item.amountUsdc })),
-          );
-          for (const { item, resultHash } of resultHashes) {
-            const record: SettlementRecord = {
-              agentId, taskId: item.taskId, txSig, explorerUrl,
-              amountUsdc: item.amountUsdc, resultHash, invoiceRef: item.invoiceRef,
-              idempotencyKey: item.idempotencyKey, at: new Date().toISOString(),
-            };
-            history.unshift(record);
-            if (item.idempotencyKey) idempotencyIndex.set(item.idempotencyKey, record);
-            receipts.push(record);
-          }
-          if (history.length > 500) history.length = 500;
-        } catch (err) {
-          batchError = (err as Error).message;
+      const planned: { unit: PayoutUnit; payout: TempoPayout }[] = [];
+      const seen = new Set<string>();
+      for (const item of raw) {
+        const job = byId.get(String(item?.jobId));
+        if (!job || !isPayable(job)) throw new HttpError(`Job ${item?.jobId} is not an approved, unpaid job in this org`, 400);
+        if (seen.has(job.id)) throw new HttpError(`Job ${job.id} is listed twice`, 400);
+        seen.add(job.id);
+        const amountUsdc = checkAmount(item.amountUsdc, job.title);
+        const agentId = job.takenByAgentId!;
+        if (!walletCache.has(agentId)) {
+          walletCache.set(agentId, new Set((await evmWallets(agentId)).map((w) => w.address.toLowerCase())));
         }
-      }
-
-      if (batchError) return Response.json({ error: "Batch settlement failed", details: batchError }, { status: 502 });
-      return Response.json({ receipts, settled: receipts.length, batchTxSig: receipts.find((r) => !already.has(r.taskId))?.txSig ?? null });
-    },
-
-    /**
-     * POST /meter/accrue — record a micro-charge against an agent's pending
-     * balance without touching the chain. Call this once per request/tick;
-     * call /meter/flush periodically (or above a threshold) to commit the
-     * accrued total as a single settlement.
-     *
-     * Body: { orgId, agentId, amountUsdc, taskId }
-     */
-    "POST /meter/accrue": async (req, ctx) => {
-      const body = await req.json();
-      const agentId = ctx.agent?.agentId ?? body.agentId;
-      const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { amountUsdc, taskId } = body;
-
-      if (!orgId || !agentId || amountUsdc == null || !taskId) {
-        return Response.json({ error: "orgId, agentId, amountUsdc, taskId are required" }, { status: 400 });
-      }
-
-      try {
-        await enforceCapability(agentId, orgId, "tempo-settle");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
-
-      const entry: MeterEntry = meters.get(agentId) ?? { agentId, orgId, pendingUsdc: 0, taskIds: [] };
-      entry.pendingUsdc += amountUsdc;
-      entry.taskIds.push(taskId);
-      meters.set(agentId, entry);
-
-      return Response.json({ agentId, pendingUsdc: entry.pendingUsdc, meteredTasks: entry.taskIds.length });
-    },
-
-    /** GET /meter/:agentId — view an agent's accrued, not-yet-settled balance. */
-    "GET /meter/:agentId": (_req, { params }) => {
-      const entry = meters.get(params.agentId);
-      return Response.json({
-        agentId: params.agentId,
-        pendingUsdc: entry?.pendingUsdc ?? 0,
-        meteredTasks: entry?.taskIds.length ?? 0,
-      });
-    },
-
-    /**
-     * POST /meter/flush/:agentId — settle the agent's entire pending meter
-     * balance in one on-chain transaction, then clear it.
-     *
-     * Body: { agentWallet, creditScore?, trustScore? }
-     */
-    "POST /meter/flush/:agentId": async (req, { params }) => {
-      const body = await req.json();
-      const { agentWallet, creditScore, trustScore } = body;
-      const entry = meters.get(params.agentId);
-
-      if (!entry || entry.pendingUsdc <= 0) {
-        return Response.json({ error: "Nothing accrued for this agent" }, { status: 400 });
-      }
-      if (!agentWallet) {
-        return Response.json({ error: "agentWallet is required" }, { status: 400 });
-      }
-
-      try {
-        await enforceCapability(params.agentId, entry.orgId, "tempo-settle");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
-
-      const flushTaskId = `meter:${params.agentId}:${Date.now()}`;
-      const result = await settleOne(params.agentId, agentWallet, creditScore ?? 680, trustScore ?? 50, {
-        taskId: flushTaskId,
-        amountUsdc: entry.pendingUsdc,
-        executionTimeMs: 0,
-        exitCode: 0,
-        stdout: `meter flush: ${entry.taskIds.length} accrued charge(s)`,
-      });
-
-      if (!result.ok) return Response.json({ error: "Flush failed", details: result.error }, { status: 502 });
-
-      meters.delete(params.agentId);
-      return Response.json({ receipt: result.record, flushedTaskCount: entry.taskIds.length });
-    },
-
-    /**
-     * POST /void/:txSig — mark a past settlement as voided/disputed. The
-     * on-chain transaction is permanent; this only removes it from totals,
-     * stats, and default history so an operator can flag a bad settlement
-     * (wrong amount, disputed job, etc.) without hiding the record.
-     *
-     * Body: { reason }
-     */
-    "POST /void/:txSig": async (req, { params }) => {
-      const record = history.find((h) => h.txSig === params.txSig);
-      if (!record) return Response.json({ error: "No local record of this tx" }, { status: 404 });
-
-      const body = await req.json().catch(() => ({}));
-      record.void = true;
-      record.voidReason = body.reason || "unspecified";
-
-      return Response.json({ ok: true, record });
-    },
-
-    /**
-     * GET /history — optionally filtered/paginated. Query params: agentId,
-     * taskId, since (ISO timestamp), limit (default 20, max 100),
-     * includeVoid (default false).
-     */
-    "GET /history": (req) => {
-      const url = new URL(req.url);
-      const agentId = url.searchParams.get("agentId");
-      const taskId = url.searchParams.get("taskId");
-      const since = url.searchParams.get("since");
-      const includeVoid = url.searchParams.get("includeVoid") === "true";
-      const limit = Math.min(Number(url.searchParams.get("limit")) || 20, 100);
-
-      const rows = history.filter((h) => {
-        if (!includeVoid && h.void) return false;
-        if (agentId && h.agentId !== agentId) return false;
-        if (taskId && h.taskId !== taskId) return false;
-        if (since && h.at < since) return false;
-        return true;
-      });
-
-      return Response.json({ history: rows.slice(0, limit), total: rows.length });
-    },
-
-    /** GET /agent/:agentId/total — lifetime USDC earned by one agent on Tempo (excludes voided). */
-    "GET /agent/:agentId/total": (_req, { params }) => {
-      const rows = history.filter((h) => h.agentId === params.agentId && !h.void);
-      return Response.json({ agentId: params.agentId, totalUsdc: rows.reduce((s, h) => s + h.amountUsdc, 0), settlementCount: rows.length });
-    },
-
-    /** GET /stats — aggregate settlement analytics across all agents. */
-    "GET /stats": () => {
-      const live = history.filter((h) => !h.void);
-      const byAgent = new Map<string, { agentId: string; totalUsdc: number; count: number }>();
-      for (const h of live) {
-        const entry = byAgent.get(h.agentId) ?? { agentId: h.agentId, totalUsdc: 0, count: 0 };
-        entry.totalUsdc += h.amountUsdc;
-        entry.count += 1;
-        byAgent.set(h.agentId, entry);
-      }
-      const topAgents = [...byAgent.values()].sort((a, b) => b.totalUsdc - a.totalUsdc).slice(0, 5);
-      const totalUsdc = live.reduce((s, h) => s + h.amountUsdc, 0);
-
-      return Response.json({
-        settlementCount: live.length,
-        voidCount: history.length - live.length,
-        totalUsdc,
-        avgUsdc: live.length ? totalUsdc / live.length : 0,
-        uniqueAgents: byAgent.size,
-        topAgents,
-      });
-    },
-
-    /** GET /export — settlement history as a CSV file for accounting/reconciliation. */
-    "GET /export": () => {
-      const header = "agentId,taskId,txSig,amountUsdc,resultHash,invoiceRef,void,voidReason,at";
-      const rows = history.map((h) =>
-        [h.agentId, h.taskId, h.txSig, h.amountUsdc, h.resultHash, h.invoiceRef ?? "", h.void ? "true" : "false", h.voidReason ?? "", h.at]
-          .map((v) => csvEscape(String(v)))
-          .join(","),
-      );
-      const csv = [header, ...rows].join("\n");
-      return new Response(csv, {
-        headers: {
-          "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": 'attachment; filename="tempo-settlements.csv"',
-        },
-      });
-    },
-
-    /** GET /estimate — current Tempo network fee estimate, so a caller can budget before settling. */
-    "GET /estimate": async () => {
-      const chain = getChain("tempo");
-      if (!chain) return Response.json({ error: "Unknown chain: tempo" }, { status: 500 });
-      try {
-        const provider = new ethers.JsonRpcProvider(chain.rpc);
-        const fee = await provider.getFeeData();
-        return Response.json({
-          chain: "tempo",
-          gasPrice: fee.gasPrice?.toString() ?? null,
-          maxFeePerGas: fee.maxFeePerGas?.toString() ?? null,
-          maxPriorityFeePerGas: fee.maxPriorityFeePerGas?.toString() ?? null,
+        const to = String(item.to ?? "");
+        if (!isAddress(to) || !walletCache.get(agentId)!.has(to.toLowerCase())) {
+          throw new HttpError(`${job.title}: pay to one of the agent's own Tempo wallets`, 400);
+        }
+        planned.push({
+          unit: { kind: "job", jobId: job.id },
+          payout: {
+            orgId: org.id, kind: "job", jobId: job.id, jobTitle: job.title,
+            agentId, agentName: agents.get(agentId), to, amountUsdc,
+            resultHash: hashJobResult({ taskId: `job:${job.id}`, exitCode: 0, executionTimeMs: 0, stdout: job.deliveryNotes }),
+            status: "pending", paidBy: canonicalizeWalletAddress(ctx.session!.address), createdAt: new Date().toISOString(),
+          },
         });
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 502 });
       }
-    },
 
-    /** GET /balance/:wallet — live USDC balance, no signing key needed. */
-    "GET /balance/:wallet": async (_req, { params }) => {
-      try {
-        return Response.json(await getBalance("tempo", params.wallet));
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 502 });
+      // Claim every job before paying any. If one is taken, let the rest go.
+      const claimed: PayoutUnit[] = [];
+      for (const { unit, payout } of planned) {
+        const claim = await claimPayout(unit, payout);
+        if (claim.state !== "claimed") {
+          await releasePayouts(claimed).catch(() => {});
+          throw new HttpError(`${payout.jobTitle} is already ${claim.state === "paid" ? "paid" : "being paid"}`, 409);
+        }
+        claimed.push(unit);
       }
-    },
 
-    /** GET /verify/:txSig — re-reads the tx from Tempo and checks the calldata memo. */
-    "GET /verify/:txSig": async (_req, { params }) => {
-      const record = history.find((h) => h.txSig === params.txSig);
-      if (!record) return Response.json({ error: "No local record of this tx" }, { status: 404 });
-      try {
-        return Response.json(await verifyReceipt("tempo", params.txSig, record.resultHash));
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 502 });
+      const tx = await sendBatch(claimed, planned.map(({ payout }) => ({ to: payout.to, resultHash: payout.resultHash, amountUsdc: payout.amountUsdc })));
+      return {
+        ...tx,
+        paid: planned.length,
+        totalUsdc: planned.reduce((s, p) => s + p.payout.amountUsdc, 0),
+      };
+    }),
+
+    /**
+     * POST /wallet — give an agent a Tempo wallet to be paid into (a
+     * platform-held EVM key, same as any custodial agent wallet). Org owner only.
+     * Body: { orgId, agentId }
+     */
+    "POST /wallet": (req, ctx) => handle(async () => {
+      const body = await req.json();
+      const org = await requireOwner(ctx, body.orgId);
+      const agent = (await getAgentsByOrg(org.id)).find((a) => a.id === body.agentId);
+      if (!agent) throw new HttpError("Agent not found in this org", 404);
+      const existing = await evmWallets(agent.id);
+      if (existing.length) return { address: existing[0].address, created: false };
+      const wallet = await generateAgentWallet(agent.id, org.id, canonicalizeWalletAddress(ctx.session!.address), { chain: "evm", label: "Tempo payouts" });
+      return { address: wallet.publicKey, created: true };
+    }),
+
+    /**
+     * POST /settle — an agent settles one of its own finished tasks. Needs
+     * a verified agent signature and the "tempo-settle" upgrade. Pays into
+     * the agent's own Tempo wallet (the first, unless `agentWallet` names
+     * another of its wallets). A retry with the same taskId returns the
+     * first receipt instead of paying again.
+     *
+     * Body: { taskId, amountUsdc, exitCode?, executionTimeMs?, stdout?, agentWallet? }
+     */
+    "POST /settle": (req, ctx) => handle(async () => {
+      if (!ctx.agent) throw new HttpError("POST /settle needs a signed agent request", 401);
+      const { agentId, orgId } = ctx.agent;
+      const body = await req.json();
+      if (!body.taskId) throw new HttpError("taskId is required", 400);
+      const amountUsdc = checkAmount(body.amountUsdc, `task ${body.taskId}`);
+
+      const caps = await getAgentCapabilities(agentId, orgId);
+      if (!caps.some((c) => c.key === CAP_SETTLE)) {
+        throw new HttpError(`Agent ${agentId} doesn't have the "${CAP_SETTLE}" upgrade`, 403);
       }
-    },
 
-    /** GET /invoice/:ref — look up settlements by Tempo's invoice reconciliation metadata. */
-    "GET /invoice/:ref": (_req, { params }) => {
-      const matches = history.filter((h) => h.invoiceRef === params.ref);
-      return Response.json({ invoiceRef: params.ref, settlements: matches, totalUsdc: matches.reduce((s, h) => s + h.amountUsdc, 0) });
+      const wallets = (await evmWallets(agentId)).map((w) => w.address);
+      const to = body.agentWallet ? wallets.find((w) => w.toLowerCase() === String(body.agentWallet).toLowerCase()) : wallets[0];
+      if (!to) throw new HttpError(wallets.length ? "agentWallet is not one of this agent's Tempo wallets" : "This agent has no Tempo wallet yet", 400);
+
+      const unit: PayoutUnit = { kind: "task", agentId, taskId: String(body.taskId) };
+      const payout: TempoPayout = {
+        orgId, kind: "task", taskId: String(body.taskId), agentId, to, amountUsdc,
+        resultHash: hashJobResult({ taskId: String(body.taskId), exitCode: body.exitCode ?? 0, executionTimeMs: body.executionTimeMs ?? 0, stdout: body.stdout }),
+        status: "pending", paidBy: `agent:${agentId}`, createdAt: new Date().toISOString(),
+      };
+      const claim = await claimPayout(unit, payout);
+      if (claim.state === "paid") return { receipt: claim.payout, replayed: true };
+      if (claim.state === "conflict") throw new HttpError("Task already settled for another org", 409);
+      if (claim.state === "pending") throw new HttpError("Settlement already in progress for this task", 409);
+
+      const tx = await sendBatch([unit], [{ to, resultHash: payout.resultHash, amountUsdc }]);
+      return { receipt: { ...payout, status: "paid", txSig: tx.txSig, explorerUrl: tx.explorerUrl }, persisted: tx.persisted };
+    }),
+
+    /** GET /history — this caller's orgs' payouts, newest first. */
+    "GET /history": (_req, ctx) => handle(async () => ({ payouts: await listPayouts(await callerOrgIds(ctx), 100) })),
+
+    /** GET /verify/:txSig — re-read each transfer in the tx and check its memo matches the recorded receipt hash. */
+    "GET /verify/:txSig": (_req, ctx) => handle(async () => {
+      const orgIds = new Set(await callerOrgIds(ctx));
+      const payouts = (await getPayoutsByTx(ctx.params.txSig)).filter((p) => orgIds.has(p.orgId));
+      if (!payouts.length) throw new HttpError("No payout with this transaction in your orgs", 404);
+      const results = await Promise.all(payouts.map((p) => verifyReceipt("tempo", ctx.params.txSig, p.resultHash)));
+      return { found: results.every((r) => r.found), hashVerified: results.every((r) => r.hashVerified), confirmedAt: results[0]?.confirmedAt ?? null };
+    }),
+
+    /** GET /export — this caller's payouts as CSV for accounting. */
+    "GET /export": async (_req, ctx) => {
+      const rows = await listPayouts(await callerOrgIds(ctx), 1000);
+      const header = "paidAt,status,orgId,agentId,agentName,jobId,jobTitle,taskId,to,amount,txHash,receiptHash";
+      const lines = rows.map((p) =>
+        [p.paidAt ?? "", p.status, p.orgId, p.agentId, p.agentName ?? "", p.jobId ?? "", p.jobTitle ?? "", p.taskId ?? "", p.to, p.amountUsdc, p.txSig ?? "", p.resultHash]
+          .map((v) => csvEscape(String(v))).join(","),
+      );
+      return new Response([header, ...lines].join("\n"), {
+        headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="tempo-payouts.csv"' },
+      });
     },
 
     /**
-     * GET /paid/ping — demonstrates Tempo's Machine Payments Protocol (MPP):
-     * an anonymous machine client can pay for this resource inline, in one
-     * HTTP round trip (request → 402 challenge → paid retry → 200 + receipt),
-     * with no session, API key, or signup. `public: true` because that
-     * caller has no platform session — MPP's own challenge/credential
-     * verification is the auth. This endpoint only ever RECEIVES payment;
-     * it never spends funds or calls out to a caller-supplied URL.
-     *
-     * Requires MPP_SECRET_KEY (from an mpp.dev account) and either
-     * TEMPO_MPP_RECIPIENT or TEMPO_TREASURY_ADDRESS to be configured;
-     * returns 501 with a clear reason otherwise.
+     * GET /paid/ping — Machine Payments Protocol (HTTP 402) demo: an
+     * anonymous machine client pays 0.001 inline (request → 402 challenge →
+     * paid retry → 200 + receipt). `public: true` because MPP's own
+     * credential check is the auth. It only ever RECEIVES payment.
+     * Used by GatewayAgent's mpp-fetch executor as a test target.
      */
     "GET /paid/ping": {
       public: true,

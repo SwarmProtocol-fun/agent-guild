@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { parseOrder, describeOrder, type ParsedOrder } from "./orders";
 import { BacktestPanel, type BotSpec } from "./backtest-panel";
+import { activeAssetCtxSubscription, hlWsUrl, parseActiveAssetCtx } from "./oracle";
 
 type Network = "testnet" | "mainnet";
 
@@ -756,28 +757,86 @@ function TradingPanel({ api }: PanelProps) {
 
   // ── Live price, chart, book ────────────────────────────────────────────────
   const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [oraclePx, setOraclePx] = useState<number | null>(null);
+  const [markPx, setMarkPx] = useState<number | null>(null);
+  const [priceFeed, setPriceFeed] = useState<"ws" | "poll">("poll");
   const [chartInterval, setChartInterval] = useState<Interval>("15m");
   const [candles, setCandles] = useState<Candle[] | "loading" | "error">("loading");
   const [book, setBook] = useState<{ bids: BookLevel[]; asks: BookLevel[] } | null>(null);
 
+  // Live prices: Hyperliquid's `activeAssetCtx` WebSocket pushes mid, mark and
+  // the validator oracle price ~1/s. While the socket is down, poll the mod's
+  // price + on-chain oracle routes every 5s, and retry the socket.
   useEffect(() => {
     if (!coin) return;
     let cancelled = false;
+    let ws: WebSocket | null = null;
+    let pollId: ReturnType<typeof setInterval> | null = null;
+    let retryId: ReturnType<typeof setTimeout> | null = null;
     setLivePrice(null);
+    setOraclePx(null);
+    setMarkPx(null);
+    setPriceFeed("poll");
+
     async function poll() {
-      try {
-        const resp = await api(`price/${coin}?network=${network}`);
-        const data = await resp.json();
-        if (!cancelled) setLivePrice(data.price ?? null);
-      } catch {
-        if (!cancelled) setLivePrice(null);
-      }
+      const [mid, oracle] = await Promise.all([
+        api(`price/${coin}?network=${network}`).then((r) => r.json()).catch(() => null),
+        api(`oracle/${coin}?network=${network}`).then((r) => r.json()).catch(() => null),
+      ]);
+      if (cancelled) return;
+      setLivePrice(mid?.price ?? null);
+      setOraclePx(oracle?.oraclePx ?? null);
+      if (oracle?.markPx) setMarkPx(oracle.markPx);
     }
+    function startPolling() {
+      if (pollId || cancelled) return;
+      setPriceFeed("poll");
+      poll();
+      pollId = setInterval(poll, 5000);
+    }
+    function stopPolling() {
+      if (pollId) clearInterval(pollId);
+      pollId = null;
+    }
+    function connect() {
+      if (cancelled || typeof WebSocket === "undefined") return startPolling();
+      try {
+        ws = new WebSocket(hlWsUrl(network));
+      } catch {
+        return startPolling();
+      }
+      ws.onopen = () => ws?.send(JSON.stringify(activeAssetCtxSubscription(coin)));
+      ws.onmessage = (e) => {
+        let px;
+        try {
+          px = parseActiveAssetCtx(JSON.parse(e.data));
+        } catch {
+          return;
+        }
+        if (!px || cancelled || px.coin !== coin) return;
+        stopPolling();
+        setPriceFeed("ws");
+        setLivePrice(px.midPx ?? px.markPx);
+        setOraclePx(px.oraclePx);
+        setMarkPx(px.markPx);
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        startPolling();
+        retryId = setTimeout(connect, 5000);
+      };
+    }
+    connect();
+    // Show a price right away rather than waiting on the socket handshake.
     poll();
-    const id = setInterval(poll, 5000);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stopPolling();
+      if (retryId) clearTimeout(retryId);
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
     };
   }, [coin, network, api]);
 
@@ -1420,6 +1479,13 @@ function TradingPanel({ api }: PanelProps) {
         <span className={`${monoClass} text-lg font-semibold ${coinInfo ? pnlClass(coinInfo.change24hPct) : ""}`}>
           {price != null ? formatPrice(price) : "—"}
         </span>
+        <Stat label="Oracle">
+          <span className="inline-flex items-center gap-1.5" title={priceFeed === "ws" ? "Live via Hyperliquid WebSocket" : "Polling (HyperEVM precompile)"}>
+            <PulseDot tone={priceFeed === "ws" ? "live" : "idle"} />
+            {oraclePx != null ? formatPrice(oraclePx) : "—"}
+          </span>
+        </Stat>
+        <Stat label="Mark">{markPx != null ? formatPrice(markPx) : coinInfo ? formatPrice(coinInfo.markPx) : "—"}</Stat>
         {coinInfo && (
           <>
             <Stat label="24h change"><span className={pnlClass(coinInfo.change24hPct)}>{signed(coinInfo.change24hPct)}%</span></Stat>

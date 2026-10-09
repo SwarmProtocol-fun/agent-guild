@@ -84,8 +84,8 @@ function query(name: string, shape: Shape = { filters: [], order: null, max: nul
       }
       if (shape.after) rows = rows.slice(rows.findIndex(([id]) => id === shape.after) + 1);
       if (shape.max !== null) rows = rows.slice(0, shape.max);
-      const docs = rows.map(([id, e]) => ({ id, data: () => ({ ...e.data }) }));
-      return { docs, size: docs.length };
+      const docs = rows.map(([id, e]) => ({ id, ref: docRef(name, id), data: () => ({ ...e.data }) }));
+      return { docs, size: docs.length, empty: docs.length === 0 };
     },
   };
 }
@@ -111,6 +111,10 @@ const adminDbFake = {
       const tx = {
         get: async (r: ReturnType<typeof docRef>) => { const s = await r.get(); reads.push([r, s.__v]); return s; },
         update: (r: ReturnType<typeof docRef>, p: Data) => { writes.push([r, p]); },
+        create: (r: ReturnType<typeof docRef>, p: Data) => {
+          if (col(r.__col).has(r.id)) throw Object.assign(new Error("6 ALREADY_EXISTS"), { code: 6 });
+          writes.push([r, p]);
+        },
       };
       const result = await fn(tx);
       await Promise.resolve(); // let a concurrent transaction interleave, as on a real backend
@@ -141,7 +145,9 @@ import {
   claimJob,
   createJob,
   dispatchJob,
+  rateJob,
   reopenJob,
+  sweepReviews,
   getJob,
   hireApplicant,
   reviewDelivery,
@@ -400,4 +406,82 @@ describe("applications", () => {
     await applyToJob({ jobId, orgId: "org1", agentId: "agentB", agentName: "Bob" });
     expect((await getJob(jobId))?.applicationCount).toBe(2);
   });
+
+  it("stamps a review deadline on each delivery and restarts it on redelivery", async () => {
+    const jobId = await postJob({ reviewWindowDays: 3 });
+    await claimJob(jobId, "agentA", "org1", "p1", "Ada");
+    const t0 = Date.now();
+    await submitJobDelivery(jobId, { deliveryNotes: "v1", completedByAgentName: "Ada" });
+    const due1 = (await getJob(jobId))!.reviewDueAt!;
+    expect(due1 - t0).toBeGreaterThanOrEqual(3 * DAY - 1000);
+    expect(due1 - t0).toBeLessThanOrEqual(3 * DAY + 1000);
+    col("jobs").get(jobId)!.data.reviewReminderSentAt = 1;
+    await reviewDelivery(jobId, { approve: false, notes: "redo" }, user);
+    await submitJobDelivery(jobId, { deliveryNotes: "v2", completedByAgentName: "Ada" });
+    expect((await getJob(jobId))!.reviewReminderSentAt).toBeUndefined();
+  });
+
+  it("rates approved work once, into the agent's average", async () => {
+    const deliveredJob = async () => {
+      const id = await postJob();
+      await claimJob(id, "agentA", "org1", "p1", "Ada");
+      await submitJobDelivery(id, { deliveryNotes: "v1", completedByAgentName: "Ada" });
+      return id;
+    };
+    const j1 = await deliveredJob();
+    await expect(rateJob(j1, { rating: 5, comment: "" }, user)).rejects.toMatchObject({ status: 409 }); // not approved yet
+    await reviewDelivery(j1, { approve: true, notes: "" }, user);
+    const rated = await rateJob(j1, { rating: 5, comment: "excellent" }, user);
+    expect(rated).toMatchObject({ rating: 5, ratingComment: "excellent", ratedBy: "0xposter" });
+    await expect(rateJob(j1, { rating: 1, comment: "" }, user)).rejects.toMatchObject({ status: 409 });
+
+    const j2 = await deliveredJob();
+    await reviewDelivery(j2, { approve: true, notes: "" }, user);
+    await rateJob(j2, { rating: 2, comment: "" }, user);
+    expect(col("agents").get("agentA")?.data).toMatchObject({ ratingSum: 7, ratingCount: 2, avgRating: 3.5 });
+    expect((await getJobEvents(j1)).at(-1)).toMatchObject({ type: "rated", details: { rating: 5, agentId: "agentA" } });
+  });
+
+  it("rating a gig order also reviews the gig listing", async () => {
+    col("gigs").set("g1", { data: { avgRating: 4, ratingCount: 1 }, v: 1 });
+    col("jobs").set("order1", { data: {
+      orgId: "org1", gigId: "g1", sellerOrgId: "org2", status: "completed", reviewStatus: "approved", takenByAgentId: "agentA",
+    }, v: 1 });
+    await rateJob("order1", { rating: 2, comment: "late" }, user);
+    expect(col("gigs").get("g1")?.data).toMatchObject({ avgRating: 3, ratingCount: 2 });
+    expect(col("gigReviews").get("order1")?.data).toMatchObject({ gigId: "g1", rating: 2, review: "late" });
+    expect(col("agents").get("agentA")?.data.avgRating).toBe(2);
+  });
+
+  it("sweeps: starts legacy clocks, reminds once, auto-approves, flags escrow it can't release", async () => {
+    const delivered = async (extra: Record<string, unknown> = {}) => {
+      const id = await postJob();
+      await claimJob(id, "agentA", "org1", "p1", "Ada");
+      await submitJobDelivery(id, { deliveryNotes: "v1", completedByAgentName: "Ada" });
+      Object.assign(col("jobs").get(id)!.data, extra);
+      return id;
+    };
+    const now = Date.now();
+    const legacy = await delivered();
+    delete col("jobs").get(legacy)!.data.reviewDueAt;
+    const soon = await delivered({ reviewDueAt: now + DAY / 2 });
+    const overdue = await delivered({ reviewDueAt: now - 1 });
+    const escrowed = await delivered({ reviewDueAt: now - 1, escrow: { status: "delivered" } });
+    const fresh = await delivered();
+
+    const r1 = await sweepReviews(now);
+    expect(r1).toMatchObject({ clockStarted: [legacy], reminded: [soon], autoApproved: [overdue], flaggedOverdue: [escrowed], errors: [] });
+    expect(r1.checked).toBe(5);
+    expect(await getJob(overdue)).toMatchObject({ status: "completed", reviewStatus: "approved", autoApproved: true });
+    expect(col("agents").get("agentA")?.data.tasksCompleted).toBe(3); // credited like any approval
+    expect((await getJobEvents(overdue)).at(-1)).toMatchObject({ type: "auto_approved", actor: { type: "system" } });
+    expect((await getJob(legacy))!.reviewDueAt).toBeGreaterThan(now); // a fresh window, not instant approval
+    expect((await getJob(fresh))!.reviewStatus).toBe("pending");
+
+    // Second run: nothing repeats.
+    const r2 = await sweepReviews(now);
+    expect([r2.reminded, r2.autoApproved, r2.flaggedOverdue, r2.clockStarted]).toEqual([[], [], [], []]);
+  });
 });
+
+const DAY = 86_400_000;

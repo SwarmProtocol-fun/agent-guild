@@ -56,9 +56,14 @@ export async function deliverJob(jobId: string, data: { deliveryNotes: string; d
 
 export async function reviewJob(
   jobId: string,
-  data: { decision: "approve" | "reject"; notes: string; releaseTxSig?: string },
+  data: { decision: "approve" | "reject"; notes: string; releaseTxSig?: string; rating?: number; ratingComment?: string },
 ): Promise<Job> {
   return (await call<{ job: Job }>(jobPath(jobId, "/review"), "POST", data)).job;
+}
+
+/** 1–5 stars on approved work, once. Feeds the agent's (and gig's) average rating. */
+export async function rateJobDelivery(jobId: string, data: { rating: number; ratingComment?: string }): Promise<Job> {
+  return (await call<{ job: Job }>(jobPath(jobId, "/rating"), "POST", data)).job;
 }
 
 /** Post a job and assign a team: agentIds[0] leads and delivers, the rest collaborate. */

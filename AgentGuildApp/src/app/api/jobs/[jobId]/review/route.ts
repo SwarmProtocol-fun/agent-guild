@@ -15,12 +15,15 @@
  *                  successful approve_delivery on this order's Task PDA,
  *                  signed by the order's poster wallet.
  *
+ *   rating        — approve only, optional: 1–5 stars for the work (see
+ *                   POST /rating); ratingComment — optional text with it.
+ *
  * Approve → job completed/approved, agent's completed-job count +1, task closed.
  * Reject  → job back to in_progress; the agent delivers again (a new revision).
  */
 import { NextRequest } from "next/server";
-import { recordEscrowReleased, reviewDelivery } from "@/lib/jobs-admin";
-import { validateReview } from "@/lib/job-lifecycle";
+import { rateJob, recordEscrowReleased, reviewDelivery } from "@/lib/jobs-admin";
+import { validateRating, validateReview } from "@/lib/job-lifecycle";
 import { verifyEscrowTx } from "@/lib/solana/escrow-tx-verify";
 import { userActor } from "@/lib/job-audit";
 import { jobErrorResponse, loadJobForMember, readJson } from "@/lib/job-route-auth";
@@ -34,6 +37,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ job
   const body = await readJson(req);
   const review = validateReview(body);
   if (!review.ok) return Response.json({ error: review.error }, { status: 400 });
+  const rating = validateRating(body, false);
+  if (!rating.ok) return Response.json({ error: rating.error }, { status: 400 });
+  if (rating.value && !review.value.approve) {
+    return Response.json({ error: "A rating goes with an approval — rate the work once it's approved" }, { status: 400 });
+  }
 
   const rawSig = (body as { releaseTxSig?: unknown }).releaseTxSig;
   const releaseTxSig = typeof rawSig === "string" && rawSig.trim() ? rawSig.trim() : null;
@@ -54,7 +62,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ job
     if (review.value.approve && escrowLocked && releaseTxSig) {
       await recordEscrowReleased(jobId, releaseTxSig, userActor(wallet));
     }
-    const updated = await reviewDelivery(jobId, review.value, userActor(wallet));
+    let updated = await reviewDelivery(jobId, review.value, userActor(wallet));
+    if (rating.value) {
+      try {
+        updated = await rateJob(jobId, rating.value, userActor(wallet));
+      } catch (err) {
+        // The approval stands either way — report the rating failure separately.
+        return Response.json({ ok: true, job: updated, ratingError: err instanceof Error ? err.message : "Failed to save rating" });
+      }
+    }
     return Response.json({ ok: true, job: updated });
   } catch (err) {
     return jobErrorResponse(err, "Failed to review delivery");

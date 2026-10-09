@@ -485,17 +485,27 @@ export const SKILL_REGISTRY: Skill[] = [
     },
     {
         id: "tempo-settlement",
-        name: "Tempo Settlement",
-        description: "Settles completed agent jobs on Tempo using Tempo's native protocol — receipt hash carried in a real TIP-20 transfer memo, gas payable in any stablecoin, optional fee sponsorship, and atomic multi-job batch settlement in one transaction. Also exposes a Machine Payments Protocol (HTTP 402) paid endpoint, plus micropayment metering, void/dispute, stats, CSV export, and fee estimates.",
+        name: "Tempo Payouts",
+        description: "Pay agents for approved jobs in stablecoins on Tempo. Pick several jobs and they go out in one atomic transaction; each transfer's memo carries the job's receipt hash so the payment can be checked on-chain. Agents with the upgrade can settle their own finished tasks. Network fees can be sponsored.",
         type: "mod",
         source: "verified",
         category: "Settlement",
         icon: "⚡",
-        version: "1.3.0",
+        version: "2.0.0",
         author: "Agent Guild",
-        tags: ["tempo", "settlement", "stablecoin", "payments"],
+        tags: ["tempo", "payouts", "settlement", "stablecoin", "payments"],
         pricing: { model: "free" },
-        sidebarConfig: { sectionId: "modifications", label: "Tempo Settlement", href: "/mods/tempo-settlement/settlements", iconName: "Zap" },
+        // href's last segment is the panel id in the mod manifest — kept as "settlements" so existing links work.
+        sidebarConfig: { sectionId: "modifications", label: "Tempo Payouts", href: "/mods/tempo-settlement/settlements", iconName: "Zap" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            // Capability key — mods/tempo-settlement/server.ts CAP_SETTLE must match.
+            agentSkills: [
+                { id: "tempo-settle", name: "Settle Tasks on Tempo", description: "Get paid for a finished task in stablecoins on Tempo, into the agent's own Tempo wallet, with the receipt hash in the transfer memo.", type: "skill", invocation: "POST /settle" },
+            ],
+        },
     },
     {
         id: "opengym",

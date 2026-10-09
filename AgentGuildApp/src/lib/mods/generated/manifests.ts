@@ -108,9 +108,9 @@ export const MOD_MANIFESTS: ModManifest[] = [
   },
   {
     "id": "tempo-settlement",
-    "name": "Tempo Settlement",
-    "version": "1.3.0",
-    "description": "Settles completed agent jobs on Tempo using Tempo's native protocol (viem/tempo) — receipt hash carried in a real TIP-20 transfer memo, gas payable in any stablecoin, optional fee sponsorship, and atomic multi-job batch settlement in one transaction. Also exposes a Machine Payments Protocol (HTTP 402) paid endpoint, plus micropayment metering, void/dispute, stats, CSV export, and fee estimates.",
+    "name": "Tempo Payouts",
+    "version": "2.0.0",
+    "description": "Pay agents for approved jobs in stablecoins on Tempo. Pick several jobs and they go out in one atomic transaction; each transfer's memo carries the job's receipt hash so the payment can be checked on-chain. Agents with the upgrade can settle their own finished tasks. Network fees can be sponsored.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [
@@ -123,7 +123,7 @@ export const MOD_MANIFESTS: ModManifest[] = [
     "panels": [
       {
         "id": "settlements",
-        "title": "Tempo Settlement",
+        "title": "Tempo Payouts",
         "icon": "Zap"
       }
     ]

@@ -34,7 +34,6 @@ import {
   getJobApplications,
   getCompletedJobsByAgent,
   getGigReviewByJob,
-  addGigReview,
   type Job,
   type JobComment,
   type Agent,
@@ -51,6 +50,7 @@ import {
   deliverJob,
   editJob,
   hireApplication,
+  rateJobDelivery,
   reviewJob,
   reviseApplication,
 } from "@/lib/jobs-client";
@@ -166,6 +166,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   // Gig order review (buyer rates the seller after approval)
   const [gigReview, setGigReview] = useState<GigReview | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
+  /** Optional stars given in the approve dialog (0 = none). */
+  const [approveRating, setApproveRating] = useState(0);
   const [reviewText, setReviewText] = useState("");
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewSubmitError, setReviewSubmitError] = useState<string | null>(null);
@@ -259,7 +261,9 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
         decision: reviewAction,
         notes: reviewNotes,
         ...(releaseTxSig ? { releaseTxSig } : {}),
+        ...(reviewAction === 'approve' && approveRating > 0 ? { rating: approveRating } : {}),
       });
+      setApproveRating(0);
 
       if (job.projectId && currentOrg) {
         try {
@@ -382,19 +386,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
   };
 
   const handleSubmitReview = async () => {
-    if (!job || !job.gigId || !currentOrg) return;
+    if (!job) return;
     setSubmittingReview(true);
     setReviewSubmitError(null);
     try {
-      await addGigReview({
-        gigId: job.gigId,
-        jobId: job.id,
-        orgId: currentOrg.id,
-        authorAddress: address || "",
+      const updated = await rateJobDelivery(job.id, {
         rating: reviewRating,
-        review: reviewText.trim() || undefined,
+        ...(reviewText.trim() ? { ratingComment: reviewText.trim() } : {}),
       });
-      setGigReview(await getGigReviewByJob(job.id));
+      setJob(updated);
+      setAuditKey((k) => k + 1);
       setReviewText("");
     } catch (error) {
       console.error("Failed to submit review:", error);
@@ -734,6 +735,11 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                               {applicant?.trustScore != null && (
                                 <span className="text-[11px] text-muted-foreground flex items-center gap-0.5"><Star className="h-3 w-3" />{applicant.trustScore} trust</span>
                               )}
+                              {applicant?.ratingCount ? (
+                                <span className="text-[11px] text-muted-foreground" title="Average rating from job posters">
+                                  ★ {applicant.avgRating?.toFixed(1)} ({applicant.ratingCount})
+                                </span>
+                              ) : null}
                               {applicant?.tasksCompleted != null && (
                                 <span className="text-[11px] text-muted-foreground">{applicant.tasksCompleted} jobs completed</span>
                               )}
@@ -908,11 +914,21 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
             </Card>
           )}
 
-          {job.gigId && job.reviewStatus === 'approved' && (
+          {job.reviewStatus === 'approved' && (typeof job.rating === "number" || gigReview || isBuyer) && (
             <Card>
-              <CardHeader><CardTitle className="flex items-center gap-2"><Star className="h-5 w-5 text-amber-500" />Rate {job.claimedByAgentName || "the seller"}</CardTitle></CardHeader>
+              <CardHeader><CardTitle className="flex items-center gap-2"><Star className="h-5 w-5 text-amber-500" />{typeof job.rating === "number" || gigReview ? "Rating" : `Rate ${job.claimedByAgentName || job.completedByAgentName || "the work"}`}</CardTitle></CardHeader>
               <CardContent className="space-y-4">
-                {gigReview ? (
+                {typeof job.rating === "number" ? (
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-0.5" aria-label={`${job.rating} out of 5 stars`}>
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <Star key={n} className={cn("h-4 w-4", n <= job.rating! ? "fill-amber-400 text-amber-400" : "text-muted-foreground")} />
+                      ))}
+                    </div>
+                    {job.ratingComment && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{job.ratingComment}</p>}
+                    {Boolean(job.ratedAt) && <div className="text-xs text-muted-foreground">Rated {fmtDateTime(job.ratedAt)}</div>}
+                  </div>
+                ) : gigReview ? (
                   <div className="space-y-1">
                     <div className="flex items-center gap-0.5">
                       {[1, 2, 3, 4, 5].map((n) => (
@@ -936,9 +952,12 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                         </button>
                       ))}
                     </div>
+                    {job.autoApproved && (
+                      <p className="text-xs text-muted-foreground">This delivery was auto-approved after the review deadline. You can still rate it.</p>
+                    )}
                     <Textarea placeholder="How did it go? (optional)" value={reviewText} onChange={(e) => setReviewText(e.target.value)} rows={3} />
                     <Button onClick={handleSubmitReview} disabled={submittingReview} className="bg-amber-600 hover:bg-amber-700 text-white">
-                      {submittingReview ? "Submitting..." : "Submit Review"}
+                      {submittingReview ? "Submitting..." : "Submit Rating"}
                     </Button>
                   </>
                 )}
@@ -986,6 +1005,13 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                   <div>
                     <div className="font-medium mb-1">Review Required</div>
                     <div className="text-sm text-muted-foreground">This job has been completed and is awaiting your review.</div>
+                    {typeof job.reviewDueAt === "number" && (
+                      <div className="text-xs mt-2 text-amber-700 dark:text-amber-400">
+                        {job.reviewOverdueAt
+                          ? "Review deadline passed. This escrowed order can't auto-approve; approve it or file a dispute."
+                          : `Auto-approves ${new Date(job.reviewDueAt).toLocaleString()} if not reviewed.`}
+                      </div>
+                    )}
                   </div>
                 </div>
               </CardContent>
@@ -1114,6 +1140,26 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               <label className="text-sm font-medium mb-2 block">Feedback {reviewAction === 'reject' && <span className="text-destructive">*</span>}</label>
               <Textarea placeholder={reviewAction === 'approve' ? "Great work! (optional)" : "Please explain what needs to be changed..."} value={reviewNotes} onChange={(e) => setReviewNotes(e.target.value)} rows={4} />
             </div>
+            {reviewAction === 'approve' && (
+              <div>
+                <label className="text-sm font-medium mb-2 block">Rate the work (optional)</label>
+                <div className="flex items-center gap-1" role="radiogroup" aria-label="Rating">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      role="radio"
+                      aria-checked={approveRating === n}
+                      aria-label={`${n} star${n === 1 ? "" : "s"}`}
+                      onClick={() => setApproveRating(approveRating === n ? 0 : n)}
+                    >
+                      <Star className={cn("h-6 w-6 transition-colors", n <= approveRating ? "fill-amber-400 text-amber-400" : "text-muted-foreground hover:text-amber-300")} />
+                    </button>
+                  ))}
+                  {approveRating > 0 && <span className="text-xs text-muted-foreground ml-2">Counts toward the agent&apos;s rating</span>}
+                </div>
+              </div>
+            )}
             {reviewError && (
               <div className="p-2.5 rounded-md bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-400">
                 {reviewError}

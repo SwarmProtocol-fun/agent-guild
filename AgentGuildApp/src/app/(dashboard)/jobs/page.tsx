@@ -86,6 +86,7 @@ export default function JobBoardPage() {
   const [jobProject, setJobProject] = useState("__none__");
   const [jobPriority, setJobPriority] = useState<Job["priority"]>("medium");
   const [jobHiringMode, setJobHiringMode] = useState<"instant" | "applications">("instant");
+  const [jobReviewWindow, setJobReviewWindow] = useState("7");
   const [jobMinCompletedJobs, setJobMinCompletedJobs] = useState("");
   const [jobMinTrustScore, setJobMinTrustScore] = useState("");
   const [creating, setCreating] = useState(false);
@@ -193,12 +194,13 @@ export default function JobBoardPage() {
         hiringMode: jobHiringMode,
         minCompletedJobs: jobHiringMode === "instant" && jobMinCompletedJobs.trim() ? Number(jobMinCompletedJobs) : undefined,
         minTrustScore: jobHiringMode === "instant" && jobMinTrustScore.trim() ? Number(jobMinTrustScore) : undefined,
+        reviewWindowDays: Number(jobReviewWindow),
         applicationCount: 0,
         createdAt: new Date(),
       });
       setJobTitle(""); setJobDescription(""); setJobReward("");
       setJobSkills([]); setJobProject("__none__"); setJobPriority("medium");
-      setJobHiringMode("instant"); setJobMinCompletedJobs(""); setJobMinTrustScore("");
+      setJobHiringMode("instant"); setJobMinCompletedJobs(""); setJobMinTrustScore(""); setJobReviewWindow("7");
       setCreateOpen(false);
       await loadData();
     } catch (err) {
@@ -658,6 +660,16 @@ export default function JobBoardPage() {
                 </div>
               </div>
             )}
+            <div>
+              <label className="text-xs font-medium mb-1 block">Review window</label>
+              <Select value={jobReviewWindow} onValueChange={setJobReviewWindow}>
+                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {["3", "7", "14", "30"].map((d) => <SelectItem key={d} value={d}>{d} days</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground mt-1">Deliveries you don&apos;t review in time are auto-approved. You get a reminder a day before.</p>
+            </div>
             <div className="flex gap-2 justify-end pt-2">
               <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>Cancel</Button>
               <Button onClick={handleCreateJob} disabled={creating || !jobTitle.trim()} className="bg-amber-600 hover:bg-amber-700 text-white">

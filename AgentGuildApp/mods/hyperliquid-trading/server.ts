@@ -62,6 +62,7 @@ import {
   type AiPosition,
 } from "./ai-trader-core";
 import type { Candle } from "./indicators";
+import { findPerpAsset, readOraclePxOnchain, type PerpAssetMeta } from "./oracle";
 
 type HlNetwork = "testnet" | "mainnet";
 
@@ -91,6 +92,48 @@ async function getMidPrice(coin: string, network: HlNetwork): Promise<number> {
   const px = Number(mids[coin]);
   if (!px) throw new Error(`No mid price for ${coin}`);
   return px;
+}
+
+type PerpUniverse = { name: string; szDecimals: number }[];
+const universeCache = new Map<HlNetwork, { at: number; universe: PerpUniverse }>();
+
+/** Perp universe (asset index = position) — cached a minute, since listings change rarely. */
+async function getPerpUniverse(network: HlNetwork): Promise<PerpUniverse> {
+  const hit = universeCache.get(network);
+  if (hit && Date.now() - hit.at < 60_000) return hit.universe;
+  const meta = await hlInfo<{ universe: PerpUniverse }>({ type: "meta" }, network);
+  universeCache.set(network, { at: Date.now(), universe: meta.universe });
+  return meta.universe;
+}
+
+interface OracleReading {
+  coin: string;
+  oraclePx: number;
+  markPx: number | null;
+  source: "onchain" | "api";
+}
+
+/**
+ * Oracle price for one perp. `onchain` reads HyperEVM's 0x…0807 precompile
+ * and falls back to the Info API if the RPC is down; `api` goes straight to
+ * `metaAndAssetCtxs` (which also carries markPx).
+ */
+async function getOraclePrice(coin: string, network: HlNetwork, source: "onchain" | "api"): Promise<OracleReading> {
+  if (source === "onchain") {
+    const asset: PerpAssetMeta | null = findPerpAsset(await getPerpUniverse(network), coin);
+    if (!asset) throw new Error(`Unknown perp: ${coin}`);
+    try {
+      return { coin, oraclePx: await readOraclePxOnchain(asset, network), markPx: null, source: "onchain" };
+    } catch {
+      // RPC hiccup — the Info API serves the same oracle value
+    }
+  }
+  type Ctx = { oraclePx: string; markPx: string };
+  const [meta, ctxs] = await hlInfo<[{ universe: PerpUniverse }, Ctx[]]>({ type: "metaAndAssetCtxs" }, network);
+  const asset = findPerpAsset(meta.universe, coin);
+  const ctx = asset ? ctxs[asset.index] : undefined;
+  if (!ctx) throw new Error(`Unknown perp: ${coin}`);
+  return { coin, oraclePx: Number(ctx.oraclePx), markPx: Number(ctx.markPx) || null, source: "api" };
 }
 
 /** The full set of perp coins currently tradeable on Hyperliquid — used by the "new-listing" sniper mode. */
@@ -827,6 +870,13 @@ const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: { coin: { type: "string", description: "Perp symbol, e.g. ETH, BTC, SOL" } }, required: ["coin"] },
   },
   {
+    name: "hyperliquid_oracle",
+    description: "Validator oracle price for one perp (the price funding and mark are anchored to; updates every ~3s). Read on-chain from the HyperEVM precompile by default.",
+    method: "GET",
+    path: "oracle/{coin}",
+    input_schema: { type: "object", properties: { coin: { type: "string", description: "Perp symbol, e.g. ETH, BTC, SOL" } }, required: ["coin"] },
+  },
+  {
     name: "hyperliquid_account",
     description: "Account value and margin used for a Hyperliquid wallet address.",
     method: "GET",
@@ -1193,6 +1243,18 @@ export default defineServerMod({
         const network = (new URL(req.url).searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
         const price = await getMidPrice(params.coin, network);
         return Response.json({ coin: params.coin, price });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /** GET /oracle/:coin?network=testnet|mainnet&source=onchain|api — validator oracle price (HyperEVM precompile by default). */
+    "GET /oracle/:coin": async (req, { params }) => {
+      try {
+        const url = new URL(req.url);
+        const network = (url.searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
+        const source = url.searchParams.get("source") === "api" ? "api" : "onchain";
+        return Response.json(await getOraclePrice(params.coin, network, source));
       } catch (err) {
         return Response.json({ error: (err as Error).message }, { status: 502 });
       }

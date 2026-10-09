@@ -4,7 +4,7 @@ import type { Idl } from "@coral-xyz/anchor";
 import type { ServerMod, RouteContext } from "../sdk";
 import {
   derivePda, seedToBytes, pdaSnippet, parseErrorCode, decodeProgramError, detectInput, explorerUrl,
-  toPlainJson, SYSTEM_PROGRAM, TOKEN_PROGRAM, DevtoolsInputError,
+  toPlainJson, walletHoldings, SYSTEM_PROGRAM, TOKEN_PROGRAM, TOKEN_2022_PROGRAM, DevtoolsInputError,
 } from "../../../../mods/solana-settlement/devtools";
 
 vi.mock("@/lib/skills", () => ({
@@ -145,5 +145,36 @@ describe("server /dev routes", () => {
     const res = await call("GET", "/dev/error/0x7d6");
     expect(res.status).toBe(200);
     expect((await res.json()).decoded).toMatchObject({ code: 2006, name: "ConstraintSeeds" });
+  });
+});
+
+describe("walletHoldings", () => {
+  const owner = new PublicKey(PROGRAM).toBase58();
+  const tokenAccount = (mint: string, amount: string, decimals: number) => ({
+    pubkey: PublicKey.unique(),
+    account: { data: { parsed: { info: { mint, tokenAmount: { amount, decimals, uiAmountString: String(Number(amount) / 10 ** decimals) } } } } },
+  });
+
+  it("returns SOL plus non-empty SPL and Token-2022 balances, largest first", async () => {
+    const conn = {
+      getBalance: vi.fn(async () => 1_500_000_000),
+      getParsedTokenAccountsByOwner: vi.fn(async (_o: PublicKey, { programId }: { programId: PublicKey }) => ({
+        value: programId.toBase58() === TOKEN_PROGRAM
+          ? [tokenAccount("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "2500000", 6), tokenAccount(SYSTEM_PROGRAM, "0", 9)]
+          : programId.toBase58() === TOKEN_2022_PROGRAM ? [tokenAccount(PROGRAM, "4200", 2)] : [],
+      })),
+    };
+    const out = await walletHoldings(conn as never, owner);
+    expect(out.lamports).toBe(1_500_000_000);
+    expect(out.tokens.map((t) => [t.symbol, t.uiAmount, t.program])).toEqual([
+      [null, "42", "spl-token-2022"],
+      ["USDC", "2.5", "spl-token"],
+    ]);
+  });
+
+  it("rejects a bad address before touching the RPC", async () => {
+    const conn = { getBalance: vi.fn(), getParsedTokenAccountsByOwner: vi.fn() };
+    await expect(walletHoldings(conn as never, "nope")).rejects.toBeInstanceOf(DevtoolsInputError);
+    expect(conn.getBalance).not.toHaveBeenCalled();
   });
 });
