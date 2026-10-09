@@ -1,0 +1,214 @@
+{
+ "key": "0x0123456789012345678901234567890123456789012345678901234567890123",
+ "address": "0x14791697260E4c9A71f18484C9f997B308e59325",
+ "cases": [
+  {
+   "name": "ioc-buy-btc",
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": true,
+      "p": "101234",
+      "s": "0.00123",
+      "r": false,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "nonce": 1760000000000,
+   "mainnet": false,
+   "hash": "0xf81a1999ccd7f4128fae1e280add7bc9696b68d4b45da046d28c2f51d68eadd3",
+   "signature": {
+    "r": "0xa30fc5bb2e1b89418a955563bc6e70683db348fd98e860ac44bb6a8304b59acb",
+    "s": "0x2e3193f2ae00be56eeb289a239e9a65d5161a166ae359e169de81668af78b424",
+    "v": 27
+   }
+  },
+  {
+   "name": "ioc-buy-btc-mainnet",
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 0,
+      "b": true,
+      "p": "101234",
+      "s": "0.00123",
+      "r": false,
+      "t": {
+       "limit": {
+        "tif": "Ioc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "nonce": 1760000000000,
+   "mainnet": true,
+   "hash": "0xf81a1999ccd7f4128fae1e280add7bc9696b68d4b45da046d28c2f51d68eadd3",
+   "signature": {
+    "r": "0x92f12e99b65b2007f761f98ef39904f50e8f48fbe16779d4c8d943b2a68f8271",
+    "s": "0x2d353de95318cc6bafb6c4cf6ee6aadc1384b9526bf3668e7180fea7b28c8125",
+    "v": 27
+   }
+  },
+  {
+   "name": "gtc-reduce-asset200",
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 200,
+      "b": false,
+      "p": "0.012345",
+      "s": "1500",
+      "r": true,
+      "t": {
+       "limit": {
+        "tif": "Gtc"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "nonce": 1760000000123,
+   "mainnet": true,
+   "hash": "0x7b2ce26ed61e757b9d11ec1a9bb8eab5adadf0bff7ae1e379baf27107c7b80fa",
+   "signature": {
+    "r": "0x236bf91c2eb2fc2b7c0508edc4ce94b6a24e0fb3e4b20384496ac64208d67e50",
+    "s": "0x5e272af0f4b2b93e6d6b3b71e5654d1e9cbd985fe7d996cc6935d529c4a80901",
+    "v": 27
+   }
+  },
+  {
+   "name": "sl-tp-pair",
+   "action": {
+    "type": "order",
+    "orders": [
+     {
+      "a": 5,
+      "b": false,
+      "p": "95.5",
+      "s": "2.5",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "95.5",
+        "tpsl": "sl"
+       }
+      }
+     },
+     {
+      "a": 70000,
+      "b": false,
+      "p": "110.25",
+      "s": "2.5",
+      "r": true,
+      "t": {
+       "trigger": {
+        "isMarket": true,
+        "triggerPx": "110.25",
+        "tpsl": "tp"
+       }
+      }
+     }
+    ],
+    "grouping": "na"
+   },
+   "nonce": 1760000000456,
+   "mainnet": false,
+   "hash": "0x33049dda0532bc90060ceec66020af4a03875c5d540a420100405aa222094038",
+   "signature": {
+    "r": "0xf6f2343f103500073813ba1c0d83d319faf930f3962fe23571d489c1d2239391",
+    "s": "0x1a5bcb1cab044cba923434ef601ba562867d57d7a908776e33f03967eb861a4a",
+    "v": 27
+   }
+  },
+  {
+   "name": "leverage",
+   "action": {
+    "type": "updateLeverage",
+    "asset": 3,
+    "isCross": true,
+    "leverage": 10
+   },
+   "nonce": 1760000000789,
+   "mainnet": true,
+   "hash": "0x737c95ac1b4b000b7a8c92e4af1a9355d4754550e44e26fdd7d7cc5be1c17f46",
+   "signature": {
+    "r": "0x2c567f0da1e1c77d28add3366f5e6cec32c1201b8206bef10d06dfbca5eee66a",
+    "s": "0x37fd9e4513c71e8a61f9230637c92e078c4fb5801cf84168e7543e0794de4a13",
+    "v": 28
+   }
+  },
+  {
+   "name": "leverage-big",
+   "action": {
+    "type": "updateLeverage",
+    "asset": 300,
+    "isCross": false,
+    "leverage": 40
+   },
+   "nonce": 1760000000999,
+   "mainnet": false,
+   "hash": "0xdd8ed24f39b4453b7bf707cfea624f47daa9308b5dd6b5f8da95e89129bd2e98",
+   "signature": {
+    "r": "0x5a1d6269fba2b600900bf526d1dcf5fe0e888efbb75d27be996f821abebc3b4d",
+    "s": "0x5a5ad00df7e7c315dd68029655efa486a7c7f1a551e43b113163f949a7fea17d",
+    "v": 27
+   }
+  }
+ ],
+ "floats": [
+  [
+   0.00123,
+   "0.00123"
+  ],
+  [
+   101234.0,
+   "101234"
+  ],
+  [
+   1500.0,
+   "1500"
+  ],
+  [
+   0.012345,
+   "0.012345"
+  ],
+  [
+   95.5,
+   "95.5"
+  ],
+  [
+   110.25,
+   "110.25"
+  ],
+  [
+   1e-08,
+   "0.00000001"
+  ],
+  [
+   123456789.12345678,
+   "123456789.12345678"
+  ],
+  [
+   0.0,
+   "0"
+  ],
+  [
+   10.0,
+   "10"
+  ]
+ ]
+}

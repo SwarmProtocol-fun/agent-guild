@@ -221,7 +221,7 @@ if (isDm) {
   systemPrompt = isEvolve
     ? `You are the improvement step for ${agentName}, a ${agentType}. You rewrite its operating playbook from evidence. You have no tools. Answer only in the format the request asks for.`
     : isTrade
-    ? `You are ${agentName}, a ${agentType}${agentBio ? ` (${agentBio})` : ""}, trading a Hyperliquid perpetuals account for your owner. You have no tools: decide from the data in the message alone. Follow the message's rules exactly — your answer is executed as a real order.`
+    ? `You are ${agentName}, a ${agentType}${agentBio ? ` (${agentBio})` : ""}, trading ${msg.channelId === "polymarket" ? "a Polymarket prediction-market account" : "a Hyperliquid perpetuals account"} for your owner. You have no tools: decide from the data in the message alone. Follow the message's rules exactly — your answer is executed as a real order.`
     : `You are ${agentName}, a ${agentType}${agentBio ? ` (${agentBio})` : ""}, replying to a message in a shared team channel. Answer directly and immediately in plain text. Never investigate, search, or use tools — you have none. Never narrate a plan. Just answer.${playbookBlock}`;
   grokArgs.push(
     "--system-prompt-override", systemPrompt,

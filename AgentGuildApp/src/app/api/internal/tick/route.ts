@@ -17,6 +17,7 @@ import { advanceRun } from "@/lib/workflow/executor";
 import { evaluateCronTriggers, evaluateRegularCronJobs } from "@/lib/workflow/cron-evaluator";
 import { getRedis } from "@/lib/redis";
 import { runHyperliquidStrategyTick, runAiTraderTick } from "../../../../../mods/hyperliquid-trading/server";
+import { runPolymarketTick } from "../../../../../mods/polymarket-trading/server";
 import { sweepStaleAgents } from "@/lib/heartbeat";
 
 /** Max runs to advance per tick (fits within 10s Netlify timeout) */
@@ -133,6 +134,16 @@ export async function POST(req: NextRequest) {
     aiTraderResult.errors = 1;
   }
 
+  // ── Phase 7: Polymarket. Pays out resolved paper positions and runs every
+  // enabled bot (BTC 5-minute bots, price triggers, AI Predictor questions).
+  let polymarketResult = { bots: 0, entered: 0, asked: 0, settled: 0, errors: 0 };
+  try {
+    polymarketResult = await runPolymarketTick();
+  } catch (err) {
+    console.error("[tick] Polymarket evaluation failed:", err);
+    polymarketResult.errors = 1;
+  }
+
   // ── Release lock ────────────────────────────────────────────────────────
   if (redis) {
     try {
@@ -150,6 +161,7 @@ export async function POST(req: NextRequest) {
     cronJobs: cronJobsResult,
     hyperliquidStrategies: hyperliquidResult,
     aiTraders: aiTraderResult,
+    polymarket: polymarketResult,
     presenceFlipped,
   });
 }

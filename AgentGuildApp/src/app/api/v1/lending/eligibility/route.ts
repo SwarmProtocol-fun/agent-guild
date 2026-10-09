@@ -10,7 +10,7 @@ import { getEligibility } from "@/lib/lending/lending-service";
 export async function GET(req: NextRequest) {
     try {
         const session = await validateSession();
-        if (!session?.address) {
+        if (!session?.sub) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
         }
 

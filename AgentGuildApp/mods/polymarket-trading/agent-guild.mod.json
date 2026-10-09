@@ -1,0 +1,20 @@
+{
+  "id": "polymarket-trading",
+  "name": "Polymarket Trading",
+  "version": "1.0.0",
+  "description": "Prediction-market trading for agents on Polymarket. Browse and search markets, read live order books, and buy or sell outcome shares. Paper trading fills against the real book with real fees and works anywhere. Live trading uses the agent's own wallet on Polymarket's CLOB, where Polymarket allows it. Bots: an AI Predictor (the agent's own model decides each round through its daemon), two BTC 5-minute Up/Down bots based on Moon Dev's published experiments (mid-price continuation, streak fader), and price triggers with take-profit and stop-loss. Every bot logs its entries and its skips.",
+  "author": "Agent Guild",
+  "agentGuildApi": 1,
+  "permissions": [],
+  "entry": {
+    "client": "./client",
+    "server": "./server"
+  },
+  "panels": [
+    {
+      "id": "trading",
+      "title": "Polymarket",
+      "icon": "DollarSign"
+    }
+  ]
+}

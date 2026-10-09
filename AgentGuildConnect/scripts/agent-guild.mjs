@@ -1663,7 +1663,7 @@ async function cmdDaemon() {
   };
   scheduleDrive();
 
-  // Hyperliquid AI Trader: answer this agent's trade questions on its own
+  // AI trading bots (Hyperliquid, Polymarket): answer this agent's trade questions on its own
   // model, on a separate timer so a slow model never delays the heartbeat.
   let tradeTimer = null;
   let tradeDelay = 5000;
@@ -1673,7 +1673,7 @@ async function cmdDaemon() {
         const state = await answerTradeRequests(config, privateKey);
         tradeDelay = state === "busy" ? 2000 : state === "idle" ? 15000 : 5 * 60 * 1000;
       } catch (err) {
-        console.error(`[${new Date().toISOString()}] hyperliquid: ${err.message}`);
+        console.error(`[${new Date().toISOString()}] trading: ${err.message}`);
         tradeDelay = 60000;
       } finally {
         if (!shuttingDown) scheduleTrade();
@@ -4978,10 +4978,15 @@ async function cmdCapabilities() {
 }
 
 /** Signed call to /api/mods/hyperliquid-trading/<modPath>. The body is not part of the signature (runtime.ts). */
-async function hlRequest(config, privateKey, method, modPath, body) {
+function hlRequest(config, privateKey, method, modPath, body) {
+  return modRequest(config, privateKey, HL_MOD, method, modPath, body);
+}
+
+/** Signed call to /api/mods/<mod>/<modPath>. */
+async function modRequest(config, privateKey, mod, method, modPath, body) {
   const ts = Date.now().toString();
-  const sig = sign(`${method}:/mods/${HL_MOD}/${modPath}:${ts}`, privateKey);
-  const resp = await fetch(`${config.hubUrl}/api/mods/${HL_MOD}/${modPath}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, {
+  const sig = sign(`${method}:/mods/${mod}/${modPath}:${ts}`, privateKey);
+  const resp = await fetch(`${config.hubUrl}/api/mods/${mod}/${modPath}?agent=${config.agentId}&sig=${encodeURIComponent(sig)}&ts=${ts}`, {
     method,
     headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -4991,77 +4996,92 @@ async function hlRequest(config, privateKey, method, modPath, body) {
   return data;
 }
 
-// --- Hyperliquid AI Trader: decide on this agent's own model ----------------
-// The hub never runs a model for an AI Trader bot. Each round it posts the
-// question (market snapshot + rules) to this agent's queue; the daemon runs
-// it through the agent's own replyCommand — sandboxed, one turn, no tools —
-// and posts the answer back. Backtest bars arrive through the same queue.
+// --- AI trading bots: decide on this agent's own model ---------------------
+// The hub never runs a model for an AI bot (Hyperliquid AI Trader, Polymarket
+// AI Predictor). Each round it posts the question (market snapshot + rules) to
+// this agent's queue on that mod; the daemon runs it through the agent's own
+// replyCommand — sandboxed, one turn, no tools — and posts the answer back.
+// Hyperliquid backtest bars arrive through the same queue.
 
 const TRADE_ANSWER_TIMEOUT_MS = 3 * 60 * 1000;
 
-/** The last LONG/SHORT/CLOSE/NOTHING in the model's text wins (the hub parses it the same way). */
-function parseTradeDecision(text) {
-  const words = String(text || "").toUpperCase().replace(/DO NOTHING/g, "NOTHING").match(/\b(LONG|SHORT|CLOSE|NOTHING)\b/g);
-  return words ? words[words.length - 1] : null;
+const TRADE_VENUES = [
+  { mod: HL_MOD, channelId: "hyperliquid", channelName: "hyperliquid-ai-trader", words: ["LONG", "SHORT", "CLOSE", "NOTHING"] },
+  { mod: "polymarket-trading", channelId: "polymarket", channelName: "polymarket-ai-predictor", words: ["BUY_YES", "BUY_NO", "SELL", "HOLD"] },
+];
+
+/** The last decision word in the model's text wins (each hub mod parses it the same way). */
+function parseTradeDecision(text, words = TRADE_VENUES[0].words) {
+  const upper = String(text || "").toUpperCase().replace(/DO NOTHING/g, "NOTHING").replace(/\bBUY[\s-]+(YES|NO)\b/g, "BUY_$1");
+  const found = upper.match(new RegExp(`\\b(${words.join("|")})\\b`, "g"));
+  return found ? found[found.length - 1] : null;
 }
 
 /**
- * Answers every open AI Trader question for this agent, oldest first.
- * Returns "busy" if it answered something, "idle" if the queue was empty, or
- * "off" when the mod isn't installed / no replyCommand (poll slowly then).
+ * Answers every open AI bot question for this agent, oldest first, across
+ * every trading mod. Returns "busy" if it answered something, "idle" if the
+ * queues were empty, or "off" when no mod is installed / no replyCommand
+ * (poll slowly then).
  */
 async function answerTradeRequests(config, privateKey) {
-  let queue;
-  try {
-    queue = await hlRequest(config, privateKey, "GET", "ai/requests");
-  } catch (err) {
-    if (/\((401|403|404)\)/.test(err.message)) return "off";
-    throw err;
+  const queues = [];
+  for (const venue of TRADE_VENUES) {
+    try {
+      const queue = await modRequest(config, privateKey, venue.mod, "GET", "ai/requests");
+      queues.push({ venue, requests: Array.isArray(queue.requests) ? queue.requests : [] });
+    } catch (err) {
+      if (/\((401|403|404)\)/.test(err.message)) continue;
+      throw err;
+    }
   }
-  const requests = Array.isArray(queue.requests) ? queue.requests : [];
-  if (requests.length === 0) return "idle";
+  if (queues.length === 0) return "off";
+  const total = queues.reduce((n, q) => n + q.requests.length, 0);
+  if (total === 0) return "idle";
 
   const replyScript = join(__dirname, "grok-reply.mjs");
   const command = config.replyCommand || (existsSync(replyScript) ? `node ${replyScript}` : null);
   if (!command) {
-    console.error(`[${new Date().toISOString()}] hyperliquid: ${requests.length} trade question(s) waiting, but no replyCommand is configured to answer them`);
+    console.error(`[${new Date().toISOString()}] trading: ${total} trade question(s) waiting, but no replyCommand is configured to answer them`);
     return "off";
   }
 
-  for (const r of requests) {
-    const left = Date.parse(r.expiresAt) - Date.now();
-    if (!(left > 5000)) continue;
-    const result = await runReplyCommand(command, {
-      id: `trade-${r.id}`,
-      channelId: "hyperliquid",
-      channelName: "hyperliquid-ai-trader",
-      from: "Agent Guild",
-      fromType: "system",
-      text: `${r.system}\n\n${r.prompt}`,
-      timestamp: Date.now(),
-      history: [],
-    }, {
-      AGENT_GUILD_AGENT_NAME: config.agentName || "",
-      AGENT_GUILD_AGENT_TYPE: config.agentType || "",
-      AGENT_GUILD_AGENT_BIO: config.bio || "",
-      AGENT_GUILD_AGENT_ID: config.agentId || "",
-      AGENT_GUILD_CHANNEL_KIND: "trade",
-    }, Math.min(TRADE_ANSWER_TIMEOUT_MS, left - 3000));
-    const stamp = new Date().toISOString();
-    if (!result.ok) {
-      console.error(`[${stamp}] hyperliquid ${r.coin}: model failed (${result.error}) — the round will be skipped`);
-      continue;
-    }
-    if (!parseTradeDecision(result.text)) {
-      console.error(`[${stamp}] hyperliquid ${r.coin}: the model's answer named no decision — the round will be skipped`);
-      continue;
-    }
-    try {
-      const res = await hlRequest(config, privateKey, "POST", `ai/requests/${r.id}/answer`, { text: result.text });
-      const outcome = res.action ? ` → ${res.action}${res.taskId ? ` (task ${res.taskId})` : ""}${res.error ? ` — ${res.error}` : ""}` : "";
-      console.log(`[${stamp}] hyperliquid ${r.purpose} ${r.coin}: ${res.decision}${outcome}`);
-    } catch (err) {
-      console.error(`[${stamp}] hyperliquid ${r.coin}: answer rejected — ${err.message}`);
+  for (const { venue, requests } of queues) {
+    for (const r of requests) {
+      const left = Date.parse(r.expiresAt) - Date.now();
+      if (!(left > 5000)) continue;
+      const label = `${venue.channelId} ${r.coin}`;
+      const result = await runReplyCommand(command, {
+        id: `trade-${r.id}`,
+        channelId: venue.channelId,
+        channelName: venue.channelName,
+        from: "Agent Guild",
+        fromType: "system",
+        text: `${r.system}\n\n${r.prompt}`,
+        timestamp: Date.now(),
+        history: [],
+      }, {
+        AGENT_GUILD_AGENT_NAME: config.agentName || "",
+        AGENT_GUILD_AGENT_TYPE: config.agentType || "",
+        AGENT_GUILD_AGENT_BIO: config.bio || "",
+        AGENT_GUILD_AGENT_ID: config.agentId || "",
+        AGENT_GUILD_CHANNEL_KIND: "trade",
+      }, Math.min(TRADE_ANSWER_TIMEOUT_MS, left - 3000));
+      const stamp = new Date().toISOString();
+      if (!result.ok) {
+        console.error(`[${stamp}] ${label}: model failed (${result.error}) — the round will be skipped`);
+        continue;
+      }
+      if (!parseTradeDecision(result.text, venue.words)) {
+        console.error(`[${stamp}] ${label}: the model's answer named no decision — the round will be skipped`);
+        continue;
+      }
+      try {
+        const res = await modRequest(config, privateKey, venue.mod, "POST", `ai/requests/${r.id}/answer`, { text: result.text });
+        const outcome = res.action ? ` → ${res.action}${res.taskId ? ` (task ${res.taskId})` : ""}${res.error ? ` — ${res.error}` : ""}` : "";
+        console.log(`[${stamp}] ${label}${r.purpose ? ` ${r.purpose}` : ""}: ${res.decision}${outcome}`);
+      } catch (err) {
+        console.error(`[${stamp}] ${label}: answer rejected — ${err.message}`);
+      }
     }
   }
   return "busy";

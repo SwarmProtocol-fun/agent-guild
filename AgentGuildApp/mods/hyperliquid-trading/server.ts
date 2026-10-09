@@ -1,5 +1,5 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { enqueueTask, getTask } from "@/lib/gateway/store";
+import { enqueueTask, getTask, newTaskId, recordCompletedTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
 import { enforceCapability, getAgentCapabilities } from "@/lib/skills";
 import { encryptValue, decryptValue } from "@/lib/secrets";
@@ -63,6 +63,7 @@ import {
 } from "./ai-trader-core";
 import type { Candle } from "./indicators";
 import { findPerpAsset, readOraclePxOnchain, type PerpAssetMeta } from "./oracle";
+import { placeOrder as placeHlOrder, type PlaceOrderResult } from "./exchange";
 
 type HlNetwork = "testnet" | "mainnet";
 
@@ -310,6 +311,67 @@ async function enforceRiskAndEnqueue(params: {
     maxRetries: reduceOnly ? 0 : 2,
   });
 
+  return { taskId };
+}
+
+/**
+ * Where orders get signed. "native" (default): right here, in this request,
+ * via ./exchange.ts. "worker": the old path — enqueued for a GatewayAgent
+ * worker running place_order.py — kept as an escape hatch.
+ */
+function executionMode(): "native" | "worker" {
+  return process.env.HYPERLIQUID_EXECUTION === "worker" ? "worker" : "native";
+}
+
+/**
+ * Signs and sends the order now, then records it as an already-completed
+ * gateway task in the same result shape the worker produced
+ * ({ data: { coin, isBuy, sizeUsd, fill, stdout } }), so GET /status,
+ * POST /settle-trade and the client's order log work unchanged. The key is
+ * never written anywhere.
+ */
+async function placeNatively(p: {
+  orgId: string; agentId: string; coin: string; isBuy: boolean; sizeUsd: number; privateKey: string; network: HlNetwork;
+  orderType: "market" | "limit"; limitPrice?: number; reduceOnly: boolean; leverage?: number; stopLossPct?: number; takeProfitPct?: number;
+}): Promise<{ taskId: string } | { error: string }> {
+  const { orgId, agentId, coin, isBuy, sizeUsd, orderType, limitPrice, reduceOnly, leverage, stopLossPct, takeProfitPct, network } = p;
+  const started = Date.now();
+  let fill: PlaceOrderResult;
+  try {
+    fill = await placeHlOrder(p);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+
+  // The order is live from here on: never report it as failed, or a caller
+  // (a strategy left pending, a retried signal) could place it twice.
+  const taskId = newTaskId();
+  try {
+    await recordCompletedTask(taskId, {
+      orgId,
+      taskType: "hyperliquid",
+      payload: {
+        agentId, coin, isBuy, sizeUsd, orderType, network, execution: "native",
+        ...(limitPrice ? { limitPrice } : {}),
+        ...(reduceOnly ? { reduceOnly } : {}),
+        ...(leverage ? { leverage } : {}),
+        ...(stopLossPct ? { stopLossPct } : {}),
+        ...(takeProfitPct ? { takeProfitPct } : {}),
+      },
+      result: {
+        data: { agentId, coin, isBuy, sizeUsd, fill, stdout: JSON.stringify(fill), stderr: "" },
+        artifacts: [],
+        executionTimeMs: Date.now() - started,
+        exitCode: 0,
+      },
+      priority: "normal",
+      resources: { requiredTags: ["hyperliquid"] },
+      timeoutMs: 30000,
+      maxRetries: 0,
+    });
+  } catch (err) {
+    console.error(`[hyperliquid] order ${taskId} for agent ${agentId} filled but its record failed to save:`, err, fill);
+  }
   return { taskId };
 }
 

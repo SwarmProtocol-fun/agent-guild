@@ -110,6 +110,31 @@ export async function enqueueTask(
   return ref.id;
 }
 
+/** Reserves a task id before the work runs, so a caller can report it even if the record write later fails. */
+export function newTaskId(): string {
+  return db().collection(QUEUE).doc().id;
+}
+
+/**
+ * Records work that already ran in-process (e.g. a natively signed
+ * Hyperliquid order) so it shares the queue's status/result surface.
+ * Written straight as "completed" — workers only claim "queued" tasks, so no
+ * worker ever picks it up.
+ */
+export async function recordCompletedTask(
+  id: string,
+  data: Omit<QueuedTask, "id" | "createdAt" | "updatedAt" | "retriesUsed" | "status" | "completedAt" | "claimedBy" | "claimedAt">,
+): Promise<void> {
+  await db().collection(QUEUE).doc(id).set({
+    ...data,
+    status: "completed",
+    retriesUsed: 0,
+    completedAt: Date.now(),
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+}
+
 export async function getTask(id: string): Promise<QueuedTask | null> {
   const snap = await db().collection(QUEUE).doc(id).get();
   if (!snap.exists) return null;
