@@ -72,6 +72,7 @@ import {
   buildSnapshot,
   decisionRequest,
   decisionToAction,
+  INSTRUCTIONS_MAX,
   parseDecision,
   type PredictorDecision,
   type PredictorPosition,
@@ -529,6 +530,8 @@ interface AiParams {
   /** "market": the bot's fixed market every intervalMs. "btc-5m": each new BTC 5-minute window, once. */
   target: "market" | "btc-5m";
   intervalMs: number;
+  /** Operator's standing instructions for the model, added to every round's system prompt. */
+  instructions?: string;
 }
 
 async function predictorPosition(account: PmAccount, market: PmMarket): Promise<{ position: PredictorPosition | null; mark: number | null }> {
@@ -555,6 +558,7 @@ function btcContextLines(ctx: BtcContext): string {
 
 /** Puts one round's question to the agent. The hub never runs a model; the agent's daemon answers. */
 async function askPredictor(bot: PmBot, market: PmMarket, expiresInMs: number, btc?: BtcContext | null): Promise<void> {
+  const instructions = (bot.params as Partial<AiParams>).instructions ?? null;
   const account = await botAccount(bot);
   const [yesBook, noBook, history, held] = await Promise.all([
     getBook(market.outcomes[0].tokenId),
@@ -571,7 +575,7 @@ async function askPredictor(bot: PmBot, market: PmMarket, expiresInMs: number, b
     history,
     context: btc ? btcContextLines(btc) : null,
   });
-  const { system, prompt } = decisionRequest(market, snapshot, held.position, held.mark);
+  const { system, prompt } = decisionRequest(market, snapshot, held.position, held.mark, instructions);
   const requestId = await createAiRequest({
     agentId: bot.agentId, orgId: bot.orgId, botId: bot.id, conditionId: market.conditionId, question: market.question,
     system, prompt, holding: !!held.position, expiresAt: new Date(Date.now() + expiresInMs),
@@ -777,7 +781,7 @@ const AGENT_TOOLS = [
     name: "polymarket_bot_create",
     description:
       "Start a bot that trades from your account. Types: 'mid-price' and 'streak-fade' trade each BTC 5-minute Up/Down window; " +
-      "'ai' asks you (via polymarket_ai_requests) to decide each round, params { target: 'btc-5m' | 'market', intervalMs }; " +
+      "'ai' asks you (via polymarket_ai_requests) to decide each round, params { target: 'btc-5m' | 'market', intervalMs, instructions? } — instructions is your operator's standing strategy, shown in every round's prompt; " +
       "'price-trigger' buys when an outcome's ask crosses a price, params { outcomeIndex, when: 'ask-below'|'ask-above', price, takeProfit?, stopLoss? }. " +
       "conditionId is required for price-trigger and for ai with target 'market'. maxLossUsd stops the bot once its realized loss reaches it.",
     method: "POST", path: "bots",
@@ -875,7 +879,13 @@ export function parseBotParams(type: BotType, raw: Record<string, unknown>): Rec
   let params: Record<string, unknown>;
   if (type === "ai") {
     const target = raw.target === "btc-5m" ? "btc-5m" : "market";
-    params = { target, intervalMs: Math.max(AI_MIN_INTERVAL_MS, num(raw.intervalMs, AI_MIN_INTERVAL_MS, 7 * 86_400_000) ?? 3_600_000) };
+    if (raw.instructions != null && typeof raw.instructions !== "string") return "params.instructions must be text";
+    const instructions = typeof raw.instructions === "string" ? raw.instructions.trim() : "";
+    if (instructions.length > INSTRUCTIONS_MAX) return `params.instructions must be at most ${INSTRUCTIONS_MAX} characters`;
+    params = {
+      target, intervalMs: Math.max(AI_MIN_INTERVAL_MS, num(raw.intervalMs, AI_MIN_INTERVAL_MS, 7 * 86_400_000) ?? 3_600_000),
+      ...(instructions ? { instructions } : {}),
+    };
   } else if (type === "price-trigger") {
     const price = num(raw.price, 0.01, 0.99);
     if (price == null) return "params.price must be between 0.01 and 0.99";

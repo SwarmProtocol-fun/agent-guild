@@ -53,12 +53,12 @@ export function DiagnosticCard({ issue, onFix }: DiagnosticCardProps) {
           )}
           <div className="flex-1">
             <div className="flex items-center space-x-2 mb-1">
-              <h4 className="font-medium text-white">{issue.targetName}</h4>
-              <span className="text-xs text-gray-400 capitalize">({issue.checkType.replace(/_/g, " ")})</span>
+              <h4 className="font-medium text-foreground">{issue.targetName}</h4>
+              <span className="text-xs text-muted-foreground capitalize">({issue.checkType.replace(/_/g, " ")})</span>
             </div>
-            <p className="text-sm text-gray-300">{issue.description}</p>
+            <p className="text-sm text-foreground/85">{issue.description}</p>
             {issue.suggestedFix && (
-              <p className="text-xs text-gray-400 mt-2">
+              <p className="text-xs text-muted-foreground mt-2">
                 <strong>Suggested fix:</strong> {issue.suggestedFix}
               </p>
             )}

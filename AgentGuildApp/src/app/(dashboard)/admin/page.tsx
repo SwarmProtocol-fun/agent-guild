@@ -279,7 +279,7 @@ export default function AdminPage() {
           </div>
 
           {/* Wallet address */}
-          <div className="flex items-center gap-2 bg-black/20 rounded-lg px-3 py-2">
+          <div className="flex items-center gap-2 bg-background/20 dark:bg-black/20 rounded-lg px-3 py-2">
             <Wallet className="h-4 w-4 text-muted-foreground shrink-0" />
             <code className="text-xs font-mono text-foreground flex-1 truncate">
               {gasSponsor.address}

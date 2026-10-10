@@ -113,6 +113,18 @@ describe("AI Trader — the agent's own model decides", () => {
     expect(enqueueTask).not.toHaveBeenCalled();
   });
 
+  it("a training goal is part of the question the agent answers", async () => {
+    const goal = "Fade ETH when hourly funding is extreme. Stay flat otherwise.";
+    store.getEnabledStrategies.mockResolvedValue([aiBot({ goal })]);
+    stubHyperliquid();
+
+    await runAiTraderTick();
+
+    expect(store.createAiRequest).toHaveBeenCalledWith(expect.objectContaining({
+      system: expect.stringContaining(`GOAL: ${goal}`),
+    }));
+  });
+
   it("the agent's answer is traded from its own wallet", async () => {
     store.getAiRequest.mockResolvedValue(liveRequest());
     store.answerAiRequest.mockImplementation(async (_id, decision, reasoning) => liveRequest({ status: "answered", decision, reasoning }));

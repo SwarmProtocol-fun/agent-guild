@@ -35,7 +35,7 @@ export default function DebugAuthPage() {
 
       <div className="space-y-6">
         {/* SessionContext State */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">
             SessionContext State
           </h2>
@@ -55,7 +55,7 @@ export default function DebugAuthPage() {
         </div>
 
         {/* Active Wallet */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">
             Active Wallet (Thirdweb)
           </h2>
@@ -72,7 +72,7 @@ export default function DebugAuthPage() {
         </div>
 
         {/* Session API Check */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">
             /api/auth/session Response
           </h2>
@@ -82,20 +82,20 @@ export default function DebugAuthPage() {
         </div>
 
         {/* Cookie Check */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">
             Browser Cookies
           </h2>
           <pre className="bg-black p-4 rounded text-sm overflow-auto whitespace-pre-wrap break-all">
             {cookieCheck}
           </pre>
-          <p className="text-sm text-gray-400 mt-2">
+          <p className="text-sm text-muted-foreground mt-2">
             Note: httpOnly cookies won't be visible here (that's correct!)
           </p>
         </div>
 
         {/* Manual Session Refresh */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">Actions</h2>
           <div className="space-y-2">
             <button
@@ -130,7 +130,7 @@ export default function DebugAuthPage() {
         </div>
 
         {/* Diagnostic Info */}
-        <div className="border border-gray-700 rounded-lg p-6 bg-gray-900">
+        <div className="border border-border rounded-lg p-6 bg-card">
           <h2 className="text-xl font-semibold mb-4 text-amber-500">Diagnosis</h2>
           <ul className="space-y-2 text-sm">
             <li className={session.authenticated ? "text-green-400" : "text-red-400"}>
@@ -152,10 +152,10 @@ export default function DebugAuthPage() {
               <p className="text-red-400 font-semibold">
                 ⚠️ Problem Detected: Wallet is connected but session not authenticated
               </p>
-              <p className="text-sm text-gray-300 mt-2">
+              <p className="text-sm text-foreground/85 mt-2">
                 This means either:
               </p>
-              <ul className="list-disc list-inside text-sm text-gray-300 mt-1">
+              <ul className="list-disc list-inside text-sm text-foreground/85 mt-1">
                 <li>ConnectButton auth flow didn't complete SIWE</li>
                 <li>/api/auth/verify failed</li>
                 <li>Cookie wasn't set</li>

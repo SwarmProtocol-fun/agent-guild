@@ -37,11 +37,11 @@ export default function ClearSessionPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-black to-gray-900">
-      <div className="max-w-md w-full p-8 bg-gray-800/50 rounded-lg border border-amber-500/20 text-center">
+      <div className="max-w-md w-full p-8 bg-muted/50 rounded-lg border border-amber-500/20 text-center">
         <h1 className="text-2xl font-bold text-amber-500 mb-4">
           Clear Session
         </h1>
-        <p className="text-gray-300 mb-6">
+        <p className="text-foreground/85 mb-6">
           Click the button below to clear your current session and test the new
           SIWE authentication flow.
         </p>
@@ -53,7 +53,7 @@ export default function ClearSessionPage() {
           {clearing ? "Clearing..." : "Clear Session & Logout"}
         </Button>
         {message && (
-          <p className="mt-4 text-sm text-gray-300">{message}</p>
+          <p className="mt-4 text-sm text-foreground/85">{message}</p>
         )}
       </div>
     </div>

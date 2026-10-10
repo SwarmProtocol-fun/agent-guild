@@ -13,12 +13,12 @@ export function SummaryCard({ summary, expanded = false, onExpand }: SummaryCard
   const { agentName, date, summary: data } = summary;
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700 p-6 hover:border-gray-600 transition">
+    <div className="bg-muted rounded-lg border border-border p-6 hover:border-border transition">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-lg font-bold text-white">{agentName}</h3>
-          <p className="text-sm text-gray-400">{date}</p>
+          <h3 className="text-lg font-bold text-foreground">{agentName}</h3>
+          <p className="text-sm text-muted-foreground">{date}</p>
         </div>
         <button
           onClick={onExpand}
@@ -33,54 +33,54 @@ export function SummaryCard({ summary, expanded = false, onExpand }: SummaryCard
         <div className="flex items-center space-x-2">
           <CheckCircle className="w-5 h-5 text-green-400" />
           <div>
-            <p className="text-xs text-gray-400">Completed</p>
-            <p className="text-lg font-bold text-white">{data.tasksCompleted}</p>
+            <p className="text-xs text-muted-foreground">Completed</p>
+            <p className="text-lg font-bold text-foreground">{data.tasksCompleted}</p>
           </div>
         </div>
 
         <div className="flex items-center space-x-2">
           <XCircle className="w-5 h-5 text-red-400" />
           <div>
-            <p className="text-xs text-gray-400">Failed</p>
-            <p className="text-lg font-bold text-white">{data.tasksFailed}</p>
+            <p className="text-xs text-muted-foreground">Failed</p>
+            <p className="text-lg font-bold text-foreground">{data.tasksFailed}</p>
           </div>
         </div>
 
         <div className="flex items-center space-x-2">
           <MessageSquare className="w-5 h-5 text-blue-400" />
           <div>
-            <p className="text-xs text-gray-400">Messages</p>
-            <p className="text-lg font-bold text-white">{data.messagesPosted}</p>
+            <p className="text-xs text-muted-foreground">Messages</p>
+            <p className="text-lg font-bold text-foreground">{data.messagesPosted}</p>
           </div>
         </div>
 
         <div className="flex items-center space-x-2">
           <DollarSign className="w-5 h-5 text-green-400" />
           <div>
-            <p className="text-xs text-gray-400">Cost</p>
-            <p className="text-lg font-bold text-white">${data.costUsd.toFixed(2)}</p>
+            <p className="text-xs text-muted-foreground">Cost</p>
+            <p className="text-lg font-bold text-foreground">${data.costUsd.toFixed(2)}</p>
           </div>
         </div>
       </div>
 
       {/* Token Usage */}
-      <div className="flex items-center space-x-2 mb-4 p-3 bg-gray-700 rounded-lg">
+      <div className="flex items-center space-x-2 mb-4 p-3 bg-muted/80 rounded-lg">
         <Zap className="w-4 h-4 text-yellow-400" />
-        <span className="text-sm text-gray-300">
+        <span className="text-sm text-foreground/85">
           {(data.tokensUsed / 1000).toFixed(1)}K tokens used
         </span>
       </div>
 
       {/* Expanded Section */}
       {expanded && (
-        <div className="space-y-4 mt-4 pt-4 border-t border-gray-700">
+        <div className="space-y-4 mt-4 pt-4 border-t border-border">
           {/* Highlights */}
           {data.highlights.length > 0 && (
             <div>
-              <h4 className="text-sm font-semibold text-gray-300 mb-2">✨ Highlights</h4>
+              <h4 className="text-sm font-semibold text-foreground/85 mb-2">✨ Highlights</h4>
               <ul className="space-y-1">
                 {data.highlights.map((h, idx) => (
-                  <li key={idx} className="text-sm text-gray-400 pl-4">
+                  <li key={idx} className="text-sm text-muted-foreground pl-4">
                     • {h}
                   </li>
                 ))}
@@ -91,14 +91,14 @@ export function SummaryCard({ summary, expanded = false, onExpand }: SummaryCard
           {/* Top Activities */}
           {data.topActivities.length > 0 && (
             <div>
-              <h4 className="text-sm font-semibold text-gray-300 mb-2">🎯 Top Activities</h4>
+              <h4 className="text-sm font-semibold text-foreground/85 mb-2">🎯 Top Activities</h4>
               <div className="space-y-2">
                 {data.topActivities.map((activity, idx) => (
                   <div
                     key={idx}
-                    className="flex items-center justify-between p-2 bg-gray-700 rounded"
+                    className="flex items-center justify-between p-2 bg-muted/80 rounded"
                   >
-                    <span className="text-sm text-gray-300 capitalize">
+                    <span className="text-sm text-foreground/85 capitalize">
                       {activity.type.replace(/_/g, " ")}
                     </span>
                     <span className="text-sm font-bold text-blue-400">{activity.count}x</span>
@@ -127,7 +127,7 @@ export function SummaryCard({ summary, expanded = false, onExpand }: SummaryCard
                       </span>
                       <span className="text-xs text-red-400">{error.count}x</span>
                     </div>
-                    <p className="text-xs text-gray-400 truncate">{error.lastError}</p>
+                    <p className="text-xs text-muted-foreground truncate">{error.lastError}</p>
                   </div>
                 ))}
               </div>

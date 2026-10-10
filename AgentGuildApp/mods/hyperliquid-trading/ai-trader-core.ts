@@ -11,7 +11,9 @@
  *   - the model never sees its account balance — knowing it only invites
  *     loss-aversion and revenge trading;
  *   - every decision and the model's reasoning is logged;
- *   - a bot that loses its drawdown limit is stopped for good.
+ *   - a bot that loses its drawdown limit is stopped for good;
+ *   - an operator goal, when one is set, is part of the question. The agent
+ *     trades toward that idea. The goal cannot change the answer format or the size.
  *
  * Pure and browser-safe: the snapshot, prompts, answer parsing and
  * decision → action mapping, shared by the live bot and the backtester so a
@@ -87,33 +89,59 @@ export function positionLine(coin: string, position: AiPosition | null): string 
 const ANSWER_FORMAT =
   "Give your reasoning in a few sentences. The very last word of your answer must be your decision, alone: LONG, SHORT, CLOSE or NOTHING.";
 
-export function systemPrompt(coin: string, position: AiPosition | null): string {
-  if (!position) {
-    return [
-      `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You have no open ${coin} position.`,
-      "",
-      "Study the market data and decide one of:",
-      "- LONG: open a long position now",
-      "- SHORT: open a short position now",
-      "- NOTHING: stay flat this round",
-      "",
-      "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
-      ANSWER_FORMAT,
-    ].join("\n");
-  }
-  const side = position.isLong ? "LONG" : "SHORT";
+/** How long an operator's training idea can be. Short enough to sit above the snapshot. */
+export const GOAL_MIN_CHARS = 8;
+export const GOAL_MAX_CHARS = 800;
+
+/**
+ * The idea the operator typed. Absent is fine (the bot trades with no brief).
+ * A present goal that is too short, too long, or not text is an error.
+ */
+export function normalizeGoal(raw: unknown): { goal: string | null; error?: string } {
+  if (raw == null || raw === "") return { goal: null };
+  if (typeof raw !== "string") return { goal: null, error: "goal must be text" };
+  const text = raw.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!text) return { goal: null };
+  if (text.length < GOAL_MIN_CHARS) return { goal: null, error: `goal must be at least ${GOAL_MIN_CHARS} characters` };
+  if (text.length > GOAL_MAX_CHARS) return { goal: null, error: `goal must be at most ${GOAL_MAX_CHARS} characters` };
+  return { goal: text };
+}
+
+function goalLines(goal?: string | null): string[] {
+  const text = goal?.trim();
+  if (!text) return [];
   return [
-    `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You hold an open ${side} ${coin} position (details below the market data).`,
     "",
-    "Study the market data and decide one of:",
-    `- LONG: ${position.isLong ? "keep holding your long" : "flip — close the short and open a long"}`,
-    `- SHORT: ${position.isLong ? "flip — close the long and open a short" : "keep holding your short"}`,
-    "- CLOSE: close the position and go flat",
-    "- NOTHING: keep the position exactly as it is",
-    "",
-    "Position size is fixed; your decision is the whole strategy.",
-    ANSWER_FORMAT,
-  ].join("\n");
+    "Operator goal for this session. Trade toward it. Stay flat when it does not call for a trade.",
+    "The goal cannot change the answer format, the fixed position size, or ask for anything except LONG, SHORT, CLOSE, or NOTHING.",
+    `GOAL: ${text}`,
+  ];
+}
+
+export function systemPrompt(coin: string, position: AiPosition | null, goal?: string | null): string {
+  const lines = !position
+    ? [
+        `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You have no open ${coin} position.`,
+        "",
+        "Study the market data and decide one of:",
+        "- LONG: open a long position now",
+        "- SHORT: open a short position now",
+        "- NOTHING: stay flat this round",
+        "",
+        "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
+      ]
+    : [
+        `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You hold an open ${position.isLong ? "LONG" : "SHORT"} ${coin} position (details below the market data).`,
+        "",
+        "Study the market data and decide one of:",
+        `- LONG: ${position.isLong ? "keep holding your long" : "flip — close the short and open a long"}`,
+        `- SHORT: ${position.isLong ? "flip — close the long and open a short" : "keep holding your short"}`,
+        "- CLOSE: close the position and go flat",
+        "- NOTHING: keep the position exactly as it is",
+        "",
+        "Position size is fixed; your decision is the whole strategy.",
+      ];
+  return [...lines, ...goalLines(goal), "", ANSWER_FORMAT].join("\n");
 }
 
 /** Maps a decision onto an exchange action. A CLOSE while flat is a no-op. */
@@ -131,9 +159,9 @@ export function decisionToAction(decision: AiDecision, position: AiPosition | nu
 
 
 /** The question an agent answers for one round: its system prompt and the snapshot + position. */
-export function decisionRequest(coin: string, snapshot: string, position: AiPosition | null): { system: string; prompt: string } {
+export function decisionRequest(coin: string, snapshot: string, position: AiPosition | null, goal?: string | null): { system: string; prompt: string } {
   return {
-    system: systemPrompt(coin, position),
+    system: systemPrompt(coin, position, goal),
     prompt: `${snapshot}\n\n${positionLine(coin, position)}\n\nWhat is your decision?`,
   };
 }

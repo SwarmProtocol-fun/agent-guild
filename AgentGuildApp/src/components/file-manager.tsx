@@ -117,7 +117,7 @@ export function FileManager() {
                 <textarea
                     value={fileContent}
                     onChange={(e) => setFileContent(e.target.value)}
-                    className="flex-1 w-full p-4 bg-black/40 text-foreground font-mono text-sm resize-none focus:outline-none custom-scrollbar"
+                    className="flex-1 w-full p-4 bg-background/40 dark:bg-black/40 text-foreground font-mono text-sm resize-none focus:outline-none custom-scrollbar"
                     spellCheck={false}
                 />
             </Card>
@@ -169,7 +169,7 @@ export function FileManager() {
                             <button
                                 key={file.path}
                                 onClick={() => openFile(file)}
-                                className="flex items-start gap-3 p-3 rounded-lg border border-transparent hover:border-purple-500/20 hover:bg-white/5 transition-all text-left group"
+                                className="flex items-start gap-3 p-3 rounded-lg border border-transparent hover:border-purple-500/20 hover:bg-foreground/[0.03] transition-all text-left group"
                             >
                                 {file.type === 'directory' ? (
                                     <Folder className="w-8 h-8 text-blue-400 shrink-0 mt-0.5" />

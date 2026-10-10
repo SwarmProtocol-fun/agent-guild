@@ -69,18 +69,18 @@ export function TaskBlockerModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-gray-800 rounded-lg max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-gray-700">
+      <div className="bg-muted rounded-lg max-w-2xl w-full max-h-[80vh] overflow-y-auto border border-border">
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-gray-700">
+        <div className="flex items-center justify-between p-6 border-b border-border">
           <div className="flex items-center space-x-3">
             <AlertTriangle className="w-6 h-6 text-orange-400" />
-            <h2 className="text-xl font-bold text-white">
+            <h2 className="text-xl font-bold text-foreground">
               {isBlocked ? "Task Blocked" : "Block Task"}
             </h2>
           </div>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white transition"
+            className="text-muted-foreground hover:text-foreground transition"
           >
             <X className="w-6 h-6" />
           </button>
@@ -89,21 +89,21 @@ export function TaskBlockerModal({
         {/* Content */}
         <div className="p-6 space-y-6">
           {/* Current task info */}
-          <div className="bg-gray-700 rounded-lg p-4">
-            <p className="text-sm text-gray-400 mb-1">Task</p>
-            <p className="font-medium text-white">{task.title}</p>
+          <div className="bg-muted/80 rounded-lg p-4">
+            <p className="text-sm text-muted-foreground mb-1">Task</p>
+            <p className="font-medium text-foreground">{task.title}</p>
             {task.description && (
-              <p className="text-sm text-gray-400 mt-2">{task.description}</p>
+              <p className="text-sm text-muted-foreground mt-2">{task.description}</p>
             )}
           </div>
 
           {/* Blocker tasks */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-3">
+            <label className="block text-sm font-medium text-foreground/85 mb-3">
               Blocked by tasks
             </label>
             {validBlockers.length === 0 ? (
-              <p className="text-sm text-gray-400">No other tasks available to select as blockers</p>
+              <p className="text-sm text-muted-foreground">No other tasks available to select as blockers</p>
             ) : (
               <div className="space-y-2 max-h-[200px] overflow-y-auto">
                 {validBlockers.map((blocker) => (
@@ -112,26 +112,26 @@ export function TaskBlockerModal({
                     className={`flex items-center space-x-3 p-3 rounded-lg cursor-pointer transition ${
                       selectedBlockers.includes(blocker.id)
                         ? "bg-blue-500/20 border border-blue-500/30"
-                        : "bg-gray-700 hover:bg-gray-600"
+                        : "bg-muted/80 hover:bg-muted"
                     }`}
                   >
                     <input
                       type="checkbox"
                       checked={selectedBlockers.includes(blocker.id)}
                       onChange={() => toggleBlocker(blocker.id)}
-                      className="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500"
+                      className="w-4 h-4 text-blue-600 bg-muted/80 border-border rounded focus:ring-blue-500"
                     />
                     <div className="flex-1">
-                      <p className="text-sm font-medium text-white">{blocker.title}</p>
+                      <p className="text-sm font-medium text-foreground">{blocker.title}</p>
                       <div className="flex items-center space-x-2 mt-1">
-                        <span className="text-xs text-gray-400 capitalize">
+                        <span className="text-xs text-muted-foreground capitalize">
                           {blocker.status.replace("_", " ")}
                         </span>
                         {blocker.priority !== "none" && (
-                          <span className="text-xs text-gray-400">•</span>
+                          <span className="text-xs text-muted-foreground">•</span>
                         )}
                         {blocker.priority !== "none" && (
-                          <span className="text-xs text-gray-400 capitalize">
+                          <span className="text-xs text-muted-foreground capitalize">
                             {blocker.priority} priority
                           </span>
                         )}
@@ -148,7 +148,7 @@ export function TaskBlockerModal({
 
           {/* Block reason */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-foreground/85 mb-2">
               Block reason (optional)
             </label>
             <textarea
@@ -156,7 +156,7 @@ export function TaskBlockerModal({
               onChange={(e) => setBlockReason(e.target.value)}
               placeholder="Why is this task blocked? (e.g., waiting for API design, dependency not ready...)"
               rows={3}
-              className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
+              className="w-full bg-muted/80 border border-border rounded-lg px-4 py-2 text-foreground placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
           </div>
 
@@ -168,15 +168,15 @@ export function TaskBlockerModal({
                 <div>
                   <p className="text-sm font-medium text-orange-300">Currently Blocked</p>
                   {task.blockedBy && task.blockedBy.length > 0 && (
-                    <p className="text-xs text-gray-400 mt-1">
+                    <p className="text-xs text-muted-foreground mt-1">
                       {task.blockedBy.length} blocker task{task.blockedBy.length > 1 ? "s" : ""}
                     </p>
                   )}
                   {task.blockReason && (
-                    <p className="text-xs text-gray-300 mt-2">{task.blockReason}</p>
+                    <p className="text-xs text-foreground/85 mt-2">{task.blockReason}</p>
                   )}
                   {task.blockedAt && (
-                    <p className="text-xs text-gray-500 mt-1">
+                    <p className="text-xs text-muted-foreground mt-1">
                       Blocked at {task.blockedAt.toLocaleString()}
                     </p>
                   )}
@@ -189,7 +189,7 @@ export function TaskBlockerModal({
           <div className="flex gap-3 justify-end">
             <button
               onClick={onClose}
-              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition"
+              className="px-4 py-2 bg-muted/80 hover:bg-muted text-foreground rounded-lg transition"
               disabled={blocking}
             >
               Cancel

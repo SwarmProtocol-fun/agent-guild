@@ -46,10 +46,10 @@ export function GatewayMap({ gateways, selectedGatewayId, onSelect }: GatewayMap
   return (
     <div className="space-y-6">
       {/* World Map Visualization (Simplified) */}
-      <div className="bg-gray-900 rounded-lg p-6 border border-gray-700">
+      <div className="bg-card rounded-lg p-6 border border-border">
         <div className="flex items-center gap-2 mb-4">
           <Globe className="w-5 h-5 text-blue-400" />
-          <h3 className="text-lg font-semibold text-white">Global Gateway Network</h3>
+          <h3 className="text-lg font-semibold text-foreground">Global Gateway Network</h3>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
@@ -66,30 +66,30 @@ export function GatewayMap({ gateways, selectedGatewayId, onSelect }: GatewayMap
                 key={region}
                 className={`p-4 rounded-lg border transition cursor-pointer ${
                   hoveredRegion === region
-                    ? "bg-gray-700 border-blue-500"
-                    : "bg-gray-800 border-gray-700 hover:bg-gray-750"
+                    ? "bg-muted/80 border-blue-500"
+                    : "bg-muted border-border hover:bg-gray-750"
                 }`}
                 onMouseEnter={() => setHoveredRegion(region as GatewayRegion)}
                 onMouseLeave={() => setHoveredRegion(null)}
               >
                 <div className="flex items-center gap-2 mb-2">
                   <div className={`w-2 h-2 rounded-full ${getStatusColor(status)}`} />
-                  <span className="text-sm font-medium text-white">{location.name}</span>
+                  <span className="text-sm font-medium text-foreground">{location.name}</span>
                 </div>
 
-                <div className="text-xs text-gray-400 space-y-1">
+                <div className="text-xs text-muted-foreground space-y-1">
                   <div className="flex justify-between">
                     <span>Gateways:</span>
-                    <span className="text-white">{regionGateways.length}</span>
+                    <span className="text-foreground">{regionGateways.length}</span>
                   </div>
                   <div className="flex justify-between">
                     <span>Connections:</span>
-                    <span className="text-white">{totalConnections}</span>
+                    <span className="text-foreground">{totalConnections}</span>
                   </div>
                   {regionGateways.length > 0 && (
                     <div className="flex justify-between">
                       <span>Avg Latency:</span>
-                      <span className="text-white">
+                      <span className="text-foreground">
                         {Math.round(
                           regionGateways.reduce((sum, g) => sum + (g.metrics?.avgLatencyMs || 0), 0) /
                             regionGateways.length
@@ -117,9 +117,9 @@ export function GatewayMap({ gateways, selectedGatewayId, onSelect }: GatewayMap
         ))}
 
         {gateways.length === 0 && (
-          <div className="text-center p-8 bg-gray-800 rounded-lg border border-gray-700">
+          <div className="text-center p-8 bg-muted rounded-lg border border-border">
             <Globe className="w-12 h-12 mx-auto text-gray-600 mb-3" />
-            <p className="text-gray-400">No gateways configured</p>
+            <p className="text-muted-foreground">No gateways configured</p>
           </div>
         )}
       </div>
@@ -152,15 +152,15 @@ function GatewayCard({ gateway, isSelected, onSelect }: GatewayCardProps) {
       className={`p-4 rounded-lg border transition cursor-pointer ${
         isSelected
           ? "bg-blue-500/10 border-blue-500"
-          : "bg-gray-800 border-gray-700 hover:bg-gray-750"
+          : "bg-muted border-border hover:bg-gray-750"
       }`}
     >
       <div className="flex items-start justify-between mb-3">
         <div className="flex items-center gap-3">
           <div className={`w-3 h-3 rounded-full ${statusColor}`} />
           <div>
-            <h4 className="font-medium text-white">{gateway.name}</h4>
-            <p className="text-xs text-gray-400">
+            <h4 className="font-medium text-foreground">{gateway.name}</h4>
+            <p className="text-xs text-muted-foreground">
               {gateway.region ? REGION_LOCATIONS[gateway.region]?.name : "Unknown Region"}
             </p>
           </div>
@@ -175,43 +175,43 @@ function GatewayCard({ gateway, isSelected, onSelect }: GatewayCardProps) {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
         <div>
-          <div className="flex items-center gap-1 text-gray-400 mb-1">
+          <div className="flex items-center gap-1 text-muted-foreground mb-1">
             <Activity className="w-3 h-3" />
             <span>Connections</span>
           </div>
-          <div className="text-white font-medium">
+          <div className="text-foreground font-medium">
             {gateway.metrics?.activeConnections || 0}
             {gateway.capacity && ` / ${gateway.capacity.maxConnections}`}
           </div>
         </div>
 
         <div>
-          <div className="flex items-center gap-1 text-gray-400 mb-1">
+          <div className="flex items-center gap-1 text-muted-foreground mb-1">
             <Zap className="w-3 h-3" />
             <span>Latency</span>
           </div>
-          <div className="text-white font-medium">{gateway.metrics?.avgLatencyMs || 0}ms</div>
+          <div className="text-foreground font-medium">{gateway.metrics?.avgLatencyMs || 0}ms</div>
         </div>
 
         <div>
-          <div className="flex items-center gap-1 text-gray-400 mb-1">
+          <div className="flex items-center gap-1 text-muted-foreground mb-1">
             <TrendingUp className="w-3 h-3" />
             <span>Uptime</span>
           </div>
-          <div className="text-white font-medium">{uptimePercent.toFixed(1)}%</div>
+          <div className="text-foreground font-medium">{uptimePercent.toFixed(1)}%</div>
         </div>
 
         <div>
-          <div className="flex items-center gap-1 text-gray-400 mb-1">
+          <div className="flex items-center gap-1 text-muted-foreground mb-1">
             <Activity className="w-3 h-3" />
             <span>Load</span>
           </div>
-          <div className="text-white font-medium">{loadPercent.toFixed(0)}%</div>
+          <div className="text-foreground font-medium">{loadPercent.toFixed(0)}%</div>
         </div>
       </div>
 
       {gateway.lastHeartbeat && (
-        <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400">
+        <div className="mt-3 pt-3 border-t border-border text-xs text-muted-foreground">
           Last heartbeat: {new Date(gateway.lastHeartbeat).toLocaleString()}
         </div>
       )}

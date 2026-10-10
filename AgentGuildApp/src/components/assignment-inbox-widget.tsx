@@ -104,7 +104,7 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
       case "low":
         return <Clock className="w-5 h-5 text-green-400" />;
       default:
-        return <Clock className="w-5 h-5 text-gray-400" />;
+        return <Clock className="w-5 h-5 text-muted-foreground" />;
     }
   };
 
@@ -124,10 +124,10 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
 
   if (loading) {
     return (
-      <div className="border border-gray-700 rounded-lg p-6 bg-gray-800/50">
+      <div className="border border-border rounded-lg p-6 bg-muted/50">
         <div className="flex items-center justify-center">
           <Loader className="w-6 h-6 animate-spin text-blue-400" />
-          <span className="ml-2 text-gray-400">Loading assignments...</span>
+          <span className="ml-2 text-muted-foreground">Loading assignments...</span>
         </div>
       </div>
     );
@@ -135,8 +135,8 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
 
   if (assignments.length === 0) {
     return (
-      <div className="border border-gray-700 rounded-lg p-6 bg-gray-800/50">
-        <div className="text-center text-gray-400">
+      <div className="border border-border rounded-lg p-6 bg-muted/50">
+        <div className="text-center text-muted-foreground">
           <CheckCircle className="w-12 h-12 mx-auto mb-2 text-green-400/50" />
           <p>No pending assignments</p>
         </div>
@@ -145,9 +145,9 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
   }
 
   return (
-    <div className="border border-gray-700 rounded-lg p-6 bg-gray-800/50">
+    <div className="border border-border rounded-lg p-6 bg-muted/50">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-white">Assignment Inbox</h3>
+        <h3 className="text-lg font-semibold text-foreground">Assignment Inbox</h3>
         <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded">
           {assignments.length} pending
         </span>
@@ -168,22 +168,22 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
                 <div className="flex-1">
                   <div className="flex items-start justify-between mb-1">
                     <div>
-                      <h4 className="font-medium text-white">{assignment.title}</h4>
-                      <p className="text-xs text-gray-400">
+                      <h4 className="font-medium text-foreground">{assignment.title}</h4>
+                      <p className="text-xs text-muted-foreground">
                         From: {assignment.fromAgentName || assignment.fromHumanName}
                       </p>
                     </div>
                     <div className="flex items-center space-x-2">
-                      <span className="text-xs text-gray-400 capitalize">{assignment.priority}</span>
+                      <span className="text-xs text-muted-foreground capitalize">{assignment.priority}</span>
                       <span
-                        className={`text-xs ${isOverdue ? "text-red-400 font-bold" : "text-gray-400"}`}
+                        className={`text-xs ${isOverdue ? "text-red-400 font-bold" : "text-muted-foreground"}`}
                       >
                         {deadlineStr}
                       </span>
                     </div>
                   </div>
 
-                  <p className="text-sm text-gray-300 mb-3">{assignment.description}</p>
+                  <p className="text-sm text-foreground/85 mb-3">{assignment.description}</p>
 
                   {showRejectForm[assignment.id] ? (
                     <div className="space-y-2">
@@ -196,7 +196,7 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
                           }))
                         }
                         placeholder="Reason for rejection..."
-                        className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 bg-card border border-border rounded text-sm text-foreground placeholder-gray-500 focus:outline-none focus:border-blue-500"
                         rows={2}
                       />
                       <div className="flex space-x-2">
@@ -221,7 +221,7 @@ export function AssignmentInboxWidget({ agentId, onAssignmentAction }: Assignmen
                           onClick={() =>
                             setShowRejectForm((prev) => ({ ...prev, [assignment.id]: false }))
                           }
-                          className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded transition"
+                          className="px-3 py-1.5 bg-muted/80 hover:bg-muted text-foreground text-sm rounded transition"
                         >
                           Cancel
                         </button>

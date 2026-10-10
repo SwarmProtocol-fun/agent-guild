@@ -94,7 +94,7 @@ vi.mock("../../../../mods/polymarket-trading/markets", async (orig) => ({
   getWalletPositions: vi.fn(async () => []),
 }));
 
-const { default: mod, checkBuyRisk, runPolymarketTick, resolvePaperPositions } = await import("../../../../mods/polymarket-trading/server");
+const { default: mod, checkBuyRisk, runPolymarketTick, resolvePaperPositions, parseBotParams } = await import("../../../../mods/polymarket-trading/server");
 
 type Handler = (req: Request, ctx: unknown) => Promise<Response>;
 function route(key: string): Handler {
@@ -149,6 +149,13 @@ describe("polymarket mod routes", () => {
     const missing = await grant(post({ agentId: "a1" }), asOwner);
     expect(missing.status).toBe(404);
     expect((await missing.json()).error).toMatch(/Install it from the Market/);
+  });
+
+  it("AI bots keep trimmed operator instructions and reject bad ones", () => {
+    expect(parseBotParams("ai", { target: "btc-5m", instructions: "  Fade spikes.  " })).toMatchObject({ target: "btc-5m", instructions: "Fade spikes." });
+    expect(parseBotParams("ai", { target: "btc-5m", instructions: "   " })).not.toHaveProperty("instructions");
+    expect(parseBotParams("ai", { target: "btc-5m", instructions: 5 })).toMatch(/must be text/);
+    expect(parseBotParams("ai", { target: "btc-5m", instructions: "x".repeat(2001) })).toMatch(/at most 2000/);
   });
 
   it("GET /me reports whether the org installed the mod", async () => {

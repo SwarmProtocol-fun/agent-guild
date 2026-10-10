@@ -253,7 +253,7 @@ function SessionItem({ session, agentId }: { session: any; agentId: string }) {
             <button
               onClick={() => handleClose('cancelled')}
               disabled={closing}
-              className="px-3 py-1 text-xs font-medium bg-gray-600 text-white rounded hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="px-3 py-1 text-xs font-medium bg-gray-600 text-foreground rounded hover:bg-muted/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               Cancel
             </button>

@@ -791,7 +791,7 @@ export default function SettingsPage() {
                    Share this 6-character code with your team. They can enter it during onboarding to join this organization.
                  </p>
                  <div className="flex items-center gap-2">
-                   <code className="flex-1 rounded-md border border-amber-300 bg-black/50 px-3 py-2 text-center text-lg font-mono font-bold tracking-widest text-amber-400">
+                   <code className="flex-1 rounded-md border border-amber-300 bg-background/50 dark:bg-black/50 px-3 py-2 text-center text-lg font-mono font-bold tracking-widest text-amber-400">
                      {inviteCode}
                    </code>
                    <Button

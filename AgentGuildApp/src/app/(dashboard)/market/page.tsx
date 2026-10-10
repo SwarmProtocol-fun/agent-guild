@@ -100,7 +100,7 @@ function AgentMarketCard({ agent }: { agent: Agent }) {
                             <Bot className="h-3 w-3" /> View Agent
                         </Button>
                     </Link>
-                    <Badge className={`text-[10px] ${agent.status === "online" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : agent.status === "busy" ? "bg-amber-500/10 text-amber-400 border-amber-500/20" : "bg-zinc-500/10 text-zinc-400 border-zinc-500/20"}`}>
+                    <Badge className={`text-[10px] ${agent.status === "online" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" : agent.status === "busy" ? "bg-amber-500/10 text-amber-400 border-amber-500/20" : "bg-zinc-500/10 text-muted-foreground border-zinc-500/20"}`}>
                         <Activity className="h-2.5 w-2.5 mr-0.5" />{agent.status}
                     </Badge>
                 </div>

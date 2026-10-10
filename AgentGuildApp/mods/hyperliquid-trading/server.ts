@@ -68,6 +68,7 @@ import {
   buildSnapshot,
   decisionRequest,
   decisionToAction,
+  normalizeGoal,
   parseDecision,
   type AiAction,
   type AiDecision,
@@ -818,6 +819,39 @@ const AI_BACKTEST_ANSWER_MS = 3 * 60_000;
 /** A flip whose close hasn't filled within this long is abandoned. */
 const FLIP_GIVE_UP_MS = 10 * 60_000;
 const AI_SNAPSHOT_HISTORY = 112; // 72 shown + warm-up for SMA40/RSI
+const TRAIN_DEFAULT_SIZE_USD = 25;
+const TRAIN_DEFAULT_INTERVAL_MS = AI_MIN_INTERVAL_MS;
+const TRAIN_DEFAULT_DRAWDOWN_PCT = 10;
+const TRAIN_MAX_SIZE_USD = 100_000;
+
+/** Shared by POST /strategy (type ai) and POST /paper/train. */
+function buildAiParams(params: Record<string, unknown> | undefined): AiParams | { error: string } {
+  const intervalMs = Number(params?.intervalMs ?? 3_600_000);
+  const maxDrawdownPct = Number(params?.maxDrawdownPct ?? 50);
+  const leverage = params?.leverage != null && params.leverage !== "" ? Number(params.leverage) : undefined;
+  if (!(intervalMs >= AI_MIN_INTERVAL_MS)) {
+    return { error: "params.intervalMs must be at least 15 minutes for an ai strategy" };
+  }
+  if (!(maxDrawdownPct > 0 && maxDrawdownPct < 100)) {
+    return { error: "params.maxDrawdownPct must be between 0 and 100" };
+  }
+  const goal = normalizeGoal(params?.goal);
+  if (goal.error) return { error: goal.error };
+  return {
+    intervalMs,
+    maxDrawdownPct,
+    ...(leverage ? { leverage } : {}),
+    ...(goal.goal ? { goal: goal.goal } : {}),
+    flipTo: null,
+    openRequestId: null,
+  };
+}
+
+function cleanTrainCoin(raw: unknown): string | null {
+  const coin = String(raw ?? "").trim().toUpperCase();
+  if (coin === "ANY" || !/^[A-Z0-9]{1,12}$/.test(coin)) return null;
+  return coin;
+}
 
 /** The largest chart interval no longer than the bot's decision interval. */
 function candleIntervalFor(intervalMs: number): string {
@@ -1051,7 +1085,7 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
   });
   const requestId = await createAiRequest({
     agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id, coin: strategy.coin,
-    ...decisionRequest(strategy.coin, snapshot, held?.position ?? null),
+    ...decisionRequest(strategy.coin, snapshot, held?.position ?? null, params.goal),
     expiresAt: new Date(Date.now() + Math.min(AI_ANSWER_WINDOW_MS, params.intervalMs)),
   });
   await touchStrategyRun(strategy.id, { ...params, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
@@ -1369,6 +1403,23 @@ const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: { id: { type: "string", description: "orderId from hyperliquid_paper_account" } }, required: ["id"] },
   },
   {
+    name: "hyperliquid_paper_train",
+    description: "Start paper training from an idea or goal the operator just gave you. Each round your own model decides LONG, SHORT, CLOSE, or NOTHING toward that goal, and the fill lands on the virtual account. No wallet and no real money. One running paper trainer per coin.",
+    method: "POST",
+    path: "paper/train",
+    input_schema: {
+      type: "object",
+      properties: {
+        coin: { type: "string", description: "Perp symbol, e.g. BTC" },
+        goal: { type: "string", description: "The idea to practice, in plain language. 8–800 characters." },
+        sizeUsd: { type: "number", description: "USD notional per order. Default 25. Minimum 10." },
+        intervalMs: { type: "number", description: "How often to decide, in milliseconds. Default and minimum 15 minutes." },
+        maxDrawdownPct: { type: "number", description: "Stop for good if equity falls this percent from the start. Default 10." },
+      },
+      required: ["coin", "goal"],
+    },
+  },
+  {
     name: "hyperliquid_ai_requests",
     description: "Questions waiting for you from your AI Trader bots and backtests: each has a system prompt and a market snapshot. Decide each one and answer with hyperliquid_ai_answer before it expires.",
     method: "GET",
@@ -1377,7 +1428,7 @@ const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: "hyperliquid_ai_answer",
-    description: "Answer one AI Trader question. A live bot's answer is traded immediately from your wallet, within your risk limits.",
+    description: "Answer one AI Trader question. A paper bot's answer fills the virtual account. A live bot's answer is traded from your wallet, within your risk limits.",
     method: "POST",
     path: "ai/requests/{id}/answer",
     input_schema: {
@@ -2001,17 +2052,10 @@ export default defineServerMod({
       }
       let storedParams = params ?? {};
       if (type === "ai") {
-        const intervalMs = Number(params?.intervalMs ?? 3_600_000);
-        const maxDrawdownPct = Number(params?.maxDrawdownPct ?? 50);
-        const leverage = params?.leverage != null ? Number(params.leverage) : undefined;
-        if (!(intervalMs >= AI_MIN_INTERVAL_MS)) {
-          return Response.json({ error: "params.intervalMs must be at least 15 minutes for an ai strategy" }, { status: 400 });
-        }
-        if (!(maxDrawdownPct > 0 && maxDrawdownPct < 100)) {
-          return Response.json({ error: "params.maxDrawdownPct must be between 0 and 100" }, { status: 400 });
-        }
         if (coin === "ANY") return Response.json({ error: "an ai strategy needs a specific coin" }, { status: 400 });
-        storedParams = { intervalMs, maxDrawdownPct, ...(leverage ? { leverage } : {}), flipTo: null, openRequestId: null } satisfies AiParams;
+        const built = buildAiParams(params);
+        if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
+        storedParams = built;
       }
       if (type === "dca" && !params?.intervalMs) {
         return Response.json({ error: "params.intervalMs is required for a dca strategy" }, { status: 400 });
@@ -2127,9 +2171,11 @@ export default defineServerMod({
         ? { isLong: Number(p.size) > 0, size: Number(p.size), entryPx: Number(p.entryPx), unrealizedPnl: Number(p.unrealizedPnl) || 0 }
         : null;
 
+      const goal = normalizeGoal(body.goal);
+      if (goal.error) return Response.json({ error: goal.error }, { status: 400 });
       const id = await createAiRequest({
         agentId, orgId: access.orgId, purpose: "backtest", strategyId: null, coin,
-        ...decisionRequest(coin, buildSnapshot({ coin, candles, interval }), position),
+        ...decisionRequest(coin, buildSnapshot({ coin, candles, interval }), position, goal.goal),
         expiresAt: new Date(Date.now() + AI_BACKTEST_ANSWER_MS),
       });
       return Response.json({ id });
@@ -2276,6 +2322,74 @@ export default defineServerMod({
     },
 
     // ── Paper trading ──────────────────────────────────────────────────────
+
+    /**
+     * POST /paper/train — start a paper AI trader from an operator goal.
+     * Body: { orgId, agentId, coin, goal, sizeUsd?, intervalMs?, maxDrawdownPct?, leverage? }
+     * No wallet. The first round is asked immediately; the hub tick keeps asking.
+     * The agent's daemon answers, and the fill lands on the paper account.
+     */
+    "POST /paper/train": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const agentId = ctx.agent?.agentId ?? body.agentId;
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      const coin = cleanTrainCoin(body.coin);
+      if (!orgId || !agentId) return Response.json({ error: "orgId and agentId are required" }, { status: 400 });
+      if (!coin) return Response.json({ error: "coin must be a perp symbol such as BTC" }, { status: 400 });
+      const goal = normalizeGoal(body.goal);
+      if (goal.error) return Response.json({ error: goal.error }, { status: 400 });
+      if (!goal.goal) return Response.json({ error: "A goal is required — write the idea this agent should practice" }, { status: 400 });
+
+      const sizeUsd = body.sizeUsd == null || body.sizeUsd === "" ? TRAIN_DEFAULT_SIZE_USD : Number(body.sizeUsd);
+      if (!(sizeUsd >= MIN_ORDER_USD && sizeUsd <= TRAIN_MAX_SIZE_USD)) {
+        return Response.json({ error: `sizeUsd must be between ${MIN_ORDER_USD} and ${TRAIN_MAX_SIZE_USD}` }, { status: 400 });
+      }
+      const built = buildAiParams({
+        intervalMs: body.intervalMs ?? TRAIN_DEFAULT_INTERVAL_MS,
+        maxDrawdownPct: body.maxDrawdownPct ?? TRAIN_DEFAULT_DRAWDOWN_PCT,
+        leverage: body.leverage,
+        goal: goal.goal,
+      });
+      if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
+
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      try {
+        await enforceCapability(agentId, orgId, "hyperliquid-run-strategy");
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 403 });
+      }
+
+      const existing = await getStrategies(agentId);
+      const clash = existing.find((s) => s.enabled && s.paper && s.type === "ai" && s.coin === coin);
+      if (clash) {
+        return Response.json({
+          error: `This agent already has a paper trainer on ${coin}. Stop it before starting another goal.`,
+          strategyId: clash.id,
+        }, { status: 409 });
+      }
+
+      const id = await createStrategy({
+        orgId, agentId, wallet: "", type: "ai", coin, sizeUsd, enabled: true, params: built, paper: true,
+      });
+
+      let firstRound: "asked" | "waiting" | "error" = "waiting";
+      try {
+        const created = await getStrategy(id);
+        if (created) {
+          const round = await runAiStrategy(created);
+          firstRound = round === "asked" ? "asked" : round === "error" ? "error" : "waiting";
+        }
+      } catch (err) {
+        console.error(`[hyperliquid-paper] train ${id} first round failed:`, err);
+        firstRound = "error";
+      }
+
+      return Response.json({
+        id, paper: true, coin, goal: goal.goal, sizeUsd,
+        intervalMs: built.intervalMs, maxDrawdownPct: built.maxDrawdownPct, firstRound,
+      });
+    },
 
     /**
      * GET /paper/:agentId — the agent's paper account marked to mainnet mids:

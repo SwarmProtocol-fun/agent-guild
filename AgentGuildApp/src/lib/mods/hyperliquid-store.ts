@@ -297,6 +297,7 @@ export interface SniperParams { mode: "new-listing" | "price-above" | "price-bel
  * maxDrawdownPct below it the bot is stopped for good (eliminated).
  * flipTo is set when a flip's close has been sent and the new side still
  * has to open — the tick opens it once the close has filled.
+ * goal is the operator's training idea, quoted into every decision prompt.
  */
 export interface AiParams {
   intervalMs: number;
@@ -306,6 +307,7 @@ export interface AiParams {
   startEquity?: number;
   eliminated?: boolean;
   flipTo?: "long" | "short" | null;
+  goal?: string;
 }
 
 export interface Strategy {

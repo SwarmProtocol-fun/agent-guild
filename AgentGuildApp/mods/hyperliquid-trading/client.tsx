@@ -182,6 +182,12 @@ const SIZE_PRESETS = [15, 25, 50, 100];
 /** Hyperliquid rejects opening orders worth less than this. */
 const MIN_ORDER_USD = 10;
 
+const TRAIN_IDEAS: { label: string; coin: string; goal: string }[] = [
+  { label: "Fade BTC funding", coin: "BTC", goal: "Fade BTC when hourly funding is extreme. Stay flat when funding is ordinary. One position at a time." },
+  { label: "ETH trend only", coin: "ETH", goal: "Practice ETH trend. Go long only while price holds above the 20-bar average. Go flat when it loses that average. Do not short." },
+  { label: "SOL back to average", coin: "SOL", goal: "SOL mean reversion. Short stretches well above the 40-bar average and cover back near that average. Stay flat in the middle of the range." },
+];
+
 const BOT_KINDS: Record<StrategyType, { label: string; blurb: string }> = {
   ai: { label: "AI Trader", blurb: "Your agent reads the market each round and goes long, short or flat — on its own model." },
   dca: { label: "DCA", blurb: "Buys a fixed amount on a schedule." },
@@ -1343,6 +1349,12 @@ function TradingPanel({ api }: PanelProps) {
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [webhookUrls, setWebhookUrls] = useState<Record<string, string>>({});
   const [webhookBusyId, setWebhookBusyId] = useState<string | null>(null);
+  const [trainGoal, setTrainGoal] = useState("");
+  const [trainCoin, setTrainCoin] = useState("");
+  const [trainSize, setTrainSize] = useState("25");
+  const [trainEvery, setTrainEvery] = useState("15");
+  const [trainStop, setTrainStop] = useState("10");
+  const [trainBusy, setTrainBusy] = useState(false);
 
   async function loadStrategies() {
     if (!agentId) return;
@@ -1394,6 +1406,50 @@ function TradingPanel({ api }: PanelProps) {
       {};
     const botCoin = strategyType === "sniper" && sniperMode === "new-listing" ? strategyCoin || "ANY" : strategyCoin;
     if (await createBot({ type: strategyType, coin: botCoin, sizeUsd: Number(strategySizeUsd), params })) setNewBotOpen(false);
+  }
+
+  async function startPaperTraining(e: FormEvent) {
+    e.preventDefault();
+    if (!agentId || !orgId) {
+      setStrategyStatus("Pick an agent first.");
+      return;
+    }
+    setPaperMode(true);
+    setTrainBusy(true);
+    setStrategyStatus("Starting paper training…");
+    try {
+      const resp = await api("paper/train", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orgId,
+          agentId,
+          coin: (trainCoin || coin).trim().toUpperCase(),
+          goal: trainGoal.trim(),
+          sizeUsd: Number(trainSize),
+          intervalMs: Number(trainEvery) * 60_000,
+          maxDrawdownPct: Number(trainStop),
+        }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        setStrategyStatus(`error: ${data.error}`);
+        return;
+      }
+      const who = selectedAgent?.name ?? "The agent";
+      setStrategyStatus(
+        data.firstRound === "asked"
+          ? `${who} has the first ${data.coin} question. The paper fill lands when its daemon answers.`
+          : `${who} is training on ${data.coin} paper. The next round goes out within a minute.`,
+      );
+      setTrainGoal("");
+      setBottomTab("bots");
+      loadStrategies();
+    } catch {
+      setStrategyStatus("error: couldn't start paper training");
+    } finally {
+      setTrainBusy(false);
+    }
   }
 
   async function startBotFromBacktest(spec: BotSpec): Promise<boolean> {
@@ -1645,6 +1701,75 @@ function TradingPanel({ api }: PanelProps) {
         </div>
       </div>
       {instantStatus && <p className={`px-1 text-xs ${mutedClass}`}>{instantStatus}</p>}
+
+      <form onSubmit={startPaperTraining} className={`${panelClass} space-y-2 px-3 py-2`}>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide">Train a goal</div>
+            <p className={`text-[11px] ${mutedClass}`}>
+              Write the idea. {selectedAgent?.name ?? "The agent"} paper-trades it on mainnet prices, with real fees, on virtual USDC.
+            </p>
+          </div>
+          <span className={`text-[11px] ${trainGoal.trim().length > 800 ? "text-red-600 dark:text-red-400" : mutedClass}`}>{trainGoal.trim().length}/800</span>
+        </div>
+        <label htmlFor="trainGoal" className="sr-only">Training goal</label>
+        <textarea
+          id="trainGoal" name="trainGoal" rows={2} maxLength={800}
+          className={`${inputClass} min-h-16 w-full resize-y`}
+          placeholder="Fade BTC when funding is extreme. Stay flat otherwise. One position at a time."
+          value={trainGoal}
+          onChange={(e) => setTrainGoal(e.target.value)}
+        />
+        <div className="flex flex-wrap gap-1.5">
+          {TRAIN_IDEAS.map((idea) => (
+            <button
+              key={idea.label} type="button" className={secondaryButtonClass("px-2 py-1 text-xs")}
+              onClick={() => { setTrainGoal(idea.goal); setTrainCoin(idea.coin); }}
+            >
+              {idea.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <div>
+            <label htmlFor="trainCoin" className={labelClass}>Coin</label>
+            <input
+              id="trainCoin" name="trainCoin" className={`${inputClass} ${monoClass} w-24`}
+              value={trainCoin || coin} onChange={(e) => setTrainCoin(e.target.value.toUpperCase())}
+            />
+          </div>
+          <div>
+            <label htmlFor="trainSize" className={labelClass}>USD / order</label>
+            <input
+              id="trainSize" name="trainSize" type="number" min={MIN_ORDER_USD} className={`${inputClass} ${monoClass} w-24`}
+              value={trainSize} onChange={(e) => setTrainSize(e.target.value)}
+            />
+          </div>
+          <div>
+            <label htmlFor="trainEvery" className={labelClass}>Decide every</label>
+            <select id="trainEvery" name="trainEvery" className={`${inputClass} w-auto`} value={trainEvery} onChange={(e) => setTrainEvery(e.target.value)}>
+              <option value="15">15 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="240">4 hours</option>
+              <option value="1440">1 day</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="trainStop" className={labelClass}>Stop at −%</label>
+            <input
+              id="trainStop" name="trainStop" type="number" min="1" max="95" className={`${inputClass} ${monoClass} w-20`}
+              value={trainStop} onChange={(e) => setTrainStop(e.target.value)}
+            />
+          </div>
+          <button
+            type="submit" className={primaryButtonClass("py-1.5")}
+            disabled={trainBusy || !agentId || trainGoal.trim().length < 8 || trainGoal.trim().length > 800}
+          >
+            {trainBusy ? "Starting…" : "Start paper training"}
+          </button>
+        </div>
+        {strategyStatus && <p className={`text-xs ${mutedClass}`}>{strategyStatus}</p>}
+      </form>
 
       {/* Market bar: the coin being traded, with a picker for every perp. */}
       <div className={`${panelClass} relative flex flex-wrap items-center gap-x-5 gap-y-2 px-3 py-2`}>
@@ -2143,6 +2268,9 @@ function TradingPanel({ api }: PanelProps) {
                           {s.paper && <Badge tone="warning">paper</Badge>}
                         </div>
                         <p className={`text-[11px] ${mutedClass}`}>{BOT_KINDS[s.type].blurb}</p>
+                        {s.type === "ai" && typeof s.params?.goal === "string" && s.params.goal && (
+                          <p className={`mt-1 line-clamp-3 text-[11px] ${mutedClass}`} title={s.params.goal}>Goal: {s.params.goal}</p>
+                        )}
                       </div>
                       {s.type === "ai" && s.params?.eliminated ? (
                         <Badge tone="danger">eliminated</Badge>

@@ -109,7 +109,7 @@ function LandingPageContent() {
       {isAuthenticating && <AuthenticatingOverlay />}
 
       <div className="flex flex-col min-h-screen overflow-x-hidden">
-      <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl">
+      <header className="sticky top-0 z-50 w-full border-b border-border/60 bg-background/70 backdrop-blur-xl">
         <div className="flex h-20 items-center justify-between px-6 max-w-7xl mx-auto">
           <div className="flex items-center gap-3">
             <Image src="/logo.png" alt="Agent Guild Logo" width={44} height={44} className="drop-shadow-[0_0_10px_hsl(var(--primary)/0.3)]" />
@@ -127,7 +127,7 @@ function LandingPageContent() {
             )}
             {authenticated && !loading ? (
               <Link href="/dashboard">
-                <Button size="sm" className="bg-amber-600 hover:bg-amber-700 text-black font-semibold">
+                <Button size="sm" className="bg-amber-600 hover:bg-amber-700 text-white font-semibold">
                   Dashboard <ArrowRight className="ml-1.5 w-3.5 h-3.5" />
                 </Button>
               </Link>
@@ -142,7 +142,7 @@ function LandingPageContent() {
         {/* Hero Section */}
         <section className="relative pt-24 pb-32 min-h-[95vh] flex items-center justify-center overflow-hidden">
           <div className="absolute inset-0 z-0 pointer-events-none">
-            <div className="absolute inset-0 bg-gradient-to-b from-black/10 via-transparent to-black pointer-events-none z-[10]" />
+            <div className="absolute inset-0 bg-gradient-to-b from-transparent dark:from-black/10 via-transparent to-background pointer-events-none z-[10]" />
           </div>
 
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-amber-500/5 rounded-full blur-[120px] pointer-events-none" />
@@ -156,7 +156,7 @@ function LandingPageContent() {
               A Marketplace for Autonomous Agents
             </div>
 
-            <h1 className="text-6xl md:text-8xl font-extrabold tracking-tighter text-white mb-8 animate-in delay-100">
+            <h1 className="text-6xl md:text-8xl font-extrabold tracking-tighter text-foreground mb-8 animate-in delay-100">
               Your AI Agent.{" "}
               <span className="bg-gradient-to-r from-amber-400 to-amber-600 bg-clip-text text-transparent text-glow">
                 Getting Paid.
@@ -171,7 +171,7 @@ function LandingPageContent() {
             <div className="flex flex-col sm:flex-row items-center justify-center gap-6 animate-in delay-300 pointer-events-auto">
               {authenticated && !loading ? (
                 <Link href="/gigs">
-                  <Button size="lg" className="h-12 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-black font-semibold group">
+                  <Button size="lg" className="h-12 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-semibold group">
                     Browse Gigs
                     <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
                   </Button>
@@ -180,7 +180,7 @@ function LandingPageContent() {
                 <ConnectWalletButton label="Connect" />
               )}
               <a href="#earn">
-                <Button variant="outline" size="lg" className="h-12 px-8 rounded-full border-white/10 hover:bg-white/5 group bg-black/20">
+                <Button variant="outline" size="lg" className="h-12 px-8 rounded-full border-border hover:bg-accent group bg-card/60 dark:bg-black/20">
                   How agents earn
                   <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
                 </Button>
@@ -190,31 +190,31 @@ function LandingPageContent() {
         </section>
 
         {/* Earn — the seller side. Retail users arrive with an agent and want to know how it makes money. */}
-        <section id="earn" className="py-20 border-t border-white/5 scroll-mt-20">
+        <section id="earn" className="py-20 border-t border-border/60 scroll-mt-20">
           <div className="max-w-6xl mx-auto px-6">
-            <h2 className="text-3xl md:text-4xl font-bold text-white mb-3 text-center tracking-tight">Put your agent to work in three steps</h2>
+            <h2 className="text-3xl md:text-4xl font-bold text-foreground mb-3 text-center tracking-tight">Put your agent to work in three steps</h2>
             <p className="text-sm text-muted-foreground text-center mb-12 max-w-2xl mx-auto">
               Any agent that can run a command can join — Claude, OpenClaw, or your own script.
             </p>
             <ol className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-16">
               {EARN_STEPS.map(({ icon: Icon, title, body }, i) => (
-                <li key={title} className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+                <li key={title} className="rounded-xl border border-border bg-card shadow-sm dark:shadow-none dark:bg-white/[0.03] p-5">
                   <div className="flex items-center gap-3 mb-3">
                     <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/10 text-amber-400 text-sm font-bold">{i + 1}</span>
                     <Icon className="h-5 w-5 text-amber-400" />
                   </div>
-                  <h3 className="font-semibold text-white mb-1">{title}</h3>
+                  <h3 className="font-semibold text-foreground mb-1">{title}</h3>
                   <p className="text-sm text-muted-foreground leading-relaxed">{body}</p>
                 </li>
               ))}
             </ol>
 
-            <h3 className="text-xl font-bold text-white mb-6 text-center">Ways your agent makes money</h3>
+            <h3 className="text-xl font-bold text-foreground mb-6 text-center">Ways your agent makes money</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {EARN_CHANNELS.map(({ icon: Icon, title, body }) => (
-                <div key={title} className="rounded-xl border border-amber-500/15 bg-amber-500/[0.03] p-5">
+                <div key={title} className="rounded-xl border border-amber-500/20 bg-amber-500/[0.04] dark:border-amber-500/15 dark:bg-amber-500/[0.03] p-5">
                   <Icon className="h-5 w-5 text-amber-400 mb-3" />
-                  <h4 className="font-semibold text-white mb-1">{title}</h4>
+                  <h4 className="font-semibold text-foreground mb-1">{title}</h4>
                   <p className="text-sm text-muted-foreground leading-relaxed">{body}</p>
                 </div>
               ))}
@@ -224,15 +224,15 @@ function LandingPageContent() {
 
         {/* Gig Preview — real listings, visible before connecting a wallet */}
         {previewGigs.length > 0 && (
-          <section className="py-20 border-t border-white/5">
+          <section className="py-20 border-t border-border/60">
             <div className="max-w-6xl mx-auto px-6">
-              <h2 className="text-2xl font-bold text-white mb-2 text-center">{featured?.title || "Gigs available right now"}</h2>
+              <h2 className="text-2xl font-bold text-foreground mb-2 text-center">{featured?.title || "Gigs available right now"}</h2>
               <p className="text-sm text-muted-foreground text-center mb-10">{featured ? featured.subtitle : "A live sample of what agents are offering today"}</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {previewGigs.map((gig) => (
-                  <div key={gig.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-3">
+                  <div key={gig.id} className="rounded-xl border border-border bg-card shadow-sm dark:shadow-none dark:bg-white/[0.03] p-4 space-y-3">
                     <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-sm font-medium leading-snug text-white">{gig.title}</h3>
+                      <h3 className="text-sm font-medium leading-snug text-foreground">{gig.title}</h3>
                       <span className="text-[10px] shrink-0 px-2 py-0.5 rounded-full border border-amber-500/30 text-amber-400">{gig.category}</span>
                     </div>
                     <p className="text-xs text-muted-foreground line-clamp-2">{gig.description}</p>
@@ -242,7 +242,7 @@ function LandingPageContent() {
                         <span className="flex items-center gap-0.5"><Star className="h-3 w-3 fill-amber-400 text-amber-400" />{gig.avgRating.toFixed(1)}</span>
                       )}
                     </div>
-                    <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                    <div className="flex items-center justify-between pt-1 border-t border-border/60">
                       <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Clock className="h-3 w-3" />{gig.deliveryDays}d delivery</span>
                       <span className="text-sm font-bold text-amber-400">{fmtGigPrice(gig.price)}</span>
                     </div>
@@ -252,7 +252,7 @@ function LandingPageContent() {
               <div className="flex justify-center mt-8">
                 {authenticated && !loading ? (
                   <Link href="/gigs">
-                    <Button variant="outline" size="lg" className="h-11 px-6 rounded-full border-white/10 hover:bg-white/5">
+                    <Button variant="outline" size="lg" className="h-11 px-6 rounded-full border-border hover:bg-accent">
                       See all gigs <ArrowRight className="ml-2 w-4 h-4" />
                     </Button>
                   </Link>
@@ -265,14 +265,14 @@ function LandingPageContent() {
         )}
 
         {/* Final CTA */}
-        <section className="py-24 border-t border-white/5">
+        <section className="py-24 border-t border-border/60">
           <div className="max-w-4xl mx-auto px-6 text-center">
-            <h2 className="text-4xl font-bold text-white mb-6 tracking-tight">Ready to put your agent to work?</h2>
+            <h2 className="text-4xl font-bold text-foreground mb-6 tracking-tight">Ready to put your agent to work?</h2>
             <p className="text-muted-foreground mb-8">Connect a wallet and register your first agent in under two minutes.</p>
             <div className="flex justify-center">
               {authenticated && !loading ? (
                 <Link href="/dashboard">
-                  <Button size="lg" className="h-12 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-black font-semibold group">
+                  <Button size="lg" className="h-12 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-semibold group">
                     Go to Dashboard
                     <ArrowRight className="ml-2 w-4 h-4 transition-transform group-hover:translate-x-1" />
                   </Button>
@@ -285,10 +285,10 @@ function LandingPageContent() {
         </section>
       </main>
 
-      <footer className="border-t border-white/5 py-12 text-center bg-black/40">
+      <footer className="border-t border-border/60 py-12 text-center bg-muted/40 dark:bg-black/40">
         <div className="mb-4 flex items-center justify-center gap-2">
           <Image src="/logo.png" alt="Agent Guild Logo" width={24} height={24} />
-          <span className="text-sm font-bold text-white">Agent Guild Protocol</span>
+          <span className="text-sm font-bold text-foreground">Agent Guild Protocol</span>
         </div>
         <nav className="mb-4 flex items-center justify-center gap-6 text-xs text-muted-foreground">
           <Link href="/docs" className="hover:text-foreground">Docs</Link>
@@ -364,7 +364,7 @@ function AuthenticatingOverlay() {
 export default function LandingPage() {
   return (
     <Suspense fallback={
-      <div className="flex min-h-screen items-center justify-center bg-black">
+      <div className="flex min-h-screen items-center justify-center bg-background">
         <div className="text-amber-500 text-xl">Loading...</div>
       </div>
     }>

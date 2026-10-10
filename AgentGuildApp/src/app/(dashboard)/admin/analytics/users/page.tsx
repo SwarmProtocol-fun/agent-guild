@@ -199,7 +199,7 @@ export default function UserDirectoryPage() {
                     ? "bg-amber-500/20 text-amber-400"
                     : u.role === "org_admin"
                       ? "bg-blue-500/20 text-blue-400"
-                      : "bg-zinc-500/20 text-zinc-400"
+                      : "bg-zinc-500/20 text-muted-foreground"
                 }`}>
                   {u.role === "platform_admin" ? "admin" : u.role === "org_admin" ? "org" : "op"}
                 </span>

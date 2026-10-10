@@ -179,7 +179,10 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
             const r = await api("ai/ask", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ agentId, coin, interval, candles: seen.slice(-AI_WARMUP_BARS), position }),
+              body: JSON.stringify({
+                agentId, coin, interval, candles: seen.slice(-AI_WARMUP_BARS), position,
+                ...(typeof ip.goal === "string" && ip.goal ? { goal: ip.goal } : {}),
+              }),
             });
             const asked = await r.json();
             if (asked.error) throw new Error(asked.error);
@@ -196,7 +199,14 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
             }
           },
         };
-        spec = { type: "ai", coin, sizeUsd: size, params: { intervalMs: barMs, maxDrawdownPct: Number(maxDd), ...(lev > 1 ? { leverage: lev } : {}) } };
+        spec = {
+          type: "ai", coin, sizeUsd: size,
+          params: {
+            intervalMs: barMs, maxDrawdownPct: Number(maxDd),
+            ...(lev > 1 ? { leverage: lev } : {}),
+            ...(typeof ip.goal === "string" && ip.goal ? { goal: ip.goal } : {}),
+          },
+        };
       }
 
       const result = await runBacktest({

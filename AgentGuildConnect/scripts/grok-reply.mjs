@@ -175,6 +175,7 @@ function modLine() {
   if (caps.includes("hyperliquid-trade")) {
     lines.push(
       `Hyperliquid (testnet only) — run these in the shell: \`${run} hyperliquid status\`, \`${run} hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>\`, \`${run} hyperliquid strategy dca --coin <COIN> --size-usd <n> --interval-ms <n>\`, \`${run} hyperliquid pending\`. Report the taskId. Risk limits are enforced by the hub.`,
+      `Hyperliquid paper training moves no real money. When the human gives an idea or goal to practice, run \`${run} mod call hyperliquid-trading hyperliquid_paper_train '{"coin":"BTC","goal":"<their goal>","sizeUsd":25}'\`. Your daemon answers each round and the hub fills the paper account. Do not use hyperliquid trade for a practice goal.`,
     );
   }
   if (caps.includes("polymarket-trade") || caps.includes("polymarket-run-bots")) {

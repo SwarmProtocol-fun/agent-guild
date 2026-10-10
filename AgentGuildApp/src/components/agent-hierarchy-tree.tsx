@@ -132,17 +132,17 @@ function AgentTreeNode({
   return (
     <div className="select-none">
       {/* Node header */}
-      <div className="flex items-center gap-2 p-3 bg-gray-800 rounded-lg border border-gray-700 hover:bg-gray-750 transition">
+      <div className="flex items-center gap-2 p-3 bg-muted rounded-lg border border-border hover:bg-gray-750 transition">
         {/* Expand/collapse button */}
         {hasChildren && (
           <button
             onClick={() => setExpanded(!expanded)}
-            className="p-1 hover:bg-gray-700 rounded transition"
+            className="p-1 hover:bg-muted/80 rounded transition"
           >
             {expanded ? (
-              <ChevronDown className="w-4 h-4 text-gray-400" />
+              <ChevronDown className="w-4 h-4 text-muted-foreground" />
             ) : (
-              <ChevronRight className="w-4 h-4 text-gray-400" />
+              <ChevronRight className="w-4 h-4 text-muted-foreground" />
             )}
           </button>
         )}
@@ -152,8 +152,8 @@ function AgentTreeNode({
           <div className={`w-2 h-2 rounded-full ${getStatusColor(node.agent.status)}`} />
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <span className="font-medium text-white">{node.agent.name}</span>
-              <span className="text-xs text-gray-400 capitalize">
+              <span className="font-medium text-foreground">{node.agent.name}</span>
+              <span className="text-xs text-muted-foreground capitalize">
                 {node.agent.type}
               </span>
               {node.agent.canDelegate && (
@@ -162,7 +162,7 @@ function AgentTreeNode({
                 </span>
               )}
             </div>
-            <div className="text-xs text-gray-500">
+            <div className="text-xs text-muted-foreground">
               Level {node.agent.hierarchyLevel} • {hasChildren ? `${node.children.length} child${node.children.length > 1 ? "ren" : ""}` : "No children"}
             </div>
           </div>
@@ -172,7 +172,7 @@ function AgentTreeNode({
             <button
               onClick={() => setShowAddChild(!showAddChild)}
               disabled={loading}
-              className="p-2 hover:bg-gray-700 rounded transition text-gray-400 hover:text-white disabled:opacity-50"
+              className="p-2 hover:bg-muted/80 rounded transition text-muted-foreground hover:text-foreground disabled:opacity-50"
               title="Add child agent"
             >
               <UserPlus className="w-4 h-4" />
@@ -183,13 +183,13 @@ function AgentTreeNode({
 
       {/* Add child form */}
       {showAddChild && (
-        <div className="ml-6 mt-2 p-3 bg-gray-800/50 rounded-lg border border-gray-700">
+        <div className="ml-6 mt-2 p-3 bg-muted/50 rounded-lg border border-border">
           <div className="flex items-center gap-2">
             <select
               value={selectedChildId}
               onChange={(e) => setSelectedChildId(e.target.value)}
               disabled={loading}
-              className="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              className="flex-1 bg-muted/80 border border-border rounded px-3 py-2 text-foreground text-sm focus:border-blue-500 focus:outline-none disabled:opacity-50"
             >
               <option value="">Select an agent...</option>
               {availableAgents.map((agent) => (
@@ -211,7 +211,7 @@ function AgentTreeNode({
                 setSelectedChildId("");
               }}
               disabled={loading}
-              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded text-sm transition"
+              className="px-4 py-2 bg-muted/80 hover:bg-muted disabled:opacity-50 text-foreground rounded text-sm transition"
             >
               Cancel
             </button>
@@ -221,7 +221,7 @@ function AgentTreeNode({
 
       {/* Children */}
       {expanded && hasChildren && (
-        <div className="ml-6 mt-2 space-y-2 border-l-2 border-gray-700 pl-4">
+        <div className="ml-6 mt-2 space-y-2 border-l-2 border-border pl-4">
           {node.children.map((child) => (
             <div key={child.agent.id} className="relative">
               {/* Child node */}
@@ -240,7 +240,7 @@ function AgentTreeNode({
                   <button
                     onClick={() => handleDelegate(child.agent.id)}
                     disabled={loading}
-                    className="p-1 bg-gray-800 border border-gray-700 hover:bg-gray-700 rounded transition text-blue-400 disabled:opacity-50"
+                    className="p-1 bg-muted border border-border hover:bg-muted/80 rounded transition text-blue-400 disabled:opacity-50"
                     title="Delegate task to this child"
                   >
                     <ArrowRight className="w-3 h-3" />
@@ -250,7 +250,7 @@ function AgentTreeNode({
                   <button
                     onClick={() => handleRemoveChild(child.agent.id)}
                     disabled={loading}
-                    className="p-1 bg-gray-800 border border-gray-700 hover:bg-gray-700 rounded transition text-red-400 disabled:opacity-50"
+                    className="p-1 bg-muted border border-border hover:bg-muted/80 rounded transition text-red-400 disabled:opacity-50"
                     title="Remove child from hierarchy"
                   >
                     <UserMinus className="w-3 h-3" />

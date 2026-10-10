@@ -28,6 +28,15 @@
 
 const BASE = "/api/mods/hyperliquid-trading";
 
+/** Paper and decision routes never decrypt a wallet, so they must not demand the passphrase. */
+const NO_SECRET = new Set([
+  "hyperliquid_paper_trade",
+  "hyperliquid_paper_close",
+  "hyperliquid_paper_cancel",
+  "hyperliquid_paper_train",
+  "hyperliquid_ai_answer",
+]);
+
 function config(env = process.env) {
   const url = (env.AGENT_GUILD_URL || "https://agent-guild.com").replace(/\/$/, "");
   const token = env.AGENT_GUILD_TOKEN;
@@ -74,6 +83,7 @@ export async function connect(env = process.env) {
       return encodeURIComponent(String(value));
     });
     if (tool.method === "GET") return request("GET", path);
+    if (NO_SECRET.has(name)) return request("POST", path, rest);
     if (!cfg.masterSecret && !me.wallet?.instant) {
       throw new Error("HL_MASTER_SECRET is required to place or close trades (or turn on instant trading for this agent)");
     }

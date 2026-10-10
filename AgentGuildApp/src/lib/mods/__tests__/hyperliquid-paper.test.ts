@@ -105,6 +105,7 @@ const store = {
   markStrategyPending: vi.fn(),
   clearStrategyPending: vi.fn(),
   createStrategy: vi.fn(async () => "s-new"),
+  getStrategies: vi.fn(async () => [] as unknown[]),
   getInstantTrading: vi.fn(async () => null),
   getAgentWallet: vi.fn(async () => null),
   getRiskConfig: vi.fn(async () => null as unknown),
@@ -268,9 +269,33 @@ describe("paper trading routes", () => {
     expect(amount).toBeCloseTo(-2 * 1890 * 0.0001);
   });
 
+  it("starts paper training from a goal and refuses a second trainer on the same coin", async () => {
+    const goal = "Fade ETH when hourly funding is extreme. Stay flat otherwise.";
+    store.getStrategy.mockResolvedValueOnce(null);
+    const resp = await route("POST /paper/train")(post({ coin: "eth", goal, sizeUsd: 25 }), agentCtx());
+    expect(resp.status).toBe(200);
+    const data = await resp.json();
+    expect(data).toMatchObject({ id: "s-new", paper: true, coin: "ETH", goal, sizeUsd: 25, firstRound: "waiting" });
+    expect(store.createStrategy).toHaveBeenCalledWith(expect.objectContaining({
+      type: "ai", coin: "ETH", paper: true, wallet: "", sizeUsd: 25,
+      params: expect.objectContaining({ goal, intervalMs: 15 * 60_000, maxDrawdownPct: 10 }),
+    }));
+    expect(enforceCapability).toHaveBeenCalledWith("a1", "org1", "hyperliquid-run-strategy");
+    expect(enqueueTask).not.toHaveBeenCalled();
+
+    store.getStrategies.mockResolvedValueOnce([
+      { id: "s-new", enabled: true, paper: true, type: "ai", coin: "ETH" },
+    ]);
+    const again = await route("POST /paper/train")(post({ coin: "ETH", goal }), agentCtx());
+    expect(again.status).toBe(409);
+
+    const short = await route("POST /paper/train")(post({ coin: "BTC", goal: "buy" }), agentCtx());
+    expect(short.status).toBe(400);
+  });
+
   it("lists paper tools in the agent manifest", async () => {
     const data = await (await route("GET /agent/tools")(new Request("http://x/"), agentCtx())).json();
     const names = data.tools.map((t: { name: string }) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["hyperliquid_paper_account", "hyperliquid_paper_trade", "hyperliquid_paper_close", "hyperliquid_paper_cancel"]));
+    expect(names).toEqual(expect.arrayContaining(["hyperliquid_paper_account", "hyperliquid_paper_trade", "hyperliquid_paper_close", "hyperliquid_paper_cancel", "hyperliquid_paper_train"]));
   });
 });

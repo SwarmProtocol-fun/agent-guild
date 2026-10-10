@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { runBacktest, TAKER_FEE } from "../../../../mods/hyperliquid-trading/backtest";
-import { buildSnapshot, decisionToAction, parseDecision, type AiDecision } from "../../../../mods/hyperliquid-trading/ai-trader-core";
+import { buildSnapshot, decisionRequest, decisionToAction, normalizeGoal, parseDecision, systemPrompt, type AiDecision } from "../../../../mods/hyperliquid-trading/ai-trader-core";
 import { maxDrawdownPct, rsi, sma, type Candle } from "../../../../mods/hyperliquid-trading/indicators";
 
 const HOUR = 3_600_000;
@@ -17,6 +17,24 @@ describe("indicators", () => {
     expect(rsi(Array.from({ length: 20 }, (_, i) => i + 1))).toBe(100);
     expect(rsi(Array.from({ length: 20 }, () => 5))).toBe(50);
     expect(maxDrawdownPct([100, 120, 90, 130])).toBeCloseTo(25);
+  });
+});
+
+describe("operator training goal", () => {
+  it("keeps a written idea and rejects one that is too short or too long", () => {
+    expect(normalizeGoal(null)).toEqual({ goal: null });
+    expect(normalizeGoal("  Fade BTC when funding is extreme.  ").goal).toBe("Fade BTC when funding is extreme.");
+    expect(normalizeGoal("buy").error).toMatch(/at least 8/);
+    expect(normalizeGoal("x".repeat(801)).error).toMatch(/at most 800/);
+    expect(normalizeGoal(12).error).toBe("goal must be text");
+  });
+
+  it("puts the goal in the question and still demands a decision word", () => {
+    const goal = "Fade BTC when hourly funding is extreme. Stay flat otherwise.";
+    const { system } = decisionRequest("BTC", "MARKET SNAPSHOT — BTC-PERP", null, goal);
+    expect(system).toContain(`GOAL: ${goal}`);
+    expect(system.endsWith("LONG, SHORT, CLOSE or NOTHING.")).toBe(true);
+    expect(systemPrompt("ETH", null)).not.toContain("GOAL:");
   });
 });
 

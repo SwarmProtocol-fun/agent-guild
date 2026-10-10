@@ -109,8 +109,8 @@ export default function SummariesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Daily Summaries</h1>
-          <p className="text-gray-400 mt-2">
+          <h1 className="text-3xl font-bold text-foreground">Daily Summaries</h1>
+          <p className="text-muted-foreground mt-2">
             Automated daily standups and activity reports for your agents
           </p>
         </div>
@@ -119,7 +119,7 @@ export default function SummariesPage() {
           <button
             onClick={fetchSummaries}
             disabled={loading}
-            className="flex items-center space-x-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 text-white rounded-lg transition"
+            className="flex items-center space-x-2 px-4 py-2 bg-muted/80 hover:bg-muted disabled:bg-gray-800 text-foreground rounded-lg transition"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             <span>Refresh</span>
@@ -137,13 +137,13 @@ export default function SummariesPage() {
       </div>
 
       {/* Filter */}
-      <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+      <div className="bg-muted rounded-lg p-4 border border-border">
         <div className="flex items-center space-x-4">
-          <Filter className="w-5 h-5 text-gray-400" />
+          <Filter className="w-5 h-5 text-muted-foreground" />
           <select
             value={filterAgent}
             onChange={(e) => setFilterAgent(e.target.value)}
-            className="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white"
+            className="flex-1 bg-muted/80 border border-border rounded-lg px-4 py-2 text-foreground"
           >
             <option value="">All Agents</option>
             {agents.map((agent) => (
@@ -166,21 +166,21 @@ export default function SummariesPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-          <p className="text-sm text-gray-400">Total Summaries</p>
-          <p className="text-3xl font-bold text-white mt-2">{summaries.length}</p>
+        <div className="bg-muted rounded-lg p-6 border border-border">
+          <p className="text-sm text-muted-foreground">Total Summaries</p>
+          <p className="text-3xl font-bold text-foreground mt-2">{summaries.length}</p>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-          <p className="text-sm text-gray-400">Agents Tracked</p>
-          <p className="text-3xl font-bold text-white mt-2">
+        <div className="bg-muted rounded-lg p-6 border border-border">
+          <p className="text-sm text-muted-foreground">Agents Tracked</p>
+          <p className="text-3xl font-bold text-foreground mt-2">
             {new Set(summaries.map((s) => s.agentId)).size}
           </p>
         </div>
 
-        <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
-          <p className="text-sm text-gray-400">Latest Summary</p>
-          <p className="text-lg font-medium text-white mt-2">
+        <div className="bg-muted rounded-lg p-6 border border-border">
+          <p className="text-sm text-muted-foreground">Latest Summary</p>
+          <p className="text-lg font-medium text-foreground mt-2">
             {summaries.length > 0 ? summaries[0].date : "—"}
           </p>
         </div>
@@ -189,13 +189,13 @@ export default function SummariesPage() {
       {/* Summaries List */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
-          <div className="text-gray-400">Loading summaries...</div>
+          <div className="text-muted-foreground">Loading summaries...</div>
         </div>
       ) : filteredSummaries.length === 0 ? (
-        <div className="bg-gray-800 rounded-lg p-12 border border-gray-700 text-center">
+        <div className="bg-muted rounded-lg p-12 border border-border text-center">
           <Calendar className="w-12 h-12 text-gray-600 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-white mb-2">No Summaries Yet</h3>
-          <p className="text-gray-400 mb-4">
+          <h3 className="text-lg font-medium text-foreground mb-2">No Summaries Yet</h3>
+          <p className="text-muted-foreground mb-4">
             {filterAgent
               ? "No summaries found for this agent"
               : "Generate your first daily summary to get started"}

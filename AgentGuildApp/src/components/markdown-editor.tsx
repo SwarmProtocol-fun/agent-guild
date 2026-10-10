@@ -46,11 +46,11 @@ export function MarkdownEditor({
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700">
+    <div className="bg-muted rounded-lg border border-border">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-700">
+      <div className="flex items-center justify-between p-4 border-b border-border">
         <div>
-          {title && <h3 className="text-lg font-bold text-white">{title}</h3>}
+          {title && <h3 className="text-lg font-bold text-foreground">{title}</h3>}
         </div>
         <div className="flex items-center space-x-2">
           {!readOnly && (
@@ -60,7 +60,7 @@ export function MarkdownEditor({
                 className={`flex items-center space-x-2 px-3 py-1.5 rounded transition ${
                   mode === "edit"
                     ? "bg-blue-600 text-white"
-                    : "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                    : "bg-muted/80 text-foreground/85 hover:bg-muted"
                 }`}
               >
                 {mode === "edit" ? (
@@ -107,13 +107,13 @@ export function MarkdownEditor({
           <textarea
             value={content}
             onChange={(e) => handleContentChange(e.target.value)}
-            className="w-full h-[500px] bg-gray-900 text-gray-100 font-mono text-sm p-4 rounded border border-gray-600 focus:border-blue-500 focus:outline-none resize-none"
+            className="w-full h-[500px] bg-card text-foreground/85 font-mono text-sm p-4 rounded border border-border focus:border-blue-500 focus:outline-none resize-none"
             placeholder="Write markdown here..."
             spellCheck={false}
           />
         ) : (
           <div
-            className="prose prose-invert max-w-none text-gray-100"
+            className="prose dark:prose-invert max-w-none text-foreground/85"
             dangerouslySetInnerHTML={{
               __html: renderMarkdown(content),
             }}

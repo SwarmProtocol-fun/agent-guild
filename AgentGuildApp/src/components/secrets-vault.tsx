@@ -132,8 +132,8 @@ export function SecretsVault({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Key className="w-5 h-5 text-blue-400" />
-          <h3 className="text-lg font-semibold text-white">Secrets Vault</h3>
-          <span className="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
+          <h3 className="text-lg font-semibold text-foreground">Secrets Vault</h3>
+          <span className="text-xs bg-muted/80 text-foreground/85 px-2 py-1 rounded">
             {secrets.length} secret{secrets.length !== 1 ? "s" : ""}
           </span>
         </div>
@@ -149,10 +149,10 @@ export function SecretsVault({
 
       {/* Add Form */}
       {showAddForm && (
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="bg-muted rounded-lg p-4 border border-border">
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">
+              <label className="block text-sm font-medium text-foreground/85 mb-1">
                 Key
               </label>
               <input
@@ -160,12 +160,12 @@ export function SecretsVault({
                 value={newSecret.key}
                 onChange={(e) => setNewSecret({ ...newSecret, key: e.target.value })}
                 placeholder="e.g., openai_api_key"
-                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                className="w-full bg-muted/80 border border-border rounded px-3 py-2 text-foreground text-sm focus:border-blue-500 focus:outline-none"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">
+              <label className="block text-sm font-medium text-foreground/85 mb-1">
                 Value
               </label>
               <input
@@ -173,12 +173,12 @@ export function SecretsVault({
                 value={newSecret.value}
                 onChange={(e) => setNewSecret({ ...newSecret, value: e.target.value })}
                 placeholder="Secret value..."
-                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                className="w-full bg-muted/80 border border-border rounded px-3 py-2 text-foreground text-sm focus:border-blue-500 focus:outline-none"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">
+              <label className="block text-sm font-medium text-foreground/85 mb-1">
                 Description (optional)
               </label>
               <input
@@ -186,7 +186,7 @@ export function SecretsVault({
                 value={newSecret.description}
                 onChange={(e) => setNewSecret({ ...newSecret, description: e.target.value })}
                 placeholder="What is this secret for?"
-                className="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+                className="w-full bg-muted/80 border border-border rounded px-3 py-2 text-foreground text-sm focus:border-blue-500 focus:outline-none"
               />
             </div>
 
@@ -197,7 +197,7 @@ export function SecretsVault({
                   setNewSecret({ key: "", value: "", description: "" });
                 }}
                 disabled={saving}
-                className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white rounded text-sm transition"
+                className="px-3 py-1.5 bg-muted/80 hover:bg-muted disabled:opacity-50 text-foreground rounded text-sm transition"
               >
                 Cancel
               </button>
@@ -222,25 +222,25 @@ export function SecretsVault({
           return (
             <div
               key={secret.id}
-              className="bg-gray-800 rounded-lg p-4 border border-gray-700 hover:bg-gray-750 transition"
+              className="bg-muted rounded-lg p-4 border border-border hover:bg-gray-750 transition"
             >
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <h4 className="font-mono text-sm font-medium text-white">{secret.key}</h4>
+                    <h4 className="font-mono text-sm font-medium text-foreground">{secret.key}</h4>
                     {secret.description && (
-                      <span className="text-xs text-gray-400">- {secret.description}</span>
+                      <span className="text-xs text-muted-foreground">- {secret.description}</span>
                     )}
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <code className="text-xs bg-gray-900 px-2 py-1 rounded text-gray-300 font-mono">
+                    <code className="text-xs bg-card px-2 py-1 rounded text-foreground/85 font-mono">
                       {displayValue}
                     </code>
                     {isRevealed && (
                       <button
                         onClick={() => handleCopy(secret.id, revealedSecrets[secret.id])}
-                        className="p-1 hover:bg-gray-700 rounded transition text-gray-400 hover:text-white"
+                        className="p-1 hover:bg-muted/80 rounded transition text-muted-foreground hover:text-foreground"
                         title="Copy to clipboard"
                       >
                         {copiedId === secret.id ? (
@@ -252,7 +252,7 @@ export function SecretsVault({
                     )}
                   </div>
 
-                  <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
+                  <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
                     <span>Accessed {secret.accessCount} times</span>
                     {secret.lastAccessedAt && (
                       <span>Last: {new Date(secret.lastAccessedAt).toLocaleDateString()}</span>
@@ -263,7 +263,7 @@ export function SecretsVault({
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => handleReveal(secret.id)}
-                    className="p-2 hover:bg-gray-700 rounded transition text-gray-400 hover:text-white"
+                    className="p-2 hover:bg-muted/80 rounded transition text-muted-foreground hover:text-foreground"
                     title={isRevealed ? "Hide" : "Reveal"}
                   >
                     {isRevealed ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -275,7 +275,7 @@ export function SecretsVault({
                       }
                     }}
                     disabled={deleting === secret.id}
-                    className="p-2 hover:bg-gray-700 rounded transition text-gray-400 hover:text-red-400 disabled:opacity-50"
+                    className="p-2 hover:bg-muted/80 rounded transition text-muted-foreground hover:text-red-400 disabled:opacity-50"
                     title="Delete"
                   >
                     <Trash2 className={`w-4 h-4 ${deleting === secret.id ? "animate-pulse" : ""}`} />
@@ -287,10 +287,10 @@ export function SecretsVault({
         })}
 
         {secrets.length === 0 && !showAddForm && (
-          <div className="text-center p-8 bg-gray-800 rounded-lg border border-gray-700">
+          <div className="text-center p-8 bg-muted rounded-lg border border-border">
             <Key className="w-12 h-12 mx-auto text-gray-600 mb-3" />
-            <p className="text-gray-400">No secrets stored</p>
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-muted-foreground">No secrets stored</p>
+            <p className="text-xs text-muted-foreground mt-1">
               Click &quot;Add Secret&quot; to store encrypted credentials
             </p>
           </div>
@@ -298,7 +298,7 @@ export function SecretsVault({
       </div>
 
       {/* Info */}
-      <div className="text-xs text-gray-400 bg-gray-800/50 rounded-lg p-3 border border-gray-700">
+      <div className="text-xs text-muted-foreground bg-muted/50 rounded-lg p-3 border border-border">
         <p className="font-medium mb-1">🔒 AES-256-GCM Encryption</p>
         <p>
           All secrets are encrypted using AES-256-GCM before storage. Values are only decrypted when

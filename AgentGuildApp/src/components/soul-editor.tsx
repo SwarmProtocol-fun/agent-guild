@@ -100,9 +100,9 @@ export function SOULEditor({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <FileCode className="w-5 h-5 text-blue-400" />
-          <h3 className="text-lg font-semibold text-white">SOUL Configuration</h3>
+          <h3 className="text-lg font-semibold text-foreground">SOUL Configuration</h3>
           {isDefault && (
-            <span className="text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded">
+            <span className="text-xs bg-muted/80 text-foreground/85 px-2 py-1 rounded">
               Default Template
             </span>
           )}
@@ -117,7 +117,7 @@ export function SOULEditor({
           <button
             onClick={handleValidate}
             disabled={validating || !content}
-            className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed text-white rounded text-sm transition flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-muted/80 hover:bg-muted disabled:bg-gray-800 disabled:cursor-not-allowed text-foreground rounded text-sm transition flex items-center gap-1.5"
           >
             {validating ? (
               <>Validating...</>
@@ -131,7 +131,7 @@ export function SOULEditor({
           <button
             onClick={handleReset}
             disabled={!hasChanges || saving}
-            className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed text-white rounded text-sm transition flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-muted/80 hover:bg-muted disabled:bg-gray-800 disabled:cursor-not-allowed text-foreground rounded text-sm transition flex items-center gap-1.5"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             Reset
@@ -206,17 +206,17 @@ export function SOULEditor({
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
-          className="w-full h-[600px] bg-gray-900 border border-gray-700 rounded-lg p-4 text-white font-mono text-sm focus:border-blue-500 focus:outline-none resize-none"
+          className="w-full h-[600px] bg-card border border-border rounded-lg p-4 text-foreground font-mono text-sm focus:border-blue-500 focus:outline-none resize-none"
           placeholder="Enter SOUL configuration in YAML format..."
           spellCheck={false}
         />
-        <div className="absolute bottom-3 right-3 text-xs text-gray-500">
+        <div className="absolute bottom-3 right-3 text-xs text-muted-foreground">
           {content.split("\n").length} lines • {content.length} characters
         </div>
       </div>
 
       {/* Help Text */}
-      <div className="text-xs text-gray-400 space-y-1">
+      <div className="text-xs text-muted-foreground space-y-1">
         <p>
           <strong>SOUL</strong> (System Of Understanding & Learning) defines your agent&apos;s personality, behavior, and capabilities.
         </p>

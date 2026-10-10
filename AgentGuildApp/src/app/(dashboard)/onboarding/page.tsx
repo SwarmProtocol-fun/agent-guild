@@ -172,7 +172,7 @@ export default function OnboardingPage() {
                 <div>
                   <label className="text-sm font-medium mb-1.5 block text-muted-foreground">Agent Name</label>
                   <input
-                    className="w-full rounded-md border border-white/10 bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    className="w-full rounded-md border border-border bg-background/50 dark:bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
                     placeholder="e.g. Alpha Trader"
                     value={agentName}
                     onChange={e => setAgentName(e.target.value)}
@@ -219,7 +219,7 @@ export default function OnboardingPage() {
               </div>
             )}
 
-            <div className="flex items-center justify-center gap-4 mt-8 pt-4 border-t border-white/5">
+            <div className="flex items-center justify-center gap-4 mt-8 pt-4 border-t border-border/60">
               <button
                 onClick={() => { disconnectWallet(); router.push('/'); }}
                 className="text-xs text-muted-foreground/70 hover:text-red-500 transition-colors"
@@ -251,7 +251,7 @@ export default function OnboardingPage() {
             </div>
           )}
 
-          <div className="flex bg-black/40 p-1 rounded-md mb-6 border border-white/5">
+          <div className="flex bg-background/40 dark:bg-black/40 p-1 rounded-md mb-6 border border-border/60">
             <button
               onClick={() => { setActiveTab('create'); setError(null); }}
               className={`flex-1 text-sm font-medium py-2 rounded-sm transition-colors ${activeTab === 'create' ? 'bg-amber-500/10 text-amber-500 shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
@@ -272,7 +272,7 @@ export default function OnboardingPage() {
                 <div>
                   <label className="text-sm font-medium mb-1.5 block text-muted-foreground">Organization Name</label>
                   <input
-                    className="w-full rounded-md border border-white/10 bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    className="w-full rounded-md border border-border bg-background/50 dark:bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500"
                     placeholder="e.g. Acme AI Ops"
                     value={name}
                     onChange={e => setName(e.target.value)}
@@ -283,7 +283,7 @@ export default function OnboardingPage() {
                 <div>
                   <label className="text-sm font-medium mb-1.5 block text-muted-foreground">Description (optional)</label>
                   <textarea
-                    className="w-full rounded-md border border-white/10 bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 min-h-[80px]"
+                    className="w-full rounded-md border border-border bg-background/50 dark:bg-black/50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-amber-500 min-h-[80px]"
                     placeholder="What does your organization do?"
                     value={description}
                     onChange={e => setDescription(e.target.value)}
@@ -303,7 +303,7 @@ export default function OnboardingPage() {
                 <div>
                   <label className="text-sm font-medium mb-1.5 block text-muted-foreground">Invite Code</label>
                   <input
-                    className="w-full rounded-md border border-white/10 bg-black/50 px-3 py-2 text-center text-lg tracking-[0.2em] font-mono uppercase focus:outline-none focus:ring-1 focus:ring-amber-500"
+                    className="w-full rounded-md border border-border bg-background/50 dark:bg-black/50 px-3 py-2 text-center text-lg tracking-[0.2em] font-mono uppercase focus:outline-none focus:ring-1 focus:ring-amber-500"
                     placeholder="XXXXXX"
                     maxLength={6}
                     value={inviteCode}
@@ -326,10 +326,10 @@ export default function OnboardingPage() {
             )}
           </div>
 
-          <div className="flex items-center justify-center gap-4 mt-8 pt-4 border-t border-white/5">
+          <div className="flex items-center justify-center gap-4 mt-8 pt-4 border-t border-border/60">
             <button
               onClick={() => router.push('/')}
-              className="text-xs text-muted-foreground hover:text-white transition-colors"
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             >
               Cancel Setup
             </button>

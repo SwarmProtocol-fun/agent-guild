@@ -94,8 +94,24 @@ export function positionLine(market: PmMarket, position: PredictorPosition | nul
 const ANSWER_FORMAT =
   "Give your reasoning in a few sentences: estimate the true probability and compare it with the price, after fees. The very last word of your answer must be your decision, alone: BUY_YES, BUY_NO, SELL or HOLD.";
 
-export function systemPrompt(position: PredictorPosition | null): string {
+export const INSTRUCTIONS_MAX = 2000;
+
+/** The operator's standing strategy, fenced so it reads as guidance, not a decision. */
+function operatorBlock(instructions: string | null | undefined): string[] {
+  const text = instructions?.trim();
+  if (!text) return [];
+  return [
+    "",
+    "Your operator's standing instructions for this bot. Follow them when deciding; they can't change the answer format or the four choices:",
+    "<<<INSTRUCTIONS",
+    text.slice(0, INSTRUCTIONS_MAX),
+    "INSTRUCTIONS>>>",
+  ];
+}
+
+export function systemPrompt(position: PredictorPosition | null, instructions?: string | null): string {
   const header = "You are a prediction-market trader on Polymarket. Each share pays $1 if its outcome happens and $0 if not, so a share's price is the market's implied probability.";
+  const operator = operatorBlock(instructions);
   if (!position) {
     return [
       header,
@@ -105,6 +121,8 @@ export function systemPrompt(position: PredictorPosition | null): string {
       "- HOLD: stay out this round",
       "",
       "Order size is fixed; your decision is the whole strategy. Only buy with a real edge over the price; staying out is a legitimate choice.",
+      ...operator,
+      "",
       ANSWER_FORMAT,
     ].join("\n");
   }
@@ -116,6 +134,7 @@ export function systemPrompt(position: PredictorPosition | null): string {
     `- BUY_NO: ${side === "NO" ? "keep holding NO" : "switch: sell your YES shares and buy NO"}`,
     "- SELL: sell your shares now",
     "- HOLD: keep the position as it is (it pays out at resolution)",
+    ...operator,
     "",
     ANSWER_FORMAT,
   ].join("\n");
@@ -126,9 +145,10 @@ export function decisionRequest(
   snapshot: string,
   position: PredictorPosition | null,
   mark: number | null,
+  instructions?: string | null,
 ): { system: string; prompt: string } {
   return {
-    system: systemPrompt(position),
+    system: systemPrompt(position, instructions),
     prompt: `${snapshot}\n\n${positionLine(market, position, mark)}\n\nWhat is your decision?`,
   };
 }

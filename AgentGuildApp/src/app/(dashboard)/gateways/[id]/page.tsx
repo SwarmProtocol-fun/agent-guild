@@ -290,7 +290,7 @@ export default function GatewayDetailPage({ params }: { params: Promise<{ id: st
         {/* Job History */}
         <div>
           <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-            <Clock className="h-3.5 w-3.5 text-zinc-400" />
+            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
             Job History ({historyJobs.length})
           </h3>
           {historyJobs.length === 0 ? (

@@ -3,29 +3,92 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* Expose the shadcn tokens to Tailwind v4 so `bg-card`, `text-muted-foreground`,
+   `border-border`, `bg-primary` etc. generate CSS. Without this they were silent
+   no-ops — invisible in dark mode (everything inherits light text), broken in light. */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+}
+
+/* Light theme — "paper": violet-tinted off-white canvas, pure-white raised surfaces,
+   deep violet-ink text. Elevation comes from canvas/card contrast + hairline borders,
+   not heavy shadows. */
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222.2 47.4% 11.2%;
-  --card: 0 0% 97%;
-  --card-foreground: 222.2 47.4% 11.2%;
+  --background: 250 33% 98%;
+  --foreground: 252 33% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 252 33% 11%;
   --popover: 0 0% 100%;
-  --popover-foreground: 222.2 47.4% 11.2%;
-  --primary: 262 96% 55%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 210 40% 96%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
-  --muted: 210 40% 96%;
-  --muted-foreground: 215 16% 47%;
-  --accent: 210 40% 96%;
-  --accent-foreground: 222.2 47.4% 11.2%;
-  --destructive: 0 84% 60%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 214 32% 91%;
-  --input: 214 32% 91%;
-  --ring: 262 96% 55%;
+  --popover-foreground: 252 33% 11%;
+  --primary: 262 90% 52%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 250 30% 95%;
+  --secondary-foreground: 252 33% 16%;
+  --muted: 250 25% 95%;
+  --muted-foreground: 250 9% 40%;
+  --accent: 258 60% 96%;
+  --accent-foreground: 262 70% 30%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 250 18% 90%;
+  --input: 250 16% 86%;
+  --ring: 262 90% 52%;
   --radius: 0.5rem;
   --spotlight-color: rgba(114, 33, 250, 0.06);
-  /* Brand remap: amber/gold -> violet (matches logo.png gradient apex) */
+  /* Brand remap: amber/gold -> violet (matches logo.png gradient apex).
+     Light mode shifts 300–500 deeper so `text-amber-400/500` (written for dark
+     backgrounds) still reads on white. Dark keeps the original ramp below. */
+  --color-amber-50: oklch(97% 0.016 262);
+  --color-amber-100: oklch(94% 0.032 262);
+  --color-amber-200: oklch(88% 0.062 262);
+  --color-amber-300: oklch(70% 0.15 262);
+  --color-amber-400: oklch(58% 0.21 262);
+  --color-amber-500: oklch(52% 0.245 262);
+  --color-amber-600: oklch(47% 0.25 262);
+  --color-amber-700: oklch(42% 0.22 262);
+  --color-amber-800: oklch(37% 0.18 262);
+  --color-amber-900: oklch(33% 0.14 262);
+  --color-amber-950: oklch(24% 0.09 262);
+}
+
+.dark {
+  --background: 222.2 84% 4.9%;
+  --foreground: 210 40% 98%;
+  --card: 222.2 50% 10%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222.2 84% 4.9%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 262 96% 55%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 217.2 32.6% 17.5%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217.2 32.6% 17.5%;
+  --muted-foreground: 215 20.2% 65.1%;
+  --accent: 217.2 32.6% 17.5%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217.2 32.6% 17.5%;
+  --input: 217.2 32.6% 17.5%;
+  --ring: 262 96% 55%;
   --color-amber-50: oklch(96.2% 0.018 262);
   --color-amber-100: oklch(93% 0.034 262);
   --color-amber-200: oklch(87% 0.065 262);
@@ -39,38 +102,25 @@
   --color-amber-950: oklch(25.7% 0.09 262);
 }
 
-.dark {
-  --background: 222.2 84% 4.9%;
-  --foreground: 210 40% 98%;
-  --card: 222.2 50% 10%;
-  --card-foreground: 210 40% 98%;
-  --popover: 222.2 84% 4.9%;
-  --popover-foreground: 210 40% 98%;
-  --primary: 262 96% 55%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 217.2 32.6% 17.5%;
-  --secondary-foreground: 210 40% 98%;
-  --muted: 217.2 32.6% 17.5%;
-  --muted-foreground: 215 20.2% 65.1%;
-  --accent: 217.2 32.6% 17.5%;
-  --accent-foreground: 210 40% 98%;
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 217.2 32.6% 17.5%;
-  --input: 217.2 32.6% 17.5%;
-  --ring: 262 96% 55%;
+/* Default border color lives in the base layer so Tailwind's border-* utilities
+   (border-transparent, border-amber-500/20, …) can override it. Unlayered, it beat
+   every utility and boxed in nav items, badges, and chips. */
+@layer base {
+  *, ::before, ::after {
+    border-color: hsl(var(--border));
+  }
 }
 
 * {
-  border-color: hsl(var(--border));
   cursor: url('/cursor.png'), auto;
 }
 
 body {
   background-color: hsl(var(--background));
   background-image:
-    radial-gradient(at 0% 0%, hsla(262, 96%, 55%, 0.1) 0px, transparent 50%),
-    radial-gradient(at 100% 0%, hsla(206, 98%, 20%, 0.1) 0px, transparent 50%);
+    radial-gradient(at 0% 0%, hsla(262, 96%, 60%, 0.07) 0px, transparent 45%),
+    radial-gradient(at 100% 0%, hsla(206, 98%, 57%, 0.06) 0px, transparent 45%);
+  background-attachment: fixed;
   color: hsl(var(--foreground));
   font-family: var(--font-inter), system-ui, sans-serif;
   min-height: 100vh;
@@ -114,14 +164,15 @@ body {
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.8);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(0, 0, 0, 0.05);
+  border: 1px solid hsl(var(--border));
+  box-shadow: 0 1px 2px rgba(30, 20, 60, 0.04);
   transition: all 0.3s ease;
 }
 
 .glass-card:hover {
-  background: rgba(255, 255, 255, 0.7);
+  background: #fff;
   border-color: rgba(114, 33, 250, 0.3);
   transform: translateY(-4px);
 }
@@ -502,9 +553,10 @@ body {
 
 /* Enhanced glass-morphism */
 .glass-card-enhanced {
-  background: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(16px);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  border: 1px solid hsl(var(--border));
+  box-shadow: 0 1px 2px rgba(30, 20, 60, 0.04);
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 

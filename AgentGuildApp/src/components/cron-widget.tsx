@@ -87,7 +87,7 @@ export function CronWidget() {
                         <Clock className="w-5 h-5 text-amber-500" />
                         <DecryptedText text="Scheduled Jobs" speed={30} maxIterations={6} animateOn="view" sequential className="text-lg font-semibold" encryptedClassName="text-lg font-semibold text-amber-500/40" />
                     </div>
-                    <Badge variant="outline" className="text-[10px] bg-black/40">
+                    <Badge variant="outline" className="text-[10px] bg-background/40 dark:bg-black/40">
                         {tasks.filter(t => t[1].active).length} Active
                     </Badge>
                 </CardTitle>
@@ -101,7 +101,7 @@ export function CronWidget() {
                     </div>
                 ) : (
                     tasks.map(([id, task]) => (
-                        <div key={id} className="bg-black/20 p-3 rounded-lg border border-white/5 flex flex-col gap-2 relative group hover:bg-black/30 transition-colors">
+                        <div key={id} className="bg-background/20 dark:bg-black/20 p-3 rounded-lg border border-border/60 flex flex-col gap-2 relative group hover:bg-black/30 transition-colors">
                             <div className="flex justify-between items-start gap-2">
                                 <div className="min-w-0">
                                     <div className="flex items-center gap-2 max-w-full">

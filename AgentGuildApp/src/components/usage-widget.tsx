@@ -95,13 +95,13 @@ export function UsageWidget() {
 
             <CardContent className="space-y-4 pt-2">
                 <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-black/20 p-3 rounded-lg border border-white/5">
+                    <div className="bg-background/20 dark:bg-black/20 p-3 rounded-lg border border-border/60">
                         <div className="text-xs text-muted-foreground mb-1 uppercase tracking-wider font-semibold">Total Cost</div>
                         <div className="text-2xl font-bold font-mono text-emerald-400">
                             ${data.current.totalCost.toFixed(2)}
                         </div>
                     </div>
-                    <div className="bg-black/20 p-3 rounded-lg border border-white/5">
+                    <div className="bg-background/20 dark:bg-black/20 p-3 rounded-lg border border-border/60">
                         <div className="text-xs text-muted-foreground mb-1 uppercase tracking-wider font-semibold">Burn Rate</div>
                         <div className="text-lg font-bold font-mono text-amber-400">
                             ${data.burnRate.costPerMinute.toFixed(4)}<span className="text-xs text-muted-foreground">/min</span>
@@ -150,7 +150,7 @@ export function UsageWidget() {
                             {Object.entries(data.fiveHour.perModel)
                                 .sort((a, b) => b[1].cost - a[1].cost)
                                 .map(([model, stats]: [string, any]) => (
-                                    <div key={model} className="flex justify-between text-xs items-center bg-black/10 p-1.5 rounded">
+                                    <div key={model} className="flex justify-between text-xs items-center bg-background/10 dark:bg-black/10 p-1.5 rounded">
                                         <span className="truncate max-w-[140px] opacity-80" title={model}>
                                             {model.split('/').pop()}
                                         </span>

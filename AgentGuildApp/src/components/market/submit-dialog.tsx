@@ -811,7 +811,7 @@ export function SubmitMarketItemDialog({
                                             onClick={() => setScreenshots(screenshots.filter(x => x.cid !== s.cid))}
                                             className="absolute -top-1.5 -right-1.5 bg-red-500 rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                                         >
-                                            <X className="h-2.5 w-2.5 text-white" />
+                                            <X className="h-2.5 w-2.5 text-foreground" />
                                         </button>
                                     </div>
                                 ))}

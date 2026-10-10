@@ -189,7 +189,7 @@ const SECTIONS: DocSection[] = [
                 <div className="flex gap-3 mt-1">
                     <Badge variant="outline" className="text-[9px] text-amber-400">Admin</Badge>
                     <Badge variant="outline" className="text-[9px] text-blue-400">Member</Badge>
-                    <Badge variant="outline" className="text-[9px] text-zinc-400">Viewer</Badge>
+                    <Badge variant="outline" className="text-[9px] text-muted-foreground">Viewer</Badge>
                 </div>
 
                 <h4 className="text-sm font-semibold mt-6 mb-2">Scheduler (Cron)</h4>
@@ -461,7 +461,7 @@ export default function DocsPage() {
                             </div>
                             <h2 className="text-lg font-semibold">{currentSection.title}</h2>
                         </div>
-                        <div className="prose prose-sm prose-invert max-w-none text-sm text-foreground/90 leading-relaxed">
+                        <div className="prose prose-sm dark:prose-invert max-w-none text-sm text-foreground/90 leading-relaxed">
                             {currentSection.content}
                         </div>
                     </Card>

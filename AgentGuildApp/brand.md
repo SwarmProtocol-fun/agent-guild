@@ -18,6 +18,15 @@ This app has a runtime "skin" system (`src/contexts/SkinContext.tsx` + `src/app/
 - `SKINS` array `classic` entry (`SkinContext.tsx`): `colors: ["#7221FA", "#5B8FFD", "#27A0FD"]` — used by `GradientText` on the "Agent Guild" wordmark.
 - `useChartPalette()` (`chart-theme.ts`) `classic` entry: primary/secondary/accent set to violet/blue/mid-blue; `success`/`danger`/`muted` (genuine semantic colors, not brand) left alone.
 
+## Light mode ("paper")
+
+- Canvas `--background` is a violet-tinted off-white; `--card`/`--popover` are pure white. Surfaces separate by canvas/card contrast and hairline `--border`, not heavy shadows.
+- Text is deep violet-ink (`252 33% 11%`); `--muted-foreground` is `250 9% 40%` (passes AA on white and canvas).
+- `--primary-foreground` is white in both themes.
+- The amber→violet ramp is shifted deeper for 300–500 in `:root` so `text-amber-400/500` (written for dark) stays legible; `.dark` restates the original ramp.
+- The tokens are exposed to Tailwind through `@theme inline` in `globals.css` — without it `bg-card`, `text-muted-foreground`, `border-border` etc. generate nothing. The default border color sits in `@layer base` so `border-*` utilities can override it. `src/app/__tests__/theme-tokens.test.ts` guards both.
+- In components, use tokens (`text-foreground`, `text-muted-foreground`, `bg-card`, `bg-muted`, `border-border`) rather than `text-white`/`text-gray-400`/`bg-gray-900`/`border-white/10`. `text-white` is for text on saturated fills only. Terminal/log/VNC viewers stay dark in both themes on purpose.
+
 ## Usage
 
 - Primary brand actions, focus rings, active/glow states → violet (`--primary`, `text-amber-500` etc. via the remap).

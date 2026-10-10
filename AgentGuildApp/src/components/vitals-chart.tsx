@@ -153,7 +153,7 @@ export function VitalsChart({ records, metric = "all" }: VitalsChartProps) {
 
   if (records.length === 0) {
     return (
-      <div className="h-[400px] w-full flex items-center justify-center text-gray-400">
+      <div className="h-[400px] w-full flex items-center justify-center text-muted-foreground">
         <p>No vitals data available</p>
       </div>
     );

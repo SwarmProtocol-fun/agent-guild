@@ -192,7 +192,7 @@ export default function SessionExplorerPage() {
                   ? "bg-amber-500/20 text-amber-400"
                   : s.role === "org_admin"
                     ? "bg-blue-500/20 text-blue-400"
-                    : "bg-zinc-500/20 text-zinc-400"
+                    : "bg-zinc-500/20 text-muted-foreground"
               }`}>
                 {s.role === "platform_admin" ? "admin" : s.role === "org_admin" ? "org" : "op"}
               </span>

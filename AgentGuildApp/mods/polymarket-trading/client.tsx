@@ -53,6 +53,37 @@ interface Bot {
   lastReason: string | null; lastEvalAt: number | null; waitingOnAgent: boolean; lastRunAt: string | null;
   maxLossUsd: number | null; stats: Record<"paper" | "live", BotStats>;
 }
+/** One-click starting points for an AI Predictor's instructions; the operator can edit them freely. */
+const AI_PRESETS: { label: string; text: string }[] = [
+  { label: "Value only", text: "Only buy when your probability estimate beats the ask by at least 10 points after fees. Otherwise HOLD." },
+  { label: "Fade hype", text: "Look for prices that moved sharply on news without a change in the resolution facts, and bet against the overreaction." },
+  { label: "Follow momentum", text: "Favor the side the price has been trending toward over the history shown, unless the rules make that outcome unlikely." },
+  { label: "Take profits", text: "When holding, SELL once unrealized gain is above 30% or the edge you bought for is gone. Don't average down." },
+];
+const AI_INSTRUCTIONS_MAX = 2000;
+
+/** Free-text strategy for an AI Predictor bot, plus preset chips that append a line. */
+function InstructionsField({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <label className={labelClass} htmlFor={id}>Instructions for the agent (optional)</label>
+      <textarea
+        id={id} className={`${inputClass} min-h-[84px] resize-y text-xs`} maxLength={AI_INSTRUCTIONS_MAX} value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. Only trade Fed and inflation markets' fundamentals. Skip anything ending in under 2 hours. Prefer HOLD when unsure."
+      />
+      <div className="mt-1 flex flex-wrap items-center gap-1">
+        {AI_PRESETS.map((p) => (
+          <button key={p.label} type="button" className={buttonClass("secondary", "py-0.5 text-[11px]")}
+            onClick={() => onChange(value.trim() ? `${value.trim()}\n${p.text}` : p.text)}>+ {p.label}</button>
+        ))}
+        <span className={`ml-auto text-[11px] ${mutedClass}`}>{value.length}/{AI_INSTRUCTIONS_MAX}</span>
+      </div>
+      <p className={`mt-1 text-[11px] ${mutedClass}`}>Sent with every round&apos;s question. The agent still answers BUY_YES, BUY_NO, SELL or HOLD within your size and loss limits.</p>
+    </div>
+  );
+}
+
 interface BotStats { entries: number; wins: number; losses: number; realizedPnl: number; volumeUsd: number }
 interface BotLog { id: string; kind: string; reason: string; createdAt: string | null }
 interface OpenOrder { id: string; tokenId: string; side: string; price: number; size: number; filled: number }
@@ -778,6 +809,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
   const [size, setSize] = useState("5");
   const [aiTarget, setAiTarget] = useState<"market" | "btc-5m">("btc-5m");
   const [aiHours, setAiHours] = useState("1");
+  const [aiInstructions, setAiInstructions] = useState("");
   const [when, setWhen] = useState<"ask-below" | "ask-above">("ask-below");
   const [trigger, setTrigger] = useState("");
   const [tp, setTp] = useState("");
@@ -785,7 +817,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
   const [maxLoss, setMaxLoss] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
-  const [edit, setEdit] = useState({ size: "", maxLoss: "" });
+  const [edit, setEdit] = useState({ size: "", maxLoss: "", instructions: "" });
   const [openLog, setOpenLog] = useState<string | null>(null);
   const [log, setLog] = useState<BotLog[] | null>(null);
 
@@ -805,7 +837,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
     setError(null);
     const pct = (s: string) => (s ? Number(s) / 100 : undefined);
     const params =
-      type === "ai" ? { target: aiTarget, intervalMs: Math.round(Number(aiHours) * 3_600_000) }
+      type === "ai" ? { target: aiTarget, intervalMs: Math.round(Number(aiHours) * 3_600_000), instructions: aiInstructions }
       : type === "price-trigger" ? { outcomeIndex, when, price: pct(trigger), takeProfit: pct(tp), stopLoss: pct(sl) }
       : {};
     try {
@@ -821,10 +853,13 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
     }
   }
 
-  async function saveEdit(id: string) {
+  async function saveEdit(bot: Bot) {
     setError(null);
     try {
-      await postJson(`bots/${id}/update`, { sizeUsd: Number(edit.size), maxLossUsd: edit.maxLoss ? Number(edit.maxLoss) : null });
+      await postJson(`bots/${bot.id}/update`, {
+        sizeUsd: Number(edit.size), maxLossUsd: edit.maxLoss ? Number(edit.maxLoss) : null,
+        ...(bot.type === "ai" ? { params: { instructions: edit.instructions } } : {}),
+      });
       setEditing(null);
       load();
     } catch (err) {
@@ -861,6 +896,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
                 <input id="pm-ai-hours" className={`${inputClass} ${monoClass}`} inputMode="decimal" value={aiHours} onChange={(e) => setAiHours(e.target.value)} />
               </div>
             )}
+            <InstructionsField id="pm-ai-instructions" value={aiInstructions} onChange={setAiInstructions} />
           </>
         )}
         {type === "price-trigger" && (
@@ -895,13 +931,16 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
               {b.waitingOnAgent && <Badge tone="warning">Waiting on agent</Badge>}
               <span className={`${monoClass} text-xs ${mutedClass}`}>{usd(b.sizeUsd)}/trade</span>
               <div className="ml-auto flex gap-1">
-                <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => { setEditing(editing === b.id ? null : b.id); setEdit({ size: String(b.sizeUsd), maxLoss: b.maxLossUsd != null ? String(b.maxLossUsd) : "" }); }}>Edit</button>
+                <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => { setEditing(editing === b.id ? null : b.id); setEdit({ size: String(b.sizeUsd), maxLoss: b.maxLossUsd != null ? String(b.maxLossUsd) : "", instructions: typeof b.params.instructions === "string" ? b.params.instructions : "" }); }}>Edit</button>
                 <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => setOpenLog(openLog === b.id ? null : b.id)}>{openLog === b.id ? "Hide log" : "Log"}</button>
                 <button className={buttonClass("secondary", "py-0.5 text-xs")} onClick={() => postJson(`bots/${b.id}/toggle`, { enabled: !b.enabled }).then(load).catch((e: Error) => setError(e.message))}>{b.enabled ? "Stop" : "Start"}</button>
                 <button className={buttonClass("danger", "py-0.5 text-xs")} onClick={() => { if (window.confirm("Delete this bot and its log?")) call(`bots/${b.id}`, { method: "DELETE" }).then(load).catch((e: Error) => setError(e.message)); }}>Delete</button>
               </div>
             </div>
             {b.market && <div className="mt-1 truncate text-xs">{b.market.question}</div>}
+            {b.type === "ai" && typeof b.params.instructions === "string" && b.params.instructions && (
+              <div className={`mt-1 line-clamp-2 whitespace-pre-line text-[11px] italic ${mutedClass}`}>“{b.params.instructions}”</div>
+            )}
             <div className={`mt-1 flex flex-wrap gap-x-4 text-[11px] ${monoClass} ${mutedClass}`}>
               <span>PnL <span className={pnlClass(b.stats[mode].realizedPnl)}>{signed(b.stats[mode].realizedPnl)}</span></span>
               <span>{b.stats[mode].entries} entries</span>
@@ -910,9 +949,10 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
               <span>{b.maxLossUsd != null ? `stops at −${usd(b.maxLossUsd, 0)}` : "no loss limit"}</span>
             </div>
             {editing === b.id && (
-              <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); saveEdit(b.id); }}>
+              <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); saveEdit(b); }}>
                 <div><label className={labelClass} htmlFor={`pm-e-size-${b.id}`}>USD/trade</label><input id={`pm-e-size-${b.id}`} className={`${inputClass} ${monoClass} w-24`} inputMode="decimal" value={edit.size} onChange={(e) => setEdit({ ...edit, size: e.target.value })} /></div>
                 <div><label className={labelClass} htmlFor={`pm-e-loss-${b.id}`}>Stop after losing</label><input id={`pm-e-loss-${b.id}`} className={`${inputClass} ${monoClass} w-28`} inputMode="decimal" value={edit.maxLoss} onChange={(e) => setEdit({ ...edit, maxLoss: e.target.value })} placeholder="no limit" /></div>
+                {b.type === "ai" && <div className="w-full"><InstructionsField id={`pm-e-instr-${b.id}`} value={edit.instructions} onChange={(v) => setEdit({ ...edit, instructions: v })} /></div>}
                 <button className={buttonClass("primary", "py-1 text-xs")}>Save</button>
               </form>
             )}

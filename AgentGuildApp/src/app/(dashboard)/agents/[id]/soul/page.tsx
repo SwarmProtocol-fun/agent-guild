@@ -76,7 +76,7 @@ export default function AgentSOULPage({ params }: { params: Promise<{ id: string
   if (!agent) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <p className="text-gray-400">Agent not found</p>
+        <p className="text-muted-foreground">Agent not found</p>
         <button
           onClick={() => router.push("/agents")}
           className="text-blue-400 hover:text-blue-300 transition"
@@ -93,18 +93,18 @@ export default function AgentSOULPage({ params }: { params: Promise<{ id: string
       <div className="mb-6">
         <button
           onClick={() => router.push(`/agents/${agentId}`)}
-          className="flex items-center gap-2 text-gray-400 hover:text-white transition mb-4"
+          className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition mb-4"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Agent
         </button>
 
         <div>
-          <h1 className="text-3xl font-bold tracking-tight text-white">
+          <h1 className="text-3xl font-bold tracking-tight text-foreground">
             SOUL Configuration
           </h1>
-          <p className="text-sm text-gray-400 mt-2">
-            Define personality and behavior for <span className="font-medium text-white">{agent.name}</span>
+          <p className="text-sm text-muted-foreground mt-2">
+            Define personality and behavior for <span className="font-medium text-foreground">{agent.name}</span>
           </p>
         </div>
       </div>

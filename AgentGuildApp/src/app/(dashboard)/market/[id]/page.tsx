@@ -337,7 +337,7 @@ export default function MarketItemPage() {
                                     </div>
                                 </div>
                                 <div className="flex gap-2">
-                                    <div className="h-6 rounded-md px-3 flex items-center text-[10px] font-medium text-white" style={{ backgroundColor: skinMeta.colors[0] }}>
+                                    <div className="h-6 rounded-md px-3 flex items-center text-[10px] font-medium text-foreground" style={{ backgroundColor: skinMeta.colors[0] }}>
                                         Primary Button
                                     </div>
                                     <div className="h-6 rounded-md px-3 flex items-center text-[10px] font-medium border" style={{ borderColor: `${skinMeta.colors[0]}40`, color: skinMeta.colors[0] }}>

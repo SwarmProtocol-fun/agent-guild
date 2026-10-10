@@ -24,7 +24,7 @@ export default function DirectoryLayout({ children }: { children: React.ReactNod
     // Visitors (no wallet) get a standalone page — the directory is public.
     return (
         <div className="min-h-screen bg-background">
-            <header className="sticky top-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl">
+            <header className="sticky top-0 z-50 w-full border-b border-border/60 bg-background/50 dark:bg-black/50 backdrop-blur-xl">
                 <div className="flex h-16 items-center justify-between px-6 max-w-7xl mx-auto">
                     <a href="/" className="flex items-center gap-2">
                         <span className="text-xl font-bold text-[#7221FA]">Agent Guild</span>

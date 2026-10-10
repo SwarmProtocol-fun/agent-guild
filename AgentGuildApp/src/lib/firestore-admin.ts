@@ -385,6 +385,7 @@ export async function updateGatewayMetrics(
 const SUBSCRIPTION_COLLECTION = "marketSubscriptions";
 const COMMUNITY_COLLECTION = "communityMarketItems";
 const MOD_INSTALL_COLLECTION = "modInstallations";
+const INVENTORY_COLLECTION = "installedSkills";
 const AGENT_SKILLS_COLLECTION = "agentSkills";
 const MARKETPLACE_AGENTS_COLLECTION = "marketplaceAgents";
 const AGENT_RATINGS_COLLECTION = "agentRatings";
@@ -584,8 +585,16 @@ export async function getModInstallStatus(
   registryModId: string,
 ): Promise<{ installed: boolean; enabled: boolean; installationId: string | null; enabledCapabilities: string[] }> {
   const install = (await getModInstallations(orgId)).find((i) => i.modId === registryModId);
-  if (!install) return { installed: false, enabled: false, installationId: null, enabledCapabilities: [] };
-  return { installed: true, enabled: install.enabled, installationId: install.id, enabledCapabilities: install.enabledCapabilities };
+  if (install) return { installed: true, enabled: install.enabled, installationId: install.id, enabledCapabilities: install.enabledCapabilities };
+  // The Market's Install button only adds the item to the org's inventory
+  // (installedSkills); it never writes a modInstallations doc. Count that as
+  // installed with no capabilities yet, so the owner's grant can create one.
+  const skillId = MOD_REGISTRY.find((m) => m.id === registryModId)?.legacySkillId;
+  if (!skillId) return { installed: false, enabled: false, installationId: null, enabledCapabilities: [] };
+  const owned = await adminDb().collection(INVENTORY_COLLECTION)
+    .where("orgId", "==", orgId).where("skillId", "==", skillId).limit(1).get();
+  if (owned.empty) return { installed: false, enabled: false, installationId: null, enabledCapabilities: [] };
+  return { installed: true, enabled: owned.docs[0].data().enabled ?? true, installationId: null, enabledCapabilities: [] };
 }
 
 /**
@@ -599,7 +608,15 @@ export async function enableModCapabilities(
   capabilityIds: readonly string[],
 ): Promise<{ installed: boolean; enabled: string[] }> {
   const status = await getModInstallStatus(orgId, registryModId);
-  if (!status.installed || !status.installationId) return { installed: false, enabled: [] };
+  if (!status.installed) return { installed: false, enabled: [] };
+  if (!status.installationId) {
+    // Owned from the Market but never given an install doc: create it now.
+    await adminDb().collection(MOD_INSTALL_COLLECTION).add({
+      modId: registryModId, orgId, enabled: true, enabledCapabilities: [...capabilityIds],
+      config: {}, installedBy: "market-grant", installedAt: FieldValue.serverTimestamp(),
+    });
+    return { installed: true, enabled: [...capabilityIds] };
+  }
   const missing = capabilityIds.filter((c) => !status.enabledCapabilities.includes(c));
   if (missing.length || !status.enabled) {
     await adminDb().collection(MOD_INSTALL_COLLECTION).doc(status.installationId).update({

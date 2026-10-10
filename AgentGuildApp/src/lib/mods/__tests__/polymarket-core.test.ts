@@ -5,7 +5,7 @@ import {
   evaluateMidPrice, evaluateStreak, evaluateTrigger, trailingStreak, windowAtr, upDownIndexes,
   MID_PRICE_DEFAULTS, STREAK_DEFAULTS, type Candle,
 } from "../../../../mods/polymarket-trading/strategies";
-import { parseDecision, decisionToAction, buildSnapshot, decisionRequest } from "../../../../mods/polymarket-trading/ai-predictor-core";
+import { parseDecision, decisionToAction, buildSnapshot, decisionRequest, systemPrompt } from "../../../../mods/polymarket-trading/ai-predictor-core";
 import { matchedAmounts } from "../../../../mods/polymarket-trading/live";
 
 const rawMarket = {
@@ -164,6 +164,17 @@ describe("AI Predictor", () => {
     const req = decisionRequest(market, snap, null, null);
     expect(req.system).toMatch(/BUY_YES, BUY_NO, SELL or HOLD/);
     expect(req.prompt).toMatch(/Current position: NONE/);
+  });
+
+  it("adds the operator's instructions, fenced, to the system prompt in both position states", () => {
+    const market = normalizeMarket(rawMarket)!;
+    const snap = buildSnapshot({ market, quotes: [{ bid: 0.49, ask: 0.5 }, { bid: 0.5, ask: 0.51 }], history: [], now: 0 });
+    const req = decisionRequest(market, snap, null, null, "  Only buy below 30c.  ");
+    expect(req.system).toContain("<<<INSTRUCTIONS\nOnly buy below 30c.\nINSTRUCTIONS>>>");
+    expect(req.system.trimEnd().endsWith("SELL or HOLD.")).toBe(true);
+    expect(systemPrompt({ outcomeIndex: 0, shares: 5, avgPrice: 0.4 }, "Take profit at 60c")).toContain("Take profit at 60c");
+    expect(systemPrompt(null)).not.toContain("INSTRUCTIONS");
+    expect(systemPrompt(null, "   ")).not.toContain("INSTRUCTIONS");
   });
 });
 

@@ -84,23 +84,23 @@ export function BudgetBurnGauge({
           <span className={`text-4xl font-bold ${color}`}>
             {percentage.toFixed(0)}%
           </span>
-          <span className="text-sm text-gray-400 mt-1">{periodLabel}</span>
+          <span className="text-sm text-muted-foreground mt-1">{periodLabel}</span>
         </div>
       </div>
 
       {/* Stats below gauge */}
       <div className="text-center space-y-1">
-        {label && <p className="text-sm font-medium text-gray-300">{label}</p>}
+        {label && <p className="text-sm font-medium text-foreground/85">{label}</p>}
         <div className="flex items-center justify-center space-x-2 text-sm">
           <span className={color}>
             ${currentSpend.toFixed(2)}
           </span>
-          <span className="text-gray-500">/</span>
-          <span className="text-gray-400">
+          <span className="text-muted-foreground">/</span>
+          <span className="text-muted-foreground">
             ${threshold.toFixed(2)}
           </span>
         </div>
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-muted-foreground">
           {threshold - currentSpend > 0
             ? `$${(threshold - currentSpend).toFixed(2)} remaining`
             : `$${(currentSpend - threshold).toFixed(2)} over budget`}

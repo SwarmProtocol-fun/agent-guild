@@ -10,7 +10,7 @@ interface CronHistoryTimelineProps {
 export function CronHistoryTimeline({ history }: CronHistoryTimelineProps) {
   if (history.length === 0) {
     return (
-      <div className="text-center py-12 text-gray-400">
+      <div className="text-center py-12 text-muted-foreground">
         <Clock className="w-12 h-12 mx-auto mb-4 text-gray-600" />
         <p>No execution history yet</p>
       </div>
@@ -51,10 +51,10 @@ export function CronHistoryTimeline({ history }: CronHistoryTimelineProps) {
               <div className="flex items-center space-x-3">
                 {statusIcon}
                 <div>
-                  <p className="font-medium text-white">
+                  <p className="font-medium text-foreground">
                     {execution.startTime?.toLocaleString() || "Unknown time"}
                   </p>
-                  <p className="text-xs text-gray-400">
+                  <p className="text-xs text-muted-foreground">
                     Duration: {execution.durationMs}ms
                   </p>
                 </div>
@@ -71,7 +71,7 @@ export function CronHistoryTimeline({ history }: CronHistoryTimelineProps) {
             {/* Agent results */}
             {execution.agentResults && execution.agentResults.length > 0 && (
               <div className="space-y-2">
-                <p className="text-xs font-semibold text-gray-300 uppercase">
+                <p className="text-xs font-semibold text-foreground/85 uppercase">
                   Agent Results ({execution.agentResults.length})
                 </p>
                 <div className="grid grid-cols-1 gap-2">
@@ -91,18 +91,18 @@ export function CronHistoryTimeline({ history }: CronHistoryTimelineProps) {
                           <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
                         )}
                         <div>
-                          <p className="font-medium text-white">{result.agentName}</p>
+                          <p className="font-medium text-foreground">{result.agentName}</p>
                           {result.error && (
                             <p className="text-xs text-red-400">{result.error}</p>
                           )}
                           {result.responsePreview && (
-                            <p className="text-xs text-gray-400 truncate max-w-md">
+                            <p className="text-xs text-muted-foreground truncate max-w-md">
                               {result.responsePreview}
                             </p>
                           )}
                         </div>
                       </div>
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-muted-foreground">
                         {new Date(result.executedAt).toLocaleTimeString()}
                       </span>
                     </div>
@@ -113,7 +113,7 @@ export function CronHistoryTimeline({ history }: CronHistoryTimelineProps) {
 
             {/* Timeline connector (not on last item) */}
             {idx < history.length - 1 && (
-              <div className="absolute left-[18px] top-[60px] w-[2px] h-8 bg-gray-700" />
+              <div className="absolute left-[18px] top-[60px] w-[2px] h-8 bg-muted/80" />
             )}
           </div>
         );

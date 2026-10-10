@@ -95,7 +95,7 @@ export function JobDispatchForm({ orgId, open, onOpenChange, onDispatched }: Job
                   className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                     taskType === t
                       ? "bg-teal-500/20 text-teal-400 border border-teal-500/40"
-                      : "bg-zinc-800 text-zinc-400 border border-zinc-700 hover:border-zinc-600"
+                      : "bg-muted text-muted-foreground border border-border hover:border-border"
                   }`}
                   onClick={() => {
                     setTaskType(t);
@@ -118,7 +118,7 @@ export function JobDispatchForm({ orgId, open, onOpenChange, onDispatched }: Job
                   className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                     priority === p
                       ? "bg-teal-500/20 text-teal-400 border border-teal-500/40"
-                      : "bg-zinc-800 text-zinc-400 border border-zinc-700 hover:border-zinc-600"
+                      : "bg-muted text-muted-foreground border border-border hover:border-border"
                   }`}
                   onClick={() => setPriority(p)}
                 >
@@ -148,7 +148,7 @@ export function JobDispatchForm({ orgId, open, onOpenChange, onDispatched }: Job
               value={payload}
               onChange={(e) => setPayload(e.target.value)}
               rows={6}
-              className="w-full rounded-md border border-border bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-300 focus:outline-none focus:ring-1 focus:ring-teal-500"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs font-mono text-foreground/85 focus:outline-none focus:ring-1 focus:ring-teal-500"
               spellCheck={false}
             />
           </div>

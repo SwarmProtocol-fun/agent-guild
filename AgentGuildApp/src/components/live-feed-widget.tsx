@@ -92,7 +92,7 @@ export function LiveFeedWidget() {
                 </div>
             </CardHeader>
 
-            <CardContent className="p-0 flex-1 overflow-hidden relative bg-black/40">
+            <CardContent className="p-0 flex-1 overflow-hidden relative bg-background/40 dark:bg-black/40">
                 <div
                     ref={scrollRef}
                     onScroll={handleScroll}
@@ -129,7 +129,7 @@ export function LiveFeedWidget() {
                             }
 
                             return (
-                                <div key={i} className="flex gap-3 leading-relaxed hover:bg-white/5 p-1 rounded transition-colors group">
+                                <div key={i} className="flex gap-3 leading-relaxed hover:bg-foreground/[0.03] p-1 rounded transition-colors group">
                                     <span className="text-muted-foreground/60 shrink-0">[{time}]</span>
                                     <span className={`shrink-0 w-16 uppercase ${color}`}>{roleStr}</span>
                                     <span className="text-muted-foreground truncate flex-1 opacity-80 group-hover:opacity-100 transition-opacity">
