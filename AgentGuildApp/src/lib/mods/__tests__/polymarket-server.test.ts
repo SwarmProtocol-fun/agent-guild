@@ -62,6 +62,7 @@ const wallets = {
 };
 const enforceCapability = vi.fn(async () => ({}));
 const getModInstallStatus = vi.fn(async () => ({ installed: true, enabled: true, installationId: "i1" as string | null, enabledCapabilities: [] as string[] }));
+const postAgentDmMessage = vi.fn(async () => ({ channelId: "c1", messageId: "m1" }));
 const enableModCapabilities = vi.fn(async () => ({ installed: true, enabled: ["polymarket-trade", "polymarket-run-bots"] }));
 
 vi.mock("@/lib/mods/polymarket-store", () => store);
@@ -75,6 +76,7 @@ vi.mock("@/lib/firestore-admin", () => ({
   enforceCapability,
   getModInstallStatus,
   enableModCapabilities,
+  postAgentDmMessage,
   getAgentCapabilities: vi.fn(async () => []),
   getAgent: vi.fn(async (id: string) => ({ id, orgId: "org1", name: "Trader" })),
   getAgentsByOrg: vi.fn(),
@@ -156,6 +158,22 @@ describe("polymarket mod routes", () => {
     expect(parseBotParams("ai", { target: "btc-5m", instructions: "   " })).not.toHaveProperty("instructions");
     expect(parseBotParams("ai", { target: "btc-5m", instructions: 5 })).toMatch(/must be text/);
     expect(parseBotParams("ai", { target: "btc-5m", instructions: "x".repeat(2001) })).toMatch(/at most 2000/);
+  });
+
+  it("only the signed-in owner can send the agent a prompt, posted as themselves", async () => {
+    const prompt = route("POST /prompt");
+    expect((await prompt(post({ agentId: "a1", text: "trade" }), asAgent)).status).toBe(403);
+    expect((await prompt(post({ agentId: "a1", text: "trade" }), asMember)).status).toBe(403);
+    expect((await prompt(post({ agentId: "a1", text: "   " }), asOwner)).status).toBe(400);
+    expect((await prompt(post({ agentId: "a1", text: "x".repeat(8001) }), asOwner)).status).toBe(400);
+    expect(postAgentDmMessage).not.toHaveBeenCalled();
+
+    const ok = await prompt(post({ agentId: "a1", text: "  Make one paper trade  " }), asOwner);
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ channelId: "c1", messageId: "m1" });
+    expect(postAgentDmMessage).toHaveBeenCalledWith({
+      agentId: "a1", orgId: "org1", agentName: "Trader", senderAddress: OWNER, text: "Make one paper trade",
+    });
   });
 
   it("GET /me reports whether the org installed the mod", async () => {

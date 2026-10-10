@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
+import { buildAgentPrompt, MAX_PROMPT_CHARS, TASK_PRESETS } from "./agent-prompt";
 
 // ── Types (mirrors of the server's JSON) ─────────────────────────────────────
 
@@ -695,7 +696,7 @@ function PolymarketPanel({ api }: PanelProps) {
           {tab === "trades" && agentId && <TradesTab key={`${agentId}-${tradesKey}`} agentId={agentId} call={call} />}
           {tab === "bots" && agentId && <BotsTab key={agentId} agentId={agentId} mode={mode} market={market} outcomeIndex={outcomeIndex} call={call} postJson={postJson} maxOrderUsd={account?.account.risk.maxOrderUsd ?? 25} />}
           {tab === "orders" && agentId && <OrdersTab key={agentId} agentId={agentId} call={call} />}
-          {tab === "agent" && agent && <AgentTab agent={agent} account={account} caps={caps} install={install} />}
+          {tab === "agent" && agent && <AgentTab agent={agent} account={account} caps={caps} install={install} postJson={postJson} />}
           {tab === "settings" && agent && <SettingsTab agent={agent} account={account} postJson={postJson} onChange={() => { loadAccount(); loadAgents(); }} />}
         </div>
       </div>
@@ -1036,9 +1037,9 @@ function CopyBlock({ text, label }: { text: string; label: string }) {
   );
 }
 
-/** How to put the agent to work: what it has, what to DM it, and how other runtimes call the tools. */
-function AgentTab({ agent, account, caps, install }: {
-  agent: MyAgent; account: AccountView | null; caps: Record<string, boolean> | null; install: InstallStatus | null;
+/** How to put the agent to work: what it has, the instructions to send it, and how other runtimes call the tools. */
+function AgentTab({ agent, account, caps, install, postJson }: {
+  agent: MyAgent; account: AccountView | null; caps: Record<string, boolean> | null; install: InstallStatus | null; postJson: PostJson;
 }) {
   const mode = account?.account.mode ?? agent.mode;
   const origin = typeof window === "undefined" ? "https://agent-guild.com" : window.location.origin;
@@ -1048,67 +1049,138 @@ function AgentTab({ agent, account, caps, install }: {
     ["polymarket-run-bots (run bots)", caps ? !!caps["polymarket-run-bots"] : null],
     [`${mode === "live" ? "Live" : "Paper"} account${account ? ` · ${usd(account.cash)} cash` : ""}`, account ? (account.cash ?? 0) > 0 : null],
   ];
-  const messages = [
-    {
-      label: "One paper trade",
-      text: "Paper trade on Polymarket: check your account with polymarket_account, find an active market about bitcoin with polymarket_markets, look at its order book, then buy $10 of the outcome you think is underpriced with polymarket_order. Tell me the market, what you bought, the price, and why.",
-    },
-    {
-      label: "Start a bot",
-      text: "Start a Polymarket paper bot: polymarket_bot_create with type \"streak-fade\", sizeUsd 5 and maxLossUsd 20. Then check polymarket_bots in a few minutes and show me its last log lines with polymarket_bot_log.",
-    },
-    {
-      label: "Daily check-in",
-      text: "Polymarket check-in: show your open positions and today's PnL (polymarket_account), your last 5 trades (polymarket_trades), and whether any bot is waiting on you (polymarket_bots).",
-    },
-  ];
   const cli = [
     "# From the agent's machine (Agent Guild Connect CLI):",
-    "agent-guild mod tools polymarket-trading",
-    `agent-guild mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'`,
-    `agent-guild mod call polymarket-trading polymarket_order '{"conditionId":"0x…","outcomeIndex":0,"side":"buy","usd":10}'`,
+    `agent-guild --as ${agent.agentId} mod tools polymarket-trading`,
+    `agent-guild --as ${agent.agentId} mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'`,
     "",
     "# MCP clients (agent-guild mcp): guild_mod_tools, guild_mod_call",
     `# Any runtime: tool definitions at ${origin}/api/mods/polymarket-trading/agent/tools`,
   ].join("\n");
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <div className="space-y-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide">1 · Ready to trade?</h3>
-        <ul className="space-y-1 text-xs">
-          {checks.map(([label, ok]) => (
-            <li key={label} className="flex items-center gap-2">
-              <Badge tone={ok == null ? "neutral" : ok ? "success" : "warning"}>{ok == null ? "…" : ok ? "Yes" : "No"}</Badge>
-              <span>{label}</span>
-            </li>
-          ))}
-        </ul>
-        <p className={`text-xs ${mutedClass}`}>
-          {mode === "paper"
-            ? "Paper fills against the real Polymarket book with real fees. No money moves."
-            : "This agent is in live mode: its orders use real funds."}
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wide">2 · Tell {agent.name}</h3>
-          <a className={buttonClass("primary", "py-0.5 text-xs")} href={`/chat?agent=${encodeURIComponent(agent.agentId)}`}>Open DM</a>
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="space-y-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide">1 · Ready to trade?</h3>
+          <ul className="space-y-1 text-xs">
+            {checks.map(([label, ok]) => (
+              <li key={label} className="flex items-center gap-2">
+                <Badge tone={ok == null ? "neutral" : ok ? "success" : "warning"}>{ok == null ? "…" : ok ? "Yes" : "No"}</Badge>
+                <span>{label}</span>
+              </li>
+            ))}
+          </ul>
+          <p className={`text-xs ${mutedClass}`}>
+            {mode === "paper"
+              ? "Paper fills against the real Polymarket book with real fees. No money moves."
+              : "This agent is in live mode: its orders use real funds."}
+          </p>
         </div>
-        <p className={`text-xs ${mutedClass}`}>
-          Send one of these in a private DM. The agent&apos;s daemon (<code>agent-guild supervise</code>) has to be running to answer.
-        </p>
-        {messages.map((m) => <CopyBlock key={m.label} label={m.label} text={m.text} />)}
+        <div className="space-y-2 lg:col-span-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide">Other runtimes</h3>
+          <p className={`text-xs ${mutedClass}`}>
+            Every call is signed as the agent. The hub checks the capability, risk limits and paper/live mode on each one.
+          </p>
+          <CopyBlock label="CLI · MCP · HTTP" text={cli} />
+        </div>
       </div>
+      <PromptSection agent={agent} account={account} postJson={postJson} />
+    </div>
+  );
+}
 
-      <div className="space-y-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide">3 · Other runtimes</h3>
-        <p className={`text-xs ${mutedClass}`}>
-          Every call is signed as the agent. The hub checks the capability, risk limits and paper/live mode on each one.
-        </p>
-        <CopyBlock label="CLI · MCP · HTTP" text={cli} />
+/** "2 · Prompt your agent": the full briefing plus a task, editable, sent to the agent's DM or copied. */
+function PromptSection({ agent, account, postJson }: { agent: MyAgent; account: AccountView | null; postJson: PostJson }) {
+  const [preset, setPreset] = useState<string>(TASK_PRESETS[0].id);
+  const [task, setTask] = useState<string>(TASK_PRESETS[0].task);
+  const [edited, setEdited] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const generated = useMemo(() => buildAgentPrompt(
+    { agentId: agent.agentId, name: agent.name },
+    { mode: account?.account.mode ?? agent.mode, cash: account?.cash ?? null, risk: account?.account.risk ?? null },
+    task,
+  ), [agent.agentId, agent.name, agent.mode, account?.account.mode, account?.cash, account?.account.risk, task]);
+  const text = edited ?? generated;
+  const tooLong = text.length > MAX_PROMPT_CHARS;
+
+  const pick = (id: string) => {
+    const p = TASK_PRESETS.find((x) => x.id === id);
+    setPreset(id);
+    if (p) setTask(p.task);
+    setEdited(null);
+  };
+  const send = async () => {
+    setSending(true);
+    setResult(null);
+    try {
+      await postJson("prompt", { agentId: agent.agentId, text });
+      setResult({ tone: "success", text: `Sent to ${agent.name}'s DM.` });
+    } catch (err) {
+      setResult({ tone: "danger", text: (err as Error).message });
+    } finally {
+      setSending(false);
+    }
+  };
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+  };
+
+  return (
+    <div className="space-y-3 border-t border-[hsl(var(--border))] pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide">2 · Prompt {agent.name}</h3>
+        <Segmented label="Task" value={preset} onChange={pick} options={[...TASK_PRESETS.map((p) => ({ id: p.id, label: p.label })), { id: "custom", label: "Custom" }]} />
       </div>
+      <div>
+        <label htmlFor="pm-agent-task" className={labelClass}>Task</label>
+        <input
+          id="pm-agent-task" className={inputClass} value={task}
+          onChange={(e) => { setTask(e.target.value); setPreset("custom"); setEdited(null); }}
+          placeholder="What should the agent do?"
+        />
+      </div>
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor="pm-agent-prompt" className={labelClass}>Instructions sent to the agent</label>
+          {edited != null && (
+            <button type="button" className="mb-1 text-[11px] underline" onClick={() => setEdited(null)}>Reset to generated</button>
+          )}
+        </div>
+        <textarea
+          id="pm-agent-prompt" rows={14} spellCheck={false}
+          className={`${inputClass} ${monoClass} resize-y text-[11px] leading-relaxed`}
+          value={text} onChange={(e) => setEdited(e.target.value)}
+        />
+        <div className={`mt-1 flex justify-between gap-3 text-[11px] ${tooLong ? "text-red-600 dark:text-red-400" : mutedClass}`}>
+          <span>Includes how to call the tools, the trade workflow and the rules, filled from this account.</span>
+          <span className={`${monoClass} shrink-0`}>{text.length.toLocaleString()} / {MAX_PROMPT_CHARS.toLocaleString()}</span>
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {agent.isOwner ? (
+          <button type="button" className={buttonClass("primary")} disabled={sending || tooLong || !text.trim()} onClick={send}>
+            {sending ? "Sending…" : `Send to ${agent.name}`}
+          </button>
+        ) : null}
+        <button type="button" className={buttonClass("secondary")} onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+        <a className="text-xs underline" href={`/chat?agent=${encodeURIComponent(agent.agentId)}`}>Open DM</a>
+      </div>
+      {!agent.isOwner && (
+        <Note>Only the owner of {agent.orgName} can send this: the agent only uses its tools for the owner&apos;s DMs. Copy it to the owner instead.</Note>
+      )}
+      {result && (
+        <Note tone={result.tone}>
+          {result.text}{" "}
+          {result.tone === "success" && <a className="underline" href={`/chat?agent=${encodeURIComponent(agent.agentId)}`}>Watch the reply</a>}
+        </Note>
+      )}
+      <p className={`text-[11px] ${mutedClass}`}>
+        The agent&apos;s daemon (<code>agent-guild supervise</code>) has to be running to answer. Replies show up in the DM.
+      </p>
     </div>
   );
 }

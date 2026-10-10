@@ -278,7 +278,7 @@ describe("paper trading routes", () => {
     expect(data).toMatchObject({ id: "s-new", paper: true, coin: "ETH", goal, sizeUsd: 25, firstRound: "waiting" });
     expect(store.createStrategy).toHaveBeenCalledWith(expect.objectContaining({
       type: "ai", coin: "ETH", paper: true, wallet: "", sizeUsd: 25,
-      params: expect.objectContaining({ goal, intervalMs: 15 * 60_000, maxDrawdownPct: 10 }),
+      params: expect.objectContaining({ goal, intervalMs: 60_000, maxDrawdownPct: 10 }),
     }));
     expect(enforceCapability).toHaveBeenCalledWith("a1", "org1", "hyperliquid-run-strategy");
     expect(enqueueTask).not.toHaveBeenCalled();
@@ -291,6 +291,8 @@ describe("paper trading routes", () => {
 
     const short = await route("POST /paper/train")(post({ coin: "BTC", goal: "buy" }), agentCtx());
     expect(short.status).toBe(400);
+    const tooFast = await route("POST /paper/train")(post({ coin: "BTC", goal, intervalMs: 30_000 }), agentCtx());
+    expect(tooFast.status).toBe(400);
   });
 
   it("lists paper tools in the agent manifest", async () => {

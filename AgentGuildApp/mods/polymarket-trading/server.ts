@@ -1,5 +1,6 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { enableModCapabilities, enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getModInstallStatus, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { enableModCapabilities, enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getModInstallStatus, getOrganizationsByWalletAdmin, postAgentDmMessage } from "@/lib/firestore-admin";
+import { MAX_PROMPT_CHARS } from "./agent-prompt";
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -963,6 +964,26 @@ export default defineServerMod({
      * agent's org (they're org-wide). Owner only, and only for an org that has
      * already installed the mod from the Market.
      */
+    /**
+     * POST /prompt { agentId, text } — send the agent instructions in its
+     * private DM. Owner only: the daemon gives tools (and so trading) only to
+     * DMs from the org owner, so anyone else's prompt couldn't act anyway.
+     */
+    "POST /prompt": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const access = await requireOwner(ctx, body.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const text = typeof body.text === "string" ? body.text.trim() : "";
+      if (!text) return fail("text is required");
+      if (text.length > MAX_PROMPT_CHARS) return fail(`Keep the prompt under ${MAX_PROMPT_CHARS} characters`);
+      const agent = await getAgent(body.agentId);
+      const sent = await postAgentDmMessage({
+        agentId: body.agentId, orgId: access.orgId, agentName: agent?.name || "Agent",
+        senderAddress: ctx.session!.address, text,
+      });
+      return json(sent);
+    },
+
     "POST /grant": async (req, ctx) => {
       const body = await req.json().catch(() => ({}));
       const access = await requireOwner(ctx, body.agentId);

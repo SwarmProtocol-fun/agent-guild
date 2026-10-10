@@ -1352,7 +1352,7 @@ function TradingPanel({ api }: PanelProps) {
   const [trainGoal, setTrainGoal] = useState("");
   const [trainCoin, setTrainCoin] = useState("");
   const [trainSize, setTrainSize] = useState("25");
-  const [trainEvery, setTrainEvery] = useState("15");
+  const [trainEvery, setTrainEvery] = useState("1");
   const [trainStop, setTrainStop] = useState("10");
   const [trainBusy, setTrainBusy] = useState(false);
 
@@ -1399,7 +1399,7 @@ function TradingPanel({ api }: PanelProps) {
   async function createStrategy(e: FormEvent) {
     e.preventDefault();
     const params =
-      strategyType === "ai" ? { intervalMs: Number(aiIntervalMin) * 60_000, maxDrawdownPct: Number(aiMaxDrawdown), ...(leverage > 1 ? { leverage } : {}) } :
+      strategyType === "ai" ? { intervalMs: (paperMode ? Number(aiIntervalMin) : Math.max(15, Number(aiIntervalMin))) * 60_000, maxDrawdownPct: Number(aiMaxDrawdown), ...(leverage > 1 ? { leverage } : {}) } :
       strategyType === "dca" ? { intervalMs: Number(dcaIntervalMin) * 60_000 } :
       strategyType === "grid" ? { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels) } :
       strategyType === "sniper" ? { mode: sniperMode, ...(sniperMode !== "new-listing" ? { targetPrice: Number(sniperTargetPrice) } : {}) } :
@@ -1707,7 +1707,7 @@ function TradingPanel({ api }: PanelProps) {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide">Train a goal</div>
             <p className={`text-[11px] ${mutedClass}`}>
-              Write the idea. {selectedAgent?.name ?? "The agent"} paper-trades it on mainnet prices, with real fees, on virtual USDC.
+              Write the idea. {selectedAgent?.name ?? "The agent"} paper-trades it on mainnet prices, with real fees, on virtual USDC. Fastest is 1 minute.
             </p>
           </div>
           <span className={`text-[11px] ${trainGoal.trim().length > 800 ? "text-red-600 dark:text-red-400" : mutedClass}`}>{trainGoal.trim().length}/800</span>
@@ -1747,7 +1747,9 @@ function TradingPanel({ api }: PanelProps) {
           </div>
           <div>
             <label htmlFor="trainEvery" className={labelClass}>Decide every</label>
-            <select id="trainEvery" name="trainEvery" className={`${inputClass} w-auto`} value={trainEvery} onChange={(e) => setTrainEvery(e.target.value)}>
+            <select id="trainEvery" name="trainEvery" className={`${inputClass} w-auto`} value={trainEvery} onChange={(e) => setTrainEvery(e.target.value)} title="1 minute is the fastest. The agent still has up to 3 minutes to answer each round.">
+              <option value="1">1 minute</option>
+              <option value="5">5 minutes</option>
               <option value="15">15 minutes</option>
               <option value="60">1 hour</option>
               <option value="240">4 hours</option>
@@ -2469,7 +2471,9 @@ function TradingPanel({ api }: PanelProps) {
                       <>
                         <div>
                           <label htmlFor="aiInterval" className={labelClass}>Decide every</label>
-                          <select id="aiInterval" name="aiInterval" className={inputClass} value={aiIntervalMin} onChange={(e) => setAiIntervalMin(e.target.value)}>
+                          <select id="aiInterval" name="aiInterval" className={inputClass} value={paperMode ? aiIntervalMin : String(Math.max(15, Number(aiIntervalMin) || 15))} onChange={(e) => setAiIntervalMin(e.target.value)}>
+                            {paperMode && <option value="1">1 minute</option>}
+                            {paperMode && <option value="5">5 minutes</option>}
                             <option value="15">15 minutes</option>
                             <option value="60">1 hour</option>
                             <option value="240">4 hours</option>

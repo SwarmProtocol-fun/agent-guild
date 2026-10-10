@@ -2,7 +2,7 @@ import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { enqueueTask, getTask, newTaskId, recordCompletedTask } from "@/lib/gateway/store";
 import { settleOnChains, hashJobResult } from "@/lib/settlement/registry";
 import { encryptValue, decryptValue } from "@/lib/secrets";
-import { enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { enableModCapabilities, enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { Wallet as EvmWallet } from "ethers";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
@@ -812,6 +812,13 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
 // ── AI Trader ────────────────────────────────────────────────────────────────
 
 const AI_MIN_INTERVAL_MS = 15 * 60_000;
+/** Paper training can decide every minute. Live bots stay at 15. */
+const PAPER_MIN_INTERVAL_MS = 60_000;
+/**
+ * A one-minute paper round still leaves the daemon this long to answer.
+ * Shorter than that and a slow model gets the round skipped.
+ */
+const PAPER_ANSWER_FLOOR_MS = 3 * 60_000;
 /** How long the agent has to answer one live round before it's skipped. */
 const AI_ANSWER_WINDOW_MS = 10 * 60_000;
 /** A backtest waits on the agent one bar at a time; each question lives this long. */
@@ -820,17 +827,18 @@ const AI_BACKTEST_ANSWER_MS = 3 * 60_000;
 const FLIP_GIVE_UP_MS = 10 * 60_000;
 const AI_SNAPSHOT_HISTORY = 112; // 72 shown + warm-up for SMA40/RSI
 const TRAIN_DEFAULT_SIZE_USD = 25;
-const TRAIN_DEFAULT_INTERVAL_MS = AI_MIN_INTERVAL_MS;
+const TRAIN_DEFAULT_INTERVAL_MS = PAPER_MIN_INTERVAL_MS;
 const TRAIN_DEFAULT_DRAWDOWN_PCT = 10;
 const TRAIN_MAX_SIZE_USD = 100_000;
 
 /** Shared by POST /strategy (type ai) and POST /paper/train. */
-function buildAiParams(params: Record<string, unknown> | undefined): AiParams | { error: string } {
+function buildAiParams(params: Record<string, unknown> | undefined, minIntervalMs = AI_MIN_INTERVAL_MS): AiParams | { error: string } {
   const intervalMs = Number(params?.intervalMs ?? 3_600_000);
   const maxDrawdownPct = Number(params?.maxDrawdownPct ?? 50);
   const leverage = params?.leverage != null && params.leverage !== "" ? Number(params.leverage) : undefined;
-  if (!(intervalMs >= AI_MIN_INTERVAL_MS)) {
-    return { error: "params.intervalMs must be at least 15 minutes for an ai strategy" };
+  if (!(intervalMs >= minIntervalMs)) {
+    const minutes = minIntervalMs / 60_000;
+    return { error: `params.intervalMs must be at least ${minutes} minute${minutes === 1 ? "" : "s"} for an ai strategy` };
   }
   if (!(maxDrawdownPct > 0 && maxDrawdownPct < 100)) {
     return { error: "params.maxDrawdownPct must be between 0 and 100" };
@@ -851,6 +859,12 @@ function cleanTrainCoin(raw: unknown): string | null {
   const coin = String(raw ?? "").trim().toUpperCase();
   if (coin === "ANY" || !/^[A-Z0-9]{1,12}$/.test(coin)) return null;
   return coin;
+}
+
+/** How long this round's question stays open. Paper floors it so a 1-minute cadence can still be answered. */
+function aiAnswerWindow(paper: boolean, intervalMs: number): number {
+  if (!paper) return Math.min(AI_ANSWER_WINDOW_MS, intervalMs);
+  return Math.min(AI_ANSWER_WINDOW_MS, Math.max(intervalMs, PAPER_ANSWER_FLOOR_MS));
 }
 
 /** The largest chart interval no longer than the bot's decision interval. */
@@ -1086,7 +1100,7 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
   const requestId = await createAiRequest({
     agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id, coin: strategy.coin,
     ...decisionRequest(strategy.coin, snapshot, held?.position ?? null, params.goal),
-    expiresAt: new Date(Date.now() + Math.min(AI_ANSWER_WINDOW_MS, params.intervalMs)),
+    expiresAt: new Date(Date.now() + aiAnswerWindow(strategy.paper, params.intervalMs)),
   });
   await touchStrategyRun(strategy.id, { ...params, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
   return "asked";
@@ -1260,6 +1274,40 @@ const TRADING_CAPABILITIES = [
   "hyperliquid-webhook",
 ] as const;
 
+const HL_REGISTRY_MOD_ID = "mod-hyperliquid-trading";
+
+/**
+ * The Market install only writes inventory. Capabilities live on a separate
+ * install doc, so an installed mod can still fail enforceCapability until the
+ * owner grants them. A signed-in owner starting a bot or a paper session
+ * turns the whole mod on. Anyone else gets the same error as before.
+ */
+async function ensureRunStrategy(ctx: RouteContext, agentId: string, orgId: string): Promise<string | null> {
+  const granted = async () => {
+    try {
+      await enforceCapability(agentId, orgId, "hyperliquid-run-strategy");
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (await granted()) return null;
+
+  const session = ctx.session;
+  if (!session || ctx.agent) {
+    return `Agent ${agentId} does not have capability "hyperliquid-run-strategy". Install the required mod or assign the capability to this agent.`;
+  }
+  const membership = await requireOrgMembershipByAddress(session.address, orgId);
+  const owner = membership.ok ? membership.org?.ownerAddress : null;
+  if (!owner || canonicalizeWalletAddress(owner) !== canonicalizeWalletAddress(session.address)) {
+    return "Hyperliquid is installed for this org, but trading is still off. The org owner has to start paper training once to turn it on.";
+  }
+  const out = await enableModCapabilities(orgId, HL_REGISTRY_MOD_ID, TRADING_CAPABILITIES);
+  if (!out.installed) return "Install Hyperliquid Trading from the Market first.";
+  if (await granted()) return null;
+  return `Agent ${agentId} does not have capability "hyperliquid-run-strategy". Install the required mod or assign the capability to this agent.`;
+}
+
 interface AgentTool {
   name: string;
   description: string;
@@ -1413,7 +1461,7 @@ const AGENT_TOOLS: AgentTool[] = [
         coin: { type: "string", description: "Perp symbol, e.g. BTC" },
         goal: { type: "string", description: "The idea to practice, in plain language. 8–800 characters." },
         sizeUsd: { type: "number", description: "USD notional per order. Default 25. Minimum 10." },
-        intervalMs: { type: "number", description: "How often to decide, in milliseconds. Default and minimum 15 minutes." },
+        intervalMs: { type: "number", description: "How often to decide, in milliseconds. Default and minimum 1 minute. Live bots stay at 15 minutes." },
         maxDrawdownPct: { type: "number", description: "Stop for good if equity falls this percent from the start. Default 10." },
       },
       required: ["coin", "goal"],
@@ -2030,7 +2078,7 @@ export default defineServerMod({
      * Requires the "hyperliquid-run-strategy" capability. DCA/grid/sniper are
      * evaluated by the tick phase in /api/internal/tick and ai by its AI
      * Trader phase, which asks the agent's own model each round (params:
-     * intervalMs ≥ 15 min, maxDrawdownPct, leverage?); signal only fires via POST /strategy/:id/signal or the
+     * intervalMs ≥ 1 min on paper, ≥ 15 min live, maxDrawdownPct, leverage?); signal only fires via POST /strategy/:id/signal or the
      * public POST /webhook/:id.
      * Body: { orgId, agentId, wallet, type, coin, sizeUsd, params, paper? }
      * paper: true runs the bot on the agent's paper account (no wallet needed).
@@ -2053,7 +2101,7 @@ export default defineServerMod({
       let storedParams = params ?? {};
       if (type === "ai") {
         if (coin === "ANY") return Response.json({ error: "an ai strategy needs a specific coin" }, { status: 400 });
-        const built = buildAiParams(params);
+        const built = buildAiParams(params, paper ? PAPER_MIN_INTERVAL_MS : AI_MIN_INTERVAL_MS);
         if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
         storedParams = built;
       }
@@ -2078,11 +2126,8 @@ export default defineServerMod({
       const denied = await requireOrgAccess(ctx, orgId);
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
 
-      try {
-        await enforceCapability(agentId, orgId, "hyperliquid-run-strategy");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
+      const strategyCap = await ensureRunStrategy(ctx, agentId, orgId);
+      if (strategyCap) return Response.json({ error: strategyCap }, { status: 403 });
 
       const id = await createStrategy({ orgId, agentId, wallet: wallet ?? "", type, coin, sizeUsd, enabled: true, params: storedParams, paper });
       return Response.json({ id });
@@ -2349,16 +2394,13 @@ export default defineServerMod({
         maxDrawdownPct: body.maxDrawdownPct ?? TRAIN_DEFAULT_DRAWDOWN_PCT,
         leverage: body.leverage,
         goal: goal.goal,
-      });
+      }, PAPER_MIN_INTERVAL_MS);
       if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
 
       const denied = await requireOrgAccess(ctx, orgId);
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
-      try {
-        await enforceCapability(agentId, orgId, "hyperliquid-run-strategy");
-      } catch (err) {
-        return Response.json({ error: (err as Error).message }, { status: 403 });
-      }
+      const strategyCap = await ensureRunStrategy(ctx, agentId, orgId);
+      if (strategyCap) return Response.json({ error: strategyCap }, { status: 403 });
 
       const existing = await getStrategies(agentId);
       const clash = existing.find((s) => s.enabled && s.paper && s.type === "ai" && s.coin === coin);

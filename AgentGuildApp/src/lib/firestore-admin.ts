@@ -627,6 +627,38 @@ export async function enableModCapabilities(
   return { installed: true, enabled: missing };
 }
 
+/**
+ * Post a human message into an agent's private DM (created if missing), the
+ * same shape the chat page writes. Callers must have checked that
+ * `senderAddress` is the signed-in wallet — the daemon trusts senderId to
+ * decide whether a DM came from the org owner.
+ */
+export async function postAgentDmMessage(input: {
+  agentId: string;
+  orgId: string;
+  agentName: string;
+  senderAddress: string;
+  text: string;
+}): Promise<{ channelId: string; messageId: string }> {
+  const channels = adminDb().collection("channels");
+  const existing = await channels.where("orgId", "==", input.orgId).where("agentId", "==", input.agentId).limit(1).get();
+  const channelId = existing.empty
+    ? (await channels.add({ orgId: input.orgId, agentId: input.agentId, name: input.agentName, createdAt: FieldValue.serverTimestamp() })).id
+    : existing.docs[0].id;
+  const addr = input.senderAddress;
+  const ref = await adminDb().collection("messages").add({
+    channelId,
+    senderId: addr,
+    senderAddress: addr,
+    senderName: `${addr.slice(0, 6)}...${addr.slice(-4)}`,
+    senderType: "human",
+    content: input.text,
+    orgId: input.orgId,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return { channelId, messageId: ref.id };
+}
+
 export async function publishAgentPackage(
   pkg: Omit<AgentPackage, "id" | "publishedAt" | "updatedAt" | "installCount" | "rentalCount" | "hireCount" | "avgRating" | "ratingCount" | "status">,
 ): Promise<string> {
