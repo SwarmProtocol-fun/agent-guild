@@ -6,6 +6,8 @@
  * agent-invite code into everything `agent-guild join --code <CODE>` needs.
  */
 import { getAgentInviteByCode, getOrganizationByInviteCode } from "@/lib/firestore-admin";
+import { INVITE_CODE_TTL_MS } from "@/lib/agent-registration-grants";
+import { toMillis } from "@/lib/agent-standing";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ code: string }> }) {
     const { code } = await params;
@@ -33,6 +35,19 @@ export async function GET(_req: Request, { params }: { params: Promise<{ code: s
         return Response.json(
             { error: "Invite code not found", codeType: "unknown", dashboardUrl: "https://agent-guild.com/agents" },
             { status: 404 }
+        );
+    }
+
+    // Fail before the CLI generates keys — register would reject it anyway.
+    const expiresAt = invite.expiresAt ?? (toMillis(invite.createdAt) ?? 0) + INVITE_CODE_TTL_MS;
+    if (invite.usedAt || Date.now() > expiresAt) {
+        return Response.json(
+            {
+                error: invite.usedAt ? "This invite code has already been used" : "This invite code has expired",
+                codeType: "agent",
+                dashboardUrl: "https://agent-guild.com/agents",
+            },
+            { status: 410 }
         );
     }
 

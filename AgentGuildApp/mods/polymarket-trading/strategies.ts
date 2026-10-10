@@ -11,7 +11,9 @@
  * bots default to paper for exactly that reason.
  */
 
-export type BotType = "ai" | "mid-price" | "streak-fade" | "price-trigger";
+import type { FleetBotType } from "./fleet";
+
+export type BotType = "ai" | "mid-price" | "streak-fade" | "price-trigger" | FleetBotType;
 
 export interface Candle {
   t: number;

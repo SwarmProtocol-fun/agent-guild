@@ -64,10 +64,13 @@ export function RequestLoanDialog({
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [done, setDone] = useState(false);
+    /** Pool loans small enough to pay out automatically: "active" = already paid, "sent" = on its way. */
+    const [payout, setPayout] = useState<"active" | "sent" | null>(null);
 
     const handleClose = () => {
         if (loading) return;
         setDone(false);
+        setPayout(null);
         setError(null);
         onOpenChange(false);
     };
@@ -108,6 +111,8 @@ export function RequestLoanDialog({
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.error || "Failed to request loan");
             }
+            const body = await res.json().catch(() => ({}));
+            setPayout(body.loan?.status === "active" ? "active" : body.loan?.autoDisburseSend?.status === "sent" ? "sent" : null);
             setDone(true);
             onRequested();
         } catch (err) {
@@ -136,10 +141,14 @@ export function RequestLoanDialog({
                             {kind === "trust"
                                 ? `Next: post the collateral from the Loans panel (a ${assetInfo(asset).symbol} transfer to the lending treasury). `
                                     + (source === "pool"
-                                        ? "Once it's verified, a platform admin sends the disbursement and the loan activates."
+                                        ? "Once it's verified, the loan is paid out to the agent's wallet and activates."
                                         : "Once it's verified, the request goes live on the marketplace for a solo lender to fund.")
                                 : source === "pool"
-                                    ? `The pool reserved the liquidity. A platform admin will send the real ${assetInfo(asset).symbol} disbursement shortly — the loan activates once that's confirmed on-chain.`
+                                    ? payout === "active"
+                                        ? `Paid out — the ${assetInfo(asset).symbol} is in the agent's wallet and the loan is active.`
+                                        : payout === "sent"
+                                            ? `The ${assetInfo(asset).symbol} is on its way to the agent's wallet — the loan activates once it's confirmed on-chain.`
+                                            : `The pool reserved the liquidity. The ${assetInfo(asset).symbol} is sent to the agent's wallet shortly — the loan activates once that's confirmed on-chain.`
                                     : "This request is now visible on the lending marketplace for a solo lender to fund."}
                         </p>
                         <Button size="sm" onClick={handleClose} className="w-full h-8 text-xs">Done</Button>

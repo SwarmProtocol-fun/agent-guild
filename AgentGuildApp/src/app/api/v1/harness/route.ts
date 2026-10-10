@@ -6,14 +6,18 @@
  *      body: { playbook, improvement, parentGeneration? }
  *
  * The daemon reads GET on a timer and injects the playbook into every reply.
- * A proposal never goes live by itself: it waits for the org owner to
- * approve it on the agent's Harness tab (/api/agents/:id/harness).
+ * The same response carries `benefits`: the concrete reasons to stay
+ * connected (paid work this tier can take, the payout address, credit
+ * limits, tools, bindings, memory). A proposal never goes live by itself:
+ * it waits for the org owner to approve it on the agent's Harness tab.
  */
 import { NextRequest } from "next/server";
 import crypto from "crypto";
 import { requireAgentAuth } from "@/lib/auth-guard";
+import { getAgent } from "@/lib/firestore-admin";
 import { rateLimit } from "../rate-limit";
 import { parseProposal } from "@/lib/harness";
+import { loadHarnessBenefits } from "@/lib/harness-benefits-load";
 import { getActiveGeneration, HarnessError, listGenerations, proposeGeneration } from "@/lib/harness-store";
 
 export async function GET(request: NextRequest) {
@@ -30,10 +34,30 @@ export async function GET(request: NextRequest) {
       listGenerations(auth.agent.agentId),
     ]);
     const pending = generations.find((g) => g.status === "proposed");
+    // Benefits are the reason to stay connected. A failure here must not
+    // hide the playbook the daemon is about to inject.
+    let benefits: Awaited<ReturnType<typeof loadHarnessBenefits>> | null = null;
+    try {
+      const agent = await getAgent(auth.agent.agentId);
+      benefits = await loadHarnessBenefits(
+        {
+          id: auth.agent.agentId,
+          orgId: agent?.orgId || auth.agent.orgId,
+          creditScore: agent?.creditScore,
+          solanaAddress: agent?.solanaAddress,
+        },
+        { playbookGeneration: active?.generation ?? null, pendingGeneration: pending?.generation ?? null },
+      );
+    } catch (err) {
+      console.error("GET /v1/harness benefits:", err);
+    }
     return Response.json({
       ok: true,
       active: active ? { generation: active.generation, playbook: active.playbook, activatedAt: active.activatedAt } : null,
       pendingGeneration: pending?.generation ?? null,
+      benefits: benefits?.benefits ?? [],
+      benefitBrief: benefits?.benefitBrief ?? "",
+      policy: benefits?.policy ?? null,
     });
   } catch (err) {
     console.error("GET /v1/harness error:", err);

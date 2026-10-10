@@ -8,23 +8,25 @@
  * it is capped and can be stopped midway.
  */
 import { useRef, useState, type FormEvent } from "react";
-import { runBacktest, type BacktestResult, type BacktestStrategy } from "./backtest";
+import { runBacktest, type BacktestResult, type BacktestStrategy, type Direction } from "./backtest";
+import { BREAKOUT_DEFAULTS, breakoutWarmup, type BreakoutParams } from "./breakout";
+import { SMART_DCA_DEFAULTS, type SmartDcaParams } from "./smart-dca";
 import type { AiDecision } from "./ai-trader-core";
 import type { Candle } from "./indicators";
 
 type Network = "testnet" | "mainnet";
-type Kind = "hold" | "dca" | "grid" | "sniper" | "ai";
+type Kind = "hold" | "dca" | "grid" | "sniper" | "breakout" | "ai";
 type Interval = "15m" | "1h" | "4h" | "1d";
 
 const INTERVAL_MS: Record<Interval, number> = { "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000 };
-const KIND_LABEL: Record<Kind, string> = { hold: "Buy & hold", dca: "DCA", grid: "Grid", sniper: "Sniper", ai: "AI Trader" };
+const KIND_LABEL: Record<Kind, string> = { hold: "Buy & hold", dca: "DCA", grid: "Grid", sniper: "Sniper", breakout: "Breakout", ai: "AI Trader" };
 /** Questions one AI backtest may put to the agent — each is a real run of its model. */
 export const MAX_AI_BACKTEST_DECISIONS = 48;
 /** Bars of history before the first AI decision, so its snapshot is as full as the live bot's. */
 const AI_WARMUP_BARS = 112;
 
 export interface BotSpec {
-  type: "dca" | "grid" | "sniper" | "ai";
+  type: "dca" | "grid" | "sniper" | "breakout" | "ai";
   coin: string;
   sizeUsd: number;
   params: Record<string, unknown>;
@@ -108,7 +110,8 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
   const [coin, setCoin] = useState(initial?.coin ?? defaultCoin);
   const [dataNetwork, setDataNetwork] = useState<Network>("mainnet");
   const [interval, setInterval_] = useState<Interval>(
-    initial?.type === "ai" && ip.intervalMs ? ((Object.keys(INTERVAL_MS) as Interval[]).find((k) => INTERVAL_MS[k] === Number(ip.intervalMs)) ?? "1h") : "1h",
+    initial?.type === "ai" && ip.intervalMs ? ((Object.keys(INTERVAL_MS) as Interval[]).find((k) => INTERVAL_MS[k] === Number(ip.intervalMs)) ?? "1h")
+      : initial?.type === "breakout" && String(ip.interval) in INTERVAL_MS ? (ip.interval as Interval) : "1h",
   );
   const [bars, setBars] = useState("500");
   const [balance, setBalance] = useState("1000");
@@ -122,6 +125,19 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
   const [sniperTarget, setSniperTarget] = useState(String(ip.targetPrice ?? ""));
   const [aiDecisions, setAiDecisions] = useState("24");
   const [maxDd, setMaxDd] = useState(String(ip.maxDrawdownPct ?? 50));
+  const [direction, setDirection] = useState<Direction>(ip.direction === "short" ? "short" : "long");
+  const [stopLoss, setStopLoss] = useState(String(ip.stopLossPct ?? ""));
+  const [takeProfit, setTakeProfit] = useState(String(ip.takeProfitPct ?? ""));
+  const ismart = (initial?.params?.smart ?? null) as SmartDcaParams | null;
+  const [smartOn, setSmartOn] = useState(!!ismart);
+  const [smartStep, setSmartStep] = useState(String(ismart?.stepPct ?? SMART_DCA_DEFAULTS.stepPct));
+  const [smartMult, setSmartMult] = useState(String(ismart?.multiplier ?? SMART_DCA_DEFAULTS.multiplier));
+  const [smartSteps, setSmartSteps] = useState(String(ismart?.maxSteps ?? SMART_DCA_DEFAULTS.maxSteps));
+  const [smartTp, setSmartTp] = useState(String(ismart ? ismart.takeProfitPct ?? "" : SMART_DCA_DEFAULTS.takeProfitPct));
+  const [boMinAdx, setBoMinAdx] = useState(String(ip.minAdx ?? BREAKOUT_DEFAULTS.minAdx));
+  const [boShort, setBoShort] = useState(ip.allowShort == null ? BREAKOUT_DEFAULTS.allowShort : String(ip.allowShort) === "true");
+  const [boStop, setBoStop] = useState(String(initial?.type === "breakout" ? ip.stopLossPct ?? "" : BREAKOUT_DEFAULTS.stopLossPct));
+  const [boTp, setBoTp] = useState(String(initial?.type === "breakout" ? ip.takeProfitPct ?? "" : BREAKOUT_DEFAULTS.takeProfitPct));
 
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -153,22 +169,43 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
       let strategy: BacktestStrategy;
       let spec: BotSpec | null = null;
       let startIndex = 0;
+      // Rule bots: which way they trade and the SL/TP every order carries.
+      const sl = Number(stopLoss) > 0 ? Number(stopLoss) : undefined;
+      const tp = Number(takeProfit) > 0 ? Number(takeProfit) : undefined;
+      const extras = { ...(direction === "short" ? { direction } : {}), ...(sl ? { stopLossPct: sl } : {}), ...(tp ? { takeProfitPct: tp } : {}) };
+      let triggers: { stopLossPct?: number; takeProfitPct?: number } = { stopLossPct: sl, takeProfitPct: tp };
       if (kind === "hold") {
         strategy = { type: "hold" };
+        triggers = {};
       } else if (kind === "dca") {
         const intervalMs = Math.max(1, Number(dcaEveryH)) * 3_600_000;
-        strategy = { type: "dca", intervalMs };
-        spec = { type: "dca", coin, sizeUsd: size, params: { intervalMs } };
+        const smart: SmartDcaParams | null = smartOn
+          ? { stepPct: Number(smartStep), multiplier: Number(smartMult), maxSteps: Number(smartSteps), ...(Number(smartTp) > 0 ? { takeProfitPct: Number(smartTp) } : {}) }
+          : null;
+        if (smart && !(smart.stepPct > 0 && smart.multiplier >= 1 && smart.maxSteps >= 0)) throw new Error("Smart DCA needs a step above 0% and a multiplier of at least 1.");
+        strategy = { type: "dca", intervalMs, direction, smart };
+        spec = { type: "dca", coin, sizeUsd: size, params: { intervalMs, ...extras, ...(smart ? { smart } : {}) } };
       } else if (kind === "grid") {
         const g = { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels) };
         if (!(g.lowerPrice > 0 && g.upperPrice > g.lowerPrice && g.levels >= 1)) throw new Error("Grid needs lower < upper and at least 1 level.");
-        strategy = { type: "grid", ...g };
-        spec = { type: "grid", coin, sizeUsd: size, params: g };
+        strategy = { type: "grid", ...g, direction };
+        spec = { type: "grid", coin, sizeUsd: size, params: { ...g, ...extras } };
       } else if (kind === "sniper") {
         const targetPrice = Number(sniperTarget);
         if (!(targetPrice > 0)) throw new Error("Sniper needs a target price.");
-        strategy = { type: "sniper", mode: sniperMode, targetPrice };
-        spec = { type: "sniper", coin, sizeUsd: size, params: { mode: sniperMode, targetPrice } };
+        strategy = { type: "sniper", mode: sniperMode, targetPrice, direction };
+        spec = { type: "sniper", coin, sizeUsd: size, params: { mode: sniperMode, targetPrice, ...extras } };
+      } else if (kind === "breakout") {
+        const params: BreakoutParams = {
+          ...BREAKOUT_DEFAULTS, interval, minAdx: Number(boMinAdx), allowShort: boShort,
+          stopLossPct: Number(boStop) > 0 ? Number(boStop) : undefined,
+          takeProfitPct: Number(boTp) > 0 ? Number(boTp) : undefined,
+        };
+        startIndex = Math.min(candles.length - 2, breakoutWarmup(params));
+        if (candles.length < breakoutWarmup(params) + 20) throw new Error(`Breakout needs at least ${breakoutWarmup(params) + 20} bars; ask for more history.`);
+        strategy = { type: "breakout", params };
+        triggers = {};
+        spec = { type: "breakout", coin, sizeUsd: size, params: { ...params, ...(lev > 1 ? { leverage: lev } : {}) } };
       } else {
         // The last bar can't trade (nothing fills after it), so start one bar earlier.
         startIndex = Math.max(20, candles.length - decisionCount - 1);
@@ -213,6 +250,7 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         candles, barMs, strategy, startIndex,
         startingBalance: Number(balance), sizeUsd: kind === "hold" ? Number(balance) * 0.99 * lev : size, leverage: lev,
         maxDrawdownStopPct: kind === "ai" ? Number(maxDd) : undefined,
+        ...(kind === "ai" ? {} : triggers),
         onProgress: (done, total) => setProgress({ done, total }),
         shouldStop: () => stopRef.current,
       });
@@ -328,6 +366,80 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
             </div>
           </div>
         )}
+        {(kind === "dca" || kind === "grid" || kind === "sniper") && (
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label htmlFor="btDir" className={labelClass}>Direction</label>
+              <select id="btDir" className={inputClass} value={direction} onChange={(e) => setDirection(e.target.value as Direction)}>
+                <option value="long">Long (buy)</option>
+                <option value="short">Short (sell)</option>
+              </select>
+            </div>
+            <div>
+              <label htmlFor="btSl" className={labelClass}>Stop loss %</label>
+              <input id="btSl" type="number" min="0" step="any" placeholder="none" className={inputClass} value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} />
+            </div>
+            <div>
+              <label htmlFor="btTp" className={labelClass}>Take profit %</label>
+              <input id="btTp" type="number" min="0" step="any" placeholder="none" className={inputClass} value={takeProfit} onChange={(e) => setTakeProfit(e.target.value)} />
+            </div>
+          </div>
+        )}
+        {kind === "dca" && (
+          <div className="space-y-2 rounded-sm border border-[hsl(var(--border))] p-2">
+            <label className="flex items-center gap-2 text-xs font-medium">
+              <input type="checkbox" checked={smartOn} onChange={(e) => setSmartOn(e.target.checked)} />
+              Smart DCA: buy more the further price is under the average entry
+            </label>
+            {smartOn && (
+              <div className="grid grid-cols-4 gap-2">
+                <div>
+                  <label htmlFor="btSmStep" className={labelClass}>Step %</label>
+                  <input id="btSmStep" type="number" min="0.1" step="any" className={inputClass} value={smartStep} onChange={(e) => setSmartStep(e.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="btSmMult" className={labelClass}>× per step</label>
+                  <input id="btSmMult" type="number" min="1" max="5" step="0.1" className={inputClass} value={smartMult} onChange={(e) => setSmartMult(e.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="btSmMax" className={labelClass}>Max steps</label>
+                  <input id="btSmMax" type="number" min="0" max="10" className={inputClass} value={smartSteps} onChange={(e) => setSmartSteps(e.target.value)} />
+                </div>
+                <div>
+                  <label htmlFor="btSmTp" className={labelClass}>Stack TP %</label>
+                  <input id="btSmTp" type="number" min="0" step="any" placeholder="none" className={inputClass} value={smartTp} onChange={(e) => setSmartTp(e.target.value)} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {kind === "breakout" && (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <div>
+                <label htmlFor="btBoAdx" className={labelClass}>Min ADX</label>
+                <input id="btBoAdx" type="number" min="0" max="100" className={inputClass} value={boMinAdx} onChange={(e) => setBoMinAdx(e.target.value)} />
+              </div>
+              <div>
+                <label htmlFor="btBoSl" className={labelClass}>Stop loss %</label>
+                <input id="btBoSl" type="number" min="0" step="any" placeholder="none" className={inputClass} value={boStop} onChange={(e) => setBoStop(e.target.value)} />
+              </div>
+              <div>
+                <label htmlFor="btBoTp" className={labelClass}>Take profit %</label>
+                <input id="btBoTp" type="number" min="0" step="any" placeholder="none" className={inputClass} value={boTp} onChange={(e) => setBoTp(e.target.value)} />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={boShort} onChange={(e) => setBoShort(e.target.checked)} />
+              Also short breakdowns below the lower band
+            </label>
+            <p className={`text-[11px] ${muted}`}>
+              Waits for the Bollinger Bands (20, 2σ) to squeeze to their narrowest in {BREAKOUT_DEFAULTS.squeezeLookback} bars, then enters
+              when a close breaks out with ADX at least {boMinAdx} and the directional lines agreeing. It exits when the close
+              falls back through the middle band, or at the stop / take profit.
+            </p>
+          </>
+        )}
         {kind === "ai" && (
           <>
             <div className="grid grid-cols-3 gap-2">
@@ -365,7 +477,8 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         {!agentId && <p className={`text-xs ${muted}`}>Pick an agent first.</p>}
         {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
         <p className={`text-[11px] ${muted}`}>
-          Fills at the next bar&apos;s open with 0.05% slippage and Hyperliquid&apos;s 0.045% taker fee; funding isn&apos;t modelled.
+          Fills at the next bar&apos;s open with 0.05% slippage and Hyperliquid&apos;s 0.045% taker fee; stops and take
+          profits fill inside the bar at their price (stop first if a bar hits both). Funding isn&apos;t modelled.
           Past results don&apos;t predict future ones.
         </p>
       </form>

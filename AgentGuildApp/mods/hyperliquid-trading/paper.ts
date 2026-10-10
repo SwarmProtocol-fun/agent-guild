@@ -12,6 +12,8 @@ export const PAPER_START_BALANCE = 10_000;
 /** Hyperliquid's base-tier perp fees: takers 0.045%, makers 0.015%. */
 export const TAKER_FEE_RATE = 0.00045;
 export const MAKER_FEE_RATE = 0.00015;
+/** Hyperliquid's base-tier spot taker fee. */
+export const SPOT_TAKER_FEE_RATE = 0.0007;
 
 export interface BookLevel { px: number; sz: number }
 export interface CoinMeta { szDecimals: number; maxLeverage: number }
@@ -106,7 +108,10 @@ export interface MarkedPosition extends PaperPosition {
 
 export interface PaperSummary {
   balance: number;
+  /** Cash + unrealized perp PnL + spot holdings at their mids. */
   equity: number;
+  /** Paper spot holdings at their mids (the basis bot's spot legs). Counts toward equity, like a unified Hyperliquid account. */
+  spotValue: number;
   unrealizedPnl: number;
   marginUsed: number;
   /** Equity below this gets the whole account liquidated (Hyperliquid: half the initial margin at max leverage). */
@@ -116,8 +121,8 @@ export interface PaperSummary {
   positions: MarkedPosition[];
 }
 
-/** Marks every position to `marks` (falling back to entry when a coin has no price). */
-export function summarize(balance: number, positions: PaperPosition[], marks: Record<string, number>, meta: Record<string, CoinMeta>): PaperSummary {
+/** Marks every position to `marks` (falling back to entry when a coin has no price). `spotUsd` is the account's spot holdings, already valued. */
+export function summarize(balance: number, positions: PaperPosition[], marks: Record<string, number>, meta: Record<string, CoinMeta>, spotUsd = 0): PaperSummary {
   let unrealizedPnl = 0;
   let marginUsed = 0;
   let maintenanceMargin = 0;
@@ -131,8 +136,8 @@ export function summarize(balance: number, positions: PaperPosition[], marks: Re
     maintenanceMargin += notionalUsd / (2 * Math.max(1, meta[p.coin]?.maxLeverage ?? 50));
     return { ...p, markPx, notionalUsd, unrealizedPnl: upnl, marginUsed: margin };
   });
-  const equity = balance + unrealizedPnl;
-  return { balance, equity, unrealizedPnl, marginUsed, maintenanceMargin, available: equity - marginUsed, positions: marked };
+  const equity = balance + unrealizedPnl + spotUsd;
+  return { balance, equity, spotValue: spotUsd, unrealizedPnl, marginUsed, maintenanceMargin, available: equity - marginUsed, positions: marked };
 }
 
 export interface PaperOrder {
@@ -171,6 +176,7 @@ export function bookOrder(
   order: PaperOrder,
   marks: Record<string, number>,
   meta: Record<string, CoinMeta>,
+  spotUsd = 0,
 ): BookedOrder | { error: string } {
   const coinMeta = meta[order.coin] ?? { szDecimals: 4, maxLeverage: 50 };
   const prev = positions.find((p) => p.coin === order.coin) ?? null;
@@ -194,7 +200,7 @@ export function bookOrder(
   const nextBalance = balance + realized - fee;
   const adds = !!next && (!prev || Math.sign(prev.szi) !== Math.sign(next.szi) || Math.abs(next.szi) > Math.abs(prev.szi));
   if (adds) {
-    const after = summarize(nextBalance, [...positions.filter((p) => p.coin !== order.coin), next!], { ...marks, [order.coin]: marks[order.coin] || order.px }, meta);
+    const after = summarize(nextBalance, [...positions.filter((p) => p.coin !== order.coin), next!], { ...marks, [order.coin]: marks[order.coin] || order.px }, meta, spotUsd);
     if (after.available < -1e-9) {
       return { error: `Not enough paper margin: needs $${after.marginUsed.toFixed(2)}, equity is $${after.equity.toFixed(2)}` };
     }
@@ -307,4 +313,69 @@ export function paperPerformance(trades: PerformanceTrade[], startBalance: numbe
     maxDrawdownPct: maxDrawdownPct(curve.map((p) => p.equity)),
     curve,
   };
+}
+
+// ── Paper spot ──────────────────────────────────────────────────────────────
+//
+// Spot holdings for the basis bot's long leg: coins bought on Hyperliquid
+// spot with paper USDC, at the real spot book. Keyed by spot token (UBTC).
+
+export interface SpotHolding {
+  /** The spot market's book key ("@142"). */
+  pair: string;
+  token: string;
+  sz: number;
+  avgPx: number;
+}
+
+/** Spot holdings valued at `spotMids` (keyed by pair), falling back to cost. */
+export function spotValue(spot: Record<string, SpotHolding> | undefined, spotMids: Record<string, number>): number {
+  return Object.values(spot ?? {}).reduce((s, h) => s + h.sz * (spotMids[h.pair] || h.avgPx), 0);
+}
+
+export interface SpotOrder {
+  pair: string;
+  token: string;
+  isBuy: boolean;
+  sz: number;
+  px: number;
+  feeRate: number;
+  szDecimals: number;
+}
+
+/**
+ * Books one spot fill. A buy is paid from free cash — cash plus unrealized
+ * perp PnL less the margin perps already use — and never from spot or
+ * borrowed funds. A sell is clamped to what's held and realizes against the
+ * average cost.
+ */
+export function bookSpot(
+  balance: number,
+  positions: PaperPosition[],
+  spot: Record<string, SpotHolding>,
+  order: SpotOrder,
+  marks: Record<string, number>,
+  meta: Record<string, CoinMeta>,
+): { balance: number; holding: SpotHolding | null; sz: number; fee: number; realized: number } | { error: string } {
+  const held = spot[order.token] ?? null;
+  let sz = roundSize(order.sz, order.szDecimals);
+  if (!order.isBuy) {
+    if (!held || held.sz <= 0) return { error: `No ${order.token} spot to sell` };
+    sz = Math.min(sz, held.sz);
+  }
+  if (!(sz > 0)) return { error: "Spot order size rounds to zero" };
+  const cost = sz * order.px;
+  const fee = cost * order.feeRate;
+  if (order.isBuy) {
+    const perps = summarize(balance, positions, marks, meta);
+    if (perps.available < cost + fee - 1e-9) {
+      return { error: `Not enough free paper cash for spot: needs $${(cost + fee).toFixed(2)}, has $${perps.available.toFixed(2)}` };
+    }
+    const total = (held?.sz ?? 0) + sz;
+    const avgPx = ((held?.sz ?? 0) * (held?.avgPx ?? 0) + cost) / total;
+    return { balance: balance - cost - fee, holding: { pair: order.pair, token: order.token, sz: roundSize(total, order.szDecimals), avgPx }, sz, fee, realized: 0 };
+  }
+  const realized = sz * (order.px - held!.avgPx);
+  const left = roundSize(held!.sz - sz, order.szDecimals);
+  return { balance: balance + cost - fee, holding: left > 0 ? { ...held!, sz: left } : null, sz, fee, realized };
 }

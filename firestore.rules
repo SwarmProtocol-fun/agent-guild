@@ -207,7 +207,13 @@ service cloud.firestore {
       return ['creditScore', 'trustScore', 'asn', 'apiKeyHash', 'apiKey',
               'restoredFromBackup', 'walletAddress', 'solanaAddress',
               'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress',
-              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating'];
+              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating',
+              // Identity + anti-sybil standing (register route, agent-bond.ts):
+              // a key swap or a cleared provisional flag must go through the server.
+              'publicKey', 'agentAddress', 'provisional', 'provisionalSince',
+              'ownerWallet', 'keyBoundAt', 'bond', 'retiredAt',
+              // Policy-tier inputs (credit-policy.ts resolvePolicyTier)
+              'riskFlags', 'fraudRiskScore', 'verificationLevel', 'confidenceLevel'];
     }
     match /agents/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);
@@ -217,9 +223,15 @@ service cloud.firestore {
       allow create: if request.auth != null && isOrgMember(request.resource.data.orgId) &&
         request.resource.data.get('creditScore', 680) == 680 &&
         request.resource.data.get('trustScore', 50) == 50 &&
+        // Every browser-reserved agent starts provisional, clocked by the server.
+        request.resource.data.get('provisional', false) == true &&
+        request.resource.data.get('provisionalSince', null) == request.time &&
         !request.resource.data.keys().hasAny(['restoredFromBackup', 'walletAddress', 'solanaAddress',
                                               'nftMintAddress', 'nftMintedAt', 'nftOwnerEvmAddress',
-                                              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating']);
+                                              'tasksCompleted', 'ratingSum', 'ratingCount', 'avgRating',
+                                              'publicKey', 'agentAddress', 'ownerWallet', 'keyBoundAt',
+                                              'bond', 'retiredAt', 'riskFlags', 'fraudRiskScore',
+                                              'verificationLevel', 'confidenceLevel']);
     }
     match /approvals/{docId} {
       allow read, delete: if request.auth != null && isOrgMember(resource.data.orgId);

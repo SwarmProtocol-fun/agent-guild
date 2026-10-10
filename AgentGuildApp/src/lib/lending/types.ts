@@ -103,6 +103,8 @@ export interface Loan {
     /** Latest collateral top-up / repayment sent from the agent's own wallet (one in flight at a time). */
     agentTopUpSend?: AgentWalletSend;
     agentRepaySend?: AgentWalletSend;
+    /** Pool loans under the auto-disburse limit: the platform payout wallet sending the principal (lib/lending/auto-disburse.ts). */
+    autoDisburseSend?: AgentWalletSend;
     /** Collateral-market loans: collateral added after posting (already included in `collateral`). */
     collateralTopUps?: CollateralTopUp[];
     /** True once this pool loan's principal/interest is included in the pool's accruingPerYear / interestReceivable. */
@@ -297,7 +299,8 @@ export type LendingPayoutKind =
     | "repayment_refund"       // lender/treasury → payer: repayment that arrived after the loan closed
     | "deposit_refund"         // treasury → lender: deposit beyond the beta caps / while paused
     | "funding_refund"         // borrower → lender: solo funding that arrived after the loan was already funded or cancelled
-    | "liquidation_surplus";   // treasury → borrower: liquidation proceeds beyond the debt
+    | "liquidation_surplus"    // treasury → borrower: liquidation proceeds beyond the debt
+    | "bond_refund";           // treasury → bond poster: an agent's anti-sybil bond, on retirement (agent-bond.ts)
 
 /**
  * A money movement the lending ledger owes but can't execute itself (no
@@ -318,6 +321,8 @@ export interface LendingPayout {
     loanId?: string;
     poolId?: string;
     repaymentId?: string;
+    /** bond_refund: the retired agent whose bond this returns. */
+    agentId?: string;
     reason: string;
     createdAt: number;
     paidAt?: number;

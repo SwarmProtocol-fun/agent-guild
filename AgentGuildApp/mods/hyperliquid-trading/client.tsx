@@ -4,6 +4,39 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { parseOrder, describeOrder, type ParsedOrder } from "./orders";
 import { BacktestPanel, type BotSpec } from "./backtest-panel";
+import { ScannerPanel } from "./scanner-panel";
+import type { AccountStanding, BotStanding } from "./leaderboard";
+import { EDITABLE_PARAMS } from "./bot-edit";
+
+/** Bot settings edited as text rather than numbers. */
+const TEXT_PARAMS = new Set(["goal", "direction", "mode", "interval"]);
+/** Yes/no settings, sent as booleans. */
+const BOOL_PARAMS = new Set(["allowShort", "exitOnMid"]);
+/** Settings that are objects — not editable in the flat form (delete and recreate to change them). */
+const OBJECT_PARAMS = new Set(["smart"]);
+/** Choices for the settings that only take a few values. */
+const PARAM_CHOICES: Record<string, string[]> = {
+  direction: ["", "buy", "sell"],
+  mode: ["new-listing", "price-above", "price-below"],
+  interval: ["1m", "5m", "15m", "1h", "4h", "1d"],
+  allowShort: ["true", "false"],
+  exitOnMid: ["true", "false"],
+};
+/** A signal bot's direction is buy/sell; the rule bots' is long/short. */
+function choicesFor(type: string, key: string): string[] | undefined {
+  if (key === "direction" && type !== "signal") return ["long", "short"];
+  return PARAM_CHOICES[key];
+}
+const PARAM_LABELS: Record<string, string> = {
+  intervalMs: "Every (minutes)", maxDrawdownPct: "Stop at −%", leverage: "Leverage", goal: "Goal",
+  lowerPrice: "Lower price", upperPrice: "Upper price", levels: "Levels", direction: "Direction",
+  mode: "Mode", targetPrice: "Target price", interval: "Bar size", lookbackBars: "Lookback bars",
+  entryZ: "Enter at ±z", exitZ: "Exit at ±z", stopZ: "Stop at ±z", maxHoldBars: "Max hold (bars)", minCorrelation: "Min correlation",
+  stopLossPct: "Stop loss %", takeProfitPct: "Take profit %", bbLength: "Band length", bbMult: "Band width (σ)",
+  squeezeLookback: "Squeeze lookback", squeezeWithin: "Squeeze within (bars)", adxLength: "ADX length", minAdx: "Min ADX",
+  allowShort: "Short breakdowns", exitOnMid: "Exit at mid band", entryAprPct: "Enter at APR %", exitAprPct: "Exit under APR %",
+  minBasisPct: "Min basis %", maxHoldHours: "Max hold (hours)",
+};
 import { activeAssetCtxSubscription, hlWsUrl, parseActiveAssetCtx } from "./oracle";
 
 type Network = "testnet" | "mainnet";
@@ -86,13 +119,16 @@ interface PaperAccountView {
   available: number;
   positions: PaperPositionRow[];
   orders: PaperRestingOrder[];
+  /** Spot holdings (the basis bot's long legs), marked to the spot mid. */
+  spot?: { token: string; pair: string; sz: number; avgPx: number; markPx: number; valueUsd: number; unrealizedPnl: number }[];
+  spotValue?: number;
 }
 
 const PAPER_MODE_KEY = "hyperliquid-trading:paper";
 
 interface Strategy {
   id: string;
-  type: "dca" | "grid" | "signal" | "sniper" | "ai";
+  type: "dca" | "grid" | "signal" | "sniper" | "ai" | "pairs" | "breakout" | "basis";
   coin: string;
   sizeUsd: number;
   enabled: boolean;
@@ -106,6 +142,8 @@ interface Strategy {
 interface AiDecisionEntry {
   id: string;
   decision: "LONG" | "SHORT" | "CLOSE" | "NOTHING" | null;
+  /** Set on a basket bot's decisions — which coin this one was about. */
+  coin?: string | null;
   action: string;
   reasoning: string;
   model: string | null;
@@ -181,7 +219,7 @@ interface BookLevel {
   sz: number;
 }
 
-type BottomTab = "positions" | "orders" | "bots" | "backtest" | "history" | "agent";
+type BottomTab = "positions" | "orders" | "bots" | "scanner" | "backtest" | "history" | "leaderboard" | "agent";
 type MarketSort = "volume" | "price" | "change" | "funding";
 type StrategyType = Strategy["type"];
 
@@ -200,7 +238,17 @@ const SIZE_PRESETS = [15, 25, 50, 100];
 /** Hyperliquid rejects opening orders worth less than this. */
 const MIN_ORDER_USD = 10;
 
-const TRAIN_IDEAS: { label: string; coin: string; goal: string }[] = [
+/** A pairs bot's params: exit at ±0.5 and stop 2 z beyond the entry, the rest server defaults. */
+function pairsParams(coins: string[], interval: string, entryZ: number) {
+  return { coins: coins.map((c) => c.trim().toUpperCase()), interval, entryZ, exitZ: 0.5, stopZ: entryZ + 2 };
+}
+
+/** How many of the most-traded perps a "scan" trainer looks at each round. */
+const TRAIN_SCAN_TOP = 6;
+
+const TRAIN_IDEAS: { label: string; coin: string; goal: string; scan?: boolean }[] = [
+  { label: "BTC/ETH pair arb", coin: "BTC,ETH", goal: "Stat-arb BTC against ETH. When the pair spread z-score passes ±2, long the cheap leg and short the rich leg. Close both together once it is back inside ±0.5. Never hold one leg alone." },
+  { label: "Hunt the market", coin: "", scan: true, goal: "Scan the most-traded perps for the best setup each round: a stretched pair spread, a funding gap worth collecting, or a clean breakout. Take at most two positions at once and cut losers fast." },
   { label: "Fade BTC funding", coin: "BTC", goal: "Fade BTC when hourly funding is extreme. Stay flat when funding is ordinary. One position at a time." },
   { label: "ETH trend only", coin: "ETH", goal: "Practice ETH trend. Go long only while price holds above the 20-bar average. Go flat when it loses that average. Do not short." },
   { label: "SOL back to average", coin: "SOL", goal: "SOL mean reversion. Short stretches well above the 40-bar average and cover back near that average. Stay flat in the middle of the range." },
@@ -208,10 +256,13 @@ const TRAIN_IDEAS: { label: string; coin: string; goal: string }[] = [
 
 const BOT_KINDS: Record<StrategyType, { label: string; blurb: string }> = {
   ai: { label: "AI Trader", blurb: "Your agent reads the market each round and goes long, short or flat — on its own model." },
-  dca: { label: "DCA", blurb: "Buys a fixed amount on a schedule." },
-  grid: { label: "Grid", blurb: "Buys low and sells high inside a price range." },
+  dca: { label: "DCA", blurb: "Buys (or sells) a fixed amount on a schedule. Smart mode buys more the further price falls." },
+  grid: { label: "Grid", blurb: "Trades each level of a price range once — long or short." },
   signal: { label: "Signal", blurb: "Fires from a webhook (TradingView) or by hand." },
-  sniper: { label: "Sniper", blurb: "Fires on a new listing or a price trigger." },
+  sniper: { label: "Sniper", blurb: "Fires on a new listing or a price trigger, long or short." },
+  pairs: { label: "Pairs arb", blurb: "When two correlated coins drift apart, longs the cheap one and shorts the rich one, then closes both as they converge." },
+  breakout: { label: "Breakout", blurb: "Waits for a volatility squeeze, then trades the breakout when ADX confirms a trend." },
+  basis: { label: "Basis carry", blurb: "Paper only. Buys spot and shorts the perp to collect funding, hedged against price." },
 };
 
 const TERMINAL_STATUSES = ["completed", "failed", "cancelled", "timeout"];
@@ -1385,12 +1436,32 @@ function TradingPanel({ api }: PanelProps) {
   const [gridLevels, setGridLevels] = useState("5");
   const [sniperMode, setSniperMode] = useState<"new-listing" | "price-above" | "price-below">("new-listing");
   const [sniperTargetPrice, setSniperTargetPrice] = useState("");
+  const [pairsInterval, setPairsInterval] = useState("1h");
+  const [pairsEntryZ, setPairsEntryZ] = useState("2");
+  const [ruleDirection, setRuleDirection] = useState<"long" | "short">("long");
+  const [ruleStop, setRuleStop] = useState("");
+  const [ruleTake, setRuleTake] = useState("");
+  const [smartOn, setSmartOn] = useState(false);
+  const [smartStep, setSmartStep] = useState("5");
+  const [smartMult, setSmartMult] = useState("1.5");
+  const [smartSteps, setSmartSteps] = useState("4");
+  const [smartTake, setSmartTake] = useState("8");
+  const [boInterval, setBoInterval] = useState("4h");
+  const [boMinAdx, setBoMinAdx] = useState("20");
+  const [boShort, setBoShort] = useState(true);
+  const [boStop, setBoStop] = useState("3");
+  const [boTake, setBoTake] = useState("6");
+  const [basisEntry, setBasisEntry] = useState("15");
+  const [basisExit, setBasisExit] = useState("3");
+  const [basisHold, setBasisHold] = useState("168");
   const [strategyStatus, setStrategyStatus] = useState<string | null>(null);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [webhookUrls, setWebhookUrls] = useState<Record<string, string>>({});
   const [webhookBusyId, setWebhookBusyId] = useState<string | null>(null);
   const [trainGoal, setTrainGoal] = useState("");
   const [trainCoin, setTrainCoin] = useState("");
+  /** Scan the most-traded perps each round instead of a fixed coin list. */
+  const [trainScan, setTrainScan] = useState(false);
   const [trainSize, setTrainSize] = useState("25");
   const [trainEvery, setTrainEvery] = useState("1");
   const [trainStop, setTrainStop] = useState("10");
@@ -1436,13 +1507,31 @@ function TradingPanel({ api }: PanelProps) {
     return true;
   }
 
+  /** Direction and stop loss / take profit for a DCA, grid or sniper bot. */
+  function ruleExtras() {
+    return {
+      ...(ruleDirection === "short" ? { direction: "short" } : {}),
+      ...(Number(ruleStop) > 0 ? { stopLossPct: Number(ruleStop) } : {}),
+      ...(Number(ruleTake) > 0 ? { takeProfitPct: Number(ruleTake) } : {}),
+    };
+  }
+
   async function createStrategy(e: FormEvent) {
     e.preventDefault();
     const params =
       strategyType === "ai" ? { intervalMs: (paperMode ? Number(aiIntervalMin) : Math.max(15, Number(aiIntervalMin))) * 60_000, maxDrawdownPct: Number(aiMaxDrawdown), ...(leverage > 1 ? { leverage } : {}) } :
-      strategyType === "dca" ? { intervalMs: Number(dcaIntervalMin) * 60_000 } :
-      strategyType === "grid" ? { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels) } :
-      strategyType === "sniper" ? { mode: sniperMode, ...(sniperMode !== "new-listing" ? { targetPrice: Number(sniperTargetPrice) } : {}) } :
+      strategyType === "dca" ? {
+        intervalMs: Number(dcaIntervalMin) * 60_000, ...ruleExtras(),
+        ...(smartOn ? { smart: { stepPct: Number(smartStep), multiplier: Number(smartMult), maxSteps: Number(smartSteps), takeProfitPct: Number(smartTake) || 0 } } : {}),
+      } :
+      strategyType === "grid" ? { lowerPrice: Number(gridLower), upperPrice: Number(gridUpper), levels: Number(gridLevels), ...ruleExtras() } :
+      strategyType === "sniper" ? { mode: sniperMode, ...(sniperMode !== "new-listing" ? { targetPrice: Number(sniperTargetPrice) } : {}), ...ruleExtras() } :
+      strategyType === "pairs" ? pairsParams(strategyCoin.split(/[\s,/]+/).filter(Boolean), pairsInterval, Number(pairsEntryZ)) :
+      strategyType === "breakout" ? {
+        interval: boInterval, minAdx: Number(boMinAdx), allowShort: boShort,
+        stopLossPct: Number(boStop) || 0, takeProfitPct: Number(boTake) || 0, ...(leverage > 1 ? { leverage } : {}),
+      } :
+      strategyType === "basis" ? { entryAprPct: Number(basisEntry), exitAprPct: Number(basisExit), maxHoldHours: Number(basisHold) } :
       {};
     const botCoin = strategyType === "sniper" && sniperMode === "new-listing" ? strategyCoin || "ANY" : strategyCoin;
     if (await createBot({ type: strategyType, coin: botCoin, sizeUsd: Number(strategySizeUsd), params })) setNewBotOpen(false);
@@ -1464,7 +1553,7 @@ function TradingPanel({ api }: PanelProps) {
         body: JSON.stringify({
           orgId,
           agentId,
-          coin: (trainCoin || coin).trim().toUpperCase(),
+          ...trainTarget(),
           goal: trainGoal.trim(),
           sizeUsd: Number(trainSize),
           intervalMs: Number(trainEvery) * 60_000,
@@ -1492,6 +1581,55 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  /** One coin, a basket ("BTC, ETH, SOL"), or a scan of the most-traded perps. */
+  function trainTarget(): { coin: string } | { coins: string[] } | { scanTop: number } {
+    if (trainScan) return { scanTop: TRAIN_SCAN_TOP };
+    const list = [...new Set((trainCoin || coin).split(/[\s,/]+/).map((c) => c.trim().toUpperCase()).filter(Boolean))];
+    return list.length > 1 ? { coins: list } : { coin: list[0] ?? coin };
+  }
+
+  /** The Scanner's "Practise" button: load a basket and its goal into the train form. */
+  function practiseBasket(coins: string[], goal: string) {
+    setTrainScan(false);
+    setTrainCoin(coins.join(","));
+    setTrainGoal(goal);
+    setPaperMode(true);
+    const el = document.getElementById("trainGoal");
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.focus({ preventScroll: true });
+  }
+
+  /** The Scanner's "Run bot": a pairs bot on these coins, on paper unless live is already selected. */
+  /** The Scanner's basis "Carry on paper" button: a paper basis bot on that coin with the default thresholds. */
+  async function runBasisBot(basisCoin: string) {
+    if (!agentId) {
+      setStrategyStatus("Pick an agent first.");
+      setBottomTab("bots");
+      return;
+    }
+    setPaperMode(true);
+    const resp = await api("strategy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orgId, agentId, wallet, type: "basis", coin: basisCoin, sizeUsd: Math.max(MIN_ORDER_USD, Number(strategySizeUsd) || 25), params: {}, paper: true }),
+    });
+    const data = await resp.json();
+    setStrategyStatus(data.error ? `error: ${data.error}` : `Paper basis bot started on ${basisCoin}. It checks funding every 5 minutes.`);
+    if (!data.error) loadStrategies();
+    setBottomTab("bots");
+  }
+
+  async function runPairsBot(coins: string[], interval: string) {
+    if (!agentId) {
+      setStrategyStatus("Pick an agent first.");
+      setBottomTab("bots");
+      return;
+    }
+    const ok = await createBot({ type: "pairs", coin: coins.join("/"), sizeUsd: Math.max(MIN_ORDER_USD, Number(strategySizeUsd) || 25), params: pairsParams(coins, interval, 2) });
+    if (ok) setStrategyStatus(`${paperMode ? "Paper " : ""}pairs bot started on ${coins.join("/")}. It checks the spread every bar.`);
+    setBottomTab("bots");
+  }
+
   async function startBotFromBacktest(spec: BotSpec): Promise<boolean> {
     const ok = await createBot(spec);
     if (ok) setStrategyStatus(`${paperMode ? "Paper " : ""}${BOT_KINDS[spec.type].label} bot started on ${spec.coin}.`);
@@ -1501,6 +1639,10 @@ function TradingPanel({ api }: PanelProps) {
   /** Opens the Backtest tab prefilled with a bot's settings. */
   function backtestBot(s: Strategy) {
     if (s.type === "signal") return;
+    if (s.type === "pairs" || s.type === "basis") {
+      setBottomTab("scanner"); // pair backtests and basis rows live on the Scanner
+      return;
+    }
     setBacktestInitial({ type: s.type, coin: s.coin === "ANY" ? coin : s.coin, sizeUsd: s.sizeUsd, params: s.params ?? {} });
     setBacktestKey((k) => k + 1);
     setBottomTab("backtest");
@@ -1524,6 +1666,105 @@ function TradingPanel({ api }: PanelProps) {
       body: JSON.stringify({ enabled }),
     });
     loadStrategies();
+  }
+
+  // ── Edit / delete one bot ─────────────────────────────────────────────────
+  const [editingBot, setEditingBot] = useState<{ id: string; sizeUsd: string; fields: Record<string, string>; error: string | null; saving: boolean } | null>(null);
+
+  function startEdit(s: Strategy) {
+    const fields: Record<string, string> = {};
+    for (const k of EDITABLE_PARAMS[s.type] ?? []) {
+      if (OBJECT_PARAMS.has(k)) continue;
+      const v = s.params?.[k];
+      fields[k] = v == null ? (k === "direction" && s.type !== "signal" ? "long" : "") : k === "intervalMs" ? String(Number(v) / 60_000) : String(v);
+    }
+    setEditingBot({ id: s.id, sizeUsd: String(s.sizeUsd), fields, error: null, saving: false });
+  }
+
+  async function saveEdit(s: Strategy) {
+    if (!editingBot) return;
+    const params: Record<string, unknown> = {};
+    for (const [k, raw] of Object.entries(editingBot.fields)) {
+      const before = s.params?.[k];
+      const text = raw.trim();
+      let value: unknown = text === "" ? null : BOOL_PARAMS.has(k) ? text === "true" : TEXT_PARAMS.has(k) ? text : Number(text);
+      // A rule bot with no direction stored is long; don't send "long" as a change.
+      if (k === "direction" && s.type !== "signal" && value === "long" && before == null) continue;
+      if (k === "intervalMs" && value != null) value = Math.round(Number(value) * 60_000);
+      if (value !== (before ?? null)) params[k] = value;
+    }
+    const sizeUsd = Number(editingBot.sizeUsd);
+    const body = { ...(sizeUsd !== s.sizeUsd ? { sizeUsd } : {}), params };
+    if (!("sizeUsd" in body) && !Object.keys(params).length) {
+      setEditingBot(null);
+      return;
+    }
+    setEditingBot({ ...editingBot, saving: true, error: null });
+    try {
+      const data = await (await api(`strategy/${s.id}/edit`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      })).json();
+      if (data.error) {
+        setEditingBot((cur) => cur && { ...cur, saving: false, error: data.error });
+        return;
+      }
+      setEditingBot(null);
+      setStrategyStatus(`Updated ${BOT_KINDS[s.type]?.label ?? s.type} · ${s.coin}: ${data.changed.join(", ")}`);
+      loadStrategies();
+    } catch {
+      setEditingBot((cur) => cur && { ...cur, saving: false, error: "Couldn't reach the server" });
+    }
+  }
+
+  async function deleteBot(s: Strategy) {
+    const label = `${BOT_KINDS[s.type]?.label ?? s.type} · ${s.coin}`;
+    if (!confirm(`Delete the ${label} bot${s.paper ? " (paper)" : ""}? It stops for good and its decision log is removed. Positions it opened stay open.`)) return;
+    try {
+      const data = await (await api(`strategy/${s.id}/delete`, { method: "POST" })).json();
+      if (data.error) {
+        setStrategyStatus(`Couldn't delete: ${data.error}`);
+        return;
+      }
+      const open = (data.leftOpen ?? []) as { coin: string }[];
+      setStrategyStatus(`Deleted ${label}.${open.length ? ` Still open on paper: ${open.map((p) => p.coin).join(", ")} — close from Positions.` : ""}`);
+      loadStrategies();
+    } catch {
+      setStrategyStatus("Couldn't delete — the server didn't answer.");
+    }
+  }
+
+  // ── Emergency stop ────────────────────────────────────────────────────────
+  const [stopPanelOpen, setStopPanelOpen] = useState(false);
+  const [stopScope, setStopScope] = useState<"agent" | "org">("agent");
+  const [stopClose, setStopClose] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  async function emergencyStop() {
+    setStopping(true);
+    try {
+      const data = await (await api("strategy/stop-all", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orgId, ...(stopScope === "agent" ? { agentId } : {}), closePositions: stopClose }),
+      })).json();
+      if (data.error) {
+        setStrategyStatus(`Emergency stop failed: ${data.error}`);
+        return;
+      }
+      const left = (data.leftOpen ?? []) as { coin: string; paper: boolean; reason: string }[];
+      setStrategyStatus([
+        `Emergency stop: ${data.stopped.length} bot${data.stopped.length === 1 ? "" : "s"} stopped`,
+        stopClose ? `${data.closed.length} position${data.closed.length === 1 ? "" : "s"} closed` : "positions left open",
+        ...left.map((l) => `${l.coin}${l.paper ? " (paper)" : ""} still open: ${l.reason}`),
+      ].join(" · "));
+      setStopPanelOpen(false);
+      setStopClose(false);
+      loadStrategies();
+      refreshAccount();
+    } catch {
+      setStrategyStatus("Emergency stop didn't reach the server — try again.");
+    } finally {
+      setStopping(false);
+    }
   }
 
   /** A paper bot fires without a signer; a live one needs the instant wallet or the passphrase. */
@@ -1596,7 +1837,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   const strategyList = Array.isArray(strategies) ? strategies : [];
-  const aiBotIds = strategyList.filter((s) => s.type === "ai").map((s) => s.id).join(",");
+  const aiBotIds = strategyList.filter((s) => s.type === "ai" || s.type === "pairs" || s.type === "breakout" || s.type === "basis").map((s) => s.id).join(",");
 
   // Keep each AI bot's latest decision fresh while the Bots tab is open.
   useEffect(() => {
@@ -1659,6 +1900,28 @@ function TradingPanel({ api }: PanelProps) {
     }
   }
 
+  // ── Leaderboard (the org's paper arena) ───────────────────────────────────
+  const [board, setBoard] = useState<{ bots: BotStanding[]; accounts: AccountStanding[]; you: string; mode?: "paper" | "live" } | "loading" | "error" | null>(null);
+  const [boardMode, setBoardMode] = useState<"paper" | "live">("paper");
+
+  async function loadBoard(mode = boardMode) {
+    if (!agentId) return;
+    setBoard((prev) => (prev && prev !== "loading" && prev !== "error" && prev.mode === mode ? prev : "loading"));
+    try {
+      const data = await (await api(`leaderboard/${agentId}${mode === "live" ? "?mode=live" : ""}`)).json();
+      setBoard(data.error ? "error" : data);
+    } catch {
+      setBoard("error");
+    }
+  }
+
+  useEffect(() => {
+    if (bottomTab !== "leaderboard" || !agentId) return;
+    loadBoard(boardMode);
+    const id = setInterval(() => loadBoard(boardMode), 30_000);
+    return () => clearInterval(id);
+  }, [bottomTab, agentId, boardMode]);
+
   function loadAgentData() {
     loadConnection();
     loadWalletStatus();
@@ -1672,8 +1935,10 @@ function TradingPanel({ api }: PanelProps) {
     { id: "positions", label: "Positions", count: positionList.length },
     { id: "orders", label: "Orders", count: openOrders.length },
     { id: "bots", label: "Bots", count: strategyList.length },
+    { id: "scanner", label: "Scanner" },
     { id: "backtest", label: "Backtest" },
     { id: "history", label: "Trade history" },
+    { id: "leaderboard", label: "Leaderboard" },
     { id: "agent", label: "Agent & limits" },
   ];
 
@@ -1764,7 +2029,7 @@ function TradingPanel({ api }: PanelProps) {
           {TRAIN_IDEAS.map((idea) => (
             <button
               key={idea.label} type="button" className={secondaryButtonClass("px-2 py-1 text-xs")}
-              onClick={() => { setTrainGoal(idea.goal); setTrainCoin(idea.coin); }}
+              onClick={() => { setTrainGoal(idea.goal); setTrainCoin(idea.coin); setTrainScan(!!idea.scan); }}
             >
               {idea.label}
             </button>
@@ -1772,12 +2037,18 @@ function TradingPanel({ api }: PanelProps) {
         </div>
         <div className="flex flex-wrap items-end gap-2">
           <div>
-            <label htmlFor="trainCoin" className={labelClass}>Coin</label>
+            <label htmlFor="trainCoin" className={labelClass}>Coin or basket</label>
             <input
-              id="trainCoin" name="trainCoin" className={`${inputClass} ${monoClass} w-24`}
-              value={trainCoin || coin} onChange={(e) => setTrainCoin(e.target.value.toUpperCase())}
+              id="trainCoin" name="trainCoin" className={`${inputClass} ${monoClass} w-40`} disabled={trainScan}
+              title="One coin, or up to 8 separated by commas — a basket lets the agent trade pairs and arbitrage across them."
+              placeholder="BTC or BTC,ETH,SOL"
+              value={trainScan ? `Top ${TRAIN_SCAN_TOP} by volume` : trainCoin || coin} onChange={(e) => setTrainCoin(e.target.value.toUpperCase())}
             />
           </div>
+          <label className="flex items-center gap-1.5 pb-1.5 text-xs" title="Each round, look at the most-traded perps and trade whichever has the best setup.">
+            <input type="checkbox" checked={trainScan} onChange={(e) => setTrainScan(e.target.checked)} />
+            Scan the market
+          </label>
           <div>
             <label htmlFor="trainSize" className={labelClass}>USD / order</label>
             <input
@@ -2155,15 +2426,64 @@ function TradingPanel({ api }: PanelProps) {
               {tab.id === "bots" && pendingStrategies.length > 0 && !instant && <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-500 align-middle" aria-label="pending signals" />}
             </button>
           ))}
-          <div className="ml-auto pr-1">
+          <div className="ml-auto flex items-center gap-1.5 pr-1">
+            {agentId && orgId && (
+              <button
+                type="button" aria-expanded={stopPanelOpen}
+                className="rounded-sm border border-red-600/60 bg-red-600/10 px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-600/20 dark:text-red-400"
+                onClick={() => setStopPanelOpen((v) => !v)}
+              >
+                Emergency stop
+              </button>
+            )}
             {bottomTab === "bots" && agentId && (
               <button type="button" className={primaryButtonClass("px-3 py-1 text-xs")} onClick={openNewBot}>+ New bot</button>
             )}
           </div>
         </div>
+        {stopPanelOpen && agentId && (
+          <div role="alertdialog" aria-labelledby="estop-title" className="space-y-2 border-b border-red-600/40 bg-red-600/5 p-3 text-xs">
+            <p id="estop-title" className="text-sm font-semibold text-red-600 dark:text-red-400">Stop every bot now</p>
+            <p className={mutedClass}>
+              Turns the bots off and drops any signal waiting to run. AI rounds out with the agent are cancelled, so a late answer can&apos;t trade.
+              Turn bots back on one by one from the Bots tab.
+            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              <label className="flex items-center gap-1.5">
+                <input type="radio" name="estop-scope" checked={stopScope === "agent"} onChange={() => setStopScope("agent")} />
+                {selectedAgent?.name ?? "This agent"}&apos;s bots
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="radio" name="estop-scope" checked={stopScope === "org"} onChange={() => setStopScope("org")} />
+                Every bot in {selectedAgent?.orgName ?? "this org"}
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={stopClose} onChange={(e) => setStopClose(e.target.checked)} className="h-3.5 w-3.5" />
+                Also close their positions at market
+              </label>
+            </div>
+            {stopClose && (
+              <p className="text-amber-700 dark:text-amber-400">
+                Closes the coins the stopped bots trade, on the account they trade (paper, or live with instant trading). Manual positions in other coins stay.
+                Live wallets that need a passphrase are left open and listed.
+              </p>
+            )}
+            <div className="flex gap-1.5">
+              <button
+                type="button" disabled={stopping} onClick={emergencyStop}
+                className="rounded-sm bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {stopping ? "Stopping…" : stopClose ? "Stop bots and close positions" : "Stop bots"}
+              </button>
+              <button type="button" className={secondaryButtonClass("px-3 py-1 text-xs")} onClick={() => setStopPanelOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
 
         <div className="p-2">
-          {!agentId && bottomTab !== "agent" ? (
+          {bottomTab === "scanner" ? (
+            <ScannerPanel api={api} network={network} onPractice={practiseBasket} onRunPairs={runPairsBot} onRunBasis={runBasisBot} />
+          ) : !agentId && bottomTab !== "agent" ? (
             <p className={`p-3 text-sm ${mutedClass}`}>Pick an agent in the top bar to see its account.</p>
           ) : bottomTab === "positions" ? (
             <div className="space-y-2">
@@ -2178,6 +2498,16 @@ function TradingPanel({ api }: PanelProps) {
                 </Stat>
                 <Stat label="Today"><span className={pnlClass(paperAccount.dailyPnl)}>{signed(paperAccount.dailyPnl)}</span></Stat>
                 <Stat label="Available">${paperAccount.available.toFixed(2)}</Stat>
+                {paperAccount.spot && paperAccount.spot.length > 0 && (
+                  <Stat label="Spot held">
+                    {paperAccount.spot.map((h) => (
+                      <span key={h.token} className="mr-2" title={`avg ${h.avgPx} · mark ${h.markPx}`}>
+                        {h.sz} {h.token} <span className={mutedClass}>(${h.valueUsd.toFixed(2)}</span>{" "}
+                        <span className={pnlClass(h.unrealizedPnl)}>{signed(h.unrealizedPnl)}</span><span className={mutedClass}>)</span>
+                      </span>
+                    ))}
+                  </Stat>
+                )}
                 <div className="ml-auto flex items-end gap-1.5">
                   <div>
                     <label htmlFor="paperStart" className={labelClass}>Reset to $</label>
@@ -2339,13 +2669,78 @@ function TradingPanel({ api }: PanelProps) {
                       )}
                     </div>
                     <div className={`text-xs ${monoClass}`}>
-                      ${s.sizeUsd} per order
+                      ${s.sizeUsd} {s.type === "pairs" ? "first leg" : "per order"}
+                      {s.type === "pairs" && s.params && (
+                        <span className={mutedClass}>
+                          {" "}· {String(s.params.interval)} bars · in at ±{String(s.params.entryZ)}, out at ±{String(s.params.exitZ)}, stop ±{String(s.params.stopZ)}
+                        </span>
+                      )}
                       {s.type === "ai" && s.params && (
                         <span className={mutedClass}>
                           {" "}· every {formatEvery(Number(s.params.intervalMs))} · stop at −{String(s.params.maxDrawdownPct)}%
                         </span>
                       )}
+                      {s.type === "breakout" && s.params && (
+                        <span className={mutedClass}>
+                          {" "}· {String(s.params.interval)} bars · ADX ≥ {String(s.params.minAdx)}{s.params.allowShort ? " · long/short" : " · long only"}
+                          {s.params.stopLossPct ? ` · SL ${String(s.params.stopLossPct)}%` : ""}{s.params.takeProfitPct ? ` · TP ${String(s.params.takeProfitPct)}%` : ""}
+                        </span>
+                      )}
+                      {s.type === "basis" && s.params && (
+                        <span className={mutedClass}>
+                          {" "}· in at {String(s.params.entryAprPct)}% APR, out under {String(s.params.exitAprPct)}%
+                        </span>
+                      )}
+                      {(s.type === "dca" || s.type === "grid" || s.type === "sniper") && s.params && (s.params.direction === "short" || s.params.stopLossPct || s.params.takeProfitPct || s.params.smart) ? (
+                        <span className={mutedClass}>
+                          {s.params.direction === "short" ? " · short" : ""}
+                          {s.params.smart ? ` · smart ×${String((s.params.smart as { multiplier: number }).multiplier)} per ${String((s.params.smart as { stepPct: number }).stepPct)}%` : ""}
+                          {s.params.stopLossPct ? ` · SL ${String(s.params.stopLossPct)}%` : ""}{s.params.takeProfitPct ? ` · TP ${String(s.params.takeProfitPct)}%` : ""}
+                        </span>
+                      ) : null}
                     </div>
+                    {(s.type === "breakout" || s.type === "basis") && (
+                      <div className="rounded-sm bg-[hsl(var(--muted))]/50 p-1.5 text-[11px]">
+                        {s.type === "basis" && (() => {
+                          const open = s.params?.open as { spotSz: number; entryFundingAprPct: number } | null | undefined;
+                          const apr = typeof s.params?.lastAprPct === "number" ? s.params.lastAprPct : null;
+                          return (
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold">{open ? `Carrying: long spot / short perp (${open.spotSz} ${s.coin})` : "Flat — watching funding"}</span>
+                              {apr != null && <span className={`ml-auto ${monoClass}`}>{apr.toFixed(1)}% APR</span>}
+                            </div>
+                          );
+                        })()}
+                        {typeof s.params?.lastNote === "string" && s.params.lastNote ? (
+                          <p className={`line-clamp-3 ${mutedClass}`}>{s.params.lastNote}</p>
+                        ) : (
+                          <p className={mutedClass}>{s.enabled ? "First check on the next tick (within a minute)." : "Not checked yet."}</p>
+                        )}
+                      </div>
+                    )}
+                    {s.type === "pairs" && (() => {
+                      const open = s.params?.open as { longLeg: string; shortLeg: string; entryZ: number } | null | undefined;
+                      const z = typeof s.params?.lastZ === "number" ? s.params.lastZ : null;
+                      return (
+                        <div className="rounded-sm bg-[hsl(var(--muted))]/50 p-1.5 text-[11px]">
+                          <div className="flex items-center gap-1.5">
+                            {open ? (
+                              <span className="font-semibold">
+                                <span className="text-green-600 dark:text-green-400">Long {open.longLeg}</span> / <span className="text-red-600 dark:text-red-400">short {open.shortLeg}</span>
+                              </span>
+                            ) : (
+                              <span className="font-semibold">Flat — watching</span>
+                            )}
+                            {z != null && <span className={`ml-auto ${monoClass}`}>z {z >= 0 ? "+" : ""}{z.toFixed(2)}</span>}
+                          </div>
+                          {typeof s.params?.lastNote === "string" && s.params.lastNote ? (
+                            <p className={`line-clamp-3 ${mutedClass}`}>{s.params.lastNote}</p>
+                          ) : (
+                            <p className={mutedClass}>{s.enabled ? "First check on the next tick (within a minute)." : "Not checked yet."}</p>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {s.type === "ai" && (() => {
                       const log = aiDecisions[s.id];
                       const latest = Array.isArray(log) ? log[0] : undefined;
@@ -2359,6 +2754,7 @@ function TradingPanel({ api }: PanelProps) {
                       return latest ? (
                         <div className="rounded-sm bg-[hsl(var(--muted))]/50 p-1.5 text-[11px]">
                           <div className="flex items-center gap-1.5">
+                            {latest.coin && <span className={monoClass}>{latest.coin}</span>}
                             <span className={`font-semibold ${latest.decision === "LONG" ? "text-green-600 dark:text-green-400" : latest.decision === "SHORT" ? "text-red-600 dark:text-red-400" : ""}`}>
                               {latest.decision ?? latest.action}
                             </span>
@@ -2395,7 +2791,7 @@ function TradingPanel({ api }: PanelProps) {
                           Fire
                         </button>
                       )}
-                      {s.type === "ai" && (
+                      {(s.type === "ai" || s.type === "pairs" || s.type === "breakout" || s.type === "basis") && (
                         <button
                           type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} aria-expanded={decisionsOpen === s.id}
                           onClick={() => {
@@ -2411,6 +2807,20 @@ function TradingPanel({ api }: PanelProps) {
                           Backtest
                         </button>
                       )}
+                      {EDITABLE_PARAMS[s.type] && (
+                        <button
+                          type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} aria-expanded={editingBot?.id === s.id}
+                          onClick={() => (editingBot?.id === s.id ? setEditingBot(null) : startEdit(s))}
+                        >
+                          Edit
+                        </button>
+                      )}
+                      <button
+                        type="button" className={secondaryButtonClass("px-2 py-1 text-xs text-red-600 dark:text-red-400")}
+                        onClick={() => deleteBot(s)}
+                      >
+                        Delete
+                      </button>
                       {s.type === "signal" && (webhookUrls[s.id] || s.webhookToken ? (
                         <button
                           type="button"
@@ -2425,6 +2835,61 @@ function TradingPanel({ api }: PanelProps) {
                         </button>
                       ))}
                     </div>
+                    {editingBot?.id === s.id && (
+                      <form
+                        className="space-y-1.5 rounded-sm border border-[hsl(var(--border))] p-2"
+                        onSubmit={(e) => { e.preventDefault(); saveEdit(s); }}
+                      >
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <div>
+                            <label htmlFor={`edit-${s.id}-sizeUsd`} className={labelClass}>{s.type === "pairs" ? "USD first leg" : "USD per order"}</label>
+                            <input
+                              id={`edit-${s.id}-sizeUsd`} type="number" min={MIN_ORDER_USD} step="any" className={`${inputClass} ${monoClass} py-1 text-xs`}
+                              value={editingBot.sizeUsd} onChange={(e) => setEditingBot({ ...editingBot, sizeUsd: e.target.value })}
+                            />
+                          </div>
+                          {(EDITABLE_PARAMS[s.type] ?? []).filter((k) => k !== "goal" && !OBJECT_PARAMS.has(k)).map((k) => (
+                            <div key={k}>
+                              <label htmlFor={`edit-${s.id}-${k}`} className={labelClass}>{PARAM_LABELS[k] ?? k}</label>
+                              {choicesFor(s.type, k) ? (
+                                <select
+                                  id={`edit-${s.id}-${k}`} className={`${inputClass} py-1 text-xs`} value={editingBot.fields[k] ?? ""}
+                                  onChange={(e) => setEditingBot({ ...editingBot, fields: { ...editingBot.fields, [k]: e.target.value } })}
+                                >
+                                  {choicesFor(s.type, k)!.map((c) => <option key={c} value={c}>{c === "" ? "either" : c === "true" ? "yes" : c === "false" ? "no" : c}</option>)}
+                                </select>
+                              ) : (
+                                <input
+                                  id={`edit-${s.id}-${k}`} type="number" step="any" className={`${inputClass} ${monoClass} py-1 text-xs`}
+                                  value={editingBot.fields[k] ?? ""}
+                                  onChange={(e) => setEditingBot({ ...editingBot, fields: { ...editingBot.fields, [k]: e.target.value } })}
+                                />
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {(EDITABLE_PARAMS[s.type] ?? []).includes("goal") && (
+                          <div>
+                            <label htmlFor={`edit-${s.id}-goal`} className={labelClass}>Goal</label>
+                            <textarea
+                              id={`edit-${s.id}-goal`} rows={3} maxLength={800} className={`${inputClass} py-1 text-xs`}
+                              value={editingBot.fields.goal ?? ""}
+                              onChange={(e) => setEditingBot({ ...editingBot, fields: { ...editingBot.fields, goal: e.target.value } })}
+                            />
+                          </div>
+                        )}
+                        <p className={`text-[10px] ${mutedClass}`}>
+                          The bot keeps running and keeps its positions. To change its {s.type === "pairs" || s.params?.coins || s.params?.scanTop ? "coins" : "coin"} or paper/live, delete it and create a new one.
+                        </p>
+                        {editingBot.error && <p className="text-[11px] text-red-600 dark:text-red-400">{editingBot.error}</p>}
+                        <div className="flex gap-1.5">
+                          <button type="submit" className={primaryButtonClass("px-2 py-1 text-xs")} disabled={editingBot.saving}>
+                            {editingBot.saving ? "Saving…" : "Save"}
+                          </button>
+                          <button type="button" className={secondaryButtonClass("px-2 py-1 text-xs")} onClick={() => setEditingBot(null)}>Cancel</button>
+                        </div>
+                      </form>
+                    )}
                     {s.type === "signal" && webhookUrls[s.id] && (
                       <div className="space-y-1">
                         <code className={`block truncate text-[11px] ${monoClass} ${mutedClass}`} title={webhookUrls[s.id]}>{webhookUrls[s.id]}</code>
@@ -2472,6 +2937,7 @@ function TradingPanel({ api }: PanelProps) {
                             <li key={d.id} className="px-2.5 py-2">
                               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                                 <span className={`${monoClass} ${mutedClass}`}>{d.createdAt ? new Date(d.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}</span>
+                                {d.coin && <span className={monoClass}>{d.coin}</span>}
                                 {d.decision && (
                                   <span className={`font-semibold ${d.decision === "LONG" ? "text-green-600 dark:text-green-400" : d.decision === "SHORT" ? "text-red-600 dark:text-red-400" : ""}`}>{d.decision}</span>
                                 )}
@@ -2511,16 +2977,16 @@ function TradingPanel({ api }: PanelProps) {
                   </div>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     <div>
-                      <label htmlFor="strategyCoin" className={labelClass}>Coin</label>
+                      <label htmlFor="strategyCoin" className={labelClass}>{strategyType === "pairs" ? "Coins (2–8)" : "Coin"}</label>
                       <input
                         id="strategyCoin" name="strategyCoin" className={`${inputClass} ${monoClass}`} value={strategyCoin}
                         onChange={(e) => setStrategyCoin(e.target.value.toUpperCase())}
-                        placeholder={strategyType === "sniper" && sniperMode === "new-listing" ? "ANY" : undefined}
+                        placeholder={strategyType === "sniper" && sniperMode === "new-listing" ? "ANY" : strategyType === "pairs" ? "BTC,ETH,SOL" : undefined}
                         required={!(strategyType === "sniper" && sniperMode === "new-listing")}
                       />
                     </div>
                     <div>
-                      <label htmlFor="strategySizeUsd" className={labelClass}>USD per order</label>
+                      <label htmlFor="strategySizeUsd" className={labelClass}>{strategyType === "pairs" ? "USD first leg" : "USD per order"}</label>
                       <input id="strategySizeUsd" name="strategySizeUsd" type="number" min={MIN_ORDER_USD} className={`${inputClass} ${monoClass}`} value={strategySizeUsd} onChange={(e) => setStrategySizeUsd(e.target.value)} required />
                     </div>
                     {strategyType === "ai" && (
@@ -2539,6 +3005,23 @@ function TradingPanel({ api }: PanelProps) {
                         <div>
                           <label htmlFor="aiMaxDrawdown" className={labelClass}>Stop at −%</label>
                           <input id="aiMaxDrawdown" name="aiMaxDrawdown" type="number" min="1" max="95" className={`${inputClass} ${monoClass}`} value={aiMaxDrawdown} onChange={(e) => setAiMaxDrawdown(e.target.value)} required />
+                        </div>
+                      </>
+                    )}
+                    {strategyType === "pairs" && (
+                      <>
+                        <div>
+                          <label htmlFor="pairsInterval" className={labelClass}>Bars</label>
+                          <select id="pairsInterval" name="pairsInterval" className={inputClass} value={pairsInterval} onChange={(e) => setPairsInterval(e.target.value)}>
+                            <option value="15m">15 minutes</option>
+                            <option value="1h">1 hour</option>
+                            <option value="4h">4 hours</option>
+                            <option value="1d">1 day</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="pairsEntryZ" className={labelClass}>Enter past ±z</label>
+                          <input id="pairsEntryZ" name="pairsEntryZ" type="number" min="1" max="4" step="0.1" className={`${inputClass} ${monoClass}`} value={pairsEntryZ} onChange={(e) => setPairsEntryZ(e.target.value)} required />
                         </div>
                       </>
                     )}
@@ -2582,7 +3065,101 @@ function TradingPanel({ api }: PanelProps) {
                         )}
                       </>
                     )}
+                    {strategyType === "breakout" && (
+                      <>
+                        <div>
+                          <label htmlFor="boInterval" className={labelClass}>Bars</label>
+                          <select id="boInterval" name="boInterval" className={inputClass} value={boInterval} onChange={(e) => setBoInterval(e.target.value)}>
+                            <option value="15m">15 minutes</option>
+                            <option value="1h">1 hour</option>
+                            <option value="4h">4 hours</option>
+                            <option value="1d">1 day</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="boMinAdx" className={labelClass}>Min ADX</label>
+                          <input id="boMinAdx" name="boMinAdx" type="number" min="0" max="100" className={`${inputClass} ${monoClass}`} value={boMinAdx} onChange={(e) => setBoMinAdx(e.target.value)} required />
+                        </div>
+                        <div>
+                          <label htmlFor="boStop" className={labelClass}>Stop loss %</label>
+                          <input id="boStop" name="boStop" type="number" min="0" step="any" placeholder="none" className={`${inputClass} ${monoClass}`} value={boStop} onChange={(e) => setBoStop(e.target.value)} />
+                        </div>
+                        <div>
+                          <label htmlFor="boTake" className={labelClass}>Take profit %</label>
+                          <input id="boTake" name="boTake" type="number" min="0" step="any" placeholder="none" className={`${inputClass} ${monoClass}`} value={boTake} onChange={(e) => setBoTake(e.target.value)} />
+                        </div>
+                      </>
+                    )}
+                    {strategyType === "basis" && (
+                      <>
+                        <div>
+                          <label htmlFor="basisEntry" className={labelClass}>Enter at APR %</label>
+                          <input id="basisEntry" name="basisEntry" type="number" min="1" step="any" className={`${inputClass} ${monoClass}`} value={basisEntry} onChange={(e) => setBasisEntry(e.target.value)} required />
+                        </div>
+                        <div>
+                          <label htmlFor="basisExit" className={labelClass}>Exit under APR %</label>
+                          <input id="basisExit" name="basisExit" type="number" step="any" className={`${inputClass} ${monoClass}`} value={basisExit} onChange={(e) => setBasisExit(e.target.value)} required />
+                        </div>
+                        <div>
+                          <label htmlFor="basisHold" className={labelClass}>Max hold (hours)</label>
+                          <input id="basisHold" name="basisHold" type="number" min="1" className={`${inputClass} ${monoClass}`} value={basisHold} onChange={(e) => setBasisHold(e.target.value)} required />
+                        </div>
+                      </>
+                    )}
+                    {(strategyType === "dca" || strategyType === "grid" || strategyType === "sniper") && (
+                      <>
+                        <div>
+                          <label htmlFor="ruleDirection" className={labelClass}>Direction</label>
+                          <select id="ruleDirection" name="ruleDirection" className={inputClass} value={ruleDirection} onChange={(e) => setRuleDirection(e.target.value as "long" | "short")}>
+                            <option value="long">Long (buy)</option>
+                            <option value="short">Short (sell)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label htmlFor="ruleStop" className={labelClass}>Stop loss %</label>
+                          <input id="ruleStop" name="ruleStop" type="number" min="0" step="any" placeholder="none" className={`${inputClass} ${monoClass}`} value={ruleStop} onChange={(e) => setRuleStop(e.target.value)} />
+                        </div>
+                        <div>
+                          <label htmlFor="ruleTake" className={labelClass}>Take profit %</label>
+                          <input id="ruleTake" name="ruleTake" type="number" min="0" step="any" placeholder="none" className={`${inputClass} ${monoClass}`} value={ruleTake} onChange={(e) => setRuleTake(e.target.value)} />
+                        </div>
+                      </>
+                    )}
                   </div>
+                  {strategyType === "dca" && (
+                    <div className="space-y-1.5 rounded-sm border border-[hsl(var(--border))] p-2">
+                      <label className="flex items-center gap-2 text-xs font-medium">
+                        <input type="checkbox" checked={smartOn} onChange={(e) => setSmartOn(e.target.checked)} />
+                        Smart DCA: buy more the further price is under the average entry
+                      </label>
+                      {smartOn && (
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          <div>
+                            <label htmlFor="smartStep" className={labelClass}>Step %</label>
+                            <input id="smartStep" name="smartStep" type="number" min="0.1" max="50" step="any" className={`${inputClass} ${monoClass}`} value={smartStep} onChange={(e) => setSmartStep(e.target.value)} required />
+                          </div>
+                          <div>
+                            <label htmlFor="smartMult" className={labelClass}>× per step</label>
+                            <input id="smartMult" name="smartMult" type="number" min="1" max="5" step="0.1" className={`${inputClass} ${monoClass}`} value={smartMult} onChange={(e) => setSmartMult(e.target.value)} required />
+                          </div>
+                          <div>
+                            <label htmlFor="smartSteps" className={labelClass}>Max steps</label>
+                            <input id="smartSteps" name="smartSteps" type="number" min="0" max="10" className={`${inputClass} ${monoClass}`} value={smartSteps} onChange={(e) => setSmartSteps(e.target.value)} required />
+                          </div>
+                          <div>
+                            <label htmlFor="smartTake" className={labelClass}>Stack TP %</label>
+                            <input id="smartTake" name="smartTake" type="number" min="0" step="any" placeholder="none" className={`${inputClass} ${monoClass}`} value={smartTake} onChange={(e) => setSmartTake(e.target.value)} />
+                          </div>
+                        </div>
+                      )}
+                      {smartOn && (
+                        <p className={`text-[11px] ${mutedClass}`}>
+                          ${strategySizeUsd} at cost, ${(Number(strategySizeUsd) * Number(smartMult)).toFixed(2)} {smartStep}% under, ${(Number(strategySizeUsd) * Number(smartMult) ** 2).toFixed(2)} {Number(smartStep) * 2}% under,
+                          up to {smartSteps} steps. {Number(smartTake) > 0 ? `Sells the whole stack ${smartTake}% above the average entry.` : "No stack take profit."}
+                        </p>
+                      )}
+                    </div>
+                  )}
                   {strategyType === "grid" && price != null && (
                     <p className={`text-[11px] ${mutedClass}`}>
                       {strategyCoin === coin ? `${coin} is at ${formatPrice(price)}. ` : ""}
@@ -2599,6 +3176,36 @@ function TradingPanel({ api }: PanelProps) {
                       </button>
                     </p>
                   )}
+                  {strategyType === "pairs" && (
+                    <p className={`text-[11px] ${mutedClass}`}>
+                      Rule-based, no model. Among these coins it takes the correlated pair whose spread is furthest from normal. Past ±{pairsEntryZ}
+                      it longs the cheap coin and shorts the rich one, sized so a move in both nets out. It closes both legs together at ±0.5,
+                      at a ±{Number(pairsEntryZ) + 2} stop, or after 72 bars, and never holds one leg alone. Live needs instant trading.
+                      Backtest a pair from the Scanner tab first.
+                    </p>
+                  )}
+                  {strategyType === "breakout" && (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input type="checkbox" checked={boShort} onChange={(e) => setBoShort(e.target.checked)} />
+                      Also short breakdowns below the lower band
+                    </label>
+                  )}
+                  {strategyType === "breakout" && (
+                    <p className={`text-[11px] ${mutedClass}`}>
+                      Rule-based, no model, closed bars only. It waits for the Bollinger Bands to squeeze to their narrowest in 120 bars,
+                      then enters when a close breaks out with ADX at least {boMinAdx}{boShort ? " (long above, short below)" : " (longs only)"}.
+                      It exits when the close falls back through the middle band, or at the stop / take profit. Live needs instant trading.
+                      Backtest it first.
+                    </p>
+                  )}
+                  {strategyType === "basis" && (
+                    <p className={`text-[11px] ${mutedClass}`}>
+                      {paperMode ? "" : "Switch to Paper first — basis bots run on paper only. "}
+                      When {strategyCoin || "the coin"}&apos;s funding pays shorts {basisEntry}% a year or more, it buys the coin on Hyperliquid spot
+                      and shorts the same size of the perp, collecting funding with price risk hedged out. It unwinds both legs when funding
+                      drops under {basisExit}% or after {basisHold} hours. See the Scanner&apos;s basis rows for candidates.
+                    </p>
+                  )}
                   {strategyType === "sniper" && sniperMode === "new-listing" && (
                     <p className={`text-[11px] ${mutedClass}`}>Fires once, the moment a new Hyperliquid perp lists, then stops.</p>
                   )}
@@ -2611,7 +3218,7 @@ function TradingPanel({ api }: PanelProps) {
                       where it started. Try it in Backtest first.
                     </p>
                   )}
-                  <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId || instantBusy}>
+                  <button type="submit" className={primaryButtonClass("py-1.5")} disabled={!agentId || instantBusy || (strategyType === "basis" && !paperMode)}>
                     Start {paperMode ? "paper " : ""}{BOT_KINDS[strategyType].label} bot
                   </button>
                 </form>
@@ -2626,6 +3233,100 @@ function TradingPanel({ api }: PanelProps) {
               initial={backtestInitial}
               onStartBot={startBotFromBacktest}
             />
+          ) : bottomTab === "leaderboard" ? (
+            !agentId ? <p className={`p-3 text-sm ${mutedClass}`}>Pick an agent to see its org&apos;s leaderboard.</p> :
+            board === "loading" || board === null ? <Spinner label="Loading leaderboard…" /> :
+            board === "error" ? <ErrorNote message="Couldn't load the leaderboard." onRetry={loadBoard} /> : (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2 px-2">
+                  <div className="inline-flex rounded-sm border border-[hsl(var(--border))] text-xs" role="radiogroup" aria-label="Leaderboard">
+                    {(["paper", "live"] as const).map((m) => (
+                      <button
+                        key={m} type="button" role="radio" aria-checked={boardMode === m}
+                        className={`px-2.5 py-1 capitalize ${boardMode === m ? "bg-[hsl(var(--accent))] font-semibold" : mutedClass}`}
+                        onClick={() => setBoardMode(m)}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                  <p className={`flex-1 text-xs ${mutedClass}`}>
+                    {boardMode === "paper"
+                      ? "Paper arena for this org. Bots rank by return on their order size, then by smaller drawdown; agents rank by paper account return."
+                      : "Live bots, ranked by their own fills only — never their agent's manual trades. Fees are estimated at the taker rate. Bot fills are recorded from this release on."}
+                  </p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                        <th className="px-2 pb-1 font-medium">#</th>
+                        <th className="px-2 pb-1 font-medium">Bot</th>
+                        <th className="px-2 pb-1 font-medium">Status</th>
+                        <th className="px-2 pb-1 font-medium text-right">Return on size</th>
+                        <th className="px-2 pb-1 font-medium text-right">Net PnL</th>
+                        <th className="px-2 pb-1 font-medium text-right">Win rate</th>
+                        <th className="px-2 pb-1 font-medium text-right">Profit factor</th>
+                        <th className="px-2 pb-1 font-medium text-right">Max drawdown</th>
+                        <th className="px-2 pb-1 font-medium text-right">Closed</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[hsl(var(--border))]">
+                      {board.bots.length === 0 && (
+                        <tr><td colSpan={9} className={`px-2 py-3 ${mutedClass}`}>{boardMode === "paper" ? "No paper bots in this org yet — start one from a goal above or in the Bots tab." : "No live bots in this org yet."}</td></tr>
+                      )}
+                      {board.bots.map((b) => (
+                        <tr key={b.id} className={b.agentId === board.you ? "bg-[hsl(var(--accent))]/40" : undefined}>
+                          <td className={`px-2 py-1.5 ${monoClass} ${mutedClass}`}>{b.closed ? b.rank : "—"}</td>
+                          <td className="px-2 py-1.5">
+                            <span className="font-semibold">{b.agentName}</span>{" "}
+                            <span className={mutedClass}>{BOT_KINDS[b.type as StrategyType]?.label ?? b.type} · {b.coin} · ${b.sizeUsd}</span>
+                            {b.goal && <div className={`max-w-xs truncate text-[10px] ${mutedClass}`} title={b.goal}>{b.goal}</div>}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <Badge tone={b.status === "running" ? "success" : b.status === "eliminated" ? "danger" : "neutral"}>{b.status}</Badge>
+                          </td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass} ${b.fills ? pnlClass(b.returnOnSizePct) : mutedClass}`}>{b.fills ? `${signed(b.returnOnSizePct)}%` : "—"}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass} ${b.fills ? pnlClass(b.netPnl) : mutedClass}`}>{b.fills ? signed(b.netPnl) : "—"}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>{b.closed ? `${(b.winRate * 100).toFixed(0)}%` : "—"}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>{!b.closed ? "—" : b.profitFactor == null ? "∞" : b.profitFactor.toFixed(2)}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass}`}>{b.fills ? `$${b.maxDrawdownUsd.toFixed(2)}` : "—"}</td>
+                          <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>{b.closed}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {boardMode === "paper" && board.accounts.length > 0 && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                          <th className="px-2 pb-1 font-medium">#</th>
+                          <th className="px-2 pb-1 font-medium">Paper account</th>
+                          <th className="px-2 pb-1 font-medium text-right">Return</th>
+                          <th className="px-2 pb-1 font-medium text-right">Equity</th>
+                          <th className="px-2 pb-1 font-medium text-right">Started with</th>
+                          <th className="px-2 pb-1 font-medium text-right">Open positions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[hsl(var(--border))]">
+                        {board.accounts.map((a) => (
+                          <tr key={a.agentId} className={a.agentId === board.you ? "bg-[hsl(var(--accent))]/40" : undefined}>
+                            <td className={`px-2 py-1.5 ${monoClass} ${mutedClass}`}>{a.rank}</td>
+                            <td className="px-2 py-1.5 font-semibold">{a.agentName}</td>
+                            <td className={`px-2 py-1.5 text-right ${monoClass} ${pnlClass(a.returnPct)}`}>{signed(a.returnPct)}%</td>
+                            <td className={`px-2 py-1.5 text-right ${monoClass}`}>${a.equity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>${a.startBalance.toLocaleString()}</td>
+                            <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>{a.openPositions}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )
           ) : bottomTab === "history" ? (
             history === "loading" ? <Spinner label="Loading history…" /> :
             history === "error" ? <ErrorNote message="Couldn't load trade history." onRetry={loadHistory} /> :

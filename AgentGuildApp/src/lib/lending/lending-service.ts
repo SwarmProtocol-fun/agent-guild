@@ -62,6 +62,7 @@ import {
 import { SOLANA_WALLET_LINKS_COLLECTION, isSolanaAddress } from "@/lib/identity-nft-service";
 import { lendingLimits, assertCanOpenPosition, isWalletAllowed } from "./config";
 import { createPayoutInTxn } from "./payouts";
+import { slashBond } from "@/lib/agent-bond";
 import type {
     Loan,
     LoanKind,
@@ -1128,6 +1129,12 @@ export async function cancelLoan(loanId: string, opts: { byAdmin: boolean; reaso
         if (!snap.exists) throw new Error("Loan not found");
         const current = toLoan(snap.id, snap.data()!);
         const allowed = opts.byAdmin ? ADMIN_CANCELLABLE : BORROWER_CANCELLABLE;
+        // An automatic payout in flight. A "sending" claim older than 5 minutes means the request died
+        // mid-send; an admin who has checked the payout wallet's history may still cancel.
+        const auto = current.status === "pending_disbursement" ? current.autoDisburseSend : undefined;
+        if (auto?.status === "sent" || (auto?.status === "sending" && Date.now() - auto.startedAt < 5 * 60_000)) {
+            throw new Error("The payout to the borrower is already on its way — the loan can't be cancelled");
+        }
         if (!allowed.includes(current.status)) {
             throw new Error(
                 opts.byAdmin || !ADMIN_CANCELLABLE.includes(current.status)
@@ -1305,11 +1312,12 @@ export async function acceptLoanOffer(input: AcceptLoanOfferInput): Promise<Loan
 }
 
 /**
- * Platform-admin action: verify the treasury really paid the borrower, then
- * flip a pool-funded loan from "pending_disbursement" to "active" and start
- * its interest clock.
+ * Verify the treasury (or, for automatic payouts, the platform payout
+ * wallet — see auto-disburse.ts) really paid the borrower, then flip a
+ * pool-funded loan from "pending_disbursement" to "active" and start its
+ * interest clock. Admins confirm treasury payouts by hand.
  */
-export async function confirmLoanDisbursement(loanId: string, txSig: string): Promise<Loan> {
+export async function confirmLoanDisbursement(loanId: string, txSig: string, opts: { fromWallet?: string } = {}): Promise<Loan> {
     const loanRef = adminDb().collection(LOANS).doc(loanId);
     const loanSnap = await loanRef.get();
     if (!loanSnap.exists) throw new Error("Loan not found");
@@ -1322,7 +1330,7 @@ export async function confirmLoanDisbursement(loanId: string, txSig: string): Pr
 
     const transfer: VerifyTransferInput = {
         txSig,
-        expectedFromWallet: treasuryFor(asset),
+        expectedFromWallet: opts.fromWallet ?? treasuryFor(asset),
         expectedToWallet: loan.borrowerWalletAddress,
         expectedAmount: loan.principal,
         purpose: "loan_disbursement",
@@ -1694,6 +1702,8 @@ export async function markLoanDefaulted(loanId: string, opts: { graceDays?: numb
             recovered: recovery.recoveredPrincipal + recovery.recoveredInterest,
         },
     );
+    // Forfeit the borrower's anti-sybil bond — drops it back to provisional.
+    await slashBond(loan.borrowerAgentId, `Defaulted on ${loan.kind} loan ${loan.id}`);
     return loan;
 }
 

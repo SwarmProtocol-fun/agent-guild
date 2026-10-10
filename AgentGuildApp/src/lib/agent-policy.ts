@@ -9,6 +9,8 @@
  * dragged firebase-admin into the client bundle and broke the build.
  */
 
+import { evaluateStanding, PROVISIONAL_TIER_CAP, type StandingInput } from "./agent-standing";
+
 export interface PolicyGuardResult {
   ok: boolean;
   policy?: import("./credit-policy").PolicyTierDefinition;
@@ -48,7 +50,7 @@ async function clientPolicyLoaders(): Promise<PolicyLoaders> {
  */
 export async function resolveAgentPolicy(agentId: string, loaders?: PolicyLoaders): Promise<PolicyGuardResult> {
   const { getAgent, getCreditPolicyConfig, getOrgPolicyOverride } = loaders ?? await clientPolicyLoaders();
-  const { resolvePolicyTier, resolveEffectivePolicy, getTier } = await import("@/lib/credit-policy");
+  const { resolvePolicyTier, resolveEffectivePolicy, getTier, tierRank } = await import("@/lib/credit-policy");
 
   // 1. Load agent
   const agent = await getAgent(agentId);
@@ -91,10 +93,20 @@ export async function resolveAgentPolicy(agentId: string, loaders?: PolicyLoader
 
   const allAdjustments = [...resolution.adjustments, ...orgAdjustments];
 
+  // 5. Provisional cap — applied after org overrides so an org's minTier
+  // can't lift a fresh identity out of it.
+  let effective = policy;
+  const standing = evaluateStanding(agent as unknown as StandingInput);
+  if (standing.provisional && tierRank(policy.name) > tierRank(PROVISIONAL_TIER_CAP)) {
+    const cap = getTier(PROVISIONAL_TIER_CAP);
+    allAdjustments.push(`Capped at ${cap.label} (provisional agent: ${standing.requirements.filter((r) => !r.met).map((r) => r.label).join("; ")})`);
+    effective = { ...cap };
+  }
+
   return {
     ok: true,
-    policy,
-    tier: policy.name,
+    policy: effective,
+    tier: effective.name,
     agentId,
     orgId: agent.orgId,
     adjustments: allAdjustments,

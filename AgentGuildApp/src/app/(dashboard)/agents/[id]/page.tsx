@@ -50,6 +50,7 @@ import {
 import { shortAddress } from "@/lib/chains";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { IdentityNftCopies } from "@/components/identity-nft-copies";
+import { AgentStandingCard } from "@/components/agent-standing-card";
 import { AgentHarnessPanel } from "@/components/agent-harness-panel";
 import { getAgentAvatarUrl } from "@/lib/agent-avatar";
 import { useSession } from "@/contexts/SessionContext";
@@ -996,6 +997,14 @@ function AgentDetailPage() {
         </TabsList>
 
       <TabsContent value="overview" className="space-y-6">
+      {currentOrg && (
+        <AgentStandingCard
+          agentId={agentId}
+          orgId={currentOrg.id}
+          isOwner={!!sessionAddress && !!currentOrg.ownerAddress &&
+            canonicalizeWalletAddress(currentOrg.ownerAddress) === canonicalizeWalletAddress(sessionAddress)}
+        />
+      )}
       {/* Agent Wallets — identity row first, then custodial (platform-generated) */}
       <Card>
         <CardHeader className="pb-3">

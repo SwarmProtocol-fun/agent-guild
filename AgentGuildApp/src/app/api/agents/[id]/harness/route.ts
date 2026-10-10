@@ -12,6 +12,7 @@ import { NextRequest } from "next/server";
 import { requireOrgAdmin, requireOrgMember } from "@/lib/auth-guard";
 import { getAgent } from "@/lib/firestore-admin";
 import { analyzeLineage, parseProposal } from "@/lib/harness";
+import { loadHarnessBenefits } from "@/lib/harness-benefits-load";
 import {
   activateGeneration,
   deactivate,
@@ -39,7 +40,25 @@ export async function GET(req: NextRequest, { params }: Params) {
       listReplyOutcomes(id),
     ]);
     const isOwner = (await requireOrgAdmin(req, agent.orgId)).ok;
-    return Response.json({ ok: true, generations, analysis: analyzeLineage(generations, jobs, replies), isOwner });
+    const active = generations.find((g) => g.status === "active");
+    const pending = generations.find((g) => g.status === "proposed");
+    let benefitPack: Awaited<ReturnType<typeof loadHarnessBenefits>> | null = null;
+    try {
+      benefitPack = await loadHarnessBenefits(agent, {
+        playbookGeneration: active?.generation ?? null,
+        pendingGeneration: pending?.generation ?? null,
+      });
+    } catch (err) {
+      console.error("GET /api/agents/[id]/harness benefits:", err);
+    }
+    return Response.json({
+      ok: true,
+      generations,
+      analysis: analyzeLineage(generations, jobs, replies),
+      isOwner,
+      benefits: benefitPack?.benefits ?? [],
+      policy: benefitPack?.policy ?? null,
+    });
   } catch (err) {
     console.error("GET /api/agents/[id]/harness error:", err);
     return Response.json({ error: "Failed to load harness" }, { status: 500 });

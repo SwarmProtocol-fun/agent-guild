@@ -7,7 +7,8 @@
  * fresh here:
  *
  *   - raw data, zero interpretation: recent candles as CSV, bid/ask, RSI,
- *     SMAs, ATR, funding and open interest;
+ *     SMAs, ATR, funding and open interest, order-book imbalance, and (with
+ *     a CoinMarketCap key) market cap, all-venue volume and BTC dominance;
  *   - the model never sees its account balance — knowing it only invites
  *     loss-aversion and revenge trading;
  *   - every decision and the model's reasoning is logged;
@@ -42,6 +43,16 @@ export interface SnapshotInput {
   ask?: number | null;
   fundingRatePct?: number | null;
   openInterestUsd?: number | null;
+  /** (bid − ask) / (bid + ask) book depth near the mid (signals.ts). */
+  bookImbalance?: number | null;
+  /** cmc.ts coinContextLine(). */
+  marketContext?: string | null;
+  /** cmc.ts globalContextLine() — the whole market. */
+  globalContext?: string | null;
+}
+
+function flowStats(input: SnapshotInput): (string | null)[] {
+  return [input.bookImbalance != null ? `book_imbalance=${input.bookImbalance.toFixed(3)}` : null];
 }
 
 /** Bars of history the model sees per decision. */
@@ -76,6 +87,9 @@ export function buildSnapshot(input: SnapshotInput): string {
     change24h != null ? `change_24h_pct=${change24h.toFixed(2)}` : null,
     input.fundingRatePct != null ? `funding_rate_pct_per_hour=${input.fundingRatePct.toFixed(5)}` : null,
     input.openInterestUsd != null ? `open_interest_usd=${Math.round(input.openInterestUsd)}` : null,
+    ...flowStats(input),
+    input.marketContext ? `coinmarketcap: ${input.marketContext}` : null,
+    input.globalContext ? `whole_market: ${input.globalContext}` : null,
   ];
   return lines.filter((l) => l != null).join("\n");
 }
@@ -181,4 +195,141 @@ export function parseDecision(text: string, inPosition: boolean): AiDecision | n
   if (!words) return null;
   const last = words[words.length - 1] as AiDecision;
   return last === "CLOSE" && !inPosition ? "NOTHING" : last;
+}
+
+// ── Multi-coin (basket) rounds ──────────────────────────────────────────────
+//
+// A basket bot watches several coins at once and, each round, can act on any
+// of them — including both legs of a pair trade (long the cheap coin, short
+// the rich one) or a funding carry. It sees a shorter snapshot per coin plus
+// the cross-market scanner (./scanner.ts) for its basket.
+
+/** Most coins one basket round can carry — beyond this the prompt gets too long to read. */
+export const MULTI_MAX_COINS = 8;
+/** Bars per coin in a basket round (a single-coin round shows SNAPSHOT_BARS). */
+export const MULTI_SNAPSHOT_BARS = 24;
+
+/** One coin's compact block: indicator line, then its last MULTI_SNAPSHOT_BARS bars. */
+export function buildCoinBlock(input: SnapshotInput & { premiumPct?: number | null }): string {
+  const closes = input.candles.map((c) => c.c);
+  const last = closes[closes.length - 1];
+  const lastT = input.candles[input.candles.length - 1].t;
+  const dayAgo = input.candles.find((c) => c.t >= lastT - 86_400_000);
+  const r = rsi(closes, 14);
+  const s20 = sma(closes, 20);
+  const s40 = sma(closes, 40);
+  const a14 = atr(input.candles, 14);
+  const stats = [
+    `last=${fmt(last)}`,
+    input.bid != null && input.ask != null ? `bid=${fmt(input.bid)} ask=${fmt(input.ask)}` : null,
+    `rsi14=${r != null ? r.toFixed(1) : "n/a"}`,
+    s20 != null ? `sma20=${fmt(+s20.toPrecision(6))}` : null,
+    s40 != null ? `sma40=${fmt(+s40.toPrecision(6))}` : null,
+    a14 != null ? `atr14_pct=${((a14 / last) * 100).toFixed(3)}` : null,
+    dayAgo ? `change_24h_pct=${(((last - dayAgo.o) / dayAgo.o) * 100).toFixed(2)}` : null,
+    input.fundingRatePct != null ? `funding_pct_per_hour=${input.fundingRatePct.toFixed(5)}` : null,
+    input.premiumPct != null ? `premium_pct=${input.premiumPct.toFixed(3)}` : null,
+    input.openInterestUsd != null ? `oi_usd=${Math.round(input.openInterestUsd)}` : null,
+    ...flowStats(input),
+    input.marketContext ?? null,
+  ].filter(Boolean).join(" ");
+  const bars = input.candles.slice(-MULTI_SNAPSHOT_BARS);
+  return [
+    `## ${input.coin}-PERP  ${stats}`,
+    "time_utc,open,high,low,close,volume",
+    ...bars.map((c) => `${new Date(c.t).toISOString().slice(0, 16)},${fmt(c.o)},${fmt(c.h)},${fmt(c.l)},${fmt(c.c)},${fmt(c.v)}`),
+  ].join("\n");
+}
+
+const MULTI_ANSWER_FORMAT = [
+  "Give your reasoning in a few sentences. Then end your answer with a DECISIONS block, one line per coin you act on:",
+  "DECISIONS",
+  "BTC: LONG",
+  "ETH: SHORT",
+  "Each line is COIN: LONG, COIN: SHORT or COIN: CLOSE, for coins in your basket only. Coins you leave out stay exactly as they are.",
+  "For a pair or hedged trade, list both legs. If you do nothing at all this round, end with the single word NOTHING.",
+].join("\n");
+
+export function multiSystemPrompt(coins: string[], positions: Record<string, AiPosition>, goal?: string | null): string {
+  const held = Object.keys(positions);
+  return [
+    `You are a trader managing a Hyperliquid perpetuals account with a basket of ${coins.length} coins: ${coins.join(", ")}.`,
+    held.length ? `You hold open positions in: ${held.join(", ")} (details below).` : "You have no open positions in the basket.",
+    "",
+    "You are not limited to one coin. Look across the basket for the best trades, including relative-value and arbitrage setups:",
+    "- pair trades: when two correlated coins' spread is stretched, long the cheap leg and short the rich leg;",
+    "- funding carry: take the side Hyperliquid funding pays, ideally hedged with a correlated coin;",
+    "- premium: a perp far from its oracle tends to converge;",
+    "- or a plain directional trade when one coin's tape is clearly the best setup.",
+    "",
+    "For each coin you can:",
+    "- LONG: open a long (if short, flip to long)",
+    "- SHORT: open a short (if long, flip to short)",
+    "- CLOSE: close that coin's position",
+    "Every position is the same fixed size; your choices are the whole strategy. Doing nothing is a legitimate choice.",
+    ...goalLines(goal),
+    "",
+    MULTI_ANSWER_FORMAT,
+  ].join("\n");
+}
+
+export function multiPositionLines(positions: Record<string, AiPosition>): string {
+  const coins = Object.keys(positions);
+  if (!coins.length) return "Current positions: FLAT in every basket coin";
+  return ["Current positions:", ...coins.map((c) => `- ${positionLine(c, positions[c]).replace(/^Current position: /, `${c}: `)}`)].join("\n");
+}
+
+/** The question for one basket round. `scanner` is scannerSection() for the basket (may be empty). */
+export function multiDecisionRequest(
+  coins: string[],
+  blocks: string[],
+  scanner: string,
+  positions: Record<string, AiPosition>,
+  goal?: string | null,
+  at = new Date(),
+  globalContext?: string | null,
+): { system: string; prompt: string } {
+  const prompt = [
+    `BASKET SNAPSHOT — Hyperliquid perps, ${at.toISOString()}`,
+    ...(globalContext ? [`whole_market: ${globalContext}`] : []),
+    "",
+    blocks.join("\n\n"),
+    ...(scanner ? ["", "CROSS-MARKET SCAN", scanner] : []),
+    "",
+    multiPositionLines(positions),
+    "",
+    "What are your decisions?",
+  ].join("\n");
+  return { system: multiSystemPrompt(coins, positions, goal), prompt };
+}
+
+/**
+ * Pulls per-coin decisions out of a basket answer. Reads after the last
+ * "DECISIONS" heading when there is one, else the whole text. Accepts
+ * "ETH: LONG", "ETH - SHORT", "ETH = CLOSE", and inside a DECISIONS block
+ * also "LONG ETH" (outside one, prose like "not going long ETH" would
+ * misfire). Coins outside the
+ * basket are ignored, and the last line for a coin wins. NOTHING lines drop
+ * the coin. Returns {} for an explicit "do nothing", and null when the
+ * answer names no decision at all.
+ */
+export function parseMultiDecision(text: string, coins: string[]): Record<string, Exclude<AiDecision, "NOTHING">> | null {
+  const upper = String(text ?? "").toUpperCase().replace(/DO NOTHING/g, "NOTHING");
+  const canon = new Map(coins.map((c) => [c.toUpperCase(), c]));
+  const at = upper.lastIndexOf("DECISIONS");
+  const body = at >= 0 ? upper.slice(at + "DECISIONS".length) : upper;
+  const out: Record<string, Exclude<AiDecision, "NOTHING">> = {};
+  let found = false;
+  const re = /\b([A-Z0-9]{1,12})\s*(?::|=|-|–|—|->|→)\s*\**\s*(LONG|SHORT|CLOSE|NOTHING)\b|\b(LONG|SHORT|CLOSE)\s+([A-Z0-9]{1,12})\b/g;
+  for (const m of body.matchAll(re)) {
+    if (m[3] && at < 0) continue;
+    const coin = canon.get(m[1] ?? m[4]);
+    const word = (m[2] ?? m[3]) as AiDecision;
+    if (!coin) continue;
+    found = true;
+    if (word === "NOTHING") delete out[coin];
+    else out[coin] = word;
+  }
+  if (found) return out;
+  return /\bNOTHING\b/.test(upper) ? {} : null;
 }

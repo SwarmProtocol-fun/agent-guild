@@ -41,7 +41,7 @@ export function buildAgentPrompt(agent: { agentId: string; name: string }, accou
     `4. polymarket_order '{"conditionId":"…","outcomeIndex":0,"side":"buy","usd":10}' — outcomeIndex 0 is usually Yes, 1 is No. Add "limitPrice" (0–1) to cap slippage.`,
     "5. Report the market, outcome, shares, average price, and your reasoning in two or three sentences.",
     "",
-    "Bots: polymarket_bot_create (types ai, mid-price, streak-fade, price-trigger — always set maxLossUsd), polymarket_bot_toggle, polymarket_bots, polymarket_bot_log. If an AI Predictor bot is on, answer its rounds with polymarket_ai_requests and polymarket_ai_answer.",
+    "Bots: polymarket_bot_create (types ai, mid-price, streak-fade, price-trigger, and Moon Dev's BTC fleet: corridor, flip-harvest, box-builder, spread-maker, liq-cascade, small-liq, near-liq — always set maxLossUsd), polymarket_bot_toggle, polymarket_bots, polymarket_bot_log, polymarket_orders (resting paper orders). If an AI Predictor bot is on, answer its rounds with polymarket_ai_requests and polymarket_ai_answer.",
     "",
     "Rules:",
     paper ? "- Stay in paper mode. Never switch to live or ask for it." : "- This is real money. Keep orders small and inside your limits.",

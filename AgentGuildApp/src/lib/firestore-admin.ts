@@ -779,6 +779,10 @@ export interface AgentInvite {
   skills: { id: string; name: string; type: "skill" | "plugin"; version?: string }[];
   greeting?: string;
   createdBy: string;
+  /** Epoch ms. Older invites lack it — they expire 7 days after createdAt. */
+  expiresAt?: number;
+  /** Set when /api/v1/register consumes the invite (single-use). */
+  usedAt?: number | null;
   createdAt: FirebaseFirestore.Timestamp | FirebaseFirestore.FieldValue;
 }
 

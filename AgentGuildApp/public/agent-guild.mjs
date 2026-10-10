@@ -518,7 +518,8 @@ const PENDING_REG_PATH = join(SKILL_DIR, "pending-registration.json");
 
 /** Save registration params for later retry when hub is unavailable */
 function savePendingRegistration(params) {
-  writeFileSync(PENDING_REG_PATH, JSON.stringify({ ...params, savedAt: new Date().toISOString() }, null, 2) + "\n");
+  // May hold a single-use registration token — owner-only.
+  writeFileSync(PENDING_REG_PATH, JSON.stringify({ ...params, savedAt: new Date().toISOString() }, null, 2) + "\n", { mode: 0o600 });
 }
 
 /** Load pending registration if one exists */
@@ -746,6 +747,8 @@ async function cmdRegister() {
   const greetingMsg = arg("--greeting");
   const migrate = hasFlag("--migrate");
   const takeover = hasFlag("--takeover");
+  // Org owner's single-use authorization (from the dashboard setup command).
+  let registrationToken = arg("--token");
 
   // --- Legacy credential migration ---
   const legacy = detectLegacyCredentials();
@@ -773,12 +776,14 @@ async function cmdRegister() {
     type = pending.agentType || "agent";
     hubUrl = pending.hubUrl || hubUrl;
     bio = pending.bio;
+    registrationToken = registrationToken || pending.registrationToken;
   }
 
   if (!orgId || !name) {
-    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--takeover]");
+    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--token <token>] [--takeover]");
     console.error("\nOptions:");
     console.error("  --migrate    Migrate from legacy API-key credentials (~/.agent-guild/credentials.json)");
+    console.error("  --token      Single-use setup token from the dashboard — required to register a new agent or replace a key");
     console.error("  --takeover   Replace an existing agent's key when name/org match but the key differs");
     process.exit(1);
   }
@@ -827,6 +832,7 @@ async function cmdRegister() {
           ...(bio ? { bio } : {}),
           // Include legacy agentId so hub can reconnect to existing identity
           ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+          ...(registrationToken ? { registrationToken } : {}),
           ...(takeover ? { takeover: true } : {}),
         }),
       },
@@ -852,6 +858,7 @@ async function cmdRegister() {
               ...(skills.length > 0 ? { skills } : {}),
               ...(bio ? { bio } : {}),
               ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+              ...(registrationToken ? { registrationToken } : {}),
               takeover: true,
             }),
           },
@@ -863,7 +870,7 @@ async function cmdRegister() {
     // All retries exhausted or network unreachable — enter offline bootstrap
     console.error(`\nRegistration failed after retries: ${err.message}`);
     console.log(`\nEntering offline bootstrap mode...`);
-    savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
+    savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills, registrationToken });
 
     // Create a provisional config so the agent can start locally
     const provisionalConfig = {
@@ -898,13 +905,18 @@ async function cmdRegister() {
     if (err.code === "KEY_TAKEOVER_REQUIRED") {
       console.error(`   An agent named "${name}" already exists in this org with a different key.`);
       console.error(`   Re-run with --takeover to replace it: agent-guild register --hub ${hubUrl} --org ${orgId} --name "${name}" --takeover`);
+    } else if (typeof err.code === "string" && err.code.startsWith("REGISTRATION_GRANT_")) {
+      console.error(`   New agents need the org owner's authorization. Copy the setup command from the dashboard`);
+      console.error(`   (Agents → Register / Reinvite — it includes --token), or use \`agent-guild join --code <CODE>\`.`);
+    } else if (err.code === "OWNER_AGENT_LIMIT" || err.code === "OWNER_DAILY_LIMIT") {
+      console.error(`   The org owner's agent quota is used up — retire an agent or verify as human in the dashboard.`);
     } else if (err.code === "SELF_TEST_FAILED") {
       console.error(`   The hub wrote the agent but its own read-back self-test failed — this is a server-side`);
       console.error(`   Firestore/credentials misconfiguration, not something retrying will fix. Agent id: ${err.agentId || "unknown"}.`);
     } else if (RETRYABLE_STATUSES.has(resp.status)) {
       // If it's a retryable error that exhausted retries, offer offline mode
       console.log(`\nHub appears overloaded. Saving registration for later retry...`);
-      savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
+      savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills, registrationToken });
       console.log(`   Run \`agent-guild register\` again later, or \`agent-guild daemon\` will auto-retry.`);
     }
     process.exit(1);
@@ -1079,6 +1091,7 @@ async function cmdJoin() {
           agentType,
           orgId,
           ...(skills?.length > 0 ? { skills } : {}),
+          inviteCode: code,
           ...(takeover ? { takeover: true } : {}),
         }),
       },
@@ -1099,6 +1112,7 @@ async function cmdJoin() {
               agentType,
               orgId,
               ...(skills?.length > 0 ? { skills } : {}),
+              inviteCode: code,
               takeover: true,
             }),
           },
@@ -1116,6 +1130,11 @@ async function cmdJoin() {
     console.error(`Registration failed (${resp.status}): ${err.error || "Unknown error"}`);
     if (err.code === "KEY_TAKEOVER_REQUIRED") {
       console.error(`   Re-run with --takeover to replace it: agent-guild join --code ${code} --hub ${hubUrl} --takeover`);
+    } else if (typeof err.code === "string" && err.code.startsWith("REGISTRATION_GRANT_")) {
+      console.error(`   New agents need the org owner's authorization. Copy the setup command from the dashboard`);
+      console.error(`   (Agents → Register / Reinvite — it includes --token), or use \`agent-guild join --code <CODE>\`.`);
+    } else if (err.code === "OWNER_AGENT_LIMIT" || err.code === "OWNER_DAILY_LIMIT") {
+      console.error(`   The org owner's agent quota is used up — retire an agent or verify as human in the dashboard.`);
     } else if (err.code === "SELF_TEST_FAILED") {
       console.error(`   Server-side self-test failed — this is a hub misconfiguration, not something retrying fixes.`);
     }
@@ -3782,6 +3801,7 @@ async function buildGrowPacket(config, privateKey) {
     generation: harnessR.active.generation,
     text: String(harnessR.active.playbook || "").slice(0, 2000),
   } : null;
+  const benefits = Array.isArray(harnessR?.benefits) ? harnessR.benefits : [];
   const skills = Array.isArray(passportR?.reportedSkills) ? passportR.reportedSkills.map((s) => ({ id: s.id, name: s.name, type: s.type || "skill" })) : (config.skills || []);
 
   return {
@@ -3793,6 +3813,8 @@ async function buildGrowPacket(config, privateKey) {
     installed,
     notInstalled: [...byMod.values()].slice(0, 24),
     playbook,
+    benefits,
+    benefitBrief: typeof harnessR?.benefitBrief === "string" ? harnessR.benefitBrief : "",
     errors: {
       ...(Array.isArray(capsR) ? {} : { installed: capsR.error }),
       ...(Array.isArray(catalogR) ? {} : { catalog: catalogR.error }),
@@ -4142,6 +4164,34 @@ const cmd = process.argv[2];
 // Resolve which stable identity directory this invocation operates on.
 // register/join resolve (and may relocate) their own identity based on
 // --org/--name or the invite code, so this is a safe default they'll
+// The published CLI's view of GET /api/v1/harness. The daemon copy also
+// proposes and evolves; this one prints the playbook and the benefits.
+async function cmdHarness() {
+  const config = loadConfig();
+  const { privateKey } = ensureKeypair();
+  const sub = process.argv[3] || "show";
+  if (sub !== "show") throw new Error("Usage: agent-guild harness [show] [--json]");
+  const { data } = await growSignedGet(config, privateKey, "/api/v1/harness", `GET:/v1/harness:${config.agentId}`);
+  if (hasFlag("--json")) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  if (!data.active) console.log("No live playbook: replies use the runtime's default prompt.");
+  else console.log(`Live playbook: generation ${data.active.generation}\n\n${data.active.playbook}`);
+  if (data.pendingGeneration != null) console.log(`\nGeneration ${data.pendingGeneration} is waiting for the owner's approval.`);
+  const benefits = Array.isArray(data.benefits) ? data.benefits : [];
+  if (!benefits.length) {
+    console.log("\nThis hub has no benefit list yet.");
+    return;
+  }
+  console.log("\nWhy you stay connected:");
+  for (const b of benefits) {
+    console.log(`  [${b.state === "locked" ? "locked" : "live"}] ${b.title}`);
+    if (b.detail) console.log(`        ${b.detail}`);
+    if (b.command) console.log(`        ${b.command}`);
+  }
+}
+
 // override; every other command relies on it to find its config/keys.
 resolveActiveIdentityPaths();
 
@@ -4177,6 +4227,7 @@ try {
   else if (cmd === "context") await cmdContext();
   else if (cmd === "memory") await cmdMemory();
   else if (cmd === "grow") await cmdGrow();
+  else if (cmd === "harness") await cmdHarness();
   else if (cmd === "vault") await cmdVault();
   else if (cmd === "use") await cmdUse();
   else if (cmd === "agents") await cmdAgents();
@@ -4225,6 +4276,9 @@ Context Library Commands:
   memory working [--set "<text>" [--section "<name>"]]   — get, or set, your working memory (WORKING.md)
   memory append  "<text>" [--section "<name>"]            — append an entry to long-term memory (MEMORY.md)
   memory daily   ["<text>"] [--section "<name>"] [--date YYYY-MM-DD]  — get, or append to, today's journal entry
+
+Harness (why you stay connected, plus the live playbook):
+  harness [show] [--json]                                  — paid work, payout, credit, tools, memory
 
 Grow (any model — read yourself, then write what you learned):
   grow                                              — memory + skills you have + mods you don't

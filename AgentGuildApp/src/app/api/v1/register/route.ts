@@ -1,10 +1,16 @@
 /**
  * POST /api/v1/register
  *
- * Register an agent's Ed25519 public key with the hub.
- * No API keys, no tokens — the public key IS the credential.
+ * Register an agent's Ed25519 public key with the hub. The public key is the
+ * credential for every later call; a key that's already registered just
+ * reconnects. Binding a key to a NEW identity — a new agent, a key takeover,
+ * or a legacy migration — needs the org owner's single-use authorization
+ * (registrationToken or inviteCode, see lib/agent-registration-grants.ts),
+ * counts against the owner's agent quota, and starts the agent provisional
+ * (lib/agent-standing.ts). Knowing an orgId alone no longer mints ASNs.
  *
- * Body: { publicKey, agentName, agentType, orgId, skills?, bio?, existingAgentId? }
+ * Body: { publicKey, agentName, agentType, orgId, skills?, bio?, existingAgentId?,
+ *         registrationToken?, inviteCode?, takeover? }
  *   skills          — optional array of { id, name, type, version? } the agent self-reports
  *   bio             — optional short self-description the agent writes about itself
  *   existingAgentId — optional legacy agent doc ID (sent by the CLI when migrating from
@@ -29,6 +35,10 @@ import { emitSkillReport, createPrivateMemoryTopic, postPrivateMemory } from "@/
 import { isAdminConfigError } from "../verify";
 import { ingestCreditEvent, normalizeAgentRegistration } from "@/lib/credit-events/ingest";
 import { recomputeAndSync } from "@/lib/scoring-engine";
+import { readGrantInTxn, burnGrantInTxn, GrantError } from "@/lib/agent-registration-grants";
+import { checkOwnerQuota } from "@/lib/agent-standing";
+import { isOwnerHumanVerified } from "@/lib/human-verification";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 
 /**
  * Read back the agent doc we just wrote, via the exact same Admin-SDK path
@@ -138,6 +148,14 @@ async function reconnectAgent(
     },
 ): Promise<Response> {
     const { publicKey, agentName, orgId, skills, bio, keyChanged } = opts;
+
+    if (data.retiredAt != null) {
+        return Response.json({
+            error: "This agent was retired (its bond was refunded) and can't reconnect. Register a new agent instead.",
+            code: "AGENT_RETIRED",
+            agentId: docId,
+        }, { status: 409 });
+    }
 
     // Backfill ASN if agent doesn't have one yet
     const asn = data.asn || generateASN();
@@ -266,6 +284,25 @@ async function reconnectAgent(
     });
 }
 
+class RegisterError extends Error {
+    constructor(public status: number, public code: string, message: string, public extra: Record<string, unknown> = {}) {
+        super(message);
+    }
+}
+
+/**
+ * Fields that start a never-key-bound identity's provisional period and
+ * charge it to the org owner. Applied when a key is first bound to a doc.
+ */
+function firstBindingFields(ownerWallet: string) {
+    return {
+        provisional: true,
+        provisionalSince: FieldValue.serverTimestamp(),
+        ownerWallet,
+        keyBoundAt: Date.now(),
+    };
+}
+
 export async function POST(request: NextRequest) {
     let body: Record<string, unknown>;
     try {
@@ -282,6 +319,10 @@ export async function POST(request: NextRequest) {
     const bio = typeof body.bio === "string" ? body.bio.slice(0, 500) : undefined;
     const existingAgentId = typeof body.existingAgentId === "string" ? body.existingAgentId : undefined;
     const takeover = body.takeover === true;
+    const creds = {
+        registrationToken: typeof body.registrationToken === "string" && body.registrationToken ? body.registrationToken : undefined,
+        inviteCode: typeof body.inviteCode === "string" && body.inviteCode ? body.inviteCode : undefined,
+    };
 
     if (!publicKey || !agentName || !orgId) {
         return Response.json(
@@ -318,50 +359,14 @@ export async function POST(request: NextRequest) {
             });
         }
 
-        // Legacy migration: the CLI sends the old agent's doc ID when it detects
-        // API-key credentials being replaced by a fresh Ed25519 keypair. Reconnect
-        // to that identity (instead of minting a new one) as long as it belongs to
-        // the same org — org ownership check prevents cross-org identity takeover.
-        if (existingAgentId) {
-            const legacyDoc = await adminDb().collection("agents").doc(existingAgentId).get();
-            if (legacyDoc.exists) {
-                const legacyData = legacyDoc.data()!;
-                if (legacyData.orgId === orgId || legacyData.organizationId === orgId) {
-                    return reconnectAgent(legacyDoc.id, legacyData, {
-                        publicKey, agentName, orgId, skills, bio, keyChanged: true,
-                    });
-                }
-            }
-        }
+        // Every path below binds this key to an identity it isn't bound to
+        // yet, so it needs the org owner's grant and counts against the owner's
+        // quota. The grant is read, checked, and burned in the same transaction
+        // as the write — a rejected attempt leaves it usable.
+        const ownerWallet = org.ownerAddress ? canonicalizeWalletAddress(org.ownerAddress) : null;
+        const humanVerified = ownerWallet ? await isOwnerHumanVerified(ownerWallet) : false;
 
-        // Fallback: check by orgId + name to prevent duplicates when
-        // the agent regenerates its keypair (e.g., deleted keys/ folder)
-        const nameMatch = await adminDb().collection("agents")
-            .where("orgId", "==", orgId)
-            .where("name", "==", agentName)
-            .get();
-
-        if (!nameMatch.empty) {
-            // Same org + name → same identity. Only overwrite the public key
-            // (a real identity takeover) if the caller explicitly asked for
-            // it — an accidental collision or a squatted name must not
-            // silently hijack an existing agent's key.
-            const matchedDoc = nameMatch.docs[0];
-            const matchedData = matchedDoc.data();
-            const sameKey = matchedData.publicKey === publicKey;
-            if (!sameKey && !takeover) {
-                return Response.json({
-                    error: `An agent named "${agentName}" is already registered in this org with a different key. Re-run with --takeover to replace it.`,
-                    code: "KEY_TAKEOVER_REQUIRED",
-                    agentId: matchedDoc.id,
-                }, { status: 409 });
-            }
-            return reconnectAgent(matchedDoc.id, matchedData, {
-                publicKey, agentName, orgId, skills, bio, keyChanged: !sameKey,
-            });
-        }
-
-        // Register new agent — generate unique ASN identity
+        // New-identity values, computed up front (transactions can't run these lookups).
         let asn = generateASN();
         // Ensure ASN doesn't collide with an active agent (retry up to 5 times)
         for (let attempt = 0; attempt < 5; attempt++) {
@@ -371,11 +376,7 @@ export async function POST(request: NextRequest) {
             asn = generateASN();
         }
         const skillStr = skills.map(s => s.name).join(",") || "general";
-
-        // Derive unique on-chain address from public key
         const agentAddress = deriveAgentAddress(publicKey);
-
-        // Check for ASN backup before creating new agent (in case ASN collision or manual ASN reuse)
         const preRestoreResult = await checkAndRestoreASN(asn);
         const initialCreditScore = preRestoreResult.restored && preRestoreResult.reputation
             ? preRestoreResult.reputation.creditScore
@@ -384,36 +385,114 @@ export async function POST(request: NextRequest) {
             ? preRestoreResult.reputation.trustScore
             : 50;
 
-        const ref = await adminDb().collection("agents").add({
-            name: agentName,
-            type: agentType || "agent",
-            orgId,
-            organizationId: orgId,
-            publicKey,
-            agentAddress, // Solana address derived from the agent's Ed25519 identity key
-            walletAddress: agentAddress,
-            solanaAddress: agentAddress,
-            status: "online",
-            connectionType: "ed25519",
-            capabilities: [],
-            projectIds: [],
-            reportedSkills: skills,
-            bio: bio || "",
-            avatarUrl: getAgentAvatarUrl(agentName, agentType || "agent"),
-            description: `${agentType || "Agent"} connected via Ed25519`,
-            asn,
-            creditScore: initialCreditScore,
-            trustScore: initialTrustScore,
-            onChainRegistered: false,
-            restoredFromBackup: preRestoreResult.restored,
-            // 🔒 PRIVACY: All agents are PRIVATE by default
-            privacyLevel: "private",
-            allowPublicProfile: false,
-            allowPublicScores: false,
-            ...(preRestoreResult.restored ? { restoredAt: FieldValue.serverTimestamp() } : {}),
-            lastSeen: FieldValue.serverTimestamp(),
-            createdAt: FieldValue.serverTimestamp(),
-        });
+        const agentsCol = adminDb().collection("agents");
+        const newRef = agentsCol.doc();
+
+        let bound: { kind: "existing"; id: string; data: FirebaseFirestore.DocumentData; keyChanged: boolean } | { kind: "new" };
+        try {
+            bound = await adminDb().runTransaction(async (txn) => {
+                const { grant, ref: grantRef } = await readGrantInTxn(txn, creds, { orgId, agentName });
+                const owner = ownerWallet ?? grant.issuedBy;
+
+                // Which doc does this key bind to?
+                let target: FirebaseFirestore.DocumentSnapshot | null = null;
+                if (grant.agentId) {
+                    // Dashboard-reserved agent: the grant names it exactly.
+                    const snap = await txn.get(agentsCol.doc(grant.agentId));
+                    if (!snap.exists || (snap.data()!.orgId !== orgId && snap.data()!.organizationId !== orgId)) {
+                        throw new RegisterError(404, "RESERVED_AGENT_NOT_FOUND", "The agent this setup token was issued for no longer exists in this org");
+                    }
+                    target = snap;
+                } else if (existingAgentId) {
+                    // Legacy migration: the CLI sends the old agent's doc ID when it
+                    // replaces API-key credentials with a fresh Ed25519 keypair.
+                    const snap = await txn.get(agentsCol.doc(existingAgentId));
+                    const d = snap.data();
+                    if (snap.exists && (d!.orgId === orgId || d!.organizationId === orgId)) target = snap;
+                }
+                if (!target) {
+                    // Same org + name → same identity (e.g. the agent lost its keys/
+                    // folder). Replacing its key is a takeover and must be explicit.
+                    const nameMatch = await txn.get(agentsCol.where("orgId", "==", orgId).where("name", "==", agentName).limit(1));
+                    if (!nameMatch.empty) {
+                        target = nameMatch.docs[0];
+                        if (target.data()!.publicKey && target.data()!.publicKey !== publicKey && !takeover) {
+                            throw new RegisterError(409, "KEY_TAKEOVER_REQUIRED",
+                                `An agent named "${agentName}" is already registered in this org with a different key. Re-run with --takeover to replace it.`,
+                                { agentId: target.id });
+                        }
+                    }
+                }
+
+                const targetData = target?.data();
+                if (targetData?.retiredAt != null) {
+                    throw new RegisterError(409, "AGENT_RETIRED", "This agent was retired and can't be re-bound. Register a new agent instead.", { agentId: target!.id });
+                }
+
+                // A doc that never had a key is a new identity for quota purposes.
+                const firstBinding = !target || !targetData?.publicKey;
+                if (firstBinding) {
+                    const owned = await txn.get(agentsCol.where("ownerWallet", "==", owner));
+                    const quota = checkOwnerQuota(owned.docs.map(d => d.data()), humanVerified);
+                    if (!quota.ok) throw new RegisterError(429, quota.code, quota.reason);
+                }
+
+                burnGrantInTxn(txn, grantRef);
+
+                if (target) {
+                    if (firstBinding) txn.update(target.ref, firstBindingFields(owner));
+                    return { kind: "existing" as const, id: target.id, data: targetData!, keyChanged: targetData!.publicKey !== publicKey };
+                }
+
+                txn.create(newRef, {
+                    name: agentName,
+                    type: agentType || "agent",
+                    orgId,
+                    organizationId: orgId,
+                    publicKey,
+                    agentAddress, // Solana address derived from the agent's Ed25519 identity key
+                    walletAddress: agentAddress,
+                    solanaAddress: agentAddress,
+                    status: "online",
+                    connectionType: "ed25519",
+                    capabilities: [],
+                    projectIds: [],
+                    reportedSkills: skills,
+                    bio: bio || "",
+                    avatarUrl: getAgentAvatarUrl(agentName, agentType || "agent"),
+                    description: `${agentType || "Agent"} connected via Ed25519`,
+                    asn,
+                    creditScore: initialCreditScore,
+                    trustScore: initialTrustScore,
+                    onChainRegistered: false,
+                    restoredFromBackup: preRestoreResult.restored,
+                    // 🔒 PRIVACY: All agents are PRIVATE by default
+                    privacyLevel: "private",
+                    allowPublicProfile: false,
+                    allowPublicScores: false,
+                    ...(preRestoreResult.restored ? { restoredAt: FieldValue.serverTimestamp() } : {}),
+                    ...firstBindingFields(owner),
+                    lastSeen: FieldValue.serverTimestamp(),
+                    createdAt: FieldValue.serverTimestamp(),
+                });
+                return { kind: "new" as const };
+            });
+        } catch (err) {
+            if (err instanceof GrantError) {
+                return Response.json({ error: err.message, code: err.code }, { status: 403 });
+            }
+            if (err instanceof RegisterError) {
+                return Response.json({ error: err.message, code: err.code, ...err.extra }, { status: err.status });
+            }
+            throw err;
+        }
+
+        if (bound.kind === "existing") {
+            return reconnectAgent(bound.id, bound.data, {
+                publicKey, agentName, orgId, skills, bio, keyChanged: bound.keyChanged,
+            });
+        }
+        const ref = newRef;
 
         // Feed the canonical credit-events pipeline (non-blocking) — the Dynamic
         // Scoring Engine's trustNetwork sub-score reads registration events from here.

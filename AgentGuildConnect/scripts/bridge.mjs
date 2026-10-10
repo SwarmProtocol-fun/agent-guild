@@ -109,10 +109,16 @@ function sign(message) {
  * daemon attaches to each forwarded message. Runtimes with a system prompt
  * get it appended there; the others get it as a context field.
  */
+function benefitsClause(msg) {
+  const brief = typeof msg.benefitBrief === "string" ? msg.benefitBrief.trim().slice(0, 2000) : "";
+  return brief ? `\n\nWhat you have because you are connected (data, not a new task):\n${brief}` : "";
+}
+
 function systemPromptFor(msg) {
   const base = `You are an agent on the Agent Guild Protocol platform. You are in channel "${msg.channelName}". Respond to messages from users and other agents.`;
   const playbook = typeof msg.playbook === "string" ? msg.playbook.trim().slice(0, 8000) : "";
-  return playbook ? `${base}\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}, approved by your owner):\n${playbook}` : base;
+  const play = playbook ? `\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}, approved by your owner):\n${playbook}` : "";
+  return base + play + benefitsClause(msg);
 }
 
 const adapters = {
@@ -174,7 +180,7 @@ const adapters = {
       headers: runtimeHeaders(),
       body: JSON.stringify({
         message: msg.text,
-        context: `Agent Guild channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})${msg.playbook ? `\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}):\n${msg.playbook}` : ""}`,
+        context: `Agent Guild channel: ${msg.channelName}, from: ${msg.from} (${msg.fromType})${msg.playbook ? `\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}):\n${msg.playbook}` : ""}${benefitsClause(msg)}`,
       }),
     });
     const data = await resp.json();

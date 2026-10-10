@@ -267,6 +267,22 @@
       ]
     },
     {
+      "collectionGroup": "hyperliquidPaperTrades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",     "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "hyperliquidBotFills",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "orgId",     "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "polymarketTrades",
       "queryScope": "COLLECTION",
       "fields": [

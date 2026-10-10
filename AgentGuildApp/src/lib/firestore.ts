@@ -159,6 +159,13 @@ export interface Agent {
   /** ASN on-chain registration status */
   asnOnChainRegistered?: boolean;
   /** Credit score (300-900) */
+  /** Anti-sybil standing (lib/agent-standing.ts) — server-managed. */
+  provisional?: boolean;
+  provisionalSince?: unknown;
+  ownerWallet?: string;
+  keyBoundAt?: number;
+  bond?: import("./agent-standing").AgentBond | null;
+  retiredAt?: number;
   creditScore?: number;
   /** Trust score (0-100) */
   trustScore?: number;
@@ -543,6 +550,10 @@ export async function unassignAgentFromProject(projectId: string, agentId: strin
 export async function createAgent(data: Omit<Agent, "id">): Promise<string> {
   const ref = await addDoc(collection(db, "agents"), {
     ...data,
+    // Anti-sybil: every new identity starts provisional (lib/agent-standing.ts);
+    // firestore.rules rejects a browser-created agent without these.
+    provisional: true,
+    provisionalSince: serverTimestamp(),
     createdAt: serverTimestamp(),
   });
   return ref.id;

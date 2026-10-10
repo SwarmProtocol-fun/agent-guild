@@ -4,30 +4,44 @@
  * runAiTraderTick), so a backtest is a prediction of what the bot would
  * have done — not an idealized version of the strategy:
  *
- *   - DCA buys sizeUsd every intervalMs.
+ *   - DCA buys sizeUsd every intervalMs; smart DCA (./smart-dca.ts) sizes
+ *     each order up the further price is under its average entry, and can
+ *     take profit on the whole stack.
  *   - Grid buys sizeUsd the first time price reaches each level (the live
- *     grid is buy-only; it never sells a level back).
+ *     grid never trades a level back).
  *   - Sniper (price trigger) buys once when the close crosses the target.
+ *   - DCA, grid and sniper can run short instead (direction "short"): they
+ *     sell where they would have bought.
+ *   - Breakout (./breakout.ts) opens on a squeeze breakout and closes on the
+ *     rules' exit.
  *   - AI asks `decide` at every decision bar and opens / closes / flips a
  *     fixed sizeUsd position.
  *
  * Signals come from a bar's close and fill at the next bar's open, plus
- * slippage and a taker fee. Equity is marked at every close. Pure and
+ * slippage and a taker fee. Stop loss and take profit are checked inside
+ * each bar against its high and low, stop first (the cautious reading when
+ * one bar touches both), and fill at the trigger — or at the open when the
+ * bar gaps through it. Equity is marked at every close. Pure and
  * environment-free — it runs in the browser (the panel's Backtest tab) and
  * in tests; the AI's `decide` is the only thing that reaches the network.
  */
 import { decisionToAction, type AiDecision, type AiPosition } from "./ai-trader-core";
+import { breakoutHistory, decideBreakout, type BreakoutParams } from "./breakout";
 import { maxDrawdownPct, sharpe, type Candle } from "./indicators";
+import { smartDcaSize, smartDcaTakeProfit, type SmartDcaParams } from "./smart-dca";
 
 /** Hyperliquid's base-tier perp taker fee. */
 export const TAKER_FEE = 0.00045;
 export const DEFAULT_SLIPPAGE = 0.0005;
 
+export type Direction = "long" | "short";
+
 export type BacktestStrategy =
   | { type: "hold" }
-  | { type: "dca"; intervalMs: number }
-  | { type: "grid"; lowerPrice: number; upperPrice: number; levels: number }
-  | { type: "sniper"; mode: "price-above" | "price-below"; targetPrice: number }
+  | { type: "dca"; intervalMs: number; direction?: Direction; smart?: SmartDcaParams | null }
+  | { type: "grid"; lowerPrice: number; upperPrice: number; levels: number; direction?: Direction }
+  | { type: "sniper"; mode: "price-above" | "price-below"; targetPrice: number; direction?: Direction }
+  | { type: "breakout"; params: BreakoutParams }
   | {
       type: "ai";
       /** Decide at every Nth bar (1 = every bar). */
@@ -46,6 +60,10 @@ export interface BacktestConfig {
   startIndex?: number;
   feeRate?: number;
   slippage?: number;
+  /** Stop loss on the open position, a fixed % through its average entry. A breakout strategy defaults to its own. */
+  stopLossPct?: number;
+  /** Take profit on the open position, a fixed % through its average entry. A breakout strategy defaults to its own. */
+  takeProfitPct?: number;
   /** Stop for good (closing any position) once equity falls this far below the start, like a live AI bot. */
   maxDrawdownStopPct?: number;
   /** Called after each bar — lets a UI show progress through a slow (AI) run. */
@@ -155,12 +173,28 @@ export async function runBacktest(cfg: BacktestConfig): Promise<BacktestResult> 
     if (size !== 0) fill(t, size < 0, Math.abs(size) * px * 1.01, px, reason, true);
   }
 
+  const stopLossPct = cfg.stopLossPct ?? (strategy.type === "breakout" ? strategy.params.stopLossPct : undefined);
+  const takeProfitPct = cfg.takeProfitPct ?? (strategy.type === "breakout" ? strategy.params.takeProfitPct : undefined);
+  /** Fires a stop loss or take profit the bar's range reached. Exits at the trigger, or the open if the bar gapped through it. */
+  function checkTriggers(bar: Candle) {
+    if (size === 0 || (!stopLossPct && !takeProfitPct)) return;
+    const long = size > 0;
+    const sl = stopLossPct ? entry * (long ? 1 - stopLossPct / 100 : 1 + stopLossPct / 100) : null;
+    const tp = takeProfitPct ? entry * (long ? 1 + takeProfitPct / 100 : 1 - takeProfitPct / 100) : null;
+    if (sl != null && (long ? bar.l <= sl : bar.h >= sl)) {
+      closeAll(bar.t, long ? Math.min(bar.o, sl) : Math.max(bar.o, sl), `stop loss ${stopLossPct}%`);
+    } else if (tp != null && (long ? bar.h >= tp : bar.l <= tp)) {
+      closeAll(bar.t, long ? Math.max(bar.o, tp) : Math.min(bar.o, tp), `take profit ${takeProfitPct}%`);
+    }
+  }
+
   // Strategy state, mirroring the live tick.
   let lastDcaAt = -Infinity;
   const visitedLevels = new Set<number>();
   let sniperFired = false;
   let holdOpened = false;
-  let pending: { isBuy?: boolean; action?: string; reason: string } | null = null;
+  let pending: { isBuy?: boolean; action?: string; reason: string; sizeUsd?: number } | null = null;
+  const sideBuy = (d?: Direction) => d !== "short";
 
   for (let i = start; i < candles.length; i++) {
     if (cfg.shouldStop?.()) {
@@ -182,9 +216,12 @@ export async function runBacktest(cfg: BacktestConfig): Promise<BacktestResult> 
           fill(bar.t, p.action === "open-long", sizeUsd, bar.o, p.reason);
         }
       } else if (p.isBuy != null) {
-        fill(bar.t, p.isBuy, sizeUsd, bar.o, p.reason);
+        fill(bar.t, p.isBuy, p.sizeUsd ?? sizeUsd, bar.o, p.reason);
       }
     }
+
+    // 1b. Stop loss / take profit inside the bar.
+    checkTriggers(bar);
 
     // 2. Mark to the close; enforce the drawdown stop.
     const value = equityAt(bar.c);
@@ -205,10 +242,24 @@ export async function runBacktest(cfg: BacktestConfig): Promise<BacktestResult> 
         pending = { isBuy: true, reason: "buy & hold" };
       }
     } else if (strategy.type === "dca") {
-      if (bar.t - lastDcaAt >= strategy.intervalMs) {
+      const isBuy = sideBuy(strategy.direction);
+      const smart = strategy.smart;
+      const held = size !== 0 && (size > 0) === isBuy ? entry : null;
+      if (smart && held != null && smartDcaTakeProfit(smart, bar.c, held, isBuy)) {
+        pending = { action: "close", reason: `smart DCA take profit ${smart.takeProfitPct}%` };
+      } else if (bar.t - lastDcaAt >= strategy.intervalMs) {
         lastDcaAt = bar.t;
-        pending = { isBuy: true, reason: "DCA buy" };
+        if (smart) {
+          const next = smartDcaSize(sizeUsd, smart, bar.c, held, isBuy);
+          pending = { isBuy, sizeUsd: next.sizeUsd, reason: `smart DCA ${isBuy ? "buy" : "sell"} step ${next.step}` };
+        } else {
+          pending = { isBuy, reason: `DCA ${isBuy ? "buy" : "sell"}` };
+        }
       }
+    } else if (strategy.type === "breakout") {
+      const window = candles.slice(Math.max(0, i + 1 - breakoutHistory(strategy.params)), i + 1);
+      const d = decideBreakout(strategy.params, window, size === 0 ? null : { isLong: size > 0 });
+      if (d.action !== "hold") pending = { action: d.action, reason: `breakout: ${d.action}` };
     } else if (strategy.type === "grid") {
       const { lowerPrice, upperPrice, levels } = strategy;
       if (bar.c >= lowerPrice && bar.c <= upperPrice) {
@@ -216,14 +267,14 @@ export async function runBacktest(cfg: BacktestConfig): Promise<BacktestResult> 
         const level = Math.round((bar.c - lowerPrice) / step);
         if (!visitedLevels.has(level)) {
           visitedLevels.add(level);
-          pending = { isBuy: true, reason: `grid level ${level}` };
+          pending = { isBuy: sideBuy(strategy.direction), reason: `grid level ${level}` };
         }
       }
     } else if (strategy.type === "sniper") {
       const hit = strategy.mode === "price-above" ? bar.c >= strategy.targetPrice : bar.c <= strategy.targetPrice;
       if (!sniperFired && hit) {
         sniperFired = true;
-        pending = { isBuy: true, reason: `sniper ${strategy.mode} ${strategy.targetPrice}` };
+        pending = { isBuy: sideBuy(strategy.direction), reason: `sniper ${strategy.mode} ${strategy.targetPrice}` };
       }
     } else if (strategy.type === "ai" && (i - start) % Math.max(1, strategy.everyBars) === 0) {
       const pos = position(bar.c);

@@ -135,7 +135,7 @@ export default function AdminLendingPage() {
                     <Card>
                         <CardHeader>
                             <CardTitle className="text-base">Loans Awaiting Disbursement ({disbursements.length})</CardTitle>
-                            <CardDescription>Send the principal from the treasury to each borrower, then confirm with the signature.</CardDescription>
+                            <CardDescription>Loans under the automatic payout limit are paid from the payout wallet by themselves. For the rest, send the principal from the treasury to each borrower, then confirm with the signature.</CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-2">
                             {disbursements.length === 0 ? (
@@ -146,6 +146,14 @@ export default function AdminLendingPage() {
                                         <div>
                                             <div className="font-mono">{loan.borrowerWalletAddress}</div>
                                             <div className="text-muted-foreground">{formatAssetAmount(assetOf(loan), loan.principal)} &middot; {loan.kind} &middot; agent {loan.borrowerAgentId}</div>
+                                            {loan.autoDisburseSend && (
+                                                <div className={loan.autoDisburseSend.status === "failed" || loan.autoDisburseSend.status === "returned" ? "text-red-500" : "text-amber-500"}>
+                                                    Automatic payout {loan.autoDisburseSend.status}
+                                                    {loan.autoDisburseSend.txSig && <> &middot; <span className="font-mono">{loan.autoDisburseSend.txSig.slice(0, 12)}…</span></>}
+                                                    {loan.autoDisburseSend.error && <> &middot; {loan.autoDisburseSend.error}</>}
+                                                    {(loan.autoDisburseSend.status === "sending" || loan.autoDisburseSend.status === "sent") && " — don't send from the treasury"}
+                                                </div>
+                                            )}
                                         </div>
                                         <div className="flex gap-1.5">
                                             <Button
@@ -333,7 +341,8 @@ export default function AdminLendingPage() {
                                 const res = await fetch(`/api/v1/lending/loans/${payoutLoan.id}/disburse`, {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ txSig }),
+                                    // A stuck automatic payout is confirmed against the payout wallet that sent it.
+                                    body: JSON.stringify({ txSig, from: payoutLoan.autoDisburseSend?.txSig === txSig.trim() ? "payout" : "treasury" }),
                                 });
                                 if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed to confirm");
                                 setPayoutLoan(null);

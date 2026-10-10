@@ -135,6 +135,9 @@ export async function confirmPayout(payoutId: string, txSig: string): Promise<Le
         if (payout.kind === "overpayment_refund" && payout.repaymentId) {
             txn.update(adminDb().collection(REPAYMENTS).doc(payout.repaymentId), { refundStatus: "refunded" });
         }
+        if (payout.kind === "bond_refund" && payout.agentId) {
+            txn.update(adminDb().collection("agents").doc(payout.agentId), { "bond.status": "refunded" });
+        }
 
         return { ...payout, status: "paid" as const, txSig, paidAt };
     });

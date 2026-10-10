@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { buildAgentPrompt, MAX_PROMPT_CHARS, TASK_PRESETS } from "./agent-prompt";
+import type { FleetBotType } from "./fleet";
 
 // ── Types (mirrors of the server's JSON) ─────────────────────────────────────
 
@@ -49,7 +50,7 @@ interface Trade {
   notional: number; fee: number; realizedPnl: number; status: string; createdAt: string | null; strategyId: string | null;
 }
 interface Bot {
-  id: string; type: "ai" | "mid-price" | "streak-fade" | "price-trigger"; enabled: boolean; sizeUsd: number;
+  id: string; type: "ai" | "mid-price" | "streak-fade" | "price-trigger" | FleetBotType; enabled: boolean; sizeUsd: number;
   market: { conditionId: string; question: string; outcomes: { name: string }[] } | null; params: Record<string, unknown>;
   lastReason: string | null; lastEvalAt: number | null; waitingOnAgent: boolean; lastRunAt: string | null;
   maxLossUsd: number | null; stats: Record<"paper" | "live", BotStats>;
@@ -289,6 +290,13 @@ const BOT_LABELS: Record<Bot["type"], string> = {
   "mid-price": "BTC 5m · Mid-price continuation",
   "streak-fade": "BTC 5m · Streak fader",
   "price-trigger": "Price trigger",
+  "corridor": "BTC 15m+5m · Corridor collector",
+  "flip-harvest": "BTC 5m · Flip harvester",
+  "box-builder": "BTC 5m · Box builder (maker)",
+  "spread-maker": "BTC 5m · Spread-harvest maker",
+  "liq-cascade": "BTC 5m · Liquidation cascade chaser",
+  "small-liq": "BTC 5m · Small-liquidation continuation",
+  "near-liq": "BTC 5m · Near-liquidation trigger",
 };
 
 const BOT_HELP: Record<Bot["type"], string> = {
@@ -296,6 +304,13 @@ const BOT_HELP: Record<Bot["type"], string> = {
   "mid-price": "Once BTC is ≥0.05% through the window's strike, buys the leading side only while its ask is 40–55¢, in the first 3 minutes. Never chases above 55¢. Holds to resolution.",
   "streak-fade": "After 4+ same-direction 5-minute windows that moved more than 3× the hourly ATR, buys the reversal side at ≤52¢ in the window's first minute. Thin edge by design.",
   "price-trigger": "Buys the chosen outcome when its ask crosses your price, then optionally sells at a take-profit or stop-loss.",
+  "corridor": "At minute 10 of each BTC 15-minute window, buys the 15m leader plus the opposite side of the final 5m window (same close). One leg always wins; both win when the close lands in between. Only when the lead is 5–30 bps and the pair costs under fair value − 8¢. USD is per pair.",
+  "flip-harvest": "In the last minute of a coin-flip window, buys the trailing side at 22–45¢, then rests a sell at 62¢: all of it in high volatility, half in low. Dogs touch the lead far more often than they win. Never built in Moon Dev's repo; this is the experiment.",
+  "box-builder": "Bids on both Up and Down early in a wide-book window, capped at 94¢ together, so a filled pair redeems for $1 either way. Chases the second leg only to a locked box; a stranded leg is sold at T-90 unless it's clearly winning. Paper only: resting orders fill from Polymarket's real trade tape.",
+  "spread-maker": "When a coin-flip window's book goes wide (asks sum ≥ $1.10), rests one underdog bid at 40–48¢ in the last 2 minutes and pulls it if the flip breaks or the spread closes. Paper only. Whether these fills are toxic is the open question.",
+  "liq-cascade": "≥ $10k of one-sided BTC liquidations (OKX) in 2 minutes, BTC already ≥ 0.15% that way on 3× volume, and the cascade side still 50–85¢ in the window's first 3 minutes: buys it and holds. His one signal that beat a coin flip (58.8%).",
+  "small-liq": "$25k–$500k liquidation bursts, continuation side at 30–45¢ with 1–4 minutes left. 1.5× size at ≥ $100k; skips ≥ $500k (the cascade bot's trade). Small sample (n=41) behind it.",
+  "near-liq": "Arms when a ≥ $100k Hyperliquid BTC position is within 0.5% of liquidation; fires only after a ≥ $5k liquidation on that same side in the last 2 minutes. Watches the largest Hyperliquid accounts only (list refreshed every 6h). No backtest exists.",
 };
 
 type Tab = "positions" | "trades" | "bots" | "orders" | "agent" | "settings";
@@ -692,7 +707,7 @@ function PolymarketPanel({ api }: PanelProps) {
           ))}
         </div>
         <div className="p-3">
-          {tab === "positions" && <PositionsTab account={account} onSelect={(conditionId) => call<{ market: Market }>(`market/${conditionId}`).then(({ market }) => setMarket(market)).catch(() => {})} />}
+          {tab === "positions" && agentId && <PositionsTab account={account} agentId={agentId} call={call} postJson={postJson} onChange={() => { loadAccount(); setTradesKey((k) => k + 1); }} onSelect={(conditionId) => call<{ market: Market }>(`market/${conditionId}`).then(({ market }) => setMarket(market)).catch(() => {})} />}
           {tab === "trades" && agentId && <TradesTab key={`${agentId}-${tradesKey}`} agentId={agentId} call={call} />}
           {tab === "bots" && agentId && <BotsTab key={agentId} agentId={agentId} mode={mode} market={market} outcomeIndex={outcomeIndex} call={call} postJson={postJson} maxOrderUsd={account?.account.risk.maxOrderUsd ?? 25} />}
           {tab === "orders" && agentId && <OrdersTab key={agentId} agentId={agentId} call={call} />}
@@ -711,7 +726,89 @@ function PolymarketPanel({ api }: PanelProps) {
 type Call = <T>(path: string, init?: RequestInit) => Promise<T>;
 type PostJson = <T>(path: string, body: unknown) => Promise<T>;
 
-function PositionsTab({ account, onSelect }: { account: AccountView | null; onSelect: (conditionId: string) => void }) {
+interface RestingOrder {
+  id: string; question: string; outcome: string; side: "buy" | "sell"; price: number; shares: number; filledShares: number;
+  status: "open" | "filled" | "cancelled"; expiresAt: number; cancelReason: string | null; tag: string | null;
+}
+
+/** Resting paper orders from maker bots and flip exits (filled from the real trade tape each minute). */
+function RestingOrders({ agentId, call }: { agentId: string; call: Call }) {
+  const [orders, setOrders] = useState<RestingOrder[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => call<{ orders: RestingOrder[] }>(`paper-orders/${encodeURIComponent(agentId)}`)
+      .then(({ orders }) => { if (live) { setOrders(orders); setError(null); } })
+      .catch((e: Error) => { if (live) setError(e.message); });
+    load();
+    const t = setInterval(load, 15_000);
+    return () => { live = false; clearInterval(t); };
+  }, [agentId, call]);
+  if (error) return <div className="mt-3"><Note tone="danger">Resting orders: {error}</Note></div>;
+  if (!orders?.length) return null;
+  return (
+    <div className="mt-4">
+      <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide">Resting paper orders</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className={`text-left ${mutedClass}`}>
+            <tr><th className="pb-1 font-medium">Market</th><th className="pb-1 font-medium">Side</th><th className="pb-1 text-right font-medium">Price</th><th className="pb-1 text-right font-medium">Filled</th><th className="pb-1 pl-4 font-medium">Status</th></tr>
+          </thead>
+          <tbody className={monoClass}>
+            {orders.map((o) => (
+              <tr key={o.id} className="border-t border-[hsl(var(--border))]">
+                <td className="max-w-[300px] truncate py-1.5 font-sans">{o.question}</td>
+                <td className="font-sans">{o.side === "buy" ? "Bid" : "Ask"} {o.outcome}</td>
+                <td className="text-right">{cents(o.price)}</td>
+                <td className="text-right">{o.filledShares.toFixed(2)} / {o.shares.toFixed(2)}</td>
+                <td className="pl-4 font-sans">
+                  <Badge tone={o.status === "open" ? "warning" : o.status === "filled" ? "success" : "neutral"}>{o.status === "open" ? "Resting" : o.status === "filled" ? "Filled" : "Cancelled"}</Badge>
+                  {o.status === "cancelled" && o.cancelReason && <span className={`ml-1 ${mutedClass}`}>{o.cancelReason}</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className={`mt-1 text-[11px] ${mutedClass}`}>A resting bid fills only when Polymarket&apos;s real tape trades below it (or the book crosses it); trades exactly at its price are assumed to be ahead in the queue.</p>
+    </div>
+  );
+}
+
+/** Paper only: settle resolved markets now instead of waiting for the next sweep. */
+function CollectWinnings({ agentId, cash, postJson, onDone }: { agentId: string; cash: number | null; postJson: PostJson; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ tone: "success" | "neutral" | "danger"; text: string } | null>(null);
+  const collect = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await postJson<{ settled: number; paperCash: number }>("paper/claim", { agentId });
+      const paid = cash == null ? null : r.paperCash - cash;
+      setMsg(r.settled > 0
+        ? { tone: "success", text: `Settled ${r.settled} position${r.settled === 1 ? "" : "s"}${paid != null && paid > 0 ? ` · ${usd(paid)} paid to paper cash` : ""}.` }
+        : { tone: "neutral", text: "Nothing to collect yet: none of these markets has resolved." });
+      onDone();
+    } catch (err) {
+      setMsg({ tone: "danger", text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <button type="button" className={buttonClass("secondary", "py-0.5 text-xs")} disabled={busy} onClick={collect}>
+        {busy ? "Checking…" : "Collect winnings"}
+      </button>
+      <span className={`text-[11px] ${mutedClass}`}>Winners pay $1 a share once Polymarket resolves the market. This also runs on its own every minute.</span>
+      {msg && <Note tone={msg.tone}>{msg.text}</Note>}
+    </div>
+  );
+}
+
+function PositionsTab({ account, agentId, call, postJson, onSelect, onChange }: {
+  account: AccountView | null; agentId: string; call: Call; postJson: PostJson; onSelect: (conditionId: string) => void; onChange: () => void;
+}) {
   if (!account) return <div className={`text-xs ${mutedClass}`}>Loading…</div>;
   if (!account.positions.length) return <div className={`text-xs ${mutedClass}`}>No open positions.</div>;
   return (
@@ -737,7 +834,8 @@ function PositionsTab({ account, onSelect }: { account: AccountView | null; onSe
           ))}
         </tbody>
       </table>
-      {account.account.mode === "paper" && <p className={`mt-2 text-[11px] ${mutedClass}`}>Paper positions pay out automatically when their market resolves.</p>}
+      {account.account.mode === "paper" && <CollectWinnings agentId={agentId} cash={account.cash} postJson={postJson} onDone={onChange} />}
+      {account.account.mode === "paper" && <RestingOrders agentId={agentId} call={call} />}
       {account.account.mode === "live" && <p className={`mt-2 text-[11px] ${mutedClass}`}>Live winnings are redeemed on-chain. Redeem redeemable positions on polymarket.com with the agent&apos;s wallet.</p>}
     </div>
   );

@@ -11,11 +11,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { GenerationScore, HarnessGeneration, LineageAnalysis } from "@/lib/harness";
+import type { HarnessBenefit } from "@/lib/harness-benefits";
 
 interface HarnessData {
   generations: HarnessGeneration[];
   analysis: LineageAnalysis;
   isOwner: boolean;
+  benefits?: HarnessBenefit[];
 }
 
 const STATUS_STYLE: Record<HarnessGeneration["status"], string> = {
@@ -92,6 +94,7 @@ export function AgentHarnessPanel({ agentId }: { agentId: string }) {
 
   return (
     <div className="space-y-4">
+      <BenefitsCard benefits={data.benefits ?? []} />
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">Self-improving harness</CardTitle>
@@ -212,6 +215,40 @@ export function AgentHarnessPanel({ agentId }: { agentId: string }) {
         </Card>
       ))}
     </div>
+  );
+}
+
+function BenefitsCard({ benefits }: { benefits: HarnessBenefit[] }) {
+  if (benefits.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Why this agent stays connected</CardTitle>
+        <CardDescription>
+          These exist because the agent is on the harness. A locked row is waiting on a wallet, a mod, a binding, or a
+          higher credit tier.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {benefits.map((b) => (
+          <div key={b.id} className="text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant="outline"
+                className={b.state === "live" ? "text-emerald-600 border-emerald-300" : "text-amber-600 border-amber-300"}
+              >
+                {b.state}
+              </Badge>
+              <span className="font-medium">{b.title}</span>
+            </div>
+            <p className="text-muted-foreground mt-1 leading-relaxed">{b.detail}</p>
+            {b.command && (
+              <pre className="bg-muted rounded p-2 mt-1 overflow-x-auto text-xs">{b.command}</pre>
+            )}
+          </div>
+        ))}
+      </CardContent>
+    </Card>
   );
 }
 

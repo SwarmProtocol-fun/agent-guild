@@ -20,7 +20,7 @@
  * Verification needs finality — seconds on Solana, ~15 minutes on Ethereum.
  */
 
-import { Connection, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
+import { Connection, PublicKey, SystemProgram, Transaction, type Keypair } from "@solana/web3.js";
 import {
     createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
@@ -47,7 +47,8 @@ const SOL_FEE_RESERVE = 0.003;
 const ETH_GAS_RESERVE = 0.0005;
 
 /** The loan-document field each kind of send is claimed on. */
-export type AgentSendField = "agentCollateralSend" | "agentTopUpSend" | "agentRepaySend";
+/** autoDisburseSend is the platform payout wallet paying out a pool loan (lib/lending/auto-disburse.ts), not the agent's. */
+export type AgentSendField = "agentCollateralSend" | "agentTopUpSend" | "agentRepaySend" | "autoDisburseSend";
 
 export class AgentSendError extends Error {
     constructor(message: string, readonly status = 400) {
@@ -85,7 +86,7 @@ function fmt(n: number, asset: LendingAsset): string {
 }
 
 /** The wallet's balance of `asset`, plus SOL for fees on Solana. */
-async function readBalances(address: string, asset: LendingAsset): Promise<{ balance: number | null; feeBalance: number | null }> {
+export async function readBalances(address: string, asset: LendingAsset): Promise<{ balance: number | null; feeBalance: number | null }> {
     try {
         if (asset === "eth") {
             const client = createPublicClient({ chain: ethLendingNetwork() === "mainnet" ? mainnet : sepolia, transport: http(ethRpcUrl()) });
@@ -133,11 +134,15 @@ export async function agentWalletOptions(agentId: string, asset: LendingAsset, a
 
 // ── Broadcast ───────────────────────────────────────────────────────────────
 
-interface Broadcast { sig: string; wait: () => Promise<boolean> }
+export interface Broadcast { sig: string; wait: () => Promise<boolean> }
 
 async function broadcastSolana(wallet: AgentWallet, orgId: string, agentId: string, asset: "usdc" | "sol", amount: number, recipient: string): Promise<Broadcast> {
+    return broadcastSolanaFrom(await getAgentWalletKeypair(wallet.id, orgId, agentId), asset, amount, recipient);
+}
+
+/** Simulate, then broadcast a USDC or SOL transfer signed by `keypair`. */
+export async function broadcastSolanaFrom(keypair: Keypair, asset: "usdc" | "sol", amount: number, recipient: string): Promise<Broadcast> {
     const connection = new Connection(solanaRpcUrl(), "confirmed");
-    const keypair = await getAgentWalletKeypair(wallet.id, orgId, agentId);
     const to = new PublicKey(recipient);
     const units = toBaseUnits(asset, amount);
     const tx = new Transaction();
@@ -170,8 +175,13 @@ async function broadcastSolana(wallet: AgentWallet, orgId: string, agentId: stri
 }
 
 async function broadcastEth(wallet: AgentWallet, orgId: string, agentId: string, amount: number, recipient: string): Promise<Broadcast> {
+    return broadcastEthFrom(await getAgentWalletEvmPrivateKey(wallet.id, orgId, agentId), amount, recipient);
+}
+
+/** Simulate, then broadcast an ETH transfer signed by `privateKey`. */
+export async function broadcastEthFrom(privateKey: `0x${string}`, amount: number, recipient: string): Promise<Broadcast> {
     const chain = ethLendingNetwork() === "mainnet" ? mainnet : sepolia;
-    const account = privateKeyToAccount(await getAgentWalletEvmPrivateKey(wallet.id, orgId, agentId));
+    const account = privateKeyToAccount(privateKey);
     const publicClient = createPublicClient({ chain, transport: http(ethRpcUrl()) });
     const walletClient = createWalletClient({ chain, account, transport: http(ethRpcUrl()) });
     const value = toBaseUnits("eth", amount);

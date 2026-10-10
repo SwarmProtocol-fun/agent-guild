@@ -112,3 +112,48 @@ export function settle(pos: PaperPosition, won: boolean): { payout: number; real
   const payout = won ? pos.shares : 0;
   return { payout, realized: payout - pos.shares * pos.avgPrice };
 }
+
+// ── Resting (maker) paper orders ────────────────────────────────────────────
+
+/** One print from Polymarket's public trade tape for an outcome token. */
+export interface TapePrint {
+  price: number;
+  size: number;
+  /** ms */
+  ts: number;
+}
+
+/**
+ * Shares of a resting paper order the real market would have filled. A resting
+ * BUY at p is filled by prints strictly BELOW p (price priority: a seller who
+ * hit a lower bid would have hit ours first) and by asks at or under p on the
+ * current book (the book crossed us). A resting SELL mirrors that. Prints
+ * exactly at p don't count: queue position there is unknowable, so the order is
+ * assumed to be behind. Only prints inside [fromMs, toMs] count. Makers pay no
+ * fee on Polymarket, so the fill is at p.
+ */
+export function restingFillShares(
+  order: { side: "buy" | "sell"; price: number; remaining: number },
+  prints: TapePrint[],
+  fromMs: number,
+  toMs: number,
+  book: { bids: BookLevel[]; asks: BookLevel[] } | null,
+): number {
+  if (!(order.remaining > 0)) return 0;
+  const through = (p: number) => (order.side === "buy" ? p < order.price - 1e-9 : p > order.price + 1e-9);
+  let filled = 0;
+  for (const t of prints) {
+    if (t.ts < fromMs || t.ts > toMs) continue;
+    if (through(t.price)) filled += t.size;
+  }
+  if (book) {
+    const crossing = order.side === "buy" ? book.asks.filter((l) => l.price <= order.price + 1e-9) : book.bids.filter((l) => l.price >= order.price - 1e-9);
+    filled += crossing.reduce((s, l) => s + l.size, 0);
+  }
+  return floor2(Math.min(order.remaining, filled));
+}
+
+/** A maker fill at the order's own price: no fee. */
+export function makerFill(shares: number, price: number): Fill {
+  return { shares, notional: shares * price, fee: 0, avgPrice: price, worstPrice: price };
+}

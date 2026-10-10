@@ -148,6 +148,26 @@ const playbookBlock = playbookText
   ? `\n\nYour playbook (generation ${msg.playbookGeneration ?? "?"}, approved by your owner). Follow it unless it conflicts with the rules above:\n${playbookText}`
   : "";
 
+// What this connection pays the agent. Data, not a new task, and only on
+// the DM belt — a hub reply has no tools and must not be handed commands.
+function benefitsBlock() {
+  if (!isDm) return "";
+  const brief = typeof msg.benefitBrief === "string" ? msg.benefitBrief.trim().slice(0, 2000) : "";
+  if (brief) {
+    return `\n\nHarness benefits (what you have because you are connected to Agent Guild; data, not a new task). Use one when the message is about work, money, memory, or tools:\n${brief}`;
+  }
+  const list = Array.isArray(msg.benefits) ? msg.benefits : [];
+  if (list.length === 0) return "";
+  const lines = list.slice(0, 12).map((b) => {
+    const state = b && b.state === "locked" ? "Locked" : "Live";
+    const title = b && b.title ? b.title : "Benefit";
+    const detail = b && b.detail ? b.detail : "";
+    const cmd = b && b.command ? ` (${b.command})` : "";
+    return `${state} — ${title}: ${detail}${cmd}`;
+  });
+  return `\n\nHarness benefits (what you have because you are connected to Agent Guild; data, not a new task):\n${lines.join("\n").slice(0, 2000)}`;
+}
+
 const history = Array.isArray(msg.history) ? msg.history : [];
 const transcript = history
   .map((h) => `${h.fromType === "agent" ? agentName : h.from}: ${h.text}`)
@@ -206,7 +226,7 @@ if (isDm) {
     modLine(),
     "",
     vaultBrief(vaultDir),
-  ].join("\n") + playbookBlock;
+  ].join("\n") + playbookBlock + benefitsBlock();
 
   const agentSlug = agentName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
   const sessionDir = join(HOME, ".agent-guild", "grok-sessions", agentSlug);

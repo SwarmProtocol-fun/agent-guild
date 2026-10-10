@@ -8,13 +8,15 @@
  *   polymarketBots            — bot definitions and their running state
  *   polymarketBots/{id}/log   — what each bot did and why (entries, exits, skips, resolutions, errors)
  *   polymarketAiRequests      — AI Predictor questions waiting for the agent's own model
+ *   polymarketPaperOrders     — resting paper limit orders (maker bots), filled from the real trade tape
+ *   polymarketFeeds           — shared feed caches (whale universe) and the tick lock
  *
  * Server-only (Firebase Admin SDK). Only import from the mod's server.ts.
  */
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { applyBuy, applySell, settle, type Fill } from "../../../mods/polymarket-trading/paper";
+import { applyBuy, applySell, makerFill, settle, type Fill } from "../../../mods/polymarket-trading/paper";
 import type { BotType } from "../../../mods/polymarket-trading/strategies";
 import type { PredictorDecision } from "../../../mods/polymarket-trading/ai-predictor-core";
 
@@ -24,6 +26,8 @@ const TRADES = "polymarketTrades";
 const BOTS = "polymarketBots";
 const BOT_LOG = "log";
 const AI_REQUESTS = "polymarketAiRequests";
+const PAPER_ORDERS = "polymarketPaperOrders";
+const FEEDS = "polymarketFeeds";
 
 function db() {
   return adminDb();
@@ -364,6 +368,8 @@ export interface BotState {
   openRequestId?: string | null;
   startEquity?: number | null;
   eliminated?: boolean;
+  /** Fleet bots: per-window working state (box legs, resting quote id…). Reset each window. */
+  fleet?: Record<string, unknown> | null;
 }
 
 /** A bot's results in one mode. realizedPnl includes buy fees and paper resolutions. */
@@ -547,4 +553,150 @@ export async function answerAiRequest(id: string, decision: PredictorDecision, r
 
 export async function expireAiRequest(id: string): Promise<void> {
   await db().collection(AI_REQUESTS).doc(id).update({ status: "expired" });
+}
+
+// ── Resting paper orders ────────────────────────────────────────────────────
+
+export interface PaperOrder extends MarketRef {
+  id: string;
+  agentId: string;
+  orgId: string;
+  botId: string | null;
+  side: "buy" | "sell";
+  price: number;
+  shares: number;
+  filledShares: number;
+  status: "open" | "filled" | "cancelled";
+  /** Tape prints up to this time (ms) have already been matched. */
+  checkedTo: number;
+  /** The order is cancelled once the clock passes this (ms). */
+  expiresAt: number;
+  /** Free-form label the bot uses to find its own legs ("up", "down", "exit"…). */
+  tag: string | null;
+  cancelReason: string | null;
+}
+
+function docToOrder(d: FirebaseFirestore.DocumentSnapshot): PaperOrder {
+  const x = d.data() ?? {};
+  return {
+    id: d.id, agentId: x.agentId, orgId: x.orgId, botId: x.botId ?? null,
+    conditionId: x.conditionId, question: x.question, slug: x.slug, endDate: x.endDate ?? null,
+    tokenId: x.tokenId, outcomeIndex: Number(x.outcomeIndex ?? 0), outcome: x.outcome,
+    side: x.side === "sell" ? "sell" : "buy", price: Number(x.price), shares: Number(x.shares), filledShares: Number(x.filledShares ?? 0),
+    status: x.status === "filled" || x.status === "cancelled" ? x.status : "open",
+    checkedTo: Number(x.checkedTo ?? 0), expiresAt: Number(x.expiresAt ?? 0), tag: x.tag ?? null, cancelReason: x.cancelReason ?? null,
+  };
+}
+
+export async function createPaperOrder(data: Omit<PaperOrder, "id" | "filledShares" | "status" | "cancelReason">): Promise<PaperOrder> {
+  const ref = await db().collection(PAPER_ORDERS).add({
+    ...data, filledShares: 0, status: "open", cancelReason: null, createdAt: FieldValue.serverTimestamp(),
+  });
+  return { ...data, id: ref.id, filledShares: 0, status: "open", cancelReason: null };
+}
+
+/** Every open resting order (one equality filter: no composite index needed). */
+export async function listOpenPaperOrders(): Promise<PaperOrder[]> {
+  const snap = await db().collection(PAPER_ORDERS).where("status", "==", "open").get();
+  return snap.docs.map(docToOrder);
+}
+
+export async function listAgentPaperOrders(agentId: string, limit = 50): Promise<PaperOrder[]> {
+  const snap = await db().collection(PAPER_ORDERS).where("agentId", "==", agentId).get();
+  return snap.docs.map(docToOrder).sort((a, b) => b.expiresAt - a.expiresAt).slice(0, limit);
+}
+
+export async function updatePaperOrder(id: string, patch: Partial<Pick<PaperOrder, "price" | "checkedTo" | "expiresAt" | "status" | "cancelReason">>): Promise<void> {
+  await db().collection(PAPER_ORDERS).doc(id).update(patch);
+}
+
+/**
+ * Fills part of a resting order: the order, the cash and the position move in
+ * one transaction, so a crash can't double-fill. Clamps to what's left on the
+ * order, the cash on hand (buys) and the shares held (sells); returns what
+ * actually filled (0 when nothing could) and the realized PnL.
+ */
+export async function applyRestingFill(orderId: string, shares: number, checkedTo: number): Promise<{ shares: number; realized: number; order: PaperOrder } | null> {
+  const orderRef = db().collection(PAPER_ORDERS).doc(orderId);
+  return db().runTransaction(async (tx) => {
+    const orderSnap = await tx.get(orderRef);
+    if (!orderSnap.exists) return null;
+    const order = docToOrder(orderSnap);
+    if (order.status !== "open") return null;
+    const accountRef = db().collection(ACCOUNTS).doc(order.agentId);
+    const posRef = db().collection(PAPER_POSITIONS).doc(positionId(order.agentId, order.tokenId));
+    const [accSnap, posSnap] = await Promise.all([tx.get(accountRef), tx.get(posRef)]);
+    if (!accSnap.exists) return null;
+    const cash = Number(accSnap.data()!.paperCash ?? 0);
+    const prev = posSnap.exists ? docToPosition(posSnap) : null;
+    const prevPos = prev?.open ? { shares: prev.shares, avgPrice: prev.avgPrice, realizedPnl: prev.realizedPnl } : null;
+    const ref: MarketRef = {
+      conditionId: order.conditionId, question: order.question, slug: order.slug, endDate: order.endDate,
+      tokenId: order.tokenId, outcomeIndex: order.outcomeIndex, outcome: order.outcome,
+    };
+
+    let take = Math.min(shares, order.shares - order.filledShares);
+    if (order.side === "buy") take = Math.min(take, cash / order.price);
+    else take = Math.min(take, prevPos?.shares ?? 0);
+    take = Math.floor(take * 100) / 100;
+
+    const filledShares = order.filledShares + Math.max(0, take);
+    const done = filledShares >= order.shares - 1e-9;
+    const orderPatch: Record<string, unknown> = { checkedTo, filledShares, ...(done ? { status: "filled" } : {}) };
+    if (!(take > 0)) {
+      // Can't fill (no cash / no shares left to sell): close it rather than retry every tick.
+      tx.update(orderRef, { checkedTo, status: "cancelled", cancelReason: order.side === "buy" ? "Not enough paper cash" : "No shares left to sell" });
+      return { shares: 0, realized: 0, order: { ...order, status: "cancelled" } };
+    }
+    const fill = makerFill(take, order.price);
+    let realized = 0;
+    if (order.side === "buy") {
+      const next = applyBuy(prevPos, fill);
+      tx.set(posRef, { agentId: order.agentId, orgId: order.orgId, ...ref, ...next, open: true, strategyId: order.botId ?? (prev?.open ? prev.strategyId : null), updatedAt: FieldValue.serverTimestamp() });
+      tx.update(accountRef, { paperCash: cash - fill.notional });
+    } else {
+      const res = applySell(prevPos!, fill);
+      realized = res.realized;
+      tx.set(posRef, { agentId: order.agentId, orgId: order.orgId, ...ref, ...res.position, open: res.position.shares > 0, strategyId: prev?.strategyId ?? null, updatedAt: FieldValue.serverTimestamp() });
+      tx.update(accountRef, { paperCash: cash + fill.notional });
+    }
+    tx.update(orderRef, orderPatch);
+    return { shares: take, realized, order: { ...order, filledShares, status: done ? "filled" : "open" } };
+  });
+}
+
+// ── Shared feed cache and the tick lock ─────────────────────────────────────
+
+export async function getWhaleUniverse(): Promise<{ addresses: string[]; refreshedAt: number }> {
+  const snap = await db().collection(FEEDS).doc("hlWhales").get();
+  const x = snap.data() ?? {};
+  return { addresses: Array.isArray(x.addresses) ? x.addresses : [], refreshedAt: Number(x.refreshedAt ?? 0) };
+}
+
+export async function setWhaleUniverse(addresses: string[]): Promise<void> {
+  await db().collection(FEEDS).doc("hlWhales").set({ addresses, refreshedAt: Date.now() });
+}
+
+/**
+ * Takes the tick lock for `ttlMs`, or returns false when another tick holds it.
+ * The scheduler and the hub can both call the tick; bots must not run twice in
+ * the same minute or they'd double-enter.
+ */
+export async function acquireTickLock(holder: string, ttlMs = 50_000, now = Date.now()): Promise<boolean> {
+  const ref = db().collection(FEEDS).doc("tickLock");
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const until = Number(snap.data()?.until ?? 0);
+    if (until > now) return false;
+    tx.set(ref, { holder, until: now + ttlMs });
+    return true;
+  });
+}
+
+export async function releaseTickLock(holder: string): Promise<void> {
+  const ref = db().collection(FEEDS).doc("tickLock");
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.data()?.holder === holder) tx.set(ref, { holder: null, until: 0 });
+  });
 }

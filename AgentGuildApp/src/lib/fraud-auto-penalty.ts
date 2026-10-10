@@ -20,6 +20,7 @@ import { invalidateCache } from "./credit-cache";
 import { requestOverride } from "./credit-ops/override";
 import { ingestCreditEvent, normalizeFraudEvent } from "./credit-events/ingest";
 import { recomputeAndSync } from "./scoring-engine";
+import { slashBond } from "./agent-bond";
 import type { Agent } from "./firestore";
 
 const MIN_CREDIT_SCORE = 300;
@@ -248,6 +249,10 @@ export async function applyAutoPenalties(
         // Small penalty → apply directly to the agent's live score.
         await applyCreditPenalty(agentId, agent, rule.creditPenalty, rule.trustPenalty, reason);
         await updateSignalStatus(signal.id!, "penalized");
+        // A confirmed high-severity fraud signal forfeits the anti-sybil bond.
+        if (signal.severity === "high" || signal.severity === "critical") {
+          await slashBond(agentId, `Fraud: ${signal.signalType}`);
+        }
       }
 
       // Best-effort on-chain memo event. Non-blocking: the real score

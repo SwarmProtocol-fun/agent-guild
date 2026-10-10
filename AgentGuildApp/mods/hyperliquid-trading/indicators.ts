@@ -84,3 +84,77 @@ export function sharpe(equity: number[], barMs: number): number | null {
   const barsPerYear = (365 * 24 * 3_600_000) / barMs;
   return (mean / sd) * Math.sqrt(barsPerYear);
 }
+
+/** Population standard deviation of the last `length` values, or null if there aren't enough. */
+export function stdev(values: number[], length: number): number | null {
+  const mean = sma(values, length);
+  if (mean == null) return null;
+  let sum = 0;
+  for (let i = values.length - length; i < values.length; i++) sum += (values[i] - mean) ** 2;
+  return Math.sqrt(sum / length);
+}
+
+export interface Bands {
+  mid: number;
+  upper: number;
+  lower: number;
+  /** (upper − lower) / mid, in percent — the squeeze measure. */
+  widthPct: number;
+}
+
+/** Bollinger Bands over the last `length` closes, or null if there aren't enough. */
+export function bollinger(closes: number[], length = 20, mult = 2): Bands | null {
+  const mid = sma(closes, length);
+  const sd = stdev(closes, length);
+  if (mid == null || sd == null || !(mid > 0)) return null;
+  return { mid, upper: mid + mult * sd, lower: mid - mult * sd, widthPct: ((2 * mult * sd) / mid) * 100 };
+}
+
+export interface Adx {
+  adx: number;
+  plusDi: number;
+  minusDi: number;
+}
+
+/**
+ * Wilder's ADX with its +DI/−DI lines (the TA-Lib / TradingView definition).
+ * Needs 2 × length + 1 candles; null with fewer.
+ */
+export function adx(candles: Candle[], length = 14): Adx | null {
+  if (length <= 0 || candles.length < 2 * length + 1) return null;
+  let tr = 0, plus = 0, minus = 0;
+  const step = (i: number) => {
+    const c = candles[i];
+    const p = candles[i - 1];
+    const up = c.h - p.h;
+    const down = p.l - c.l;
+    return {
+      tr: Math.max(c.h - c.l, Math.abs(c.h - p.c), Math.abs(c.l - p.c)),
+      plus: up > down && up > 0 ? up : 0,
+      minus: down > up && down > 0 ? down : 0,
+    };
+  };
+  for (let i = 1; i <= length; i++) {
+    const s = step(i);
+    tr += s.tr;
+    plus += s.plus;
+    minus += s.minus;
+  }
+  const di = () => ({ p: tr > 0 ? (100 * plus) / tr : 0, m: tr > 0 ? (100 * minus) / tr : 0 });
+  const dx = () => {
+    const { p, m } = di();
+    return p + m > 0 ? (100 * Math.abs(p - m)) / (p + m) : 0;
+  };
+  const dxs = [dx()];
+  for (let i = length + 1; i < candles.length; i++) {
+    const s = step(i);
+    tr = tr - tr / length + s.tr;
+    plus = plus - plus / length + s.plus;
+    minus = minus - minus / length + s.minus;
+    dxs.push(dx());
+  }
+  let value = dxs.slice(0, length).reduce((a, b) => a + b, 0) / length;
+  for (let i = length; i < dxs.length; i++) value = (value * (length - 1) + dxs[i]) / length;
+  const { p, m } = di();
+  return { adx: value, plusDi: p, minusDi: m };
+}

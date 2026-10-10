@@ -1,7 +1,7 @@
 /**
  * POST /api/v1/agent-invites
  *
- * Org-admin-only. Creates a single-use-friendly agent invite: a 6-char code
+ * Org-admin-only. Creates a single-use agent invite (7-day expiry): an 8-char code
  * that `agent-guild join --code <CODE>` resolves into org id, agent name,
  * type, skills, and greeting — collapsing the old "copy this whole runbook
  * and edit --org/--name/--skills yourself" flow into one command.
@@ -10,6 +10,8 @@
  * Auth: x-wallet-address header, must be the org owner (requireOrgAdmin).
  */
 import { NextRequest } from "next/server";
+import { randomInt } from "node:crypto";
+import { INVITE_CODE_TTL_MS } from "@/lib/agent-registration-grants";
 import { requireOrgAdmin } from "@/lib/auth-guard";
 import { getOrganization, createAgentInvite } from "@/lib/firestore-admin";
 
@@ -34,9 +36,14 @@ function sanitizeSkills(raw: unknown): SkillPayload[] {
         }));
 }
 
-/** Same convention as organizations.inviteCode (firestore.ts's createOrganization). */
+// The code is also the registration authorization (consumed by
+// /api/v1/register), so it's crypto-random: 32^8 ≈ 1.1e12, no 0/O/1/I.
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
 function generateCode(): string {
-    return Math.random().toString(36).substring(2, 8).toUpperCase();
+    let code = "";
+    for (let i = 0; i < 8; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
+    return code;
 }
 
 export async function POST(req: NextRequest) {
@@ -73,6 +80,8 @@ export async function POST(req: NextRequest) {
         skills,
         greeting,
         createdBy: auth.walletAddress!,
+        expiresAt: Date.now() + INVITE_CODE_TTL_MS,
+        usedAt: null,
     });
 
     return Response.json({

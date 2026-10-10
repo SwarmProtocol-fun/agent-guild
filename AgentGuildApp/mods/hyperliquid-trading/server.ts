@@ -15,6 +15,9 @@ import {
   getDailyRealizedPnl,
   createStrategy,
   toggleStrategy,
+  updateStrategy,
+  deleteStrategy,
+  stopStrategies,
   getStrategy,
   getStrategies,
   getEnabledStrategies,
@@ -40,6 +43,7 @@ import {
   type GridParams,
   type SniperParams,
   type AiParams,
+  type StoredPairsParams,
   type Strategy,
   recordAiDecision,
   getAiDecisions,
@@ -62,12 +66,27 @@ import {
   applyPaperFunding,
   updatePaperTrailingStop,
   getPaperTradeHistory,
+  listOrgStrategies,
+  listOrgPaperAccounts,
+  listOrgPaperFills,
   type PaperPositionDoc,
+  bookPaperSpotFill,
+  logBotOrder,
+  listPendingBotOrders,
+  settleBotOrder,
+  listOrgBotFills,
+  type RuleBotExtras,
+  type StoredBreakoutParams,
+  type StoredBasisParams,
 } from "@/lib/mods/hyperliquid-store";
 import crypto from "crypto";
 import {
+  buildCoinBlock,
   buildSnapshot,
   decisionRequest,
+  multiDecisionRequest,
+  parseMultiDecision,
+  MULTI_MAX_COINS,
   decisionToAction,
   normalizeGoal,
   parseDecision,
@@ -76,12 +95,42 @@ import {
   type AiPosition,
 } from "./ai-trader-core";
 import type { Candle } from "./indicators";
+import { rankAccounts, rankBots } from "./leaderboard";
+import { applyBotEdit, withRuntimeState } from "./bot-edit";
+import { buildPairsParams, decidePairs, type OpenPair } from "./pairs";
+import { breakoutHistory, buildBreakoutParams, decideBreakout } from "./breakout";
+import { buildSmartDca, smartDcaSize, smartDcaTakeProfit } from "./smart-dca";
+import { buildBasisParams, decideBasis, findBasis, mapSpotMarkets, type OpenBasis, type SpotCtx, type SpotMarket, type SpotPair, type SpotToken } from "./basis";
+import { bookImbalance } from "./signals";
+import { coinContextLine, getCoinContexts, getGlobalContext, globalContextLine } from "./cmc";
+import { intelSection } from "./intel";
+import { getMarketIntel, getMarketIntelWithin } from "./intel-fetch";
+
+/** How long an AI round waits on the free data outlets before asking without them. */
+const AI_INTEL_WAIT_MS = 8_000;
+
+/** The intel lines for an AI prompt, or "" when the outlets are slow or down — a round never waits on them. */
+async function intelFor(coins: string[]): Promise<string> {
+  const intel = await getMarketIntelWithin(coins, AI_INTEL_WAIT_MS);
+  return intel ? intelSection(intel, coins) : "";
+}
+import {
+  findFundingArbs,
+  findPairSpreads,
+  findPremiumOutliers,
+  parsePredictedFundings,
+  scannerSection,
+  type PredictedFundingsRaw,
+  type ScannerResult,
+} from "./scanner";
 import { findPerpAsset, readOraclePxOnchain, type PerpAssetMeta } from "./oracle";
 import { placeOrder as placeHlOrder, MARKET_SLIPPAGE, MIN_ORDER_USD, type PlaceOrderResult } from "./exchange";
 import {
   MAKER_FEE_RATE,
   PAPER_START_BALANCE,
+  SPOT_TAKER_FEE_RATE,
   TAKER_FEE_RATE,
+  spotValue,
   fundingPayment,
   isLiquidatable,
   restingFillable,
@@ -179,6 +228,9 @@ interface MarketCoin {
   openInterestUsd: number;
   fundingRatePct: number;
   maxLeverage: number;
+  oraclePx: number;
+  /** (mark − oracle) / oracle, in percent. */
+  premiumPct: number;
 }
 
 /**
@@ -190,7 +242,7 @@ interface MarketCoin {
  * 24h volume, the natural "what's active right now" ordering.
  */
 async function getMarketOverview(network: HlNetwork): Promise<MarketCoin[]> {
-  type AssetCtx = { funding: string; openInterest: string; prevDayPx: string; dayNtlVlm: string; markPx: string };
+  type AssetCtx = { funding: string; openInterest: string; prevDayPx: string; dayNtlVlm: string; markPx: string; oraclePx?: string };
   type UniverseAsset = { name: string; maxLeverage: number; isDelisted?: boolean };
   const [meta, ctxs] = await hlInfo<[{ universe: UniverseAsset[] }, AssetCtx[]]>({ type: "metaAndAssetCtxs" }, network);
 
@@ -200,6 +252,7 @@ async function getMarketOverview(network: HlNetwork): Promise<MarketCoin[]> {
     if (!ctx || asset.isDelisted) return;
     const markPx = Number(ctx.markPx);
     const prevDayPx = Number(ctx.prevDayPx);
+    const oraclePx = Number(ctx.oraclePx) || 0;
     coins.push({
       coin: asset.name,
       markPx,
@@ -208,6 +261,8 @@ async function getMarketOverview(network: HlNetwork): Promise<MarketCoin[]> {
       openInterestUsd: Number(ctx.openInterest) * markPx,
       fundingRatePct: Number(ctx.funding) * 100,
       maxLeverage: asset.maxLeverage,
+      oraclePx,
+      premiumPct: oraclePx ? ((markPx - oraclePx) / oraclePx) * 100 : 0,
     });
   });
 
@@ -299,8 +354,10 @@ async function enforceRiskAndEnqueue(params: {
   stopLossPct?: number;
   takeProfitPct?: number;
   reduceOnly?: boolean;
+  /** The bot placing it, if any — logged so the leaderboard can rank live bots. */
+  strategyId?: string;
 }): Promise<{ taskId: string } | { error: string }> {
-  const { orgId, agentId, coin, isBuy, sizeUsd, privateKey, network, orderType = "market", limitPrice, reduceOnly = false } = params;
+  const { orgId, agentId, coin, isBuy, sizeUsd, privateKey, network, orderType = "market", limitPrice, reduceOnly = false, strategyId } = params;
 
   const risk = await getRiskConfig(agentId);
   if (risk && !reduceOnly) {
@@ -332,6 +389,7 @@ async function enforceRiskAndEnqueue(params: {
       ...(leverage ? { leverage } : {}),
       ...(stopLossPct ? { stopLossPct } : {}),
       ...(takeProfitPct ? { takeProfitPct } : {}),
+      ...(strategyId ? { strategyId } : {}),
     },
     priority: "normal",
     resources: { requiredTags: ["hyperliquid"] },
@@ -339,6 +397,13 @@ async function enforceRiskAndEnqueue(params: {
     maxRetries: reduceOnly ? 0 : 2,
   });
 
+  if (strategyId) {
+    try {
+      await logBotOrder({ orgId, agentId, strategyId, coin, isBuy, sizeUsd, reduceOnly, network, taskId });
+    } catch (err) {
+      console.error(`[hyperliquid] bot order ${taskId} sent but not logged:`, err);
+    }
+  }
   return { taskId };
 }
 
@@ -426,10 +491,14 @@ async function getPaperMarket(): Promise<PaperMarket> {
   };
 }
 
-/** The paper account marked to the current mainnet mids. */
+/** The paper account marked to the current mainnet mids. allMids carries spot pairs too ("@142"), so spot holdings are marked from it. */
 async function getPaperSummary(agentId: string, orgId: string) {
   const [account, positions, market] = await Promise.all([getPaperAccount(agentId, orgId), listPaperPositions(agentId), getPaperMarket()]);
-  return { account, ...summarize(account.balance, positions, market.mids, market.meta) };
+  const spot = Object.values(account.spot ?? {}).map((h) => {
+    const markPx = market.mids[h.pair] || h.avgPx;
+    return { ...h, markPx, valueUsd: h.sz * markPx, unrealizedPnl: h.sz * (markPx - h.avgPx) };
+  });
+  return { account, spot, ...summarize(account.balance, positions, market.mids, market.meta, spotValue(account.spot ?? {}, market.mids)) };
 }
 
 interface PaperOrderParams {
@@ -519,7 +588,7 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
       p.agentId,
       { coin: p.coin, isBuy: p.isBuy, sz: walk.sz, px: walk.avgPx, feeRate: TAKER_FEE_RATE, leverage, reduceOnly, stopLossPct, takeProfitPct, trailingStopPct },
       market.mids, market.meta,
-      { orgId: p.orgId, reason: p.strategyId ? "strategy" : "manual", strategyId: p.strategyId ?? null },
+      { orgId: p.orgId, reason: p.strategyId ? "strategy" : "manual", strategyId: p.strategyId ?? null, spotMids: market.mids },
     );
     if ("error" in booked) return booked;
     filled = { sz: booked.sz, avgPx: walk.avgPx, fee: booked.fee, realizedPnl: booked.realized };
@@ -638,10 +707,16 @@ export async function runHyperliquidPaperTick(): Promise<{ filled: number; trail
   for (const p of result.triggered ? await listAllPaperPositions() : afterFills) {
     byAgent.set(p.agentId, [...(byAgent.get(p.agentId) ?? []), p]);
   }
+  let spotMids: Record<string, number> | null = null;
   for (const [agentId, held] of byAgent) {
     try {
       const account = await getPaperAccount(agentId, held[0].orgId);
-      if (!isLiquidatable(summarize(account.balance, held, marks, coinMeta))) continue;
+      if (Object.keys(account.spot ?? {}).length && !spotMids) {
+        spotMids = await hlInfo<Record<string, string>>({ type: "allMids" }, PAPER_NETWORK)
+          .then((m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, Number(v)])))
+          .catch(() => ({}));
+      }
+      if (!isLiquidatable(summarize(account.balance, held, marks, coinMeta, spotValue(account.spot ?? {}, spotMids ?? {})))) continue;
       for (const p of held) {
         await bookPaperFill(
           agentId,
@@ -664,14 +739,16 @@ type Signer = { privateKey: string; network: HlNetwork };
 async function sendStrategyOrder(
   strategy: Strategy,
   signer: Signer | null,
-  order: { coin: string; isBuy: boolean; sizeUsd: number; leverage?: number; reduceOnly?: boolean; sz?: number },
+  order: { coin: string; isBuy: boolean; sizeUsd: number; leverage?: number; reduceOnly?: boolean; sz?: number; stopLossPct?: number; takeProfitPct?: number },
 ): Promise<{ taskId: string } | { error: string }> {
   if (strategy.paper) {
     return placePaperOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, ...order });
   }
   if (!signer) return { error: "No signing key for a live order" };
-  const { coin, isBuy, sizeUsd, leverage, reduceOnly } = order;
-  return enforceRiskAndEnqueue({ orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy, sizeUsd, leverage, reduceOnly, ...signer });
+  const { coin, isBuy, sizeUsd, leverage, reduceOnly, stopLossPct, takeProfitPct } = order;
+  return enforceRiskAndEnqueue({
+    orgId: strategy.orgId, agentId: strategy.agentId, coin, isBuy, sizeUsd, leverage, reduceOnly, stopLossPct, takeProfitPct, strategyId: strategy.id, ...signer,
+  });
 }
 
 /** Where a bot's market data comes from: mainnet for a paper bot, else its agent's trading network (null: no wallet yet). */
@@ -735,6 +812,10 @@ async function fireSignalStrategy(
 ): Promise<{ taskId: string } | RouteError> {
   if (strategy.type !== "signal") {
     return { status: 400, body: { error: "Only signal strategies can be fired this way" } };
+  }
+  // A stopped bot (paused, or an emergency stop) ignores its webhook and manual fires until turned back on.
+  if (!strategy.enabled) {
+    return { status: 409, body: { error: "This bot is stopped — turn it back on to fire it" } };
   }
   let signer: Signer | null = null;
   if (!strategy.paper) {
@@ -800,10 +881,25 @@ async function executePendingStrategy(strategy: Strategy, masterSecret?: string)
   // A "new-listing ANY" sniper doesn't know its target coin until the
   // tick evaluator catches one — that's what pendingContext.detectedCoin
   // is for. Every other strategy type just trades its own `coin`.
-  const detectedCoin = (strategy.pendingContext as { detectedCoin?: string } | null)?.detectedCoin;
-  const coin = strategy.type === "sniper" && detectedCoin ? detectedCoin : strategy.coin;
+  const pending = (strategy.pendingContext ?? {}) as { detectedCoin?: string; sizeUsd?: number; action?: string; sz?: number; isLong?: boolean; notionalUsd?: number };
+  const coin = strategy.type === "sniper" && pending.detectedCoin ? pending.detectedCoin : strategy.coin;
+  const extras = strategy.params as RuleBotExtras;
 
-  const result = await sendStrategyOrder(strategy, signer, { coin, isBuy: true, sizeUsd: strategy.sizeUsd });
+  // A smart DCA take profit: close the whole stack, sized when it was flagged.
+  if (strategy.type === "dca" && pending.action === "close") {
+    if (!pending.sz) return { status: 400, body: { error: "Pending close has no size" } };
+    const closed = await sendStrategyOrder(strategy, signer, {
+      coin, isBuy: !pending.isLong, sizeUsd: pending.notionalUsd ?? 0, reduceOnly: true, sz: pending.sz,
+    });
+    if ("error" in closed) return { status: 400, body: closed };
+    await clearStrategyPending(strategy.id);
+    return closed;
+  }
+
+  const result = await sendStrategyOrder(strategy, signer, {
+    coin, isBuy: extras.direction !== "short", sizeUsd: pending.sizeUsd ?? strategy.sizeUsd,
+    stopLossPct: extras.stopLossPct, takeProfitPct: extras.takeProfitPct,
+  });
   if ("error" in result) return { status: 400, body: result };
 
   if (strategy.type === "grid") {
@@ -957,9 +1053,9 @@ async function placeAiAction(
   action: AiAction,
   pos: AiHeld | null,
   signer: Signer | null,
+  coin = strategy.coin,
 ): Promise<{ taskId: string; params?: AiParams } | { error: string } | null> {
   const params = strategy.params as AiParams;
-  const coin = strategy.coin;
   const open = (isBuy: boolean) => sendStrategyOrder(strategy, signer, { coin, isBuy, sizeUsd: strategy.sizeUsd, leverage: params.leverage });
   if (action === "open-long" || action === "open-short") {
     return open(action === "open-long");
@@ -972,7 +1068,10 @@ async function placeAiAction(
     if ("error" in closed || action === "close") return closed;
     // A paper close has already filled, so a paper flip opens the new side right away.
     if (strategy.paper) return open(action === "flip-long");
-    const flipped: AiParams = { ...params, flipTo: action === "flip-long" ? "long" : "short" };
+    const side = action === "flip-long" ? "long" : "short";
+    const flipped: AiParams = isBasket(strategy)
+      ? { ...params, flips: { ...(params.flips ?? {}), [coin]: side } }
+      : { ...params, flipTo: side };
     await touchStrategyRun(strategy.id, flipped);
     return { ...closed, params: flipped };
   }
@@ -1095,7 +1194,7 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
   const interval = candleIntervalFor(params.intervalMs);
   const [candles, book, market] = await Promise.all([
     fetchCandles(strategy.coin, interval, AI_SNAPSHOT_HISTORY, network),
-    hlInfo<{ levels: { px: string }[][] }>({ type: "l2Book", coin: strategy.coin }, network).catch(() => null),
+    hlInfo<{ levels: { px: string; sz: string }[][] }>({ type: "l2Book", coin: strategy.coin }, network).catch(() => null),
     getMarketOverview(network).catch(() => []),
   ]);
   if (candles.length < 20) {
@@ -1103,13 +1202,17 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
     return "error";
   }
   const coinInfo = market.find((m) => m.coin === strategy.coin);
+  const [intel, cmc, imbalance] = await Promise.all([intelFor([strategy.coin]), cmcFor([strategy.coin]), bookImbalanceFor(strategy.coin, network, book)]);
   const snapshot = buildSnapshot({
     coin: strategy.coin, candles, interval,
     bid: book?.levels?.[0]?.[0] ? Number(book.levels[0][0].px) : null,
     ask: book?.levels?.[1]?.[0] ? Number(book.levels[1][0].px) : null,
     fundingRatePct: coinInfo?.fundingRatePct ?? null,
     openInterestUsd: coinInfo?.openInterestUsd ?? null,
-  });
+    bookImbalance: imbalance,
+    marketContext: cmc.coin.get(strategy.coin) ?? null,
+    globalContext: cmc.global,
+  }) + (intel ? `\n\n${intel}` : "");
   const requestId = await createAiRequest({
     agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id, coin: strategy.coin,
     ...decisionRequest(strategy.coin, snapshot, held?.position ?? null, params.goal),
@@ -1150,6 +1253,391 @@ async function applyAiAnswer(req: AiRequest, decision: AiDecision, reasoning: st
   return { action, ...sent };
 }
 
+// ── Basket bots and the cross-market scanner ────────────────────────────────
+//
+// A basket bot (AiParams.coins or scanTop) isn't tied to one pair: each round
+// it sees every coin in its basket plus the scanner's funding, premium and
+// pair-spread rows for them, and may act on several coins at once — both legs
+// of a pair trade, a funding carry, or one directional trade. Live baskets
+// need instant trading: there's no pending queue for several actions.
+
+export function isBasket(s: Strategy): boolean {
+  if (s.type !== "ai") return false;
+  const p = (s.params ?? {}) as AiParams;
+  return (Array.isArray(p.coins) && p.coins.length > 0) || (p.scanTop ?? 0) > 0;
+}
+
+/** The coins an AI bot claims on its agent's account, so two bots never trade the same position. */
+function aiCoinsOf(s: Strategy): string[] {
+  const p = (s.params ?? {}) as AiParams;
+  if (Array.isArray(p.coins) && p.coins.length) return p.coins;
+  if ((p.scanTop ?? 0) > 0) return p.owned ?? [];
+  return [s.coin];
+}
+
+/**
+ * An enabled AI bot (same paper/live account) that already claims one of
+ * `want`'s coins. Two scanning bots always clash: each would take the same top N.
+ */
+function findAiClash(existing: Strategy[], paper: boolean, want: { coins?: string[]; scanTop?: number }): { strategy: Strategy; coin: string } | null {
+  for (const s of existing) {
+    if (!s.enabled || (s.type !== "ai" && s.type !== "pairs") || s.paper !== paper) continue;
+    const p = (s.params ?? {}) as AiParams;
+    if (want.scanTop && s.type === "ai" && (p.scanTop ?? 0) > 0) return { strategy: s, coin: s.coin };
+    const hit = claimedCoins(s).find((c) => want.coins?.includes(c));
+    if (hit) return { strategy: s, coin: hit };
+  }
+  return null;
+}
+
+/**
+ * Validates a basket from a request body: `coins` (array or "BTC,ETH") or
+ * `scanTop` (how many of the most-traded perps to scan each round).
+ * Null when the body asks for neither, i.e. a single-coin bot.
+ */
+function parseBasket(body: Record<string, unknown>): { coins?: string[]; scanTop?: number; label: string } | { error: string } | null {
+  const rawCoins = typeof body.coins === "string" ? body.coins.split(/[\s,/]+/) : Array.isArray(body.coins) ? body.coins : null;
+  if (rawCoins && rawCoins.filter((c) => String(c ?? "").trim()).length) {
+    const coins = [...new Set(rawCoins.map(cleanTrainCoin).filter((c): c is string => c != null))];
+    if (coins.length !== rawCoins.filter((c) => String(c ?? "").trim()).length) return { error: "every coin must be a perp symbol such as BTC" };
+    if (coins.length < 2 || coins.length > MULTI_MAX_COINS) return { error: `a basket needs 2 to ${MULTI_MAX_COINS} coins` };
+    return { coins, label: coins.join("/") };
+  }
+  if (body.scanTop != null && body.scanTop !== "") {
+    const n = Number(body.scanTop);
+    if (!Number.isInteger(n) || n < 2 || n > MULTI_MAX_COINS) return { error: `scanTop must be a whole number from 2 to ${MULTI_MAX_COINS}` };
+    return { scanTop: n, label: `TOP${n}` };
+  }
+  return null;
+}
+
+/**
+ * The coins this round looks at. A fixed basket is its list (minus anything
+ * delisted). A scan takes the N most-traded perps no other bot of this agent
+ * claims, and always keeps the coins it already holds so it can manage them.
+ */
+export function pickBasketCoins(params: AiParams, market: { coin: string }[], held: string[], taken: Set<string>): string[] {
+  const tradeable = new Set(market.map((m) => m.coin));
+  if (params.coins?.length) return params.coins.filter((c) => tradeable.has(c));
+  const n = Math.min(params.scanTop ?? 0, MULTI_MAX_COINS);
+  const mine = held.filter((c) => tradeable.has(c) && (params.owned ?? []).includes(c));
+  const top = market.map((m) => m.coin).filter((c) => !taken.has(c) && !mine.includes(c)).slice(0, Math.max(0, n - mine.length));
+  return [...mine, ...top];
+}
+
+async function coinsTakenByOtherBots(strategy: Strategy): Promise<Set<string>> {
+  const others = (await getStrategies(strategy.agentId))
+    .filter((s) => s.id !== strategy.id && s.enabled && (s.type === "ai" || s.type === "pairs") && s.paper === strategy.paper);
+  return new Set(others.flatMap(claimedCoins));
+}
+
+/** Equity and every open position — from the paper account, or read off Hyperliquid for the agent's wallet. */
+async function basketAccountState(strategy: Strategy): Promise<
+  { accountValue: number; network: HlNetwork; held: Record<string, { position: AiPosition; notionalUsd: number }> } | { error: string }
+> {
+  if (strategy.paper) {
+    const summary = await getPaperSummary(strategy.agentId, strategy.orgId);
+    return {
+      accountValue: summary.equity,
+      network: PAPER_NETWORK,
+      held: Object.fromEntries(summary.positions.map((p) => [p.coin, {
+        position: { isLong: p.szi > 0, size: p.szi, entryPx: p.entryPx, unrealizedPnl: p.unrealizedPnl }, notionalUsd: p.notionalUsd,
+      }])),
+    };
+  }
+  const wallet = await getTradingWallet(strategy.agentId);
+  if (!wallet?.address) return { error: "This agent has no trading wallet yet." };
+  const { state, accountValue } = await accountEquity(wallet.address, wallet.network);
+  const held: Record<string, { position: AiPosition; notionalUsd: number }> = {};
+  for (const a of state.assetPositions) {
+    const h = positionFor(state, a.position.coin);
+    if (h) held[a.position.coin] = h;
+  }
+  return { accountValue, network: wallet.network, held };
+}
+
+/** Places one basket action now. Live needs instant trading — a basket can't wait on a passphrase per coin. */
+async function executeBasketAction(
+  strategy: Strategy,
+  coin: string,
+  action: AiAction,
+  pos: AiHeld | null,
+): Promise<{ taskId: string | null; error: string | null; params?: AiParams }> {
+  try {
+    await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+  } catch (err) {
+    return { taskId: null, error: (err as Error).message };
+  }
+  let signer: Signer | null = null;
+  if (!strategy.paper) {
+    if (!(await getInstantTrading(strategy.agentId))) {
+      return { taskId: null, error: "A live basket bot trades only with instant trading on for this agent" };
+    }
+    signer = await resolveSigningKey(strategy.agentId);
+  }
+  const placed = await placeAiAction(strategy, action, pos, signer, coin);
+  if (!placed) return { taskId: null, error: null };
+  if ("error" in placed) return { taskId: null, error: placed.error };
+  return { taskId: placed.taskId, error: null, ...(placed.params ? { params: placed.params } : {}) };
+}
+
+/** Which coins the bot holds after an action — opens and flips add, closes remove. */
+function ownedAfter(owned: string[], coin: string, action: AiAction): string[] {
+  if (action === "close") return owned.filter((c) => c !== coin);
+  if (action === "hold") return owned;
+  return owned.includes(coin) ? owned : [...owned, coin];
+}
+
+const SCANNER_TTL_MS = 60_000;
+const SCANNER_PAIR_BARS = 168;
+const scannerCache = new Map<string, { at: number; value: ScannerResult & { coins: string[]; interval: string } }>();
+
+const SPOT_TTL_MS = 60_000;
+let spotCache: { at: number; value: Map<string, SpotMarket> } | null = null;
+
+/** Every perp's USDC spot market on Hyperliquid mainnet (BTC → UBTC "@142"). Cached a minute. */
+async function getSpotMarkets(): Promise<Map<string, SpotMarket>> {
+  if (spotCache && Date.now() - spotCache.at < SPOT_TTL_MS) return spotCache.value;
+  const [[meta, ctxs], coins] = await Promise.all([
+    hlInfo<[{ tokens: SpotToken[]; universe: SpotPair[] }, SpotCtx[]]>({ type: "spotMetaAndAssetCtxs" }, PAPER_NETWORK),
+    getUniverseCoins(PAPER_NETWORK),
+  ]);
+  spotCache = { at: Date.now(), value: mapSpotMarkets(coins, meta, ctxs) };
+  return spotCache.value;
+}
+
+/** Book imbalance within ±0.5% of the mid, or null when the book can't be read. */
+async function bookImbalanceFor(coin: string, network: HlNetwork, book?: { levels?: { px: string; sz: string }[][] } | null): Promise<number | null> {
+  const b = book ?? await hlInfo<{ levels?: { px: string; sz: string }[][] }>({ type: "l2Book", coin }, network).catch(() => null);
+  if (!b?.levels) return null;
+  const side = (l: { px: string; sz: string }[] = []) => l.map((x) => ({ px: Number(x.px), sz: Number(x.sz) }));
+  return bookImbalance(coin, side(b.levels[0]), side(b.levels[1]), 0.5).imbalance;
+}
+
+/** How long an AI round waits on CoinMarketCap before asking without it. */
+const CMC_WAIT_MS = 5_000;
+
+/** CoinMarketCap lines for `coins` and the whole market; empty when no key is set or CMC is slow. */
+async function cmcFor(coins: string[]): Promise<{ coin: Map<string, string>; global: string | null }> {
+  const empty = { coin: new Map<string, string>(), global: null };
+  const work = (async () => {
+    const universe = await getUniverseCoins(PAPER_NETWORK).catch(() => coins);
+    const [contexts, global] = await Promise.all([getCoinContexts(universe), getGlobalContext()]);
+    const coin = new Map<string, string>();
+    for (const c of coins) {
+      const line = coinContextLine(contexts?.get(c));
+      if (line) coin.set(c, line);
+    }
+    return { coin, global: globalContextLine(global) };
+  })().catch(() => empty);
+  return Promise.race([work, new Promise<typeof empty>((r) => setTimeout(() => r(empty), CMC_WAIT_MS))]);
+}
+
+async function getPredictedFundings(network: HlNetwork) {
+  const raw = await hlInfo<PredictedFundingsRaw>({ type: "predictedFundings" }, network).catch(() => [] as PredictedFundingsRaw);
+  return parsePredictedFundings(raw);
+}
+
+/**
+ * Whole-market funding arbs and premium outliers, plus pair spreads among
+ * `coins` (default: the 8 most-traded perps). Cached a minute per query.
+ */
+async function scanMarket(network: HlNetwork, coins: string[] | null, interval: string) {
+  const key = `${network}|${interval}|${coins?.join(",") ?? "top"}`;
+  const hit = scannerCache.get(key);
+  if (hit && Date.now() - hit.at < SCANNER_TTL_MS) return hit.value;
+  const [market, fundings] = await Promise.all([getMarketOverview(network), getPredictedFundings(network)]);
+  const tradeable = new Set(market.map((m) => m.coin));
+  const pairCoins = (coins ?? market.slice(0, MULTI_MAX_COINS).map((m) => m.coin)).filter((c) => tradeable.has(c)).slice(0, 12);
+  const candles = Object.fromEntries(await Promise.all(pairCoins.map(async (c) =>
+    [c, await fetchCandles(c, interval, SCANNER_PAIR_BARS, network).catch(() => [] as Candle[])] as const)));
+  const value = {
+    coins: pairCoins,
+    interval,
+    fundingArbs: findFundingArbs(fundings, new Map(market.map((m) => [m.coin, m.volume24hUsd]))),
+    premiums: findPremiumOutliers(market),
+    pairs: findPairSpreads(candles, { minCorrelation: 0.6 }),
+    // Spot markets are mainnet-only; testnet's spot books are empty.
+    basis: network === "mainnet" ? findBasis(market, await getSpotMarkets().catch(() => new Map())) : [],
+    imbalances: (await Promise.all(pairCoins.map(async (c) => {
+      const b = await hlInfo<{ levels?: { px: string; sz: string }[][] }>({ type: "l2Book", coin: c }, network).catch(() => null);
+      if (!b?.levels) return null;
+      const side = (l: { px: string; sz: string }[] = []) => l.map((x) => ({ px: Number(x.px), sz: Number(x.sz) }));
+      return bookImbalance(c, side(b.levels[0]), side(b.levels[1]), 0.5);
+    }))).filter((x): x is NonNullable<typeof x> => x != null),
+  };
+  scannerCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** One basket round: same lifecycle as runAiStrategy, across every coin in the basket. */
+async function runBasketStrategy(strategy: Strategy): Promise<"asked" | "decided" | "skipped" | "error"> {
+  const params = strategy.params as AiParams;
+  const record = recordFor(strategy.id);
+
+  if (params.openRequestId) {
+    const open = await getAiRequest(params.openRequestId);
+    if (open?.status === "open" && open.expiresAt.getTime() > Date.now()) return "skipped";
+    if (open?.status === "open") await expireAiRequest(open.id);
+    await touchStrategyRun(strategy.id, { ...params, openRequestId: null });
+    if (open?.status !== "answered") {
+      await record({ error: "The agent didn't answer this round in time — is its daemon (agent-guild daemon) running?" });
+    }
+    return "skipped";
+  }
+
+  const acct = await basketAccountState(strategy);
+  if ("error" in acct) {
+    await touchStrategyRun(strategy.id);
+    await record({ error: acct.error });
+    return "error";
+  }
+  const { accountValue, held, network } = acct;
+
+  // Live flips: open each coin's new side once its close has filled.
+  const flips = params.flips ?? {};
+  if (Object.keys(flips).length) {
+    const left: Record<string, "long" | "short"> = {};
+    let current: AiParams = params;
+    let opened = false;
+    for (const [coin, side] of Object.entries(flips)) {
+      const h = held[coin];
+      if (h && h.position.isLong === (side === "long")) continue;
+      if (h) {
+        if (Date.now() - (strategy.lastRunAt?.getTime() ?? 0) > FLIP_GIVE_UP_MS) {
+          await record({ coin, error: "The flip's close never filled — gave up opening the new side." });
+        } else left[coin] = side;
+        continue;
+      }
+      const action: AiAction = side === "long" ? "open-long" : "open-short";
+      const sent = await executeBasketAction({ ...strategy, params: { ...current, flips: {} } }, coin, action, null);
+      current = { ...current, owned: ownedAfter(current.owned ?? [], coin, action) };
+      opened = true;
+      await record({ coin, action, reasoning: "Second half of the flip — opening the new side.", equity: accountValue, taskId: sent.taskId, error: sent.error });
+    }
+    await touchStrategyRun(strategy.id, { ...current, flips: left });
+    if (Object.keys(left).length) return "skipped";
+    if (opened) return "decided";
+    strategy = { ...strategy, params: { ...current, flips: {} } };
+  }
+  const p = strategy.params as AiParams;
+
+  await touchStrategyRun(strategy.id);
+
+  const mine = (c: string) => (p.coins?.length ? p.coins.includes(c) : (p.owned ?? []).includes(c));
+  const startEquity = p.startEquity ?? (accountValue > 0 ? accountValue : undefined);
+  if (startEquity != null && accountValue <= startEquity * (1 - p.maxDrawdownPct / 100)) {
+    for (const coin of Object.keys(held).filter(mine)) {
+      const sent = await executeBasketAction(strategy, coin, "close", heldFor(held[coin]));
+      await record({ coin, action: "close", reasoning: "Eliminated — closing.", equity: accountValue, taskId: sent.taskId, error: sent.error });
+    }
+    await touchStrategyRun(strategy.id, { ...p, startEquity, eliminated: true, owned: [] });
+    await toggleStrategy(strategy.id, false);
+    await record({
+      reasoning: `Eliminated: equity ${accountValue.toFixed(2)} is ${p.maxDrawdownPct}% or more below the starting ${startEquity.toFixed(2)}.`,
+      equity: accountValue,
+    });
+    return "decided";
+  }
+  if (accountValue < 10) {
+    await record({
+      error: strategy.paper
+        ? `Paper account holds $${accountValue.toFixed(2)} — reset it to keep trading.`
+        : `Wallet holds $${accountValue.toFixed(2)} — fund it with at least $10 on Hyperliquid ${network} to trade.`,
+      equity: accountValue,
+    });
+    return "skipped";
+  }
+
+  const [market, fundings, taken] = await Promise.all([
+    getMarketOverview(network),
+    getPredictedFundings(network),
+    coinsTakenByOtherBots(strategy),
+  ]);
+  const picked = pickBasketCoins(p, market, Object.keys(held), taken);
+  const interval = candleIntervalFor(p.intervalMs);
+  const fetched = await Promise.all(picked.map(async (c) => [c, await fetchCandles(c, interval, AI_SNAPSHOT_HISTORY, network).catch(() => [] as Candle[])] as const));
+  const candles = Object.fromEntries(fetched.filter(([, k]) => k.length >= 20));
+  const coins = picked.filter((c) => candles[c]);
+  if (!coins.length) {
+    await record({ error: "No coin in this basket has enough price history to decide." });
+    return "error";
+  }
+  const byCoin = new Map(market.map((m) => [m.coin, m]));
+  const [cmc, imbalances] = await Promise.all([
+    cmcFor(coins),
+    Promise.all(coins.map((c) => bookImbalanceFor(c, network))),
+  ]);
+  const blocks = coins.map((c, i) => buildCoinBlock({
+    coin: c, candles: candles[c], interval,
+    fundingRatePct: byCoin.get(c)?.fundingRatePct ?? null,
+    openInterestUsd: byCoin.get(c)?.openInterestUsd ?? null,
+    premiumPct: byCoin.get(c)?.premiumPct ?? null,
+    bookImbalance: imbalances[i],
+    marketContext: cmc.coin.get(c) ?? null,
+  }));
+  const inBasket = new Set(coins);
+  const scan = scannerSection({
+    fundingArbs: findFundingArbs(new Map([...fundings].filter(([c]) => inBasket.has(c))), new Map(), { minSpreadAprPct: 5, minVolumeUsd: 0, limit: coins.length }),
+    premiums: findPremiumOutliers(market.filter((m) => inBasket.has(m.coin)), { minAbsPremiumPct: 0.05, minVolumeUsd: 0, limit: coins.length }),
+    pairs: findPairSpreads(candles, { minCorrelation: 0.6, limit: 6 }),
+  });
+  const positions = Object.fromEntries(coins.filter((c) => held[c]).map((c) => [c, held[c].position]));
+  const intel = await intelFor(coins);
+  const requestId = await createAiRequest({
+    agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id,
+    coin: strategy.coin, coins,
+    ...multiDecisionRequest(coins, blocks, [scan, intel].filter(Boolean).join("\n\n"), positions, p.goal, new Date(), cmc.global),
+    expiresAt: new Date(Date.now() + aiAnswerWindow(strategy.paper, p.intervalMs)),
+  });
+  await touchStrategyRun(strategy.id, { ...p, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
+  return "asked";
+}
+
+/** The agent answered a basket round: trade each coin it named, against positions re-read now. */
+async function applyBasketAnswer(
+  req: AiRequest,
+  decisions: Record<string, Exclude<AiDecision, "NOTHING">>,
+  reasoning: string,
+): Promise<{ actions: { coin: string; action: AiAction; taskId: string | null; error: string | null }[]; error?: string }> {
+  const strategy = req.strategyId ? await getStrategy(req.strategyId) : null;
+  if (!strategy || !isBasket(strategy)) return { actions: [], error: "Bot no longer exists" };
+  let params = strategy.params as AiParams;
+  if (params.openRequestId === req.id) params = { ...params, openRequestId: null };
+  const record = recordFor(strategy.id);
+  if (!strategy.enabled) {
+    await touchStrategyRun(strategy.id, params);
+    await record({ reasoning, error: "Bot was stopped before the answer arrived — not traded." });
+    return { actions: [], error: "Bot is stopped" };
+  }
+  const acct = await basketAccountState(strategy);
+  if ("error" in acct) {
+    await touchStrategyRun(strategy.id, params);
+    await record({ reasoning, error: acct.error });
+    return { actions: [], error: acct.error };
+  }
+  const allowed = new Set(req.coins ?? []);
+  const actions: { coin: string; action: AiAction; taskId: string | null; error: string | null }[] = [];
+  for (const [coin, decision] of Object.entries(decisions)) {
+    if (!allowed.has(coin)) continue;
+    const h = acct.held[coin] ?? null;
+    const action = decisionToAction(decision, h?.position ?? null);
+    const sent = action === "hold"
+      ? { taskId: null, error: null }
+      : await executeBasketAction({ ...strategy, params }, coin, action, heldFor(h));
+    if ("params" in sent && sent.params) params = sent.params;
+    if (!sent.error) params = { ...params, owned: ownedAfter(params.owned ?? [], coin, action) };
+    const price = await getMidPrice(coin, acct.network).catch(() => null);
+    await record({ coin, decision, action, reasoning, model: "agent", price, equity: acct.accountValue, taskId: sent.taskId, error: sent.error });
+    actions.push({ coin, action, taskId: sent.taskId, error: sent.error });
+  }
+  if (!actions.length) {
+    await record({ decision: "NOTHING", action: "hold", reasoning, model: "agent", equity: acct.accountValue });
+  }
+  await touchStrategyRun(strategy.id, params);
+  return { actions };
+}
+
 /**
  * Hub tick phase for AI Trader bots: puts a question to every bot whose
  * interval is up, retires rounds the agent didn't answer, and opens the
@@ -1163,11 +1651,11 @@ export async function runAiTraderTick(): Promise<{ due: number; asked: number; e
     .filter((s) => {
       const p = s.params as AiParams;
       if (p.eliminated) return false;
-      if (p.flipTo || p.openRequestId) return true;
+      if (p.flipTo || p.openRequestId || Object.keys(p.flips ?? {}).length) return true;
       return now - (s.lastRunAt?.getTime() ?? 0) >= p.intervalMs;
     });
 
-  const results = await Promise.allSettled(due.map(runAiStrategy));
+  const results = await Promise.allSettled(due.map((s) => (isBasket(s) ? runBasketStrategy(s) : runAiStrategy(s))));
   let asked = 0;
   let errors = 0;
   results.forEach((r, i) => {
@@ -1178,6 +1666,458 @@ export async function runAiTraderTick(): Promise<{ due: number; asked: number; e
     else if (r.value === "error") errors++;
   });
   return { due: due.length, asked, errors };
+}
+
+// ── Pairs arbitrage bot ──────────────────────────────────────────────────────
+//
+// Rule-based stat-arb (./pairs.ts): enter the most stretched correlated pair,
+// exit both legs together on convergence, stop or timeout. Two legs have to
+// move together, so it runs on paper or with instant trading — never as a
+// pending signal waiting on a passphrase per leg.
+
+/** How often a pairs bot re-checks its spread: once a bar, at most every 15 minutes. */
+function pairsCadenceMs(interval: string): number {
+  return Math.min(CANDLE_INTERVAL_MS[interval] ?? 3_600_000, 15 * 60_000);
+}
+/** A live leg's order rides the task queue; until this long after opening, a missing leg may just be unfilled. */
+const PAIRS_FILL_GRACE_MS = 2 * 60_000;
+
+/** The coins a bot trades on its agent's account — two bots never share one. */
+function claimedCoins(s: Strategy): string[] {
+  if (s.type === "pairs") return ((s.params ?? {}) as StoredPairsParams).coins ?? [];
+  if (s.type === "ai") return aiCoinsOf(s);
+  return [s.coin];
+}
+
+/** Direction and SL/TP shared by dca/grid/sniper. Absent fields stay absent. */
+function buildRuleExtras(raw: Record<string, unknown> | undefined): RuleBotExtras | { error: string } {
+  const out: RuleBotExtras = {};
+  if (raw?.direction != null && raw.direction !== "") {
+    if (raw.direction !== "long" && raw.direction !== "short") return { error: "params.direction must be long or short" };
+    if (raw.direction === "short") out.direction = "short";
+  }
+  for (const k of ["stopLossPct", "takeProfitPct"] as const) {
+    if (raw?.[k] == null || raw[k] === "" || Number(raw[k]) === 0) continue;
+    const v = Number(raw[k]);
+    if (!(v > 0 && v < (k === "stopLossPct" ? 100 : 1000))) return { error: `params.${k} must be a positive percent${k === "stopLossPct" ? " under 100" : ""}` };
+    out[k] = v;
+  }
+  return out;
+}
+
+/** DCA settings: interval, the rule extras and an optional smart block. */
+function buildDcaParams(raw: Record<string, unknown> | undefined): DcaParams | { error: string } {
+  const intervalMs = Number(raw?.intervalMs);
+  if (!(intervalMs >= 60_000)) return { error: "params.intervalMs must be at least 60000 (1 minute)" };
+  const extras = buildRuleExtras(raw);
+  if ("error" in extras) return extras;
+  const smart = buildSmartDca(raw?.smart);
+  if (smart && "error" in smart) return smart;
+  return { intervalMs, ...extras, ...(smart ? { smart } : {}) };
+}
+
+/** An edit's merged settings, checked with the same per-type rules POST /strategy uses. Runtime state is added back by the caller. */
+function validateBotSettings(strategy: Strategy, settings: Record<string, unknown>): Record<string, unknown> | { error: string } {
+  const s = settings;
+  switch (strategy.type) {
+    case "dca": {
+      const built = buildDcaParams(s);
+      return "error" in built ? built : { ...built };
+    }
+    case "grid": {
+      const lowerPrice = Number(s.lowerPrice), upperPrice = Number(s.upperPrice), levels = Number(s.levels);
+      if (!(lowerPrice > 0 && upperPrice > lowerPrice)) return { error: "params.lowerPrice must be above 0 and below upperPrice" };
+      if (!(Number.isInteger(levels) && levels >= 2)) return { error: "params.levels must be a whole number of at least 2" };
+      const extras = buildRuleExtras(s);
+      return "error" in extras ? extras : { lowerPrice, upperPrice, levels, ...extras };
+    }
+    case "signal":
+      if (s.direction != null && s.direction !== "buy" && s.direction !== "sell") return { error: "params.direction must be buy or sell" };
+      return s.direction ? { direction: s.direction } : {};
+    case "sniper": {
+      if (!["new-listing", "price-above", "price-below"].includes(String(s.mode))) {
+        return { error: "params.mode must be new-listing, price-above, or price-below" };
+      }
+      const extras = buildRuleExtras(s);
+      if ("error" in extras) return extras;
+      if (s.mode === "new-listing") return { mode: s.mode, ...extras };
+      if (strategy.coin === "ANY") return { error: "coin \"ANY\" is only valid for new-listing sniper mode" };
+      if (!(Number(s.targetPrice) > 0)) return { error: "params.targetPrice is required for price-above/price-below sniper modes" };
+      return { mode: s.mode, targetPrice: Number(s.targetPrice), ...extras };
+    }
+    case "ai": {
+      const built = buildAiParams(s, strategy.paper ? PAPER_MIN_INTERVAL_MS : AI_MIN_INTERVAL_MS);
+      return "error" in built ? built : { ...built };
+    }
+    case "pairs": {
+      const built = buildPairsParams({ ...s, coins: (strategy.params as StoredPairsParams).coins }, cleanTrainCoin);
+      if ("error" in built) return built;
+      if (!CANDLE_INTERVAL_MS[built.interval]) {
+        return { error: `params.interval must be one of ${Object.keys(CANDLE_INTERVAL_MS).join(", ")}` };
+      }
+      return { ...built };
+    }
+    case "breakout": {
+      const built = buildBreakoutParams(s, Object.keys(CANDLE_INTERVAL_MS));
+      const lev = Number(s.leverage);
+      return "error" in built ? built : { ...built, ...(lev > 1 ? { leverage: lev } : {}) };
+    }
+    case "basis": {
+      const built = buildBasisParams(s, strategy.coin);
+      return "error" in built ? built : { ...built };
+    }
+    default:
+      return { error: `${strategy.type} bots can't be edited` };
+  }
+}
+
+interface StopAllOutcome {
+  stopped: { id: string; agentId: string; type: string; coin: string; paper: boolean }[];
+  closed: { agentId: string; coin: string; paper: boolean; taskId: string }[];
+  leftOpen: { agentId: string; coin: string; paper: boolean; reason: string }[];
+}
+
+/**
+ * Market-closes an agent's positions in `coins` on one account: the paper
+ * account, or the live wallet when instant trading can sign without a
+ * passphrase. Anything it can't close is reported, never skipped silently.
+ */
+async function flattenCoins(agentId: string, orgId: string, coins: Set<string>, paper: boolean, out: StopAllOutcome): Promise<void> {
+  const leave = (coin: string, reason: string) => out.leftOpen.push({ agentId, coin, paper, reason });
+  if (paper) {
+    for (const o of await listPaperOrders(agentId)) {
+      if (coins.has(o.coin)) await deletePaperOrder(o.id);
+    }
+    for (const p of await listPaperPositions(agentId)) {
+      if (!coins.has(p.coin)) continue;
+      const r = await placePaperOrder({ orgId, agentId, coin: p.coin, isBuy: p.szi < 0, sz: Math.abs(p.szi), sizeUsd: Math.abs(p.szi) * p.entryPx, reduceOnly: true });
+      if ("error" in r) leave(p.coin, r.error);
+      else out.closed.push({ agentId, coin: p.coin, paper, taskId: r.taskId });
+    }
+    return;
+  }
+  const wallet = await getTradingWallet(agentId);
+  if (!wallet?.address) return;
+  const state = await hlInfo<ClearinghouseState>({ type: "clearinghouseState", user: wallet.address }, wallet.network);
+  const open = state.assetPositions.filter((p) => coins.has(p.position.coin) && Number(p.position.szi) !== 0);
+  if (!open.length) return;
+  if (!wallet.instant) {
+    for (const p of open) leave(p.position.coin, "Live close needs the wallet passphrase — close it from Positions");
+    return;
+  }
+  try {
+    await enforceCapability(agentId, orgId, "hyperliquid-close");
+  } catch (err) {
+    for (const p of open) leave(p.position.coin, (err as Error).message);
+    return;
+  }
+  const { privateKey, network } = await resolveSigningKey(agentId);
+  for (const p of open) {
+    const isLong = Number(p.position.szi) > 0;
+    const r = await enforceRiskAndEnqueue({
+      orgId, agentId, coin: p.position.coin, isBuy: !isLong, sizeUsd: Math.abs(Number(p.position.positionValue)),
+      privateKey, network, orderType: "market", reduceOnly: true,
+    });
+    if ("error" in r) leave(p.position.coin, String(r.error));
+    else out.closed.push({ agentId, coin: p.position.coin, paper, taskId: r.taskId });
+  }
+}
+
+async function runPairsStrategy(strategy: Strategy): Promise<"opened" | "closed" | "held" | "error"> {
+  const params = strategy.params as StoredPairsParams;
+  const record = recordFor(strategy.id);
+  const open = params.open ?? null;
+  const now = Date.now();
+  const due = now - (strategy.lastRunAt?.getTime() ?? 0) >= pairsCadenceMs(params.interval);
+  // A pair with a missing leg is checked every tick, not once a bar.
+  if (!due && !open) return "held";
+
+  let signer: Signer | null = null;
+  try {
+    await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+    if (!strategy.paper) {
+      if (!(await getInstantTrading(strategy.agentId))) throw new Error("A live pairs bot trades only with instant trading on for this agent");
+      signer = await resolveSigningKey(strategy.agentId);
+    }
+  } catch (err) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: (err as Error).message });
+    if (due) await record({ coin: strategy.coin, error: (err as Error).message });
+    return "error";
+  }
+
+  const acct = await basketAccountState(strategy);
+  if ("error" in acct) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: acct.error });
+    return "error";
+  }
+  const isHeld = (coin: string, long: boolean) => {
+    const h = acct.held[coin];
+    return !!h && h.position.isLong === long;
+  };
+  const settling = open != null && now - open.openedAt < PAIRS_FILL_GRACE_MS;
+  const heldLegs = open && !settling ? { long: isHeld(open.longLeg, true), short: isHeld(open.shortLeg, false) } : undefined;
+  if (!due && !(heldLegs && (!heldLegs.long || !heldLegs.short))) return "held";
+
+  const coins = open ? [open.a, open.b] : params.coins;
+  const fetched = await Promise.all(coins.map(async (c) =>
+    [c, await fetchCandles(c, params.interval, params.lookbackBars + 2, acct.network).catch(() => [] as Candle[])] as const));
+  const decision = decidePairs(params, Object.fromEntries(fetched), open, strategy.sizeUsd, now, heldLegs, CANDLE_INTERVAL_MS[params.interval]);
+
+  if (decision.action === "hold") {
+    await touchStrategyRun(strategy.id, { ...params, lastZ: decision.z, lastNote: decision.reason });
+    return "held";
+  }
+
+  if (decision.action === "close" && open) {
+    const outcomes: { coin: string; taskId: string | null; error: string | null }[] = [];
+    for (const coin of [open.longLeg, open.shortLeg]) {
+      const h = acct.held[coin];
+      if (!h) continue;
+      const sent = await sendStrategyOrder(strategy, signer, {
+        coin, isBuy: !h.position.isLong, sizeUsd: h.notionalUsd, reduceOnly: true, sz: Math.abs(h.position.size),
+      });
+      outcomes.push({ coin, taskId: "error" in sent ? null : sent.taskId, error: "error" in sent ? sent.error : null });
+    }
+    const failed = outcomes.filter((o) => o.error);
+    // A refused close keeps the pair on record so the next tick tries again.
+    await touchStrategyRun(strategy.id, { ...params, open: failed.length ? open : null, lastZ: decision.z, lastNote: decision.reason });
+    await record({
+      coin: strategy.coin, action: "close", reasoning: decision.reason, equity: acct.accountValue,
+      taskId: outcomes.map((o) => o.taskId).filter(Boolean).join(",") || null,
+      error: failed.length ? failed.map((o) => `${o.coin}: ${o.error}`).join("; ") : null,
+    });
+    return failed.length ? "error" : "closed";
+  }
+
+  if (decision.action !== "open") return "held";
+  const { pair, longUsd, shortUsd } = decision;
+  const taken = new Set((await getStrategies(strategy.agentId))
+    .filter((s) => s.id !== strategy.id && s.enabled && s.paper === strategy.paper)
+    .flatMap(claimedCoins));
+  const clash = [pair.longLeg, pair.shortLeg].find((c) => taken.has(c) || acct.held[c]);
+  if (clash) {
+    const note = `${pair.a}/${pair.b} is stretched, but ${clash} already has a position or another bot — skipping.`;
+    await touchStrategyRun(strategy.id, { ...params, lastZ: pair.z, lastNote: note });
+    return "held";
+  }
+  const longSent = await sendStrategyOrder(strategy, signer, { coin: pair.longLeg, isBuy: true, sizeUsd: longUsd });
+  if ("error" in longSent) {
+    await touchStrategyRun(strategy.id, { ...params, lastZ: pair.z, lastNote: `Long ${pair.longLeg} refused: ${longSent.error}` });
+    await record({ coin: strategy.coin, action: "open", reasoning: decision.reason, error: `Long ${pair.longLeg} refused: ${longSent.error}` });
+    return "error";
+  }
+  const shortSent = await sendStrategyOrder(strategy, signer, { coin: pair.shortLeg, isBuy: false, sizeUsd: shortUsd });
+  const opened: OpenPair = { a: pair.a, b: pair.b, longLeg: pair.longLeg, shortLeg: pair.shortLeg, entryZ: pair.z, beta: pair.beta, openedAt: now };
+  // If the short leg was refused, the pair is still recorded: the next check
+  // finds the short leg missing and closes the long, so it is never held alone.
+  await touchStrategyRun(strategy.id, { ...params, open: opened, lastZ: pair.z, lastNote: decision.reason });
+  await record({
+    coin: strategy.coin, action: "open", reasoning: decision.reason, equity: acct.accountValue,
+    taskId: [longSent.taskId, "error" in shortSent ? null : shortSent.taskId].filter(Boolean).join(","),
+    error: "error" in shortSent ? `Short ${pair.shortLeg} refused: ${shortSent.error} — the long will be closed next check.` : null,
+  });
+  return "opened";
+}
+
+// ── Breakout bot ────────────────────────────────────────────────────────────
+//
+// Rule-based squeeze breakout (./breakout.ts), checked once a bar on closed
+// bars only. Opens and closes need no passphrase prompt mid-trade, so like
+// pairs it runs on paper or with instant trading.
+
+async function runBreakoutStrategy(strategy: Strategy): Promise<"opened" | "closed" | "held" | "error"> {
+  const params = strategy.params as StoredBreakoutParams;
+  const barMs = CANDLE_INTERVAL_MS[params.interval] ?? 3_600_000;
+  const now = Date.now();
+  if (now - (strategy.lastRunAt?.getTime() ?? 0) < pairsCadenceMs(params.interval)) return "held";
+  const record = recordFor(strategy.id);
+
+  let signer: Signer | null = null;
+  try {
+    await enforceCapability(strategy.agentId, strategy.orgId, "hyperliquid-trade");
+    if (!strategy.paper) {
+      if (!(await getInstantTrading(strategy.agentId))) throw new Error("A live breakout bot trades only with instant trading on for this agent");
+      signer = await resolveSigningKey(strategy.agentId);
+    }
+  } catch (err) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: (err as Error).message });
+    return "error";
+  }
+  const acct = await basketAccountState(strategy);
+  if ("error" in acct) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: acct.error });
+    return "error";
+  }
+  // Closed bars only: the backtest decides at each bar's close, so the live bot does too.
+  const raw = await fetchCandles(strategy.coin, params.interval, breakoutHistory(params) + 2, acct.network).catch(() => [] as Candle[]);
+  const candles = raw.filter((c) => c.t + barMs <= now).slice(-breakoutHistory(params));
+  const h = acct.held[strategy.coin];
+  const decision = decideBreakout(params, candles, h ? { isLong: h.position.isLong } : null);
+
+  if (decision.action === "hold") {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: decision.reason });
+    return "held";
+  }
+  const price = candles[candles.length - 1]?.c ?? null;
+  const sent = decision.action === "close"
+    ? (h ? await sendStrategyOrder(strategy, signer, { coin: strategy.coin, isBuy: !h.position.isLong, sizeUsd: h.notionalUsd, reduceOnly: true, sz: Math.abs(h.position.size) }) : null)
+    : await sendStrategyOrder(strategy, signer, {
+      coin: strategy.coin, isBuy: decision.action === "open-long", sizeUsd: strategy.sizeUsd,
+      leverage: (params as { leverage?: number }).leverage, stopLossPct: params.stopLossPct, takeProfitPct: params.takeProfitPct,
+    });
+  const error = sent && "error" in sent ? sent.error : null;
+  await touchStrategyRun(strategy.id, { ...params, lastNote: error ? `${decision.reason} — refused: ${error}` : decision.reason });
+  await record({
+    coin: strategy.coin, action: decision.action, reasoning: decision.reason, price, equity: acct.accountValue,
+    taskId: sent && !("error" in sent) ? sent.taskId : null, error,
+  });
+  if (error) return "error";
+  return decision.action === "close" ? "closed" : "opened";
+}
+
+// ── Basis bot (paper) ───────────────────────────────────────────────────────
+//
+// Cash and carry (./basis.ts): long Hyperliquid spot, short the same size of
+// the perp, collect funding. Paper only — live spot orders aren't wired yet.
+
+const BASIS_CADENCE_MS = 5 * 60_000;
+
+/** One paper spot market order against the real mainnet spot book. */
+async function placePaperSpotOrder(p: {
+  orgId: string; agentId: string; strategyId: string; market: SpotMarket; isBuy: boolean; sizeUsd?: number; sz?: number;
+}): Promise<{ taskId: string; sz: number; avgPx: number } | { error: string }> {
+  let book: { levels?: { px: string; sz: string }[][] };
+  let perps: PaperMarket;
+  try {
+    [book, perps] = await Promise.all([hlInfo<typeof book>({ type: "l2Book", coin: p.market.pair }, PAPER_NETWORK), getPaperMarket()]);
+  } catch (err) {
+    return { error: `Couldn't read the ${p.market.token} spot book: ${(err as Error).message}` };
+  }
+  const mid = perps.mids[p.market.pair] || p.market.midPx;
+  const sz = roundSize(p.sz ?? (p.sizeUsd ?? 0) / mid, p.market.szDecimals);
+  if (!(sz > 0)) return { error: `Order rounds to zero ${p.market.token}` };
+  const limitPx = p.isBuy ? mid * (1 + MARKET_SLIPPAGE) : mid * (1 - MARKET_SLIPPAGE);
+  const side = (p.isBuy ? book.levels?.[1] : book.levels?.[0]) ?? [];
+  const walk = walkBook(side.map((l) => ({ px: Number(l.px), sz: Number(l.sz) })), sz, p.isBuy, limitPx, p.market.szDecimals);
+  if (!(walk.sz > 0)) return { error: `No ${p.market.token} spot liquidity within ${MARKET_SLIPPAGE * 100}% of the mid` };
+  const booked = await bookPaperSpotFill(
+    p.agentId,
+    { pair: p.market.pair, token: p.market.token, isBuy: p.isBuy, sz: walk.sz, px: walk.avgPx, feeRate: SPOT_TAKER_FEE_RATE, szDecimals: p.market.szDecimals },
+    perps.mids, perps.meta,
+    { orgId: p.orgId, reason: "strategy", strategyId: p.strategyId },
+  );
+  if ("error" in booked) return booked;
+  return { taskId: booked.tradeId, sz: booked.sz, avgPx: walk.avgPx };
+}
+
+async function runBasisStrategy(strategy: Strategy): Promise<"opened" | "closed" | "held" | "error"> {
+  const params = strategy.params as StoredBasisParams;
+  const open = params.open ?? null;
+  const now = Date.now();
+  if (now - (strategy.lastRunAt?.getTime() ?? 0) < BASIS_CADENCE_MS) return "held";
+  const record = recordFor(strategy.id);
+  if (!strategy.paper) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: "Basis bots run on paper only for now." });
+    return "error";
+  }
+
+  const [market, spots, summary] = await Promise.all([
+    getMarketOverview(PAPER_NETWORK),
+    getSpotMarkets(),
+    getPaperSummary(strategy.agentId, strategy.orgId),
+  ]);
+  const spot = spots.get(strategy.coin) ?? null;
+  const row = findBasis(market.filter((m) => m.coin === strategy.coin), spots, { minSpotVolumeUsd: 0 })[0] ?? null;
+  const perp = summary.positions.find((p) => p.coin === strategy.coin);
+  const held = spot ? summary.account.spot?.[spot.token] : undefined;
+
+  // A leg gone (perp stopped or liquidated, spot sold by hand) unwinds the other.
+  const legMissing = open != null && (!perp || perp.szi >= 0 || !held);
+  const decision = legMissing
+    ? { action: "close" as const, reason: `A leg of the ${strategy.coin} carry is gone — unwinding the other.` }
+    : decideBasis(params, row, open, now);
+
+  if (decision.action === "hold") {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: decision.reason, lastAprPct: row?.fundingAprPct ?? null });
+    return "held";
+  }
+
+  if (decision.action === "close") {
+    const errors: string[] = [];
+    const ids: string[] = [];
+    if (perp && perp.szi < 0) {
+      const r = await placePaperOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, coin: strategy.coin, isBuy: true, sz: Math.abs(perp.szi), sizeUsd: perp.notionalUsd, reduceOnly: true });
+      if ("error" in r) errors.push(`perp: ${r.error}`);
+      else ids.push(r.taskId);
+    }
+    if (spot && held) {
+      const r = await placePaperSpotOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, market: spot, isBuy: false, sz: Math.min(held.sz, open?.spotSz ?? held.sz) });
+      if ("error" in r) errors.push(`spot: ${r.error}`);
+      else ids.push(r.taskId);
+    }
+    await touchStrategyRun(strategy.id, { ...params, open: errors.length ? open : null, lastNote: decision.reason, lastAprPct: row?.fundingAprPct ?? null });
+    await record({ coin: strategy.coin, action: "close", reasoning: decision.reason, equity: summary.equity, taskId: ids.join(",") || null, error: errors.join("; ") || null });
+    return errors.length ? "error" : "closed";
+  }
+
+  if (!spot || !row) return "held";
+  if (perp || held) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: `${strategy.coin} already has a perp or spot position — not stacking a carry on it.` });
+    return "held";
+  }
+  const bought = await placePaperSpotOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, market: spot, isBuy: true, sizeUsd: strategy.sizeUsd });
+  if ("error" in bought) {
+    await touchStrategyRun(strategy.id, { ...params, lastNote: `Spot buy refused: ${bought.error}` });
+    await record({ coin: strategy.coin, action: "open", reasoning: decision.reason, error: `Spot buy refused: ${bought.error}` });
+    return "error";
+  }
+  const shorted = await placePaperOrder({
+    orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, coin: strategy.coin, isBuy: false, sz: bought.sz, sizeUsd: bought.sz * bought.avgPx, leverage: 1,
+  });
+  if ("error" in shorted) {
+    // Never hold the spot leg unhedged.
+    await placePaperSpotOrder({ orgId: strategy.orgId, agentId: strategy.agentId, strategyId: strategy.id, market: spot, isBuy: false, sz: bought.sz });
+    await touchStrategyRun(strategy.id, { ...params, lastNote: `Perp short refused (${shorted.error}) — sold the spot back.` });
+    await record({ coin: strategy.coin, action: "open", reasoning: decision.reason, error: `Perp short refused: ${shorted.error}. Spot sold back.` });
+    return "error";
+  }
+  const opened: OpenBasis = {
+    coin: strategy.coin, openedAt: now, entryBasisPct: row.basisPct, entryFundingAprPct: row.fundingAprPct, spotSz: bought.sz, spotPx: bought.avgPx,
+  };
+  await touchStrategyRun(strategy.id, { ...params, open: opened, lastNote: decision.reason, lastAprPct: row.fundingAprPct });
+  await record({ coin: strategy.coin, action: "open", reasoning: decision.reason, price: bought.avgPx, equity: summary.equity, taskId: [bought.taskId, shorted.taskId].join(","), error: null });
+  return "opened";
+}
+
+/** A live bot order's task finished: record its fill (or failure) for the leaderboard. */
+async function settleBotOrders(): Promise<number> {
+  let settled = 0;
+  for (const o of await listPendingBotOrders()) {
+    try {
+      const task = await getTask(o.taskId);
+      if (!task) {
+        if (o.createdAt && Date.now() - o.createdAt.getTime() > 86_400_000) await settleBotOrder(o.id, { status: "failed" });
+        continue;
+      }
+      if (task.status === "completed") {
+        const fill = (task.result as { data?: { fill?: { sz?: number; raw?: { avgPx?: string; totalSz?: string }; realizedPnl?: number | string | null } } } | undefined)?.data?.fill;
+        const sz = Number(fill?.raw?.totalSz ?? fill?.sz ?? 0);
+        const px = Number(fill?.raw?.avgPx ?? 0);
+        if (!(sz > 0 && px > 0)) {
+          await settleBotOrder(o.id, { status: "failed" });
+        } else {
+          await settleBotOrder(o.id, { status: "filled", sz, px, fee: sz * px * TAKER_FEE_RATE, realizedPnl: Number(fill?.realizedPnl ?? 0) || 0 });
+        }
+        settled++;
+      } else if (["failed", "cancelled", "timeout"].includes(task.status)) {
+        await settleBotOrder(o.id, { status: "failed" });
+        settled++;
+      }
+    } catch (err) {
+      console.error(`[hyperliquid-strategy] settling bot order ${o.id} failed:`, err);
+    }
+  }
+  return settled;
 }
 
 /**
@@ -1203,12 +2143,38 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
     if (strategy.pendingSignal) continue; // already waiting on the agent — don't re-trigger
     if (strategy.type === "ai") continue; // decided by runAiTraderTick
     try {
+      if (strategy.type === "pairs" || strategy.type === "breakout" || strategy.type === "basis") {
+        const r = strategy.type === "pairs" ? await runPairsStrategy(strategy)
+          : strategy.type === "breakout" ? await runBreakoutStrategy(strategy)
+          : await runBasisStrategy(strategy);
+        if (r === "opened" || r === "closed") executed++;
+        if (r === "error") errors++;
+        continue;
+      }
       if (strategy.type === "dca") {
         const params = strategy.params as DcaParams;
         const last = strategy.lastRunAt?.getTime() ?? 0;
-        if (Date.now() - last < params.intervalMs) continue;
-
-        await markStrategyPending(strategy.id, {});
+        const due = Date.now() - last >= params.intervalMs;
+        if (!params.smart) {
+          if (!due) continue;
+          await markStrategyPending(strategy.id, {});
+        } else {
+          // Smart DCA: size from the stack's average entry; take profit is checked every tick, not once an interval.
+          const acct = await basketAccountState(strategy);
+          if ("error" in acct) continue;
+          const isLong = params.direction !== "short";
+          const h = acct.held[strategy.coin];
+          const avg = h && h.position.isLong === isLong ? h.position.entryPx : null;
+          const price = await getMidPrice(strategy.coin, acct.network);
+          if (h && avg != null && smartDcaTakeProfit(params.smart, price, avg, isLong)) {
+            await markStrategyPending(strategy.id, { action: "close", sz: Math.abs(h.position.size), isLong: h.position.isLong, notionalUsd: h.notionalUsd, price });
+          } else if (due) {
+            const next = smartDcaSize(strategy.sizeUsd, params.smart, price, avg, isLong);
+            await markStrategyPending(strategy.id, { sizeUsd: +next.sizeUsd.toFixed(2), step: next.step, price });
+          } else {
+            continue;
+          }
+        }
         markedPending++;
       } else if (strategy.type === "grid") {
         const params = strategy.params as GridParams;
@@ -1276,6 +2242,11 @@ export async function runHyperliquidStrategyTick(): Promise<{ evaluated: number;
     }
   }
 
+  try {
+    await settleBotOrders();
+  } catch (err) {
+    console.error("[hyperliquid-strategy] settling bot orders failed:", err);
+  }
   return { evaluated: strategies.length, markedPending, executed, errors };
 }
 
@@ -1416,6 +2387,13 @@ const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
   },
   {
+    name: "hyperliquid_leaderboard",
+    description: "Where this agent stands in its org's paper arena: every paper bot ranked by return on its order size (with win rate, profit factor and drawdown), and every agent's paper account ranked by return.",
+    method: "GET",
+    path: "leaderboard/{agentId}",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "hyperliquid_history",
     description: "This agent's settled trade log plus total PnL and win rate.",
     method: "GET",
@@ -1466,20 +2444,137 @@ const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: "hyperliquid_paper_train",
-    description: "Start paper training from an idea or goal the operator just gave you. Each round your own model decides LONG, SHORT, CLOSE, or NOTHING toward that goal, and the fill lands on the virtual account. No wallet and no real money. One running paper trainer per coin.",
+    description: "Start paper training from an idea or goal the operator just gave you. Each round your own model decides LONG, SHORT, CLOSE, or NOTHING toward that goal, and the fill lands on the virtual account. Give one coin, or a basket (coins, or scanTop to scan the most-traded perps) to trade several coins per round — pair trades, funding carry, arbitrage. No wallet and no real money. One running paper trainer per coin.",
     method: "POST",
     path: "paper/train",
     input_schema: {
       type: "object",
       properties: {
-        coin: { type: "string", description: "Perp symbol, e.g. BTC" },
+        coin: { type: "string", description: "Perp symbol, e.g. BTC — for a single-coin trainer" },
+        coins: { type: "array", items: { type: "string" }, description: "A basket of 2–8 perps to trade together, e.g. [\"BTC\",\"ETH\",\"SOL\"]. Use instead of coin." },
+        scanTop: { type: "number", description: "Instead of a fixed basket, scan the N (2–8) most-traded perps each round." },
         goal: { type: "string", description: "The idea to practice, in plain language. 8–800 characters." },
         sizeUsd: { type: "number", description: "USD notional per order. Default 25. Minimum 10." },
         intervalMs: { type: "number", description: "How often to decide, in milliseconds. Default and minimum 1 minute. Live bots stay at 15 minutes." },
         maxDrawdownPct: { type: "number", description: "Stop for good if equity falls this percent from the start. Default 10." },
       },
-      required: ["coin", "goal"],
+      required: ["goal"],
     },
+  },
+  {
+    name: "hyperliquid_scanner",
+    description: "Scan Hyperliquid for arbitrage and relative-value setups: funding rate gaps against Binance and Bybit (annualised), perps trading off their oracle price, and stretched spreads between correlated coins (z-score, which leg to long and which to short).",
+    method: "GET",
+    path: "scanner",
+    input_schema: {
+      type: "object",
+      properties: {
+        coins: { type: "string", description: "Comma-separated perps to check for pair spreads, e.g. BTC,ETH,SOL. Default: the 8 most-traded." },
+        interval: { type: "string", description: "Bar size for pair spreads. Default 1h." },
+        network: { type: "string", enum: ["mainnet", "testnet"] },
+      },
+    },
+  },
+  {
+    name: "hyperliquid_intel",
+    description: "Positioning and flow from free public data: what the month's most and least profitable large Hyperliquid accounts hold (smart vs dumb money), Hyperliquid's market-maker vault (HLP) positioning, OKX liquidations by window and long/short account ratio, Fear & Greed, Deribit implied volatility (DVOL) and the Coinbase premium.",
+    method: "GET",
+    path: "intel",
+    input_schema: {
+      type: "object",
+      properties: { coins: { type: "string", description: "Comma-separated perps, e.g. BTC,ETH,SOL. Default: the 6 most-traded." } },
+    },
+  },
+  {
+    name: "hyperliquid_pairs_bot",
+    description: "Start a rule-based pairs-arbitrage bot. Among its coins it finds the correlated pair whose spread is most stretched; past ±entryZ it longs the cheap coin and shorts the rich one (beta-weighted), and closes both legs together when the spread converges, hits ±stopZ, or after maxHoldBars. Check hyperliquid_scanner first. paper: true trades the virtual account; live needs instant trading.",
+    method: "POST",
+    path: "strategy",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["pairs"] },
+        coins: { type: "array", items: { type: "string" }, description: "2 coins for a fixed pair, or up to 8 to let the bot pick the most stretched pair, e.g. [\"BTC\",\"ETH\",\"SOL\"]" },
+        sizeUsd: { type: "number", description: "USD notional of the first leg; the other leg is beta-weighted. Minimum 10." },
+        paper: { type: "boolean", description: "true = paper account (recommended to start)" },
+        interval: { type: "string", description: "Bar size for the spread. Default 1h." },
+        entryZ: { type: "number", description: "Enter past this z-score. Default 2." },
+        exitZ: { type: "number", description: "Take profit back inside this z. Default 0.5." },
+        stopZ: { type: "number", description: "Stop out past this z. Default 4." },
+        maxHoldBars: { type: "number", description: "Close after this many bars. Default 72." },
+      },
+      required: ["type", "coins", "sizeUsd"],
+    },
+  },
+  {
+    name: "hyperliquid_breakout_bot",
+    description: "Start a rule-based squeeze-breakout bot on one coin. It waits for the Bollinger Bands to squeeze to their narrowest in a while, then enters on a close outside the bands with ADX confirming the trend (long above, short below if allowShort). It exits when the close falls back through the middle band, or at its stop loss / take profit. Backtest it first in the panel. paper: true trades the virtual account; live needs instant trading.",
+    method: "POST",
+    path: "strategy",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["breakout"] },
+        coin: { type: "string", description: "Perp symbol, e.g. BTC" },
+        sizeUsd: { type: "number", description: "USD notional per entry. Minimum 10." },
+        paper: { type: "boolean", description: "true = paper account (recommended to start)" },
+        interval: { type: "string", description: "Bar size: 15m, 1h, 4h or 1d. Default 4h — on 1h bars a setup is rare." },
+        minAdx: { type: "number", description: "Minimum ADX to count as a trend. Default 20." },
+        allowShort: { type: "boolean", description: "Also short breakdowns. Default true." },
+        stopLossPct: { type: "number", description: "Stop loss, % from entry. Default 3." },
+        takeProfitPct: { type: "number", description: "Take profit, % from entry. Default 6." },
+        leverage: { type: "number", description: "Leverage for entries. Default: the agent's risk config." },
+      },
+      required: ["type", "coin", "sizeUsd"],
+    },
+  },
+  {
+    name: "hyperliquid_basis_bot",
+    description: "Start a paper spot-perp basis (cash and carry) bot: when the coin's Hyperliquid funding pays shorts at least entryAprPct a year, it buys the coin on Hyperliquid spot and shorts the same size of its perp, collecting funding with price risk hedged out. It unwinds both legs when funding drops under exitAprPct or after maxHoldHours. Check the basis rows from hyperliquid_scanner first. Paper only.",
+    method: "POST",
+    path: "strategy",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["basis"] },
+        coin: { type: "string", description: "Perp symbol with a Hyperliquid spot market, e.g. BTC (spot UBTC), ETH, SOL, HYPE" },
+        sizeUsd: { type: "number", description: "USD of spot bought; the perp short matches it. Minimum 10." },
+        paper: { type: "boolean", enum: [true], description: "Must be true — basis bots are paper only" },
+        entryAprPct: { type: "number", description: "Enter when funding pays shorts at least this % a year. Default 15." },
+        exitAprPct: { type: "number", description: "Unwind when funding falls under this % a year. Default 3." },
+        maxHoldHours: { type: "number", description: "Unwind after this long. Default 168." },
+      },
+      required: ["type", "coin", "sizeUsd", "paper"],
+    },
+  },
+  {
+    name: "hyperliquid_edit_bot",
+    description: "Change one of your bots' settings or order size; it keeps running and keeps its open positions. Editable per type — dca: intervalMs, direction, stopLossPct, takeProfitPct, smart; grid: lowerPrice, upperPrice, levels, direction, stopLossPct, takeProfitPct; signal: direction; sniper: mode, targetPrice, direction, stopLossPct, takeProfitPct; ai: intervalMs, maxDrawdownPct, leverage, goal; pairs: interval, lookbackBars, entryZ, exitZ, stopZ, maxHoldBars, minCorrelation; breakout: interval, bbLength, bbMult, squeezeLookback, squeezeWithin, adxLength, minAdx, allowShort, exitOnMid, stopLossPct, takeProfitPct, leverage; basis: entryAprPct, exitAprPct, minBasisPct, maxHoldHours. Type, coin and paper/live can't change.",
+    method: "POST",
+    path: "strategy/{id}/edit",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The bot's id" },
+        sizeUsd: { type: "number", description: "New order size in USD (minimum 10)" },
+        params: { type: "object", description: "Only the settings to change" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "hyperliquid_delete_bot",
+    description: "Delete one of your bots and its decision log. Positions it opened stay open — close them separately.",
+    method: "POST",
+    path: "strategy/{id}/delete",
+    input_schema: { type: "object", properties: { id: { type: "string", description: "The bot's id" } }, required: ["id"] },
+  },
+  {
+    name: "hyperliquid_stop_all_bots",
+    description: "Emergency stop: turn off all of your bots at once and drop any signal waiting to execute. closePositions: true also market-closes the coins those bots trade (paper, or live with instant trading).",
+    method: "POST",
+    path: "strategy/stop-all",
+    input_schema: { type: "object", properties: { closePositions: { type: "boolean" } } },
   },
   {
     name: "hyperliquid_ai_requests",
@@ -1818,6 +2913,44 @@ export default defineServerMod({
     },
 
     /**
+     * GET /scanner?network=&coins=BTC,ETH,SOL&interval=1h — arbitrage and
+     * relative-value scan: Hyperliquid funding against Binance/Bybit, perps
+     * trading off their oracle, and stretched spreads between correlated
+     * pairs among `coins` (default: the 8 most-traded perps). Public data only.
+     */
+    "GET /scanner": async (req) => {
+      try {
+        const url = new URL(req.url);
+        const network = (url.searchParams.get("network") as HlNetwork | null) ?? defaultNetwork();
+        const interval = url.searchParams.get("interval") ?? "1h";
+        if (!CANDLE_INTERVAL_MS[interval]) return Response.json({ error: `interval must be one of ${Object.keys(CANDLE_INTERVAL_MS).join(", ")}` }, { status: 400 });
+        const raw = url.searchParams.get("coins");
+        const coins = raw ? [...new Set(raw.split(",").map(cleanTrainCoin).filter((c): c is string => c != null))].slice(0, 12) : null;
+        return Response.json({ network, ...(await scanMarket(network, coins?.length ? coins : null, interval)) });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /**
+     * GET /intel?coins=BTC,ETH — positioning and flow from free public data
+     * outlets (./intel.ts): smart vs dumb money and HLP positioning from
+     * Hyperliquid's leaderboard and vaults, OKX liquidations and long/short
+     * ratio, Fear & Greed, Deribit DVOL and the Coinbase premium. Default
+     * coins: the 6 most-traded perps. Always mainnet.
+     */
+    "GET /intel": async (req) => {
+      try {
+        const raw = new URL(req.url).searchParams.get("coins");
+        let coins = raw ? [...new Set(raw.split(",").map(cleanTrainCoin).filter((c): c is string => c != null))].slice(0, 12) : [];
+        if (!coins.length) coins = (await getMarketOverview("mainnet")).slice(0, 6).map((m) => m.coin);
+        return Response.json(await getMarketIntel(coins));
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
+    },
+
+    /**
      * GET /candles/:coin?interval=15m&network=&bars=120&end= — OHLCV candles
      * for the terminal's chart (default last 120 bars) and the backtester
      * (up to 1000 bars, optionally ending at `end` ms), from the public Info API.
@@ -2106,24 +3239,78 @@ export default defineServerMod({
       const { wallet, type, coin, sizeUsd, params } = body;
       const paper = body.paper === true;
 
-      if (!orgId || !agentId || (!wallet && !paper) || !type || !coin || !sizeUsd) {
+      const wantsBasket = (type === "ai" && (params?.coins != null || params?.scanTop != null)) || type === "pairs";
+      if (!orgId || !agentId || (!wallet && !paper) || !type || (!coin && !wantsBasket) || !sizeUsd) {
         return Response.json({ error: "orgId, agentId, wallet (unless paper), type, coin, sizeUsd are required" }, { status: 400 });
       }
-      if (!["dca", "grid", "signal", "sniper", "ai"].includes(type)) {
-        return Response.json({ error: "type must be dca, grid, signal, sniper, or ai" }, { status: 400 });
+      if (!["dca", "grid", "signal", "sniper", "ai", "pairs", "breakout", "basis"].includes(type)) {
+        return Response.json({ error: "type must be dca, grid, signal, sniper, ai, pairs, breakout, or basis" }, { status: 400 });
       }
       let storedParams = params ?? {};
+      let storedCoin: string = coin;
       if (type === "ai") {
         if (coin === "ANY") return Response.json({ error: "an ai strategy needs a specific coin" }, { status: 400 });
         const built = buildAiParams(params, paper ? PAPER_MIN_INTERVAL_MS : AI_MIN_INTERVAL_MS);
         if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
         storedParams = built;
+        const basket = parseBasket(params ?? {});
+        if (basket && "error" in basket) return Response.json({ error: basket.error }, { status: 400 });
+        if (basket) {
+          if (!paper && !(await getInstantTrading(agentId))) {
+            return Response.json({ error: "A live basket bot needs instant trading on for this agent — or run it on paper" }, { status: 400 });
+          }
+          const clash = findAiClash(await getStrategies(agentId), paper, basket);
+          if (clash) return Response.json({ error: `This agent already has an AI bot on ${clash.coin}`, strategyId: clash.strategy.id }, { status: 409 });
+          storedParams = { ...built, ...(basket.coins ? { coins: basket.coins } : { scanTop: basket.scanTop, owned: [] }) };
+          storedCoin = basket.label;
+        }
       }
-      if (type === "dca" && !params?.intervalMs) {
-        return Response.json({ error: "params.intervalMs is required for a dca strategy" }, { status: 400 });
+      if (type === "pairs") {
+        // Agent tools send a flat body: coins/entryZ/… may sit beside type instead of inside params.
+        const built = buildPairsParams(params ?? body, cleanTrainCoin);
+        if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
+        if (!CANDLE_INTERVAL_MS[built.interval]) {
+          return Response.json({ error: `params.interval must be one of ${Object.keys(CANDLE_INTERVAL_MS).join(", ")}` }, { status: 400 });
+        }
+        if (!(Number(sizeUsd) >= MIN_ORDER_USD)) return Response.json({ error: `sizeUsd must be at least ${MIN_ORDER_USD} per leg` }, { status: 400 });
+        if (!paper && !(await getInstantTrading(agentId))) {
+          return Response.json({ error: "A live pairs bot needs instant trading on for this agent — or run it on paper" }, { status: 400 });
+        }
+        const clash = findAiClash(await getStrategies(agentId), paper, { coins: built.coins });
+        if (clash) return Response.json({ error: `This agent already has a bot on ${clash.coin}`, strategyId: clash.strategy.id }, { status: 409 });
+        storedParams = { ...built, open: null, lastZ: null, lastNote: null } satisfies StoredPairsParams;
+        storedCoin = built.coins.join("/");
+      }
+      if (type === "breakout" || type === "basis") {
+        // Agent tools send a flat body, like pairs.
+        const raw = params ?? body;
+        const built = type === "breakout" ? buildBreakoutParams(raw, Object.keys(CANDLE_INTERVAL_MS)) : buildBasisParams(raw, cleanTrainCoin(coin));
+        if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
+        if (!(Number(sizeUsd) >= MIN_ORDER_USD)) return Response.json({ error: `sizeUsd must be at least ${MIN_ORDER_USD}` }, { status: 400 });
+        if (type === "basis" && !paper) return Response.json({ error: "A basis bot runs on paper only for now" }, { status: 400 });
+        if (type === "breakout" && !paper && !(await getInstantTrading(agentId))) {
+          return Response.json({ error: "A live breakout bot needs instant trading on for this agent — or run it on paper" }, { status: 400 });
+        }
+        const lev = Number(raw?.leverage);
+        storedParams = type === "breakout"
+          ? { ...built, ...(lev > 1 ? { leverage: lev } : {}), lastNote: null }
+          : { ...built, open: null, lastNote: null, lastAprPct: null };
+        storedCoin = cleanTrainCoin(coin) ?? coin;
+      }
+      if (type === "dca") {
+        if (!params?.intervalMs) return Response.json({ error: "params.intervalMs is required for a dca strategy" }, { status: 400 });
+        const built = buildDcaParams(params);
+        if ("error" in built) return Response.json({ error: built.error }, { status: 400 });
+        storedParams = built;
       }
       if (type === "grid" && !(params?.lowerPrice && params?.upperPrice && params?.levels)) {
         return Response.json({ error: "params.lowerPrice, upperPrice, levels are required for a grid strategy" }, { status: 400 });
+      }
+      if (type === "grid" || type === "sniper") {
+        const extras = buildRuleExtras(params);
+        if ("error" in extras) return Response.json({ error: extras.error }, { status: 400 });
+        storedParams = { ...params, direction: undefined, stopLossPct: undefined, takeProfitPct: undefined, ...extras };
+        for (const k of ["direction", "stopLossPct", "takeProfitPct"]) if (storedParams[k] === undefined) delete storedParams[k];
       }
       if (type === "sniper") {
         if (!["new-listing", "price-above", "price-below"].includes(params?.mode)) {
@@ -2143,7 +3330,7 @@ export default defineServerMod({
       const strategyCap = await ensureRunStrategy(ctx, agentId, orgId);
       if (strategyCap) return Response.json({ error: strategyCap }, { status: 403 });
 
-      const id = await createStrategy({ orgId, agentId, wallet: wallet ?? "", type, coin, sizeUsd, enabled: true, params: storedParams, paper });
+      const id = await createStrategy({ orgId, agentId, wallet: wallet ?? "", type, coin: storedCoin, sizeUsd, enabled: true, params: storedParams, paper });
       return Response.json({ id });
     },
 
@@ -2166,7 +3353,7 @@ export default defineServerMod({
       const open = await listOpenAiRequests(ctx.agent.agentId);
       return Response.json({
         requests: open.map((r) => ({
-          id: r.id, purpose: r.purpose, coin: r.coin, system: r.system, prompt: r.prompt,
+          id: r.id, purpose: r.purpose, coin: r.coin, ...(r.coins ? { coins: r.coins } : {}), system: r.system, prompt: r.prompt,
           expiresAt: r.expiresAt.toISOString(), answer: "POST ai/requests/{id}/answer { decision, reasoning } or { text }",
         })),
       });
@@ -2187,6 +3374,23 @@ export default defineServerMod({
       }
       const body = await req.json().catch(() => ({}));
       const text = typeof body.text === "string" ? body.text : "";
+      if (request.coins?.length) {
+        // A basket round: { decisions: { ETH: "LONG", ... } } or { text } with a DECISIONS block.
+        const given = body.decisions && typeof body.decisions === "object"
+          ? Object.entries(body.decisions as Record<string, unknown>).map(([c, d]) => `${c}: ${String(d)}`).join("\n")
+          : null;
+        const decisions = parseMultiDecision(given != null ? `DECISIONS\n${given}` : text, request.coins);
+        if (!decisions) {
+          return Response.json({ error: "No decisions found — end with a DECISIONS block (COIN: LONG|SHORT|CLOSE per line) or NOTHING" }, { status: 400 });
+        }
+        const summary = Object.entries(decisions).map(([c, d]) => `${c}:${d}`).join(" ") || "NOTHING";
+        const reasoning = String(body.reasoning ?? text).trim().slice(0, 2000);
+        const first = Object.values(decisions)[0] ?? "NOTHING";
+        const answered = await answerAiRequest(request.id, first, reasoning);
+        if (!answered) return Response.json({ error: "This question was already answered or has expired" }, { status: 409 });
+        const outcome = await applyBasketAnswer(answered, decisions, reasoning);
+        return Response.json({ ok: true, decision: summary, decisions, ...outcome });
+      }
       const inPosition = /Current position: (LONG|SHORT)/.test(request.prompt);
       const decision = typeof body.decision === "string" && ["LONG", "SHORT", "CLOSE", "NOTHING"].includes(body.decision.toUpperCase())
         ? parseDecision(body.decision, inPosition)
@@ -2261,6 +3465,126 @@ export default defineServerMod({
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
       await toggleStrategy(strategy.id, Boolean(body.enabled));
       return Response.json({ ok: true });
+    },
+
+    /**
+     * POST /strategy/:id/edit — edit a bot's settings and/or order size while it
+     * keeps its state (open pair, drawdown baseline, the round out with the
+     * agent). Type, coin/basket and paper/live can't change: delete and
+     * create a new bot for that. Settings are re-checked like POST /strategy.
+     * POST rather than PATCH because agent runtimes only send GET and POST.
+     * Body: { sizeUsd?, params?: { …editable settings for its type } }
+     */
+    "POST /strategy/:id/edit": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      if (ctx.agent && ctx.agent.agentId !== strategy.agentId) {
+        return Response.json({ error: "An agent can only edit its own bots" }, { status: 403 });
+      }
+
+      const current = (strategy.params ?? {}) as Record<string, unknown>;
+      const edit = applyBotEdit({ ...strategy, params: current }, body);
+      if ("error" in edit) return Response.json({ error: edit.error }, { status: 400 });
+      if (edit.sizeUsd !== undefined && edit.sizeUsd < MIN_ORDER_USD) {
+        return Response.json({ error: `sizeUsd must be at least ${MIN_ORDER_USD}` }, { status: 400 });
+      }
+      if (strategy.paper && strategy.type === "ai" && edit.sizeUsd !== undefined && edit.sizeUsd > TRAIN_MAX_SIZE_USD) {
+        return Response.json({ error: `sizeUsd must be at most ${TRAIN_MAX_SIZE_USD} for a paper AI bot` }, { status: 400 });
+      }
+      const validated = validateBotSettings(strategy, edit.settings);
+      if ("error" in validated) return Response.json({ error: validated.error }, { status: 400 });
+
+      const strategyCap = await ensureRunStrategy(ctx, strategy.agentId, strategy.orgId);
+      if (strategyCap) return Response.json({ error: strategyCap }, { status: 403 });
+
+      const params = withRuntimeState(strategy.type, validated, current);
+      // A grid whose range or level count moved has new levels; the old visited set no longer lines up.
+      if (strategy.type === "grid" && edit.changed.some((k) => k !== "sizeUsd")) delete params.visitedLevels;
+      await updateStrategy(strategy.id, { sizeUsd: edit.sizeUsd, params: params as Strategy["params"] });
+      return Response.json({ ok: true, id: strategy.id, changed: edit.changed, sizeUsd: edit.sizeUsd ?? strategy.sizeUsd, params });
+    },
+
+    /**
+     * POST /strategy/:id/delete — remove a bot and its decision log. Positions
+     * it opened stay open (closing is a separate, explicit act); for a paper
+     * bot the response lists them. An AI round still out with the agent is
+     * expired so a late answer can't trade.
+     */
+    "POST /strategy/:id/delete": async (_req, ctx) => {
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      if (ctx.agent && ctx.agent.agentId !== strategy.agentId) {
+        return Response.json({ error: "An agent can only delete its own bots" }, { status: 403 });
+      }
+
+      const openRequestId = strategy.type === "ai" ? (strategy.params as AiParams).openRequestId : null;
+      await toggleStrategy(strategy.id, false); // stop first, so a tick mid-delete can't run it
+      if (openRequestId) await expireAiRequest(openRequestId);
+      await deleteStrategy(strategy.id);
+
+      const coins = new Set(claimedCoins(strategy));
+      const leftOpen = strategy.paper
+        ? (await listPaperPositions(strategy.agentId)).filter((p) => coins.has(p.coin)).map((p) => ({ coin: p.coin, szi: p.szi }))
+        : null;
+      return Response.json({ ok: true, id: strategy.id, paper: strategy.paper, coins: [...coins], leftOpen });
+    },
+
+    /**
+     * POST /strategy/stop-all — emergency stop. Turns off every bot in scope
+     * and drops any signal waiting to execute, in one write; expires AI rounds
+     * out with the agent. Scope: one agent (agentId), or the whole org when a
+     * signed-in member leaves agentId out. An agent can only stop its own bots.
+     * closePositions: true also market-closes what the stopped bots trade —
+     * their coins, on their own account (paper, or live with instant trading);
+     * manual positions in other coins are left alone. Anything that couldn't
+     * be closed comes back in leftOpen.
+     * Body: { orgId, agentId?, closePositions? }
+     */
+    "POST /strategy/stop-all": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const orgId = ctx.agent?.orgId ?? body.orgId;
+      const agentId: string | undefined = ctx.agent?.agentId ?? (body.agentId || undefined);
+      if (!orgId) return Response.json({ error: "orgId is required" }, { status: 400 });
+      const denied = await requireOrgAccess(ctx, orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+
+      const inScope = (agentId ? await getStrategies(agentId) : await listOrgStrategies(orgId)).filter((s) => s.orgId === orgId);
+      const running = inScope.filter((s) => s.enabled || s.pendingSignal);
+      await stopStrategies(running.map((s) => s.id));
+      await Promise.all(running.map((s) => {
+        const openRequestId = s.type === "ai" ? (s.params as AiParams).openRequestId : null;
+        return openRequestId ? expireAiRequest(openRequestId).catch(() => {}) : null;
+      }));
+
+      const out: StopAllOutcome = {
+        stopped: running.map((s) => ({ id: s.id, agentId: s.agentId, type: s.type, coin: s.coin, paper: s.paper })),
+        closed: [],
+        leftOpen: [],
+      };
+      if (body.closePositions === true) {
+        // One pass per agent and account, over every coin its stopped bots trade.
+        const groups = new Map<string, { agentId: string; paper: boolean; coins: Set<string> }>();
+        for (const s of running) {
+          const key = `${s.agentId}:${s.paper}`;
+          const g = groups.get(key) ?? { agentId: s.agentId, paper: s.paper, coins: new Set<string>() };
+          claimedCoins(s).filter((c) => c !== "ANY").forEach((c) => g.coins.add(c));
+          groups.set(key, g);
+        }
+        for (const g of groups.values()) {
+          try {
+            await flattenCoins(g.agentId, orgId, g.coins, g.paper, out);
+          } catch (err) {
+            for (const coin of g.coins) out.leftOpen.push({ agentId: g.agentId, coin, paper: g.paper, reason: (err as Error).message });
+          }
+        }
+      }
+      ctx.log.warn(`emergency stop in org ${orgId}${agentId ? ` agent ${agentId}` : ""}: ${out.stopped.length} bots stopped, ${out.closed.length} closed, ${out.leftOpen.length} left open`);
+      return Response.json({ ok: true, scope: agentId ? "agent" : "org", ...out });
     },
 
     /**
@@ -2392,9 +3716,11 @@ export default defineServerMod({
       const body = await req.json().catch(() => ({}));
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
-      const coin = cleanTrainCoin(body.coin);
+      const basket = parseBasket(body);
+      if (basket && "error" in basket) return Response.json({ error: basket.error }, { status: 400 });
+      const coin = basket ? basket.label : cleanTrainCoin(body.coin);
       if (!orgId || !agentId) return Response.json({ error: "orgId and agentId are required" }, { status: 400 });
-      if (!coin) return Response.json({ error: "coin must be a perp symbol such as BTC" }, { status: 400 });
+      if (!coin) return Response.json({ error: "coin must be a perp symbol such as BTC (or send coins / scanTop for a basket)" }, { status: 400 });
       const goal = normalizeGoal(body.goal);
       if (goal.error) return Response.json({ error: goal.error }, { status: 400 });
       if (!goal.goal) return Response.json({ error: "A goal is required — write the idea this agent should practice" }, { status: 400 });
@@ -2417,23 +3743,24 @@ export default defineServerMod({
       if (strategyCap) return Response.json({ error: strategyCap }, { status: 403 });
 
       const existing = await getStrategies(agentId);
-      const clash = existing.find((s) => s.enabled && s.paper && s.type === "ai" && s.coin === coin);
+      const clash = findAiClash(existing, true, basket ?? { coins: [coin] });
       if (clash) {
         return Response.json({
-          error: `This agent already has a paper trainer on ${coin}. Stop it before starting another goal.`,
-          strategyId: clash.id,
+          error: `This agent already has a paper trainer on ${clash.coin}. Stop it before starting another goal.`,
+          strategyId: clash.strategy.id,
         }, { status: 409 });
       }
 
+      const params = basket ? { ...built, ...(basket.coins ? { coins: basket.coins } : { scanTop: basket.scanTop, owned: [] }) } : built;
       const id = await createStrategy({
-        orgId, agentId, wallet: "", type: "ai", coin, sizeUsd, enabled: true, params: built, paper: true,
+        orgId, agentId, wallet: "", type: "ai", coin, sizeUsd, enabled: true, params, paper: true,
       });
 
       let firstRound: "asked" | "waiting" | "error" = "waiting";
       try {
         const created = await getStrategy(id);
         if (created) {
-          const round = await runAiStrategy(created);
+          const round = await (isBasket(created) ? runBasketStrategy(created) : runAiStrategy(created));
           firstRound = round === "asked" ? "asked" : round === "error" ? "error" : "waiting";
         }
       } catch (err) {
@@ -2442,7 +3769,7 @@ export default defineServerMod({
       }
 
       return Response.json({
-        id, paper: true, coin, goal: goal.goal, sizeUsd,
+        id, paper: true, coin, ...(basket ? { basket: basket.coins ?? `top ${basket.scanTop}` } : {}), goal: goal.goal, sizeUsd,
         intervalMs: built.intervalMs, maxDrawdownPct: built.maxDrawdownPct, firstRound,
       });
     },
@@ -2585,6 +3912,46 @@ export default defineServerMod({
       if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
       const account = await getPaperAccount(ctx.params.agentId, access.orgId);
       return Response.json(await getPaperTradeHistory(ctx.params.agentId, undefined, { since: account.resetAt, startBalance: account.startBalance }));
+    },
+
+    /**
+     * GET /leaderboard/:agentId — the paper arena of this agent's org: paper
+     * bots ranked by their own fills (return on order size, then drawdown),
+     * and agents' paper accounts ranked by return, marked to mainnet mids.
+     * Paper only: live trades don't record which bot sent them.
+     */
+    "GET /leaderboard/:agentId": async (req, ctx) => {
+      const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
+      const live = new URL(req.url).searchParams.get("mode") === "live";
+      try {
+        const [strategies, paper, fills, agents, market] = await Promise.all([
+          listOrgStrategies(access.orgId),
+          listOrgPaperAccounts(access.orgId),
+          live ? listOrgBotFills(access.orgId) : listOrgPaperFills(access.orgId),
+          getAgentsByOrg(access.orgId),
+          getPaperMarket(),
+        ]);
+        const nameOf = new Map(agents.map((a) => [a.id, a.name || a.id]));
+        const bots = rankBots(
+          strategies.filter((s) => s.paper === !live).map((s) => ({
+            id: s.id, agentId: s.agentId, agentName: nameOf.get(s.agentId) ?? s.agentId, type: s.type, coin: s.coin, sizeUsd: s.sizeUsd,
+            enabled: s.enabled, eliminated: s.type === "ai" && (s.params as AiParams).eliminated === true,
+            goal: s.type === "ai" ? (s.params as AiParams).goal ?? null : null,
+          })),
+          fills,
+        );
+        const accounts = rankAccounts(paper.accounts.map((a) => {
+          const held = paper.positions.filter((p) => p.agentId === a.agentId);
+          return {
+            agentId: a.agentId, agentName: nameOf.get(a.agentId) ?? a.agentId, startBalance: a.startBalance,
+            equity: summarize(a.balance, held, market.mids, market.meta).equity, openPositions: held.length,
+          };
+        }));
+        return Response.json({ orgId: access.orgId, you: ctx.params.agentId, mode: live ? "live" : "paper", bots, accounts, fillsCounted: fills.length });
+      } catch (err) {
+        return Response.json({ error: (err as Error).message }, { status: 502 });
+      }
     },
 
     // ── Referrals ──────────────────────────────────────────────────────────

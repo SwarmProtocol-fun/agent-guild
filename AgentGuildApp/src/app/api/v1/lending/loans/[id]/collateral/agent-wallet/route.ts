@@ -16,6 +16,7 @@ import { getLoan } from "@/lib/lending/lending-service";
 import {
     AgentCollateralError, finishAgentCollateral, postCollateralFromAgentWallet, quoteAgentCollateral,
 } from "@/lib/lending/agent-collateral";
+import { tryAutoDisburse } from "@/lib/lending/auto-disburse";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -53,6 +54,10 @@ export async function POST(req: NextRequest, { params }: Ctx) {
         const result = body.check === true
             ? await finishAgentCollateral(id)
             : await postCollateralFromAgentWallet(id, auth.wallet, typeof body.walletId === "string" ? body.walletId : undefined);
+        if (result.status === "posted" && result.loan) {
+            const paid = await tryAutoDisburse(result.loan);
+            return NextResponse.json({ ...result, loan: paid.loan, autoDisburse: paid.autoDisburse });
+        }
         return NextResponse.json(result, { status: result.status === "failed" ? 400 : 200 });
     } catch (err) {
         return errorResponse(err, "Failed to post collateral from the agent's wallet");

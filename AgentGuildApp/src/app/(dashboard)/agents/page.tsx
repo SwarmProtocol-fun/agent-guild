@@ -57,17 +57,20 @@ function buildSetupPrompt(p: {
   agentId: string;
   apiKey: string;
   inviteCode?: string;
+  /** Single-use org-owner authorization to bind the agent's key (24h). */
+  registrationToken: string;
 }) {
   return `Join **${p.orgName}** as **${p.agentName}** (${p.agentType}).
 Run this command and stop. Do not read source, the repo, or the dashboard.
 Do not run a second command.
 
-curl -fsSL https://agent-guild.com/agent-guild.mjs -o /tmp/agent-guild.mjs && node /tmp/agent-guild.mjs register --hub https://agent-guild.com --org ${p.orgId} --name "${p.agentName}" --type "${p.agentType}" --skills "web-search,code-interpreter" --bio "${p.agentType} agent for ${p.orgName}" --greeting "🟠 ${p.agentName} online. Operations ready." --takeover
+curl -fsSL https://agent-guild.com/agent-guild.mjs -o /tmp/agent-guild.mjs && node /tmp/agent-guild.mjs register --hub https://agent-guild.com --org ${p.orgId} --name "${p.agentName}" --type "${p.agentType}" --skills "web-search,code-interpreter" --bio "${p.agentType} agent for ${p.orgName}" --greeting "🟠 ${p.agentName} online. Operations ready." --token ${p.registrationToken} --takeover
 
 Done when stdout contains the line:
 Status: online
 
-Reserved agent id: ${p.agentId}`;
+Reserved agent id: ${p.agentId}
+The --token is single-use and expires in 24 hours.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,8 +158,23 @@ export default function AgentsPage() {
   const [deleteTarget, setDeleteTarget] = useState<Agent | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const handleReinvite = (agent: Agent) => {
+  /** Mint the org owner's single-use authorization for this agent's key binding. */
+  const mintRegistrationToken = async (agentId: string): Promise<string> => {
+    const resp = await fetch(`/api/v1/orgs/${currentOrg?.id}/agent-registrations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-wallet-address': account?.address || '' },
+      body: JSON.stringify({ agentId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.token) {
+      throw new Error(data.error || `Could not create a setup token (${resp.status})`);
+    }
+    return data.token as string;
+  };
+
+  const openSetup = async (agent: { id: string; name: string; type: string; apiKey?: string }) => {
     const key = agent.apiKey || crypto.randomUUID();
+    const registrationToken = await mintRegistrationToken(agent.id);
     const prompt = buildSetupPrompt({
       agentName: agent.name,
       agentType: agent.type,
@@ -165,12 +183,20 @@ export default function AgentsPage() {
       agentId: agent.id,
       apiKey: key,
       inviteCode: inviteCode ?? undefined,
+      registrationToken,
     });
     setSetupPrompt(prompt);
     setSetupApiKey(key);
     setSetupAgentId(agent.id);
     setShowSetup(true);
     setCopied(false);
+  };
+
+  const handleReinvite = (agent: Agent) => {
+    setError(null);
+    openSetup(agent).catch((err) => {
+      setError(err instanceof Error ? err.message : 'Failed to create setup command');
+    });
   };
 
   const handleEditOpen = (agent: Agent) => {
@@ -352,33 +378,17 @@ export default function AgentsPage() {
         createdAt: new Date(),
       });
 
-      // On-chain registration is now skipped during initial agent creation 
+      // On-chain registration is now skipped during initial agent creation
       // to avoid interrupting the user with a wallet signature prompt.
       // Users can register the agent on-chain manually later if desired.
 
-      const apiKey = apiKeyForNew;
-
-      const prompt = buildSetupPrompt({
-        agentName: agentName.trim(),
-        agentType,
-        orgName: currentOrg.name,
-        orgId: currentOrg.id,
-        agentId: newAgentId,
-        apiKey,
-        inviteCode: inviteCode ?? undefined,
-      });
-
-      setSetupPrompt(prompt);
-      setSetupApiKey(apiKey);
-      setSetupAgentId(newAgentId);
+      await openSetup({ id: newAgentId, name: agentName.trim(), type: agentType, apiKey: apiKeyForNew });
 
       // Clear form and switch dialogs
       setAgentName('');
       setAgentType('fullstack-developer');
       setAgentDescription('');
       setShowRegister(false);
-      setShowSetup(true);
-      setCopied(false);
 
       // Reload agents
 

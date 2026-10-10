@@ -10,6 +10,8 @@
  *      awaiting collateral after LENDING_PENDING_EXPIRY_DAYS, releasing any
  *      pool liquidity they reserved. A loan whose agent-wallet transfer is
  *      already on-chain is never expired — its collateral is on the way.
+ *   2b. Pay out pool loans under the automatic payout limit from the platform
+ *      payout wallet (auto-disburse.ts), and settle payouts already sent.
  *   3. Reconcile every pool's interest accrual against its active loans.
  *
  * Every step is idempotent and each loan is processed independently, so a
@@ -24,6 +26,7 @@ import type { LendingPool, Loan } from "./types";
 import { normalizeLegacy, healLegacyInTxn } from "./legacy-fields";
 import { finishPendingAgentCollateral, finishPendingAgentTopUps } from "./agent-collateral";
 import { finishPendingAgentRepays } from "./agent-repay";
+import { autoDisbursePending } from "./auto-disburse";
 
 const LOANS = "loans";
 const POOLS = "lendingPools";
@@ -39,6 +42,8 @@ export interface SweepResult {
     collateralPosted: string[];
     /** Loans whose agent-wallet top-up or repayment finalized and was applied this run. */
     agentSendsSettled: string[];
+    /** Pool loans paid out automatically from the platform payout wallet this run. */
+    autoDisbursed: string[];
     poolsReconciled: Array<{ poolId: string; activeLoans: number; accruingPerYear: number; interestReceivable: number }>;
     errors: string[];
 }
@@ -81,7 +86,7 @@ export async function reconcilePoolAccrual(poolId: string): Promise<{ activeLoan
 export async function sweepLending(): Promise<SweepResult> {
     const limits = lendingLimits();
     const now = nowSec();
-    const result: SweepResult = { defaulted: [], liquidating: [], expired: [], collateralPosted: [], agentSendsSettled: [], poolsReconciled: [], errors: [] };
+    const result: SweepResult = { defaulted: [], liquidating: [], expired: [], collateralPosted: [], agentSendsSettled: [], autoDisbursed: [], poolsReconciled: [], errors: [] };
 
     const overdue = await adminDb().collection(LOANS)
         .where("status", "==", "active")
@@ -116,6 +121,8 @@ export async function sweepLending(): Promise<SweepResult> {
         ["agent collateral", finishPendingAgentCollateral, result.collateralPosted],
         ["agent top-up", finishPendingAgentTopUps, result.agentSendsSettled],
         ["agent repayment", finishPendingAgentRepays, result.agentSendsSettled],
+        // After collateral posting, so a loan whose collateral just finalized is paid out in the same run.
+        ["auto-disburse", autoDisbursePending, result.autoDisbursed],
     ] as const) {
         try {
             const finished = await finish();

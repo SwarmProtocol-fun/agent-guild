@@ -462,7 +462,8 @@ const PENDING_REG_PATH = join(SKILL_DIR, "pending-registration.json");
 
 /** Save registration params for later retry when hub is unavailable */
 function savePendingRegistration(params) {
-  writeFileSync(PENDING_REG_PATH, JSON.stringify({ ...params, savedAt: new Date().toISOString() }, null, 2) + "\n");
+  // May hold a single-use registration token — owner-only.
+  writeFileSync(PENDING_REG_PATH, JSON.stringify({ ...params, savedAt: new Date().toISOString() }, null, 2) + "\n", { mode: 0o600 });
 }
 
 /** Load pending registration if one exists */
@@ -654,6 +655,8 @@ async function cmdRegister() {
   const greetingMsg = arg("--greeting");
   const migrate = hasFlag("--migrate");
   const takeover = hasFlag("--takeover");
+  // Org owner's single-use authorization (from the dashboard setup command).
+  let registrationToken = arg("--token");
 
   // --- Legacy credential migration ---
   const legacy = detectLegacyCredentials();
@@ -681,12 +684,14 @@ async function cmdRegister() {
     type = pending.agentType || "agent";
     hubUrl = pending.hubUrl || hubUrl;
     bio = pending.bio;
+    registrationToken = registrationToken || pending.registrationToken;
   }
 
   if (!orgId || !name) {
-    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--takeover]");
+    console.error("Usage: agent-guild register --hub <url> --org <orgId> --name <name> [--type <type>] [--skills <s1,s2>] [--bio <bio>] [--greeting <msg>] [--token <token>] [--takeover]");
     console.error("\nOptions:");
     console.error("  --migrate    Migrate from legacy API-key credentials (~/.agent-guild/credentials.json)");
+    console.error("  --token      Single-use setup token from the dashboard — required to register a new agent or replace a key");
     console.error("  --takeover   Replace an existing agent's key when name/org match but the key differs");
     process.exit(1);
   }
@@ -735,6 +740,7 @@ async function cmdRegister() {
           ...(bio ? { bio } : {}),
           // Include legacy agentId so hub can reconnect to existing identity
           ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+          ...(registrationToken ? { registrationToken } : {}),
           ...(takeover ? { takeover: true } : {}),
         }),
       },
@@ -760,6 +766,7 @@ async function cmdRegister() {
               ...(skills.length > 0 ? { skills } : {}),
               ...(bio ? { bio } : {}),
               ...(legacy?.agentId ? { existingAgentId: legacy.agentId } : {}),
+              ...(registrationToken ? { registrationToken } : {}),
               takeover: true,
             }),
           },
@@ -771,7 +778,7 @@ async function cmdRegister() {
     // All retries exhausted or network unreachable — enter offline bootstrap
     console.error(`\nRegistration failed after retries: ${err.message}`);
     console.log(`\nEntering offline bootstrap mode...`);
-    savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
+    savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills, registrationToken });
 
     // Create a provisional config so the agent can start locally
     const provisionalConfig = {
@@ -806,13 +813,18 @@ async function cmdRegister() {
     if (err.code === "KEY_TAKEOVER_REQUIRED") {
       console.error(`   An agent named "${name}" already exists in this org with a different key.`);
       console.error(`   Re-run with --takeover to replace it: agent-guild register --hub ${hubUrl} --org ${orgId} --name "${name}" --takeover`);
+    } else if (typeof err.code === "string" && err.code.startsWith("REGISTRATION_GRANT_")) {
+      console.error(`   New agents need the org owner's authorization. Copy the setup command from the dashboard`);
+      console.error(`   (Agents → Register / Reinvite — it includes --token), or use \`agent-guild join --code <CODE>\`.`);
+    } else if (err.code === "OWNER_AGENT_LIMIT" || err.code === "OWNER_DAILY_LIMIT") {
+      console.error(`   The org owner's agent quota is used up — retire an agent or verify as human in the dashboard.`);
     } else if (err.code === "SELF_TEST_FAILED") {
       console.error(`   The hub wrote the agent but its own read-back self-test failed — this is a server-side`);
       console.error(`   Firestore/credentials misconfiguration, not something retrying will fix. Agent id: ${err.agentId || "unknown"}.`);
     } else if (RETRYABLE_STATUSES.has(resp.status)) {
       // If it's a retryable error that exhausted retries, offer offline mode
       console.log(`\nHub appears overloaded. Saving registration for later retry...`);
-      savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills });
+      savePendingRegistration({ hubUrl, orgId, agentName: name, agentType: type, bio, skills, registrationToken });
       console.log(`   Run \`agent-guild register\` again later, or \`agent-guild daemon\` will auto-retry.`);
     }
     process.exit(1);
@@ -986,6 +998,7 @@ async function cmdJoin() {
           agentType,
           orgId,
           ...(skills?.length > 0 ? { skills } : {}),
+          inviteCode: code,
           ...(takeover ? { takeover: true } : {}),
         }),
       },
@@ -1006,6 +1019,7 @@ async function cmdJoin() {
               agentType,
               orgId,
               ...(skills?.length > 0 ? { skills } : {}),
+              inviteCode: code,
               takeover: true,
             }),
           },
@@ -1023,6 +1037,11 @@ async function cmdJoin() {
     console.error(`Registration failed (${resp.status}): ${err.error || "Unknown error"}`);
     if (err.code === "KEY_TAKEOVER_REQUIRED") {
       console.error(`   Re-run with --takeover to replace it: agent-guild join --code ${code} --hub ${hubUrl} --takeover`);
+    } else if (typeof err.code === "string" && err.code.startsWith("REGISTRATION_GRANT_")) {
+      console.error(`   New agents need the org owner's authorization. Copy the setup command from the dashboard`);
+      console.error(`   (Agents → Register / Reinvite — it includes --token), or use \`agent-guild join --code <CODE>\`.`);
+    } else if (err.code === "OWNER_AGENT_LIMIT" || err.code === "OWNER_DAILY_LIMIT") {
+      console.error(`   The org owner's agent quota is used up — retire an agent or verify as human in the dashboard.`);
     } else if (err.code === "SELF_TEST_FAILED") {
       console.error(`   Server-side self-test failed — this is a hub misconfiguration, not something retrying fixes.`);
     }

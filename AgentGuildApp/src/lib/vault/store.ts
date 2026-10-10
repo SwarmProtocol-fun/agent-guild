@@ -256,7 +256,8 @@ export interface AuditEntry {
     | "runtime.connected" | "runtime.revoked"
     | "shroud.configured" | "shroud.blocked" | "shroud.halted" | "shroud.resumed"
     | "intent.policy_updated" | "intent.rejected" | "intent.failed" | "intent.executed"
-    | "lending.collateral_from_agent_wallet" | "lending.collateral_top_up_from_agent_wallet" | "lending.repay_from_agent_wallet";
+    | "lending.collateral_from_agent_wallet" | "lending.collateral_top_up_from_agent_wallet" | "lending.repay_from_agent_wallet"
+    | "lending.auto_disburse";
   actorType: "user" | "agent";
   actorId: string;
   target: string;

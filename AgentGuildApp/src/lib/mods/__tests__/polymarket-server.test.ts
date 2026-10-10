@@ -35,6 +35,15 @@ const store = {
   listOpenAiRequests: vi.fn(async () => []),
   answerAiRequest: vi.fn(),
   expireAiRequest: vi.fn(),
+  createPaperOrder: vi.fn(async (d: Record<string, unknown>) => ({ ...d, id: `o${Math.random()}`, filledShares: 0, status: "open", cancelReason: null })),
+  listOpenPaperOrders: vi.fn(async () => [] as unknown[]),
+  listAgentPaperOrders: vi.fn(async () => [] as unknown[]),
+  updatePaperOrder: vi.fn(),
+  applyRestingFill: vi.fn(),
+  getWhaleUniverse: vi.fn(async () => ({ addresses: [] as string[], refreshedAt: 0 })),
+  setWhaleUniverse: vi.fn(),
+  acquireTickLock: vi.fn(async () => true),
+  releaseTickLock: vi.fn(),
   PaperError: class PaperError extends Error {},
   PAPER_START_CASH: 1000,
 };
@@ -302,6 +311,64 @@ describe("polymarket mod routes", () => {
     expect(await resolvePaperPositions()).toMatchObject({ settled: 1 });
     expect(store.recordTrade).toHaveBeenCalledWith(expect.objectContaining({ side: "resolve", strategyId: "b1", realizedPnl: 6 }));
     expect(store.addBotLog).toHaveBeenCalledWith("b1", expect.objectContaining({ kind: "resolve" }));
+  });
+
+  it("reading the account pays out a resolved winner without the tick", async () => {
+    const pos = {
+      id: "a1_t-no", agentId: "a1", orgId: "org1", conditionId: "0xc", question: "Will it?", slug: "m", endDate: "2000-01-01T00:00:00Z",
+      tokenId: "t-no", outcomeIndex: 1, outcome: "No", shares: 10, avgPrice: 0.94, realizedPnl: 0, open: true, strategyId: null,
+    };
+    store.listPaperPositions.mockResolvedValueOnce([pos] as never).mockResolvedValueOnce([]);
+    const markets = await import("../../../../mods/polymarket-trading/markets");
+    vi.mocked(markets.getMarketByConditionId).mockResolvedValueOnce({ ...market, closed: true, winnerIndex: 1 } as never);
+    store.settlePaperPosition.mockResolvedValueOnce({ payout: 10, realized: 0.6 });
+    const res = await route("GET /account/:agentId")(new Request("http://x/"), { ...asAgent, params: { agentId: "a1" } });
+    expect(res.status).toBe(200);
+    expect(store.settlePaperPosition).toHaveBeenCalledWith("a1_t-no", true);
+    expect(store.recordTrade).toHaveBeenCalledWith(expect.objectContaining({ side: "resolve", status: "won", realizedPnl: 0.6 }));
+    expect((await res.json()).positions).toEqual([]);
+  });
+
+  it("pays a market that resolved before its scheduled end date", async () => {
+    store.listAllOpenPaperPositions.mockResolvedValueOnce([{
+      id: "a1_t-yes", agentId: "a1", orgId: "org1", conditionId: "0xc", question: "By Dec 31?", slug: "m", endDate: "2099-12-31T00:00:00Z",
+      tokenId: "t-yes", outcomeIndex: 0, outcome: "Yes", shares: 10, avgPrice: 0.4, realizedPnl: 0, open: true, strategyId: null,
+    }] as never);
+    const markets = await import("../../../../mods/polymarket-trading/markets");
+    vi.mocked(markets.getMarketByConditionId).mockResolvedValueOnce({ ...market, closed: true, winnerIndex: 0 } as never);
+    store.settlePaperPosition.mockResolvedValueOnce({ payout: 10, realized: 6 });
+    expect(await resolvePaperPositions()).toMatchObject({ settled: 1 });
+    expect(store.settlePaperPosition).toHaveBeenCalledWith("a1_t-yes", true);
+  });
+
+  it("checks past-due markets first, so the batch cap can't starve a closed one", async () => {
+    const pos = (i: number, endDate: string) => ({
+      id: `a1_t${i}`, agentId: "a1", orgId: "org1", conditionId: `0x${i}`, question: "q", slug: "m", endDate,
+      tokenId: `t${i}`, outcomeIndex: 0, outcome: "Yes", shares: 1, avgPrice: 0.5, realizedPnl: 0, open: true, strategyId: null,
+    });
+    const future = Array.from({ length: 30 }, (_, i) => pos(i, "2099-01-01T00:00:00Z"));
+    store.listAllOpenPaperPositions.mockResolvedValueOnce([...future, pos(99, "2000-01-01T00:00:00Z")] as never);
+    const markets = await import("../../../../mods/polymarket-trading/markets");
+    vi.mocked(markets.getMarketByConditionId).mockClear();
+    const res = await resolvePaperPositions();
+    expect(res.checked).toBe(25);
+    expect(vi.mocked(markets.getMarketByConditionId).mock.calls[0][0]).toBe("0x99");
+  });
+
+  it("POST /paper/claim settles now and returns the new paper cash; strangers can't", async () => {
+    const claim = route("POST /paper/claim");
+    expect((await claim(post({ agentId: "a1" }), ctx({ session: { address: "0xcccccccccccccccccccccccccccccccccccccccc" } }))).status).toBe(403);
+    store.listPaperPositions.mockResolvedValueOnce([{
+      id: "a1_t-no", agentId: "a1", orgId: "org1", conditionId: "0xc", question: "Will it?", slug: "m", endDate: "2000-01-01T00:00:00Z",
+      tokenId: "t-no", outcomeIndex: 1, outcome: "No", shares: 10.63, avgPrice: 0.94, realizedPnl: 0, open: true, strategyId: null,
+    }] as never);
+    const markets = await import("../../../../mods/polymarket-trading/markets");
+    vi.mocked(markets.getMarketByConditionId).mockResolvedValueOnce({ ...market, closed: true, winnerIndex: 1 } as never);
+    store.settlePaperPosition.mockResolvedValueOnce({ payout: 10.63, realized: 0.64 });
+    store.ensureAccount.mockResolvedValueOnce({ ...paperAccount(), paperCash: 1000.6 });
+    const res = await claim(post({ agentId: "a1" }), asMember);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ checked: 1, settled: 1, paperCash: 1000.6 });
   });
 
   it("the tick stops a bot that has hit its loss limit and doesn't run it", async () => {

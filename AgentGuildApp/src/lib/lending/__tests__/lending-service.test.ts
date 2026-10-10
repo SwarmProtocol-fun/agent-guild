@@ -272,6 +272,31 @@ describe("trust loan lifecycle (pool)", () => {
         expect(payouts("collateral_return")[0].amount).toBe(200);
     });
 
+    it("an automatic payout in flight blocks cancelling; one that died mid-send doesn't block an admin", async () => {
+        await seedPool(1000);
+        const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "trust", source: "pool", amount: 100, requestedByWallet: "BORROWER" });
+        await postLoanCollateral(loan.id, "BORROWER", nextSig());
+        const send = (status: string, startedAt: number) => db.col("loans").set(loan.id, {
+            ...db.col("loans").get(loan.id)!,
+            autoDisburseSend: { walletId: "platform-payout", wallet: "PAYOUT", asset: "usdc", amount: loan.principal, txSig: status === "sent" ? "s" : null, status, startedAt, requestedBy: "auto-disburse", error: null },
+        });
+        send("sent", Date.now());
+        await expect(cancelLoan(loan.id, { byAdmin: true, reason: "x" })).rejects.toThrow(/payout to the borrower is already on its way/);
+        send("sending", Date.now());
+        await expect(cancelLoan(loan.id, { byAdmin: true, reason: "x" })).rejects.toThrow(/already on its way/);
+        send("sending", Date.now() - 10 * 60_000);
+        expect((await cancelLoan(loan.id, { byAdmin: true, reason: "checked payout wallet" })).status).toBe("cancelled");
+    });
+
+    it("an automatic payout is verified against the payout wallet, not the treasury", async () => {
+        await seedPool(1000);
+        const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "trust", source: "pool", amount: 100, requestedByWallet: "BORROWER" });
+        await postLoanCollateral(loan.id, "BORROWER", nextSig());
+        await confirmLoanDisbursement(loan.id, nextSig(), { fromWallet: "PAYOUT" });
+        expect(verifyUsdcTransfer.mock.lastCall![0]).toMatchObject({ expectedFromWallet: "PAYOUT", expectedToWallet: "BORROWER", purpose: "loan_disbursement" });
+        expect((await getLoan(loan.id))!.status).toBe("active");
+    });
+
     it("collateral posted after cancellation is recorded and returned, not lost", async () => {
         await seedPool(1000);
         const loan = await requestLoan({ agentId: "agent1", orgId: "org1", kind: "trust", source: "pool", amount: 400, requestedByWallet: "BORROWER" });

@@ -14,6 +14,7 @@
  *   around that same tier rate (see eligibility.ts's validateSoloRateBps).
  */
 import { isLendingAsset } from "@/lib/lending/assets";
+import { tryAutoDisburse } from "@/lib/lending/auto-disburse";
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMember, requirePlatformAdmin, getWalletAddress, unauthorized, forbidden } from "@/lib/auth-guard";
@@ -130,7 +131,8 @@ export async function POST(req: NextRequest) {
             requestedByWallet: getWalletAddress(req) || undefined,
             requestedRateBps: body.requestedRateBps,
         });
-        return NextResponse.json({ loan }, { status: 201 });
+        // Small pool loans pay out right away; anything else waits in the admin queue.
+        return NextResponse.json(await tryAutoDisburse(loan), { status: 201 });
     } catch (error) {
         console.error("[lending/loans] POST error:", error);
         return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to request loan" }, { status: 400 });

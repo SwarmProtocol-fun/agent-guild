@@ -22,9 +22,17 @@
 
 import { adminDb } from "@/lib/firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
+import type { OpenPair, PairsParams } from "../../../mods/hyperliquid-trading/pairs";
+import type { BreakoutParams } from "../../../mods/hyperliquid-trading/breakout";
+import type { SmartDcaParams } from "../../../mods/hyperliquid-trading/smart-dca";
+import type { BasisParams, OpenBasis } from "../../../mods/hyperliquid-trading/basis";
 import {
   PAPER_START_BALANCE,
   bookOrder,
+  bookSpot,
+  spotValue,
+  type SpotHolding,
+  type SpotOrder,
   type BookedOrder,
   type CoinMeta,
   paperPerformance,
@@ -46,6 +54,7 @@ const PAPER_ACCOUNTS = "hyperliquidPaperAccounts";
 const PAPER_POSITIONS = "hyperliquidPaperPositions";
 const PAPER_ORDERS = "hyperliquidPaperOrders";
 const PAPER_TRADES = "hyperliquidPaperTrades";
+const BOT_FILLS = "hyperliquidBotFills";
 
 function db() {
   return adminDb();
@@ -207,6 +216,8 @@ export interface TradeRecord {
   fillPrice?: number;
   realizedPnl?: number;
   status: TradeStatus;
+  /** The bot that placed it; null for a manual trade. */
+  strategyId?: string | null;
   createdAt: Date | null;
 }
 
@@ -234,6 +245,7 @@ function docToTrade(d: FirebaseFirestore.QueryDocumentSnapshot): TradeRecord {
     fillPrice: data.fillPrice,
     realizedPnl: data.realizedPnl,
     status: data.status,
+    strategyId: data.strategyId ?? null,
     createdAt: data.createdAt?.toDate() ?? null,
   };
 }
@@ -275,10 +287,20 @@ export async function getDailyRealizedPnl(agentId: string): Promise<number> {
 
 // ── Strategies ───────────────────────────────────────────────────────────────
 
-export type StrategyType = "dca" | "grid" | "signal" | "sniper" | "ai";
+export type StrategyType = "dca" | "grid" | "signal" | "sniper" | "ai" | "pairs" | "breakout" | "basis";
 
-export interface DcaParams { intervalMs: number }
-export interface GridParams { lowerPrice: number; upperPrice: number; levels: number; visitedLevels?: number[] }
+/** Rule bots buy by default; "short" makes them sell where they would have bought. */
+export type BotDirection = "long" | "short";
+
+/**
+ * Shared by the rule bots (dca/grid/sniper): which way they trade and the
+ * stop loss / take profit every order they place carries.
+ */
+export interface RuleBotExtras { direction?: BotDirection; stopLossPct?: number; takeProfitPct?: number }
+
+/** smart turns on accumulation acceleration (mods/hyperliquid-trading/smart-dca.ts). */
+export interface DcaParams extends RuleBotExtras { intervalMs: number; smart?: SmartDcaParams | null }
+export interface GridParams extends RuleBotExtras { lowerPrice: number; upperPrice: number; levels: number; visitedLevels?: number[] }
 export interface SignalParams { direction?: "buy" | "sell" }
 /**
  * "new-listing" watches for any coin that wasn't in Hyperliquid's tradeable
@@ -288,7 +310,7 @@ export interface SignalParams { direction?: "buy" | "sell" }
  * Every mode auto-disarms (enabled:false) after firing once — a sniper is a
  * one-shot "wait for it, then buy" trigger, not a recurring strategy.
  */
-export interface SniperParams { mode: "new-listing" | "price-above" | "price-below"; targetPrice?: number }
+export interface SniperParams extends RuleBotExtras { mode: "new-listing" | "price-above" | "price-below"; targetPrice?: number }
 /**
  * "AI Trader": every intervalMs the hub posts a market snapshot as a
  * decision request (AiRequest) and the agent's *own* model — run by its
@@ -300,6 +322,10 @@ export interface SniperParams { mode: "new-listing" | "price-above" | "price-bel
  * flipTo is set when a flip's close has been sent and the new side still
  * has to open — the tick opens it once the close has filled.
  * goal is the operator's training idea, quoted into every decision prompt.
+ * A basket bot sets coins (a fixed watchlist) or scanTop (each round, the N
+ * most-traded perps plus the coins it holds) instead of trading only
+ * Strategy.coin, and can act on several coins per round — pair legs, funding
+ * carry. Its live flips wait per coin in flips, like flipTo.
  */
 export interface AiParams {
   intervalMs: number;
@@ -310,7 +336,25 @@ export interface AiParams {
   eliminated?: boolean;
   flipTo?: "long" | "short" | null;
   goal?: string;
+  coins?: string[];
+  scanTop?: number;
+  flips?: Record<string, "long" | "short">;
+  /** The coins a scanTop bot holds positions in — kept when they drop out of the top N, never claimed by another bot. */
+  owned?: string[];
 }
+
+/**
+ * "pairs": rule-based statistical arbitrage (mods/hyperliquid-trading/pairs.ts).
+ * open is the pair the bot holds; lastZ/lastNote are the latest evaluation,
+ * shown in the panel without logging every quiet round.
+ */
+export type StoredPairsParams = PairsParams & { open?: OpenPair | null; lastZ?: number | null; lastNote?: string | null };
+
+/** "breakout": squeeze breakout rules (mods/hyperliquid-trading/breakout.ts). lastNote is the latest evaluation. */
+export type StoredBreakoutParams = BreakoutParams & { lastNote?: string | null };
+
+/** "basis": spot-perp cash and carry (mods/hyperliquid-trading/basis.ts), paper only. open is the carry the bot holds. */
+export type StoredBasisParams = BasisParams & { open?: OpenBasis | null; lastNote?: string | null; lastAprPct?: number | null };
 
 export interface Strategy {
   id: string;
@@ -321,7 +365,7 @@ export interface Strategy {
   coin: string;
   sizeUsd: number;
   enabled: boolean;
-  params: DcaParams | GridParams | SignalParams | SniperParams | AiParams | Record<string, unknown>;
+  params: DcaParams | GridParams | SignalParams | SniperParams | AiParams | StoredPairsParams | StoredBreakoutParams | StoredBasisParams | Record<string, unknown>;
   lastRunAt: Date | null;
   createdAt: Date | null;
   /** Set by the tick evaluator when a dca/grid/sniper trigger condition is
@@ -400,6 +444,36 @@ export async function toggleStrategy(id: string, enabled: boolean): Promise<void
   await db().collection(STRATEGIES).doc(id).update({ enabled });
 }
 
+/** An operator's edit: new settings (runtime state already merged in by the caller) and/or order size. */
+export async function updateStrategy(id: string, patch: { sizeUsd?: number; params?: Strategy["params"] }): Promise<void> {
+  await db().collection(STRATEGIES).doc(id).update({
+    ...(patch.sizeUsd !== undefined ? { sizeUsd: patch.sizeUsd } : {}),
+    ...(patch.params !== undefined ? { params: patch.params } : {}),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+}
+
+/** Deletes a bot and its AI decision log. Positions it opened are not touched. */
+export async function deleteStrategy(id: string): Promise<void> {
+  await db().recursiveDelete(db().collection(STRATEGIES).doc(id));
+}
+
+/**
+ * Emergency stop: every listed bot off, any signal waiting to execute
+ * dropped, in one batch so a tick between writes can't pick one back up.
+ */
+export async function stopStrategies(ids: string[]): Promise<void> {
+  for (let i = 0; i < ids.length; i += 400) {
+    const batch = db().batch();
+    for (const id of ids.slice(i, i + 400)) {
+      batch.update(db().collection(STRATEGIES).doc(id), {
+        enabled: false, pendingSignal: false, pendingSince: null, pendingContext: null, stoppedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  }
+}
+
 export async function touchStrategyRun(id: string, params?: Strategy["params"]): Promise<void> {
   await db().collection(STRATEGIES).doc(id).update({
     lastRunAt: FieldValue.serverTimestamp(),
@@ -457,6 +531,8 @@ export async function getEnabledStrategies(): Promise<Strategy[]> {
 
 export interface AiDecisionRecord {
   id: string;
+  /** The coin acted on — set by basket bots, whose rounds can touch several. */
+  coin?: string | null;
   decision: "LONG" | "SHORT" | "CLOSE" | "NOTHING" | null;
   action: string;
   reasoning: string;
@@ -488,6 +564,7 @@ export async function getAiDecisions(strategyId: string, limit = 50): Promise<Ai
     const data = d.data();
     return {
       id: d.id,
+      coin: data.coin ?? null,
       decision: data.decision ?? null,
       action: data.action,
       reasoning: data.reasoning ?? "",
@@ -516,6 +593,8 @@ export interface AiRequest {
   purpose: "live" | "backtest";
   strategyId: string | null;
   coin: string;
+  /** A basket round's coins; null for a single-coin round. */
+  coins: string[] | null;
   system: string;
   prompt: string;
   status: "open" | "answered" | "expired";
@@ -534,6 +613,7 @@ function docToAiRequest(d: FirebaseFirestore.DocumentSnapshot): AiRequest {
     purpose: data.purpose,
     strategyId: data.strategyId ?? null,
     coin: data.coin,
+    coins: Array.isArray(data.coins) ? data.coins : null,
     system: data.system,
     prompt: data.prompt,
     status: data.status,
@@ -545,7 +625,7 @@ function docToAiRequest(d: FirebaseFirestore.DocumentSnapshot): AiRequest {
 }
 
 export async function createAiRequest(
-  data: Pick<AiRequest, "agentId" | "orgId" | "purpose" | "strategyId" | "coin" | "system" | "prompt" | "expiresAt">,
+  data: Pick<AiRequest, "agentId" | "orgId" | "purpose" | "strategyId" | "coin" | "system" | "prompt" | "expiresAt"> & { coins?: string[] | null },
 ): Promise<string> {
   const ref = await db().collection(AI_REQUESTS).add({
     ...data,
@@ -730,6 +810,17 @@ export interface PaperAccount {
   dailyPnl: number;
   /** When the account was last reset; null if never. Performance stats start here. */
   resetAt?: Date | null;
+  /** Spot holdings by token (the basis bot's long legs). */
+  spot: Record<string, SpotHolding>;
+}
+
+function docToSpot(raw: unknown): Record<string, SpotHolding> {
+  const out: Record<string, SpotHolding> = {};
+  for (const [token, h] of Object.entries((raw ?? {}) as Record<string, Record<string, unknown>>)) {
+    const sz = Number(h?.sz);
+    if (sz > 0) out[token] = { pair: String(h.pair), token, sz, avgPx: Number(h.avgPx) };
+  }
+  return out;
 }
 
 function utcDay(d = new Date()): string {
@@ -744,6 +835,7 @@ function docToPaperAccount(agentId: string, data: FirebaseFirestore.DocumentData
     startBalance: Number(data.startBalance ?? PAPER_START_BALANCE),
     dailyPnl: data.dailyPnlDay === utcDay() ? Number(data.dailyPnl ?? 0) : 0,
     resetAt: data.resetAt?.toDate?.() ?? null,
+    spot: docToSpot(data.spot),
   };
 }
 
@@ -768,6 +860,7 @@ export async function resetPaperAccount(agentId: string, orgId: string, startBal
   orders.docs.forEach((d) => batch.delete(d.ref));
   batch.set(db().collection(PAPER_ACCOUNTS).doc(agentId), {
     orgId, balance: startBalance, startBalance, dailyPnl: 0, dailyPnlDay: utcDay(), resetAt: FieldValue.serverTimestamp(),
+    spot: FieldValue.delete(),
   }, { merge: true });
   await batch.commit();
 }
@@ -869,6 +962,8 @@ export interface PaperTradeRecord {
   reduceOnly: boolean;
   reason: PaperTradeReason;
   strategyId: string | null;
+  /** "spot" for a spot fill (coin is then the spot token, e.g. UBTC). */
+  market: "perp" | "spot";
   createdAt: Date | null;
 }
 
@@ -878,6 +973,8 @@ export interface PaperFillContext {
   strategyId?: string | null;
   /** A resting order being filled: claimed in the same transaction, so a fill can never happen twice. */
   restingOrderId?: string;
+  /** Spot mids by pair, to value spot holdings in the margin check (cost basis when absent). */
+  spotMids?: Record<string, number>;
 }
 
 /**
@@ -905,9 +1002,9 @@ export async function bookPaperFill(
     if (restingRef && !restingSnap?.exists) return { error: "Order is no longer open" };
     const account = accSnap.exists
       ? docToPaperAccount(agentId, accSnap.data()!)
-      : { agentId, orgId: ctx.orgId, balance: PAPER_START_BALANCE, startBalance: PAPER_START_BALANCE, dailyPnl: 0 };
+      : { agentId, orgId: ctx.orgId, balance: PAPER_START_BALANCE, startBalance: PAPER_START_BALANCE, dailyPnl: 0, spot: {} };
     const positions = posSnap.docs.map(docToPaperPosition);
-    const booked = bookOrder(account.balance, positions, order, marks, meta);
+    const booked = bookOrder(account.balance, positions, order, marks, meta, spotValue(account.spot, ctx.spotMids ?? {}));
     if ("error" in booked) return booked;
 
     const prev = positions.find((p) => p.coin === order.coin);
@@ -931,10 +1028,54 @@ export async function bookPaperFill(
     tx.set(tradeRef, {
       agentId, orgId: ctx.orgId, coin: order.coin, isBuy: order.isBuy, sz: booked.sz, px: order.px,
       sizeUsd: booked.sz * order.px, fee: booked.fee, realizedPnl: booked.realized, reduceOnly: order.reduceOnly,
-      reason: ctx.reason, strategyId: ctx.strategyId ?? null, createdAt: FieldValue.serverTimestamp(),
+      reason: ctx.reason, strategyId: ctx.strategyId ?? null, market: "perp", createdAt: FieldValue.serverTimestamp(),
     });
     if (restingRef) tx.delete(restingRef);
     return { ...booked, tradeId: tradeRef.id };
+  });
+}
+
+/**
+ * Books one paper spot fill (buy with free cash, or sell from holdings) in a
+ * transaction with the account, like bookPaperFill. Recorded in the paper
+ * trade log as market "spot", coin = the spot token.
+ */
+export async function bookPaperSpotFill(
+  agentId: string,
+  order: SpotOrder,
+  marks: Record<string, number>,
+  meta: Record<string, CoinMeta>,
+  ctx: PaperFillContext,
+): Promise<{ balance: number; sz: number; fee: number; realized: number; tradeId: string } | { error: string }> {
+  const accountRef = db().collection(PAPER_ACCOUNTS).doc(agentId);
+  const tradeRef = db().collection(PAPER_TRADES).doc();
+  return db().runTransaction(async (tx) => {
+    const [accSnap, posSnap] = await Promise.all([
+      tx.get(accountRef),
+      tx.get(db().collection(PAPER_POSITIONS).where("agentId", "==", agentId)),
+    ]);
+    const account = accSnap.exists
+      ? docToPaperAccount(agentId, accSnap.data()!)
+      : { agentId, orgId: ctx.orgId, balance: PAPER_START_BALANCE, startBalance: PAPER_START_BALANCE, dailyPnl: 0, spot: {} as Record<string, SpotHolding> };
+    const booked = bookSpot(account.balance, posSnap.docs.map(docToPaperPosition), account.spot, order, marks, meta);
+    if ("error" in booked) return booked;
+    const spot = { ...account.spot };
+    if (booked.holding) spot[order.token] = booked.holding;
+    else delete spot[order.token];
+    tx.set(accountRef, {
+      orgId: account.orgId ?? ctx.orgId,
+      balance: booked.balance,
+      startBalance: account.startBalance,
+      dailyPnl: account.dailyPnl + booked.realized - booked.fee,
+      dailyPnlDay: utcDay(),
+      spot,
+    }, { merge: true });
+    tx.set(tradeRef, {
+      agentId, orgId: ctx.orgId, coin: order.token, pair: order.pair, isBuy: order.isBuy, sz: booked.sz, px: order.px,
+      sizeUsd: booked.sz * order.px, fee: booked.fee, realizedPnl: booked.realized, reduceOnly: !order.isBuy,
+      reason: ctx.reason, strategyId: ctx.strategyId ?? null, market: "spot", createdAt: FieldValue.serverTimestamp(),
+    });
+    return { balance: booked.balance, sz: booked.sz, fee: booked.fee, realized: booked.realized, tradeId: tradeRef.id };
   });
 }
 
@@ -992,7 +1133,7 @@ export async function getPaperTradeHistory(
     return {
       id: d.id, agentId: x.agentId, coin: x.coin, isBuy: x.isBuy, sz: Number(x.sz), px: Number(x.px), sizeUsd: Number(x.sizeUsd),
       fee: Number(x.fee ?? 0), realizedPnl: Number(x.realizedPnl ?? 0), reduceOnly: !!x.reduceOnly, reason: x.reason ?? "manual",
-      strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
+      strategyId: x.strategyId ?? null, market: x.market === "spot" ? "spot" : "perp", createdAt: x.createdAt?.toDate?.() ?? null,
     };
   });
   const since = opts.since?.getTime() ?? 0;
@@ -1006,4 +1147,98 @@ export async function getPaperTradeHistory(
     stats: { totalPnl: performance.netPnl, fees: performance.fees, winRate: performance.winRate, count: performance.closed },
     performance,
   };
+}
+
+// ── Leaderboard reads ───────────────────────────────────────────────────────
+
+/** Every bot in an org, any agent, running or not. */
+export async function listOrgStrategies(orgId: string): Promise<Strategy[]> {
+  const snap = await db().collection(STRATEGIES).where("orgId", "==", orgId).get();
+  return snap.docs.map(docToStrategy);
+}
+
+/** Every agent's paper account in an org, with its open positions. */
+export async function listOrgPaperAccounts(orgId: string): Promise<{ accounts: PaperAccount[]; positions: PaperPositionDoc[] }> {
+  const [accounts, positions] = await Promise.all([
+    db().collection(PAPER_ACCOUNTS).where("orgId", "==", orgId).get(),
+    db().collection(PAPER_POSITIONS).where("orgId", "==", orgId).get(),
+  ]);
+  return {
+    accounts: accounts.docs.map((d) => docToPaperAccount(d.id, d.data())),
+    positions: positions.docs.map(docToPaperPosition),
+  };
+}
+
+/** The org's latest paper fills, newest first — the leaderboard's per-bot results. */
+export async function listOrgPaperFills(orgId: string, limit = 2000): Promise<{ strategyId: string | null; realizedPnl: number; fee: number; at: number | null }[]> {
+  const snap = await db().collection(PAPER_TRADES)
+    .where("orgId", "==", orgId)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.map((d) => {
+    const x = d.data();
+    return { strategyId: x.strategyId ?? null, realizedPnl: Number(x.realizedPnl ?? 0), fee: Number(x.fee ?? 0), at: x.createdAt?.toDate?.().getTime() ?? null };
+  });
+}
+
+// ── Live bot fills ──────────────────────────────────────────────────────────
+//
+// Every live order a bot places, with the bot's id — so the leaderboard can
+// rank live bots by their own results, apart from their agent's manual
+// trades. Logged "pending" when the order is sent; the strategy tick settles
+// it from the finished gateway task (fill price, size, realized PnL). The fee
+// is estimated at the taker rate, since a fill status doesn't carry it.
+
+export interface BotFill {
+  id: string;
+  orgId: string;
+  agentId: string;
+  strategyId: string;
+  coin: string;
+  isBuy: boolean;
+  sizeUsd: number;
+  reduceOnly: boolean;
+  network: string;
+  taskId: string;
+  status: "pending" | "filled" | "failed";
+  sz: number;
+  px: number;
+  fee: number;
+  realizedPnl: number;
+  createdAt: Date | null;
+}
+
+export async function logBotOrder(order: Pick<BotFill, "orgId" | "agentId" | "strategyId" | "coin" | "isBuy" | "sizeUsd" | "reduceOnly" | "network" | "taskId">): Promise<void> {
+  await db().collection(BOT_FILLS).add({ ...order, status: "pending", sz: 0, px: 0, fee: 0, realizedPnl: 0, createdAt: FieldValue.serverTimestamp() });
+}
+
+/** Bot orders still waiting on their task — the tick's settle list. */
+export async function listPendingBotOrders(limit = 200): Promise<BotFill[]> {
+  const snap = await db().collection(BOT_FILLS).where("status", "==", "pending").limit(limit).get();
+  return snap.docs.map((d) => {
+    const x = d.data();
+    return {
+      id: d.id, orgId: x.orgId, agentId: x.agentId, strategyId: x.strategyId, coin: x.coin, isBuy: !!x.isBuy, sizeUsd: Number(x.sizeUsd ?? 0),
+      reduceOnly: !!x.reduceOnly, network: x.network, taskId: x.taskId, status: x.status, sz: Number(x.sz ?? 0), px: Number(x.px ?? 0),
+      fee: Number(x.fee ?? 0), realizedPnl: Number(x.realizedPnl ?? 0), createdAt: x.createdAt?.toDate?.() ?? null,
+    };
+  });
+}
+
+export async function settleBotOrder(id: string, outcome: { status: "filled"; sz: number; px: number; fee: number; realizedPnl: number } | { status: "failed" }): Promise<void> {
+  await db().collection(BOT_FILLS).doc(id).update({ ...outcome, settledAt: FieldValue.serverTimestamp() });
+}
+
+/** The org's latest settled live bot fills, newest first. */
+export async function listOrgBotFills(orgId: string, limit = 2000): Promise<{ strategyId: string | null; realizedPnl: number; fee: number; at: number | null }[]> {
+  const snap = await db().collection(BOT_FILLS)
+    .where("orgId", "==", orgId)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+  return snap.docs.filter((d) => d.data().status === "filled").map((d) => {
+    const x = d.data();
+    return { strategyId: x.strategyId ?? null, realizedPnl: Number(x.realizedPnl ?? 0), fee: Number(x.fee ?? 0), at: x.createdAt?.toDate?.().getTime() ?? null };
+  });
 }

@@ -293,3 +293,43 @@ export async function getBtcWindowMarket(win: BtcWindow): Promise<PmMarket | nul
   const event = await getEventBySlug(win.slug);
   return event?.markets[0] ?? null;
 }
+
+/** The BTC 15-minute window `now` falls in (slug btc-updown-15m-<startSec>). */
+export const BTC_15M_MS = 15 * 60_000;
+export function btc15mWindow(now = Date.now()): BtcWindow {
+  const startMs = Math.floor(now / BTC_15M_MS) * BTC_15M_MS;
+  return { startMs, endMs: startMs + BTC_15M_MS, slug: `btc-updown-15m-${startMs / 1000}`, elapsedMs: now - startMs, remainingMs: startMs + BTC_15M_MS - now };
+}
+
+/** Raw data-api trade row → { tokenId, print }, or null. */
+export function parseTapeRow(row: Raw): { tokenId: string; price: number; size: number; ts: number } | null {
+  const tokenId = str(row.asset);
+  const price = num(row.price);
+  const size = num(row.size);
+  const ts = num(row.timestamp);
+  if (!tokenId || price == null || size == null || ts == null) return null;
+  return { tokenId, price, size, ts: ts * 1000 };
+}
+
+/**
+ * Every print on a market since `sinceMs`, grouped by outcome token, from
+ * Polymarket's public trade tape (newest first, 500 a page). Stops paging once
+ * a page reaches back past `sinceMs`, after `maxPages` at most; a busy minute
+ * on a BTC 5-minute market can exceed that, which only ever under-counts fills.
+ */
+export async function getTapePrints(conditionId: string, sinceMs: number, maxPages = 4): Promise<Map<string, { price: number; size: number; ts: number }[]>> {
+  const out = new Map<string, { price: number; size: number; ts: number }[]>();
+  for (let page = 0; page < maxPages; page++) {
+    const qs = new URLSearchParams({ market: conditionId, limit: "500", offset: String(page * 500), takerOnly: "false" });
+    const rows = await getJson<Raw[]>(`${DATA_URL}/trades?${qs}`);
+    if (!rows.length) break;
+    for (const r of rows) {
+      const p = parseTapeRow(r);
+      if (!p || p.ts < sinceMs) continue;
+      out.set(p.tokenId, [...(out.get(p.tokenId) ?? []), { price: p.price, size: p.size, ts: p.ts }]);
+    }
+    const oldest = num(rows[rows.length - 1].timestamp);
+    if (rows.length < 500 || oldest == null || oldest * 1000 < sinceMs) break;
+  }
+  return out;
+}

@@ -187,7 +187,9 @@ export function ActiveLoansPanel({ agentId, refreshKey }: ActiveLoansPanelProps)
                                         {loan.status === "liquidated" && `Collateral sold for ${amt(loan.liquidationProceeds ?? 0)}; loan closed`}
                                         {loan.status === "cancelled" && (loan.cancelReason || "Cancelled before funding")}
                                         {loan.status === "pending" && "Awaiting a solo lender"}
-                                        {loan.status === "pending_disbursement" && `Approved — awaiting real ${assetInfo(asset).symbol} disbursement`}
+                                        {loan.status === "pending_disbursement" && (loan.autoDisburseSend?.status === "sent" || loan.autoDisburseSend?.status === "sending"
+                                            ? `Approved — ${assetInfo(asset).symbol} on its way to the agent's wallet`
+                                            : `Approved — awaiting ${assetInfo(asset).symbol} payout`)}
                                         {loan.status === "repaid" && "Repaid in full"}
                                         {loan.status === "defaulted" && `Defaulted — ${amt(loan.principalRemaining)} outstanding`}
                                         {loan.collateralStatus === "held" && ` · ${coll(loan.collateral)} collateral held`}

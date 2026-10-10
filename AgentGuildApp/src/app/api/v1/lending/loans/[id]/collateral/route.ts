@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireOrgMember, unauthorized, forbidden } from "@/lib/auth-guard";
 import { getLoan, postLoanCollateral } from "@/lib/lending/lending-service";
+import { tryAutoDisburse } from "@/lib/lending/auto-disburse";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
     const { id } = await params;
@@ -32,7 +33,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     try {
         const updated = await postLoanCollateral(id, orgAuth.walletAddress!, body.txSig);
-        return NextResponse.json({ loan: updated });
+        return NextResponse.json(await tryAutoDisburse(updated));
     } catch (error) {
         console.error("[lending/loans/collateral] error:", error);
         return NextResponse.json({ error: error instanceof Error ? error.message : "Failed to post collateral" }, { status: 400 });

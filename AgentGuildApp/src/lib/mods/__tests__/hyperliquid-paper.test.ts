@@ -173,6 +173,13 @@ const store = {
   applyPaperFunding: vi.fn(),
   updatePaperTrailingStop: vi.fn(),
   getPaperTradeHistory: vi.fn(),
+  listOrgStrategies: vi.fn(async () => [] as unknown[]),
+  listOrgPaperAccounts: vi.fn(async () => ({ accounts: [] as unknown[], positions: [] as unknown[] })),
+  listOrgPaperFills: vi.fn(async () => [] as unknown[]),
+  updateStrategy: vi.fn(),
+  deleteStrategy: vi.fn(),
+  stopStrategies: vi.fn(),
+  expireAiRequest: vi.fn(async () => {}),
 };
 const enqueueTask = vi.fn(async () => "task-1");
 const enforceCapability = vi.fn(async () => ({}));
@@ -182,7 +189,8 @@ vi.mock("@/lib/agent-wallets", () => ({ listAgentWallets: vi.fn(async () => []),
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));
 vi.mock("@/lib/secrets", () => ({ encryptValue: vi.fn(), decryptValue: vi.fn() }));
-vi.mock("@/lib/firestore-admin", () => ({ enforceCapability, getAgentCapabilities: vi.fn(async () => []), getAgent: vi.fn(), getAgentsByOrg: vi.fn(), getOrganizationsByWalletAdmin: vi.fn() }));
+const getAgentsByOrg = vi.fn(async () => [] as unknown[]);
+vi.mock("@/lib/firestore-admin", () => ({ enforceCapability, getAgentCapabilities: vi.fn(async () => []), getAgent: vi.fn(), getAgentsByOrg, getOrganizationsByWalletAdmin: vi.fn() }));
 vi.mock("@/lib/auth-guard", () => ({ requireOrgMembershipByAddress: vi.fn() }));
 
 const { default: mod, runHyperliquidStrategyTick, runHyperliquidPaperTick } = await import("../../../../mods/hyperliquid-trading/server");
@@ -290,6 +298,35 @@ describe("paper trading routes", () => {
     expect(store.getPaperTradeHistory).toHaveBeenCalledWith("a1", undefined, { since: resetAt, startBalance: 5000 });
   });
 
+  it("ranks the org's paper bots and accounts, skipping live bots", async () => {
+    store.listOrgStrategies.mockResolvedValue([
+      { id: "s1", agentId: "a1", orgId: "org1", type: "ai", coin: "ETH", sizeUsd: 50, enabled: true, paper: true, params: { goal: "Trend follow ETH on the hourly", eliminated: false } },
+      { id: "s2", agentId: "a2", orgId: "org1", type: "dca", coin: "BTC", sizeUsd: 25, enabled: true, paper: true, params: {} },
+      { id: "live", agentId: "a1", orgId: "org1", type: "dca", coin: "ETH", sizeUsd: 25, enabled: true, paper: false, params: {} },
+    ]);
+    store.listOrgPaperFills.mockResolvedValue([
+      { strategyId: "s2", realizedPnl: 10, fee: 0, at: 1 },
+      { strategyId: "s1", realizedPnl: -5, fee: 0, at: 2 },
+    ]);
+    store.listOrgPaperAccounts.mockResolvedValue({
+      accounts: [{ agentId: "a1", orgId: "org1", balance: 10_000, startBalance: 10_000, dailyPnl: 0 }],
+      positions: [{ agentId: "a1", coin: "ETH", szi: 1, entryPx: 1900, leverage: 1, slPx: null, tpPx: null }],
+    });
+    getAgentsByOrg.mockResolvedValue([{ id: "a1", name: "Scout" }, { id: "a2", name: "Bishop" }]);
+
+    const resp = await route("GET /leaderboard/:agentId")(new Request("http://x/"), agentCtx({ agentId: "a1" }));
+    expect(resp.status).toBe(200);
+    const data = await resp.json();
+    expect(data.bots.map((b: { id: string }) => b.id)).toEqual(["s2", "s1"]);
+    expect(data.bots[0]).toMatchObject({ agentName: "Bishop", returnOnSizePct: 40, rank: 1 });
+    expect(data.bots[1]).toMatchObject({ goal: "Trend follow ETH on the hourly", status: "running" });
+    expect(data.accounts[0]).toMatchObject({ agentName: "Scout", equity: 10_100, openPositions: 1 }); // marked at the 2000 mid
+    expect(store.listOrgStrategies).toHaveBeenCalledWith("org1");
+
+    const other = await route("GET /leaderboard/:agentId")(new Request("http://x/"), agentCtx({ agentId: "someone-else" }));
+    expect(other.status).toBe(403);
+  });
+
   it("refuses an order under Hyperliquid's $10 minimum", async () => {
     const resp = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 5 }), agentCtx());
     expect(resp.status).toBe(400);
@@ -381,5 +418,118 @@ describe("paper trading routes", () => {
     const data = await (await route("GET /agent/tools")(new Request("http://x/"), agentCtx())).json();
     const names = data.tools.map((t: { name: string }) => t.name);
     expect(names).toEqual(expect.arrayContaining(["hyperliquid_paper_account", "hyperliquid_paper_trade", "hyperliquid_paper_close", "hyperliquid_paper_cancel", "hyperliquid_paper_train"]));
+  });
+});
+
+describe("bot management: edit, delete, emergency stop", () => {
+  const aiBot = (p: Record<string, unknown> = {}) => ({
+    id: "s1", orgId: "org1", agentId: "a1", wallet: "", type: "ai", coin: "ETH", sizeUsd: 25, enabled: true, paper: true,
+    pendingSignal: false, webhookToken: null,
+    params: { intervalMs: 3_600_000, maxDrawdownPct: 10, goal: "Trend follow ETH hourly", openRequestId: "req-9", startEquity: 9_800 },
+    ...p,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store.getRiskConfig.mockResolvedValue(null);
+    stubMarket();
+  });
+
+  it("edits settings and size, keeping the bot's runtime state", async () => {
+    store.getStrategy.mockResolvedValue(aiBot());
+    const resp = await route("POST /strategy/:id/edit")(post({ sizeUsd: 40, params: { maxDrawdownPct: 20, intervalMs: 7_200_000 } }), agentCtx({ id: "s1" }));
+    expect(resp.status).toBe(200);
+    const data = await resp.json();
+    expect(data.changed.sort()).toEqual(["intervalMs", "maxDrawdownPct", "sizeUsd"]);
+    const [id, patch] = store.updateStrategy.mock.calls[0] as unknown as [string, { sizeUsd: number; params: Record<string, unknown> }];
+    expect(id).toBe("s1");
+    expect(patch.sizeUsd).toBe(40);
+    expect(patch.params).toMatchObject({ maxDrawdownPct: 20, intervalMs: 7_200_000, goal: "Trend follow ETH hourly", openRequestId: "req-9", startEquity: 9_800 });
+  });
+
+  it("re-validates an edit like a new bot, and refuses identity changes", async () => {
+    store.getStrategy.mockResolvedValue(aiBot());
+    const tooFast = await route("POST /strategy/:id/edit")(post({ params: { intervalMs: 1000 } }), agentCtx({ id: "s1" }));
+    expect(tooFast.status).toBe(400);
+    const coin = await route("POST /strategy/:id/edit")(post({ coin: "BTC" }), agentCtx({ id: "s1" }));
+    expect((await coin.json()).error).toMatch(/delete it and create/);
+    const small = await route("POST /strategy/:id/edit")(post({ sizeUsd: 5 }), agentCtx({ id: "s1" }));
+    expect(small.status).toBe(400);
+
+    store.getStrategy.mockResolvedValue({ ...aiBot(), type: "grid", coin: "ETH", params: { lowerPrice: 1800, upperPrice: 2200, levels: 5, visitedLevels: [1, 2] } });
+    const inverted = await route("POST /strategy/:id/edit")(post({ params: { lowerPrice: 2500 } }), agentCtx({ id: "s1" }));
+    expect(inverted.status).toBe(400);
+    const moved = await route("POST /strategy/:id/edit")(post({ params: { levels: 8 } }), agentCtx({ id: "s1" }));
+    expect(moved.status).toBe(200);
+    const [, patch] = store.updateStrategy.mock.calls[0] as unknown as [string, { params: Record<string, unknown> }];
+    expect(patch.params).toEqual({ lowerPrice: 1800, upperPrice: 2200, levels: 8 }); // new levels, old visited set dropped
+    expect(store.updateStrategy).toHaveBeenCalledTimes(1);
+  });
+
+  it("an agent can't edit or delete another agent's bot", async () => {
+    store.getStrategy.mockResolvedValue(aiBot({ agentId: "a2" }));
+    expect((await route("POST /strategy/:id/edit")(post({ sizeUsd: 30 }), agentCtx({ id: "s1" }))).status).toBe(403);
+    expect((await route("POST /strategy/:id/delete")(post({}), agentCtx({ id: "s1" }))).status).toBe(403);
+    expect(store.deleteStrategy).not.toHaveBeenCalled();
+  });
+
+  it("deletes a bot after stopping it, expires its open AI round, and lists positions it left", async () => {
+    store.getStrategy.mockResolvedValue(aiBot());
+    store.listPaperPositions.mockResolvedValue([{ coin: "ETH", szi: 0.01 }, { coin: "BTC", szi: 0.001 }]);
+    const resp = await route("POST /strategy/:id/delete")(post({}), agentCtx({ id: "s1" }));
+    expect(resp.status).toBe(200);
+    const data = await resp.json();
+    expect(store.toggleStrategy).toHaveBeenCalledWith("s1", false);
+    expect(store.expireAiRequest).toHaveBeenCalledWith("req-9");
+    expect(store.deleteStrategy).toHaveBeenCalledWith("s1");
+    expect(data.leftOpen).toEqual([{ coin: "ETH", szi: 0.01 }]); // BTC isn't this bot's coin
+  });
+
+  it("emergency stop turns off every running or pending bot and cancels AI rounds, leaving positions by default", async () => {
+    store.getStrategies.mockResolvedValue([
+      aiBot(),
+      { ...aiBot({ id: "s2", type: "dca", coin: "BTC", params: { intervalMs: 60_000 } }), enabled: false, pendingSignal: true },
+      aiBot({ id: "s3", enabled: false, params: {} }),
+      aiBot({ id: "other-org", orgId: "org2" }),
+    ]);
+    const resp = await route("POST /strategy/stop-all")(post({}), agentCtx());
+    const data = await resp.json();
+    expect(data.scope).toBe("agent");
+    expect(store.stopStrategies).toHaveBeenCalledWith(["s1", "s2"]);
+    expect(store.expireAiRequest).toHaveBeenCalledWith("req-9");
+    expect(data.closed).toEqual([]);
+    expect(store.bookPaperFill).not.toHaveBeenCalled();
+  });
+
+  it("emergency stop with closePositions flattens the stopped bots' paper coins only", async () => {
+    store.getStrategies.mockResolvedValue([aiBot()]);
+    store.listPaperPositions.mockResolvedValue([
+      { coin: "ETH", szi: -0.02, entryPx: 2000, leverage: 1 },
+      { coin: "BTC", szi: 0.001, entryPx: 80_000, leverage: 1 },
+    ]);
+    store.listPaperOrders.mockResolvedValue([{ id: "o-eth", coin: "ETH" }, { id: "o-btc", coin: "BTC" }] as never);
+    const data = await (await route("POST /strategy/stop-all")(post({ closePositions: true }), agentCtx())).json();
+    expect(data.closed).toEqual([{ agentId: "a1", coin: "ETH", paper: true, taskId: "trade-1" }]);
+    expect(store.bookPaperFill).toHaveBeenCalledTimes(1);
+    expect(store.bookPaperFill.mock.calls[0][1]).toMatchObject({ coin: "ETH", isBuy: true, sz: 0.02, reduceOnly: true });
+    expect(store.deletePaperOrder).toHaveBeenCalledWith("o-eth");
+    expect(store.deletePaperOrder).not.toHaveBeenCalledWith("o-btc");
+  });
+
+  it("a stopped signal bot ignores fires", async () => {
+    store.getStrategy.mockResolvedValue({ ...aiBot({ type: "signal", params: {} }), enabled: false });
+    const resp = await route("POST /strategy/:id/signal")(post({}), agentCtx({ id: "s1" }));
+    expect(resp.status).toBe(409);
+    expect(store.bookPaperFill).not.toHaveBeenCalled();
+  });
+
+  it("lists the bot management tools as POST, which agent runtimes can send", async () => {
+    const data = await (await route("GET /agent/tools")(new Request("http://x/"), agentCtx())).json();
+    const tools = (data.tools as { name: string; method: string; path: string }[]).filter((t) => /edit_bot|delete_bot|stop_all/.test(t.name));
+    expect(tools.map((t) => [t.name, t.method, t.path])).toEqual([
+      ["hyperliquid_edit_bot", "POST", "strategy/{id}/edit"],
+      ["hyperliquid_delete_bot", "POST", "strategy/{id}/delete"],
+      ["hyperliquid_stop_all_bots", "POST", "strategy/stop-all"],
+    ]);
   });
 });
