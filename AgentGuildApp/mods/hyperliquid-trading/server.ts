@@ -60,6 +60,7 @@ import {
   deletePaperOrder,
   bookPaperFill,
   applyPaperFunding,
+  updatePaperTrailingStop,
   getPaperTradeHistory,
   type PaperPositionDoc,
 } from "@/lib/mods/hyperliquid-store";
@@ -86,6 +87,7 @@ import {
   restingFillable,
   roundSize,
   summarize,
+  ratchetTrail,
   triggerHit,
   walkBook,
   type CoinMeta,
@@ -405,6 +407,8 @@ async function placeNatively(p: {
 
 /** Paper fills always use mainnet's book and prices — testnet's are too thin to preview anything real. */
 const PAPER_NETWORK: HlNetwork = "mainnet";
+/** Widest trailing stop a paper order accepts, in percent. */
+const MAX_TRAILING_STOP_PCT = 50;
 
 interface PaperMarket {
   mids: Record<string, number>;
@@ -441,6 +445,7 @@ interface PaperOrderParams {
   leverage?: number;
   stopLossPct?: number;
   takeProfitPct?: number;
+  trailingStopPct?: number;
   reduceOnly?: boolean;
   strategyId?: string | null;
 }
@@ -502,6 +507,7 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
   const leverage = p.leverage ?? risk?.leverage ?? 1;
   const stopLossPct = p.stopLossPct ?? (reduceOnly ? undefined : risk?.defaultStopLossPct);
   const takeProfitPct = p.takeProfitPct ?? (reduceOnly ? undefined : risk?.defaultTakeProfitPct);
+  const trailingStopPct = reduceOnly ? undefined : p.trailingStopPct;
   const side = (p.isBuy ? book.levels?.[1] : book.levels?.[0]) ?? [];
   const walk = walkBook(side.map((l) => ({ px: Number(l.px), sz: Number(l.sz) })), sz, p.isBuy, limitPx, meta.szDecimals);
 
@@ -511,7 +517,7 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
   if (walk.sz > 0) {
     const booked = await bookPaperFill(
       p.agentId,
-      { coin: p.coin, isBuy: p.isBuy, sz: walk.sz, px: walk.avgPx, feeRate: TAKER_FEE_RATE, leverage, reduceOnly, stopLossPct, takeProfitPct },
+      { coin: p.coin, isBuy: p.isBuy, sz: walk.sz, px: walk.avgPx, feeRate: TAKER_FEE_RATE, leverage, reduceOnly, stopLossPct, takeProfitPct, trailingStopPct },
       market.mids, market.meta,
       { orgId: p.orgId, reason: p.strategyId ? "strategy" : "manual", strategyId: p.strategyId ?? null },
     );
@@ -526,7 +532,7 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
   if (orderType === "limit" && rest > 0) {
     const orderId = await createPaperOrder({
       agentId: p.agentId, orgId: p.orgId, coin: p.coin, isBuy: p.isBuy, sz: rest, limitPx, leverage, reduceOnly,
-      stopLossPct: stopLossPct ?? null, takeProfitPct: takeProfitPct ?? null, strategyId: p.strategyId ?? null,
+      stopLossPct: stopLossPct ?? null, takeProfitPct: takeProfitPct ?? null, trailingStopPct: trailingStopPct ?? null, strategyId: p.strategyId ?? null,
     });
     resting = { orderId, sz: rest, limitPx };
   }
@@ -538,12 +544,12 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
 
 /**
  * Hub tick phase for paper accounts, on mainnet prices: fills resting limits
- * the mid has traded through (at their limit, maker fee), fires stop losses and
- * take profits at the mark, charges hourly funding, and liquidates any account
+ * the mid has traded through (at their limit, maker fee), moves trailing stops
+ * up behind the mark, fires stop losses and take profits at the mark, charges hourly funding, and liquidates any account
  * whose equity drops under its maintenance margin.
  */
-export async function runHyperliquidPaperTick(): Promise<{ filled: number; triggered: number; funded: number; liquidated: number; errors: number }> {
-  const result = { filled: 0, triggered: 0, funded: 0, liquidated: 0, errors: 0 };
+export async function runHyperliquidPaperTick(): Promise<{ filled: number; trailed: number; triggered: number; funded: number; liquidated: number; errors: number }> {
+  const result = { filled: 0, trailed: 0, triggered: 0, funded: 0, liquidated: 0, errors: 0 };
   const [orders, positions] = await Promise.all([listAllPaperOrders(), listAllPaperPositions()]);
   if (!orders.length && !positions.length) return result;
 
@@ -572,7 +578,7 @@ export async function runHyperliquidPaperTick(): Promise<{ filled: number; trigg
         o.agentId,
         {
           coin: o.coin, isBuy: o.isBuy, sz: o.sz, px: o.limitPx, feeRate: MAKER_FEE_RATE, leverage: o.leverage, reduceOnly: o.reduceOnly,
-          stopLossPct: o.stopLossPct ?? undefined, takeProfitPct: o.takeProfitPct ?? undefined,
+          stopLossPct: o.stopLossPct ?? undefined, takeProfitPct: o.takeProfitPct ?? undefined, trailingStopPct: o.trailingStopPct ?? undefined,
         },
         mids, coinMeta,
         { orgId: o.orgId, reason: "limit", strategyId: o.strategyId, restingOrderId: o.id },
@@ -592,10 +598,17 @@ export async function runHyperliquidPaperTick(): Promise<{ filled: number; trigg
 
   const now = Date.now();
   const afterFills = result.filled ? await listAllPaperPositions() : positions;
-  for (const p of afterFills) {
-    const mark = marks[p.coin];
+  for (const held of afterFills) {
+    const mark = marks[held.coin];
     if (!mark) continue;
+    let p = held;
     try {
+      const trailed = ratchetTrail(p, mark);
+      if (trailed != null) {
+        await updatePaperTrailingStop(p.agentId, p.coin, trailed);
+        p = { ...p, slPx: trailed };
+        result.trailed++;
+      }
       const hit = triggerHit(p, mark);
       if (hit) {
         const booked = await bookPaperFill(
@@ -1432,6 +1445,7 @@ const AGENT_TOOLS: AgentTool[] = [
         leverage: { type: "number" },
         stopLossPct: { type: "number", description: "Stop-loss distance from entry, in percent" },
         takeProfitPct: { type: "number", description: "Take-profit distance from entry, in percent" },
+        trailingStopPct: { type: "number", description: "Trailing stop: the stop follows the best price by this percent and never loosens. Replaces stopLossPct. Paper only." },
       },
       required: ["coin", "isBuy", "sizeUsd"],
     },
@@ -2466,13 +2480,14 @@ export default defineServerMod({
      * POST /paper/trade — a paper order, same body and same checks (capability,
      * risk limits) as POST /trade, but no wallet or passphrase: it fills on the
      * agent's virtual account against the real mainnet book, synchronously.
-     * Body: { orgId, agentId, coin, isBuy, sizeUsd, orderType?, limitPrice?, leverage?, stopLossPct?, takeProfitPct? }
+     * Body: { orgId, agentId, coin, isBuy, sizeUsd, orderType?, limitPrice?, leverage?, stopLossPct?, takeProfitPct?, trailingStopPct? }
+     * trailingStopPct is paper-only (Hyperliquid has no native trailing stop) and replaces stopLossPct.
      */
     "POST /paper/trade": async (req, ctx) => {
       const body = await req.json().catch(() => ({}));
       const agentId = ctx.agent?.agentId ?? body.agentId;
       const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { coin, isBuy, sizeUsd, orderType = "market", limitPrice, leverage, stopLossPct, takeProfitPct } = body;
+      const { coin, isBuy, sizeUsd, orderType = "market", limitPrice, leverage, stopLossPct, takeProfitPct, trailingStopPct } = body;
       if (!orgId || !agentId || !coin || isBuy == null || !(Number(sizeUsd) > 0)) {
         return Response.json({ error: "orgId, agentId, coin, isBuy, sizeUsd are required" }, { status: 400 });
       }
@@ -2481,6 +2496,9 @@ export default defineServerMod({
       }
       if (orderType === "limit" && !(Number(limitPrice) > 0)) {
         return Response.json({ error: "limitPrice is required for limit orders" }, { status: 400 });
+      }
+      if (trailingStopPct != null && trailingStopPct !== "" && !(Number(trailingStopPct) > 0 && Number(trailingStopPct) <= MAX_TRAILING_STOP_PCT)) {
+        return Response.json({ error: `trailingStopPct must be above 0 and at most ${MAX_TRAILING_STOP_PCT}` }, { status: 400 });
       }
 
       const denied = await requireOrgAccess(ctx, orgId);
@@ -2495,6 +2513,7 @@ export default defineServerMod({
       const result = await placePaperOrder({
         orgId, agentId, coin: String(coin), isBuy: Boolean(isBuy), sizeUsd: Number(sizeUsd), orderType,
         limitPrice: num(limitPrice), leverage: num(leverage), stopLossPct: num(stopLossPct), takeProfitPct: num(takeProfitPct),
+        trailingStopPct: num(trailingStopPct),
       });
       if ("error" in result) return Response.json(result, { status: 400 });
       return Response.json(result);
@@ -2556,11 +2575,16 @@ export default defineServerMod({
       return Response.json({ ok: true, balance: startBalance });
     },
 
-    /** GET /paper/history/:agentId — paper fills (newest first) and PnL net of fees, win rate. */
+    /**
+     * GET /paper/history/:agentId — paper fills (newest first) plus performance
+     * since the last reset: net PnL, win rate, profit factor, expectancy, max
+     * drawdown and the equity curve.
+     */
     "GET /paper/history/:agentId": async (_req, ctx) => {
       const access = await requireAgentOrgAccess(ctx, ctx.params.agentId);
       if ("error" in access) return Response.json({ error: access.error }, { status: access.status });
-      return Response.json(await getPaperTradeHistory(ctx.params.agentId));
+      const account = await getPaperAccount(ctx.params.agentId, access.orgId);
+      return Response.json(await getPaperTradeHistory(ctx.params.agentId, undefined, { since: account.resetAt, startBalance: account.startBalance }));
     },
 
     // ── Referrals ──────────────────────────────────────────────────────────

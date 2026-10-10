@@ -14,6 +14,10 @@ interface Position {
   notionalUsd: number;
   entryPrice: number;
   unrealizedPnl: number;
+  /** Paper only: the position's stop, take profit and trailing distance. */
+  slPx?: number | null;
+  tpPx?: number | null;
+  trailPct?: number | null;
 }
 
 interface TradeRecord {
@@ -47,6 +51,20 @@ interface PaperPositionRow {
   unrealizedPnl: number;
   slPx: number | null;
   tpPx: number | null;
+  trailPct?: number | null;
+}
+
+interface PerformanceView {
+  closed: number;
+  winRate: number;
+  netPnl: number;
+  fees: number;
+  profitFactor: number | null;
+  avgWin: number;
+  avgLoss: number;
+  expectancy: number;
+  maxDrawdownPct: number;
+  curve: { t: number | null; equity: number }[];
 }
 
 interface PaperRestingOrder {
@@ -381,6 +399,24 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
 }
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
+
+/** A bare equity line — green when it ended above where it started. */
+function EquitySparkline({ curve }: { curve: { equity: number }[] }) {
+  if (curve.length < 2) return null;
+  const w = 160;
+  const h = 32;
+  const values = curve.map((p) => p.equity);
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const span = hi - lo || 1;
+  const points = values.map((v, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${(h - 2 - ((v - lo) / span) * (h - 4)).toFixed(1)}`).join(" ");
+  const up = values[values.length - 1] >= values[0];
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} role="img" aria-label={`Equity curve, ${up ? "up" : "down"} over ${values.length - 1} fills`}>
+      <polyline points={points} fill="none" strokeWidth={1.5} className={up ? "stroke-green-600 dark:stroke-green-400" : "stroke-red-600 dark:stroke-red-400"} />
+    </svg>
+  );
+}
 
 const AXIS_W = 64;
 const TIME_H = 18;
@@ -973,6 +1009,7 @@ function TradingPanel({ api }: PanelProps) {
   const [tpslOn, setTpslOn] = useState(false);
   const [stopLossPct, setStopLossPct] = useState("");
   const [takeProfitPct, setTakeProfitPct] = useState("");
+  const [trailingStopPct, setTrailingStopPct] = useState("");
 
   const maxLeverage = coinInfo?.maxLeverage ?? 20;
   useEffect(() => {
@@ -1000,6 +1037,7 @@ function TradingPanel({ api }: PanelProps) {
       leverage,
       stopLossPct: tpslOn && stopLossPct ? Number(stopLossPct) : undefined,
       takeProfitPct: tpslOn && takeProfitPct ? Number(takeProfitPct) : undefined,
+      trailingStopPct: paperMode && tpslOn && trailingStopPct ? Number(trailingStopPct) : undefined,
     }, `${isBuy ? "Long" : "Short"} ${coin} $${sizeNum}${lev}${at}`);
   }
 
@@ -1158,6 +1196,7 @@ function TradingPanel({ api }: PanelProps) {
       setPaperAccount(data);
       setPositions((data.positions as PaperPositionRow[]).map((p) => ({
         coin: p.coin, size: p.szi, notionalUsd: p.notionalUsd, entryPrice: p.entryPx, unrealizedPnl: p.unrealizedPnl,
+        slPx: p.slPx, tpPx: p.tpPx, trailPct: p.trailPct ?? null,
       })));
       setAccountValue(data.equity);
       setMarginUsed(data.marginUsed);
@@ -1292,7 +1331,7 @@ function TradingPanel({ api }: PanelProps) {
   }
 
   // ── History ─────────────────────────────────────────────────────────────
-  const [history, setHistory] = useState<{ trades: TradeRecord[]; stats: { totalPnl: number; winRate: number; count: number } } | "loading" | "error" | null>(null);
+  const [history, setHistory] = useState<{ trades: TradeRecord[]; stats: { totalPnl: number; winRate: number; count: number }; performance?: PerformanceView } | "loading" | "error" | null>(null);
 
   async function loadHistory() {
     if (!agentId) return;
@@ -1313,6 +1352,7 @@ function TradingPanel({ api }: PanelProps) {
       };
       setHistory({
         stats: data.stats,
+        performance: data.performance,
         trades: (data.trades as PaperTrade[]).map((t) => {
           const closes = t.reduceOnly || t.realizedPnl !== 0;
           return {
@@ -1989,15 +2029,24 @@ function TradingPanel({ api }: PanelProps) {
               Take profit / Stop loss
             </label>
             {tpslOn && (
-              <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+              <div className={`mt-1.5 grid gap-1.5 ${paperMode ? "grid-cols-3" : "grid-cols-2"}`}>
                 <div>
                   <label htmlFor="takeProfitPct" className={labelClass}>TP %</label>
                   <input id="takeProfitPct" name="takeProfitPct" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={takeProfitPct} onChange={(e) => setTakeProfitPct(e.target.value)} />
                 </div>
                 <div>
                   <label htmlFor="stopLossPct" className={labelClass}>SL %</label>
-                  <input id="stopLossPct" name="stopLossPct" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`} value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} />
+                  <input
+                    id="stopLossPct" name="stopLossPct" type="number" min="0" step="any" className={`${inputClass} ${monoClass}`}
+                    value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} disabled={paperMode && !!trailingStopPct}
+                  />
                 </div>
+                {paperMode && (
+                  <div>
+                    <label htmlFor="trailingStopPct" className={labelClass} title="The stop follows the best price by this percent and never loosens. Replaces SL. Paper only.">Trail %</label>
+                    <input id="trailingStopPct" name="trailingStopPct" type="number" min="0" max="50" step="any" className={`${inputClass} ${monoClass}`} value={trailingStopPct} onChange={(e) => setTrailingStopPct(e.target.value)} />
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2157,6 +2206,7 @@ function TradingPanel({ api }: PanelProps) {
                       <th className="px-2 pb-1 font-medium text-right">Entry</th>
                       <th className="px-2 pb-1 font-medium text-right">Mark</th>
                       <th className="px-2 pb-1 font-medium text-right">PnL (%)</th>
+                      {paperMode && <th className="px-2 pb-1 font-medium text-right">TP / SL</th>}
                       <th className="px-2 pb-1"></th>
                     </tr>
                   </thead>
@@ -2177,6 +2227,12 @@ function TradingPanel({ api }: PanelProps) {
                           <td className={`px-2 py-1.5 text-right ${monoClass} ${pnlClass(p.unrealizedPnl)}`}>
                             {signed(p.unrealizedPnl)} {cost > 0 && <span className="opacity-75">({signed((p.unrealizedPnl / cost) * 100)}%)</span>}
                           </td>
+                          {paperMode && (
+                            <td className={`px-2 py-1.5 text-right ${monoClass} ${mutedClass}`}>
+                              {p.tpPx != null ? formatPrice(p.tpPx) : "—"} / {p.slPx != null ? formatPrice(p.slPx) : "—"}
+                              {p.trailPct ? <span className="ml-1"><Badge tone="neutral">trail {p.trailPct}%</Badge></span> : null}
+                            </td>
+                          )}
                           <td className="px-2 py-1.5 text-right">
                             <button
                               type="button"
@@ -2580,6 +2636,17 @@ function TradingPanel({ api }: PanelProps) {
                   <span>win rate <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{(history.stats.winRate * 100).toFixed(0)}%</span></span>
                   <span>realized <span className={`${monoClass} ${pnlClass(history.stats.totalPnl)}`}>{signed(history.stats.totalPnl)}</span></span>
                 </div>
+                {paperMode && history.performance && history.performance.closed > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-[hsl(var(--border))] px-2 py-1.5 text-xs">
+                    <EquitySparkline curve={history.performance.curve} />
+                    <span className={mutedClass}>profit factor <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.performance.profitFactor == null ? "∞" : history.performance.profitFactor.toFixed(2)}</span></span>
+                    <span className={mutedClass}>expectancy <span className={`${monoClass} ${pnlClass(history.performance.expectancy)}`}>{signed(history.performance.expectancy)}</span></span>
+                    <span className={mutedClass}>avg win / loss <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{signed(history.performance.avgWin)} / {signed(history.performance.avgLoss)}</span></span>
+                    <span className={mutedClass}>max drawdown <span className={`${monoClass} text-[hsl(var(--foreground))]`}>{history.performance.maxDrawdownPct.toFixed(2)}%</span></span>
+                    <span className={mutedClass}>fees <span className={`${monoClass} text-[hsl(var(--foreground))]`}>${history.performance.fees.toFixed(2)}</span></span>
+                    <span className={`text-[10px] ${mutedClass}`}>since last reset, funding excluded</span>
+                  </div>
+                )}
                 <table className="w-full text-xs">
                   <thead>
                     <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>

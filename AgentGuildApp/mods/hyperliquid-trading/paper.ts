@@ -5,6 +5,7 @@
  * result is an honest preview of the live one. Pure functions; persistence
  * is in hyperliquid-store.ts and the market reads/tick are in server.ts.
  */
+import { maxDrawdownPct } from "./indicators";
 
 /** Virtual USDC a new paper account starts with. */
 export const PAPER_START_BALANCE = 10_000;
@@ -23,6 +24,8 @@ export interface PaperPosition {
   leverage: number;
   slPx: number | null;
   tpPx: number | null;
+  /** Trailing stop distance in percent: slPx follows the best mark by this much and never moves back. */
+  trailPct?: number | null;
 }
 
 export function roundSize(sz: number, szDecimals: number): number {
@@ -69,7 +72,7 @@ export function applyFill(
 ): { position: PaperPosition | null; realized: number } {
   const signed = isBuy ? sz : -sz;
   if (!pos || pos.szi === 0) {
-    return { position: { coin, szi: signed, entryPx: px, leverage, slPx: null, tpPx: null }, realized: 0 };
+    return { position: { coin, szi: signed, entryPx: px, leverage, slPx: null, tpPx: null, trailPct: null }, realized: 0 };
   }
   if (Math.sign(pos.szi) === Math.sign(signed)) {
     const total = Math.abs(pos.szi) + sz;
@@ -83,7 +86,7 @@ export function applyFill(
   const remaining = Math.sign(pos.szi + signed) * roundSize(Math.abs(pos.szi + signed), szDecimals);
   if (remaining === 0) return { position: null, realized };
   if (Math.sign(remaining) === Math.sign(pos.szi)) return { position: { ...pos, szi: remaining }, realized };
-  return { position: { coin, szi: remaining, entryPx: px, leverage, slPx: null, tpPx: null }, realized };
+  return { position: { coin, szi: remaining, entryPx: px, leverage, slPx: null, tpPx: null, trailPct: null }, realized };
 }
 
 /** SL/TP trigger prices a fixed % through the entry — the same rule live orders use (exchange.ts). */
@@ -142,6 +145,8 @@ export interface PaperOrder {
   reduceOnly: boolean;
   stopLossPct?: number;
   takeProfitPct?: number;
+  /** Trailing stop distance in percent. Paper only — Hyperliquid has no native trailing stop. Replaces stopLossPct. */
+  trailingStopPct?: number;
 }
 
 export interface BookedOrder {
@@ -181,8 +186,9 @@ export function bookOrder(
   const fee = sz * order.px * order.feeRate;
 
   let next = position;
-  if (next && !order.reduceOnly && (order.stopLossPct || order.takeProfitPct)) {
-    next = { ...next, ...triggerPrices(next.szi > 0, order.px, order.stopLossPct, order.takeProfitPct) };
+  if (next && !order.reduceOnly && (order.stopLossPct || order.takeProfitPct || order.trailingStopPct)) {
+    const stopPct = order.trailingStopPct || order.stopLossPct;
+    next = { ...next, ...triggerPrices(next.szi > 0, order.px, stopPct, order.takeProfitPct), trailPct: order.trailingStopPct || null };
   }
 
   const nextBalance = balance + realized - fee;
@@ -204,6 +210,18 @@ export function triggerHit(pos: PaperPosition, markPx: number): "sl" | "tp" | nu
   return null;
 }
 
+/**
+ * A trailing stop's new stop price once the mark has moved in the position's
+ * favor, or null when it stays put. It only ever tightens.
+ */
+export function ratchetTrail(pos: PaperPosition, markPx: number): number | null {
+  if (!pos.trailPct || !(markPx > 0)) return null;
+  const isLong = pos.szi > 0;
+  const candidate = isLong ? markPx * (1 - pos.trailPct / 100) : markPx * (1 + pos.trailPct / 100);
+  if (pos.slPx == null) return candidate;
+  return (isLong ? candidate > pos.slPx : candidate < pos.slPx) ? candidate : null;
+}
+
 /** A resting limit fills once the mid trades through it. */
 export function restingFillable(isBuy: boolean, limitPx: number, mid: number): boolean {
   return isBuy ? mid <= limitPx : mid >= limitPx;
@@ -216,4 +234,77 @@ export function fundingPayment(szi: number, oraclePx: number, hourlyRate: number
 
 export function isLiquidatable(summary: PaperSummary): boolean {
   return summary.positions.length > 0 && summary.equity < summary.maintenanceMargin;
+}
+
+export interface PerformanceTrade {
+  realizedPnl: number;
+  fee: number;
+  /** ms since epoch; null sorts first. */
+  at: number | null;
+}
+
+export interface PaperPerformance {
+  /** Fills that realized PnL — a close, a reduce or a flip. */
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  /** Net of every fee, opening fills included. */
+  netPnl: number;
+  fees: number;
+  grossProfit: number;
+  grossLoss: number;
+  /** Gross profit over gross loss; null with no losing trade yet. */
+  profitFactor: number | null;
+  avgWin: number;
+  avgLoss: number;
+  /** Average net result per closed trade. */
+  expectancy: number;
+  largestWin: number;
+  largestLoss: number;
+  maxDrawdownPct: number;
+  /** Account value after each fill, oldest first, starting from startBalance. Funding not included. */
+  curve: { t: number | null; equity: number }[];
+}
+
+/**
+ * Trade-level performance of a run of paper fills. A closing fill's result is
+ * its realized PnL less its own fee; opening fees still count against netPnl
+ * and the curve, so the curve ends where the fills left the balance.
+ */
+export function paperPerformance(trades: PerformanceTrade[], startBalance: number): PaperPerformance {
+  const ordered = [...trades].sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  let equity = startBalance;
+  const curve: PaperPerformance["curve"] = [{ t: ordered[0]?.at ?? null, equity }];
+  let fees = 0, grossProfit = 0, grossLoss = 0, wins = 0, losses = 0, largestWin = 0, largestLoss = 0, closed = 0;
+  for (const t of ordered) {
+    fees += t.fee;
+    equity += t.realizedPnl - t.fee;
+    curve.push({ t: t.at, equity });
+    if (t.realizedPnl === 0) continue;
+    closed++;
+    const net = t.realizedPnl - t.fee;
+    if (net > 0) {
+      wins++;
+      grossProfit += net;
+      largestWin = Math.max(largestWin, net);
+    } else {
+      losses++;
+      grossLoss += -net;
+      largestLoss = Math.min(largestLoss, net);
+    }
+  }
+  return {
+    closed, wins, losses,
+    winRate: closed ? wins / closed : 0,
+    netPnl: equity - startBalance,
+    fees, grossProfit, grossLoss,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : null,
+    avgWin: wins ? grossProfit / wins : 0,
+    avgLoss: losses ? -grossLoss / losses : 0,
+    expectancy: closed ? (grossProfit - grossLoss) / closed : 0,
+    largestWin, largestLoss,
+    maxDrawdownPct: maxDrawdownPct(curve.map((p) => p.equity)),
+    curve,
+  };
 }

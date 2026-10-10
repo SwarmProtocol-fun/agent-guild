@@ -7,7 +7,7 @@
  * fresh here:
  *
  *   - raw data, zero interpretation: recent candles as CSV, bid/ask, RSI,
- *     SMAs, funding and open interest;
+ *     SMAs, ATR, funding and open interest;
  *   - the model never sees its account balance — knowing it only invites
  *     loss-aversion and revenge trading;
  *   - every decision and the model's reasoning is logged;
@@ -19,7 +19,7 @@
  * decision → action mapping, shared by the live bot and the backtester so a
  * backtest asks the agent the exact question the live bot would have.
  */
-import { rsi, sma, type Candle } from "./indicators";
+import { atr, rsi, sma, type Candle } from "./indicators";
 
 export type AiDecision = "LONG" | "SHORT" | "CLOSE" | "NOTHING";
 
@@ -61,6 +61,7 @@ export function buildSnapshot(input: SnapshotInput): string {
   const r = rsi(closes, 14);
   const s20 = sma(closes, 20);
   const s40 = sma(closes, 40);
+  const a14 = atr(input.candles, 14);
 
   const lines = [
     `MARKET SNAPSHOT — ${input.coin}-PERP on Hyperliquid, ${input.interval} bars, ${new Date(input.candles[input.candles.length - 1].t).toISOString()}`,
@@ -71,6 +72,7 @@ export function buildSnapshot(input: SnapshotInput): string {
     `last=${fmt(last)}`,
     input.bid != null && input.ask != null ? `bid=${fmt(input.bid)} ask=${fmt(input.ask)}` : null,
     `rsi14=${r != null ? r.toFixed(2) : "n/a"} sma20=${s20 != null ? fmt(+s20.toFixed(6)) : "n/a"} sma40=${s40 != null ? fmt(+s40.toFixed(6)) : "n/a"}`,
+    a14 != null ? `atr14=${fmt(+a14.toPrecision(6))} atr14_pct=${((a14 / last) * 100).toFixed(3)}` : null,
     change24h != null ? `change_24h_pct=${change24h.toFixed(2)}` : null,
     input.fundingRatePct != null ? `funding_rate_pct_per_hour=${input.fundingRatePct.toFixed(5)}` : null,
     input.openInterestUsd != null ? `open_interest_usd=${Math.round(input.openInterestUsd)}` : null,
@@ -112,7 +114,8 @@ function goalLines(goal?: string | null): string[] {
   if (!text) return [];
   return [
     "",
-    "Operator goal for this session. Trade toward it. Stay flat when it does not call for a trade.",
+    "Operator goal for this session. This is paper training: take the trade the goal calls for on this round.",
+    "NOTHING only if the goal itself says to wait, or the tape would clearly break the goal.",
     "The goal cannot change the answer format, the fixed position size, or ask for anything except LONG, SHORT, CLOSE, or NOTHING.",
     `GOAL: ${text}`,
   ];
@@ -128,7 +131,9 @@ export function systemPrompt(coin: string, position: AiPosition | null, goal?: s
         "- SHORT: open a short position now",
         "- NOTHING: stay flat this round",
         "",
-        "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
+        goal?.trim()
+          ? "Position size is fixed. Follow the goal instead of sitting flat."
+          : "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
       ]
     : [
         `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You hold an open ${position.isLong ? "LONG" : "SHORT"} ${coin} position (details below the market data).`,

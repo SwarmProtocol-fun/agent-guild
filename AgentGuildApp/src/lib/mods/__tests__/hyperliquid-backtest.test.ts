@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { runBacktest, TAKER_FEE } from "../../../../mods/hyperliquid-trading/backtest";
 import { buildSnapshot, decisionRequest, decisionToAction, normalizeGoal, parseDecision, systemPrompt, type AiDecision } from "../../../../mods/hyperliquid-trading/ai-trader-core";
-import { maxDrawdownPct, rsi, sma, type Candle } from "../../../../mods/hyperliquid-trading/indicators";
+import { atr, maxDrawdownPct, rsi, sma, type Candle } from "../../../../mods/hyperliquid-trading/indicators";
 
 const HOUR = 3_600_000;
 
@@ -11,6 +11,15 @@ function bars(closes: number[]): Candle[] {
 }
 
 describe("indicators", () => {
+  it("atr is Wilder's average true range, gaps included", () => {
+    const bar = (t: number, o: number, h: number, l: number, c: number): Candle => ({ t, o, h, l, c, v: 1 });
+    // Every bar ranges 2; a gap up from 100 to a 104–106 bar makes that bar's true range 6.
+    const flat = Array.from({ length: 4 }, (_, i) => bar(i, 100, 101, 99, 100));
+    expect(atr(flat, 3)).toBeCloseTo(2);
+    expect(atr([...flat, bar(4, 105, 106, 104, 105)], 3)).toBeCloseTo((2 * 2 + 6) / 3);
+    expect(atr(flat, 4)).toBeNull();
+  });
+
   it("sma / rsi / drawdown", () => {
     expect(sma([1, 2, 3, 4], 2)).toBe(3.5);
     expect(sma([1], 2)).toBeNull();
@@ -66,6 +75,7 @@ describe("AI decision mapping", () => {
     const candles = bars(Array.from({ length: 100 }, (_, i) => 100 + i));
     const snap = buildSnapshot({ coin: "ETH", candles: candles.slice(0, 50), interval: "1h" });
     expect(snap).toContain("last=149");
+    expect(snap).toMatch(/atr14=[\d.]+ atr14_pct=[\d.]+/);
     expect(snap).not.toContain("150,");
     expect(snap.split("\n").filter((l) => /^\d{4}-/.test(l))).toHaveLength(50);
     expect(snap.toLowerCase()).not.toContain("balance");

@@ -44,6 +44,21 @@ export function rsi(closes: number[], length = 14): number | null {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
+/** Wilder's Average True Range over candles, or null if there aren't enough. */
+export function atr(candles: Candle[], length = 14): number | null {
+  if (length <= 0 || candles.length <= length) return null;
+  const tr = (i: number) => {
+    const c = candles[i];
+    const prev = candles[i - 1].c;
+    return Math.max(c.h - c.l, Math.abs(c.h - prev), Math.abs(c.l - prev));
+  };
+  let value = 0;
+  for (let i = 1; i <= length; i++) value += tr(i);
+  value /= length;
+  for (let i = length + 1; i < candles.length; i++) value = (value * (length - 1) + tr(i)) / length;
+  return value;
+}
+
 /** Largest peak-to-trough fall of an equity curve, as a positive percent. */
 export function maxDrawdownPct(equity: number[]): number {
   let peak = -Infinity;

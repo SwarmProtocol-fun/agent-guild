@@ -4,6 +4,8 @@ import {
   bookOrder,
   fundingPayment,
   isLiquidatable,
+  paperPerformance,
+  ratchetTrail,
   restingFillable,
   summarize,
   triggerHit,
@@ -17,6 +19,54 @@ const META = { ETH: { szDecimals: 4, maxLeverage: 25 }, BTC: { szDecimals: 5, ma
 const pos = (p: Partial<PaperPosition> = {}): PaperPosition => ({ coin: "ETH", szi: 1, entryPx: 2000, leverage: 1, slPx: null, tpPx: null, ...p });
 
 describe("paper engine", () => {
+  it("a trailing stop starts at the trail distance and only ratchets in the position's favor", () => {
+    const booked = bookOrder(10_000, [], { coin: "ETH", isBuy: true, sz: 1, px: 2000, feeRate: 0, leverage: 1, reduceOnly: false, stopLossPct: 10, trailingStopPct: 2 }, { ETH: 2000 }, META);
+    if ("error" in booked) throw new Error(booked.error);
+    expect(booked.position).toMatchObject({ slPx: 1960, trailPct: 2 }); // trail replaces the 10% stop
+
+    const long = booked.position!;
+    expect(ratchetTrail(long, 2100)).toBeCloseTo(2058);
+    expect(ratchetTrail({ ...long, slPx: 2058 }, 2050)).toBeNull(); // never loosens
+    expect(ratchetTrail({ ...long, slPx: 2058 }, 2101)).toBeCloseTo(2058.98);
+    expect(triggerHit({ ...long, slPx: 2058 }, 2057)).toBe("sl");
+
+    const short = pos({ szi: -1, slPx: 2040, trailPct: 2 });
+    expect(ratchetTrail(short, 1900)).toBeCloseTo(1938);
+    expect(ratchetTrail(short, 2010)).toBeNull();
+    expect(ratchetTrail(pos({ slPx: 1900 }), 2500)).toBeNull(); // a plain stop doesn't move
+  });
+
+  it("a flip or a fresh position drops the trail", () => {
+    const flipped = applyFill(pos({ slPx: 1960, trailPct: 2 }), "ETH", false, 2, 2000, 1, 4);
+    expect(flipped.position).toMatchObject({ szi: -1, slPx: null, trailPct: null });
+  });
+
+  it("scores a run of fills: win rate, profit factor, expectancy and drawdown, net of fees", () => {
+    const perf = paperPerformance([
+      { realizedPnl: 0, fee: 1, at: 1 },     // open
+      { realizedPnl: 101, fee: 1, at: 2 },   // +100 net
+      { realizedPnl: 0, fee: 1, at: 3 },     // open
+      { realizedPnl: -49, fee: 1, at: 4 },   // −50 net
+      { realizedPnl: 0, fee: 1, at: 5 },
+      { realizedPnl: 26, fee: 1, at: 6 },    // +25 net
+    ], 1000);
+    expect(perf).toMatchObject({ closed: 3, wins: 2, losses: 1, fees: 6, largestWin: 100, largestLoss: -50 });
+    expect(perf.winRate).toBeCloseTo(2 / 3);
+    expect(perf.netPnl).toBeCloseTo(72); // 101 − 49 + 26 − 6 fees
+    expect(perf.profitFactor).toBeCloseTo(125 / 50);
+    expect(perf.expectancy).toBeCloseTo(75 / 3);
+    expect(perf.curve[0].equity).toBe(1000);
+    expect(perf.curve.at(-1)!.equity).toBeCloseTo(1072);
+    expect(perf.maxDrawdownPct).toBeCloseTo((52 / 1099) * 100); // 1099 peak → 1047 after the next open fee
+  });
+
+  it("scores order-independently and handles no losses", () => {
+    const perf = paperPerformance([{ realizedPnl: 10, fee: 0, at: 2 }, { realizedPnl: 0, fee: 0, at: 1 }], 100);
+    expect(perf.profitFactor).toBeNull();
+    expect(perf.curve.map((p) => p.t)).toEqual([1, 1, 2]);
+    expect(paperPerformance([], 100)).toMatchObject({ closed: 0, winRate: 0, netPnl: 0, maxDrawdownPct: 0 });
+  });
+
   it("walks the book best-first and stops at the limit, leaving the rest unfilled", () => {
     const asks = [{ px: 2000, sz: 0.5 }, { px: 2001, sz: 0.5 }, { px: 2030, sz: 10 }];
     const fill = walkBook(asks, 1.2, true, 2010, 4);
@@ -110,7 +160,7 @@ const store = {
   getAgentWallet: vi.fn(async () => null),
   getRiskConfig: vi.fn(async () => null as unknown),
   getDailyRealizedPnl: vi.fn(async () => 0),
-  getPaperAccount: vi.fn(async () => ({ agentId: "a1", orgId: "org1", balance: 10_000, startBalance: 10_000, dailyPnl: 0 })),
+  getPaperAccount: vi.fn(async () => ({ agentId: "a1", orgId: "org1", balance: 10_000, startBalance: 10_000, dailyPnl: 0 }) as { agentId: string; orgId: string; balance: number; startBalance: number; dailyPnl: number; resetAt?: Date | null }),
   resetPaperAccount: vi.fn(),
   listPaperPositions: vi.fn(async () => [] as unknown[]),
   listAllPaperPositions: vi.fn(async () => [] as unknown[]),
@@ -121,6 +171,7 @@ const store = {
   deletePaperOrder: vi.fn(),
   bookPaperFill: vi.fn(async (_agentId: string, order: { sz: number }) => ({ balance: 9999, position: null, sz: order.sz, fee: 1, realized: 0, tradeId: "trade-1" }) as unknown),
   applyPaperFunding: vi.fn(),
+  updatePaperTrailingStop: vi.fn(),
   getPaperTradeHistory: vi.fn(),
 };
 const enqueueTask = vi.fn(async () => "task-1");
@@ -206,6 +257,37 @@ describe("paper trading routes", () => {
     const lossy = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 25 }), agentCtx());
     expect((await lossy.json()).error).toMatch(/Daily loss limit/);
     expect(store.bookPaperFill).not.toHaveBeenCalled();
+  });
+
+  it("passes a trailing stop through to the fill and refuses an out-of-range one", async () => {
+    const resp = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100, trailingStopPct: 3 }), agentCtx());
+    expect(resp.status).toBe(200);
+    expect(store.bookPaperFill.mock.calls[0][1]).toMatchObject({ trailingStopPct: 3 });
+
+    const bad = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100, trailingStopPct: 80 }), agentCtx());
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/trailingStopPct/);
+  });
+
+  it("the paper tick ratchets a trailing stop behind the mark without firing it", async () => {
+    store.listAllPaperOrders.mockResolvedValue([]);
+    store.listAllPaperPositions.mockResolvedValue([
+      { id: "a1_ETH", agentId: "a1", orgId: "org1", coin: "ETH", szi: -1, entryPx: 2000, leverage: 1, slPx: 2040, tpPx: null, trailPct: 2, fundingPaid: 0, lastFundingAt: new Date() },
+    ]);
+    const result = await runHyperliquidPaperTick(); // mark 1890
+    expect(result).toMatchObject({ trailed: 1, triggered: 0 });
+    const [agentId, coin, slPx] = store.updatePaperTrailingStop.mock.calls[0] as unknown as [string, string, number];
+    expect([agentId, coin]).toEqual(["a1", "ETH"]);
+    expect(slPx).toBeCloseTo(1927.8);
+  });
+
+  it("history reports performance since the account's last reset", async () => {
+    const resetAt = new Date("2026-10-01T00:00:00Z");
+    store.getPaperAccount.mockResolvedValue({ agentId: "a1", orgId: "org1", balance: 5000, startBalance: 5000, dailyPnl: 0, resetAt });
+    store.getPaperTradeHistory.mockResolvedValue({ trades: [], stats: {}, performance: {} });
+    const resp = await route("GET /paper/history/:agentId")(new Request("http://x/"), { ...agentCtx({ agentId: "a1" }) });
+    expect(resp.status).toBe(200);
+    expect(store.getPaperTradeHistory).toHaveBeenCalledWith("a1", undefined, { since: resetAt, startBalance: 5000 });
   });
 
   it("refuses an order under Hyperliquid's $10 minimum", async () => {

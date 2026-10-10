@@ -27,7 +27,9 @@ import {
   bookOrder,
   type BookedOrder,
   type CoinMeta,
+  paperPerformance,
   type PaperOrder,
+  type PaperPerformance,
   type PaperPosition,
 } from "../../../mods/hyperliquid-trading/paper";
 
@@ -726,6 +728,8 @@ export interface PaperAccount {
   startBalance: number;
   /** Today's (UTC) realized PnL net of fees and funding — the paper daily-loss check. */
   dailyPnl: number;
+  /** When the account was last reset; null if never. Performance stats start here. */
+  resetAt?: Date | null;
 }
 
 function utcDay(d = new Date()): string {
@@ -739,6 +743,7 @@ function docToPaperAccount(agentId: string, data: FirebaseFirestore.DocumentData
     balance: Number(data.balance ?? 0),
     startBalance: Number(data.startBalance ?? PAPER_START_BALANCE),
     dailyPnl: data.dailyPnlDay === utcDay() ? Number(data.dailyPnl ?? 0) : 0,
+    resetAt: data.resetAt?.toDate?.() ?? null,
   };
 }
 
@@ -783,7 +788,7 @@ function docToPaperPosition(d: FirebaseFirestore.DocumentSnapshot): PaperPositio
   const x = d.data()!;
   return {
     id: d.id, agentId: x.agentId, orgId: x.orgId, coin: x.coin, szi: Number(x.szi), entryPx: Number(x.entryPx),
-    leverage: Number(x.leverage ?? 1), slPx: x.slPx ?? null, tpPx: x.tpPx ?? null,
+    leverage: Number(x.leverage ?? 1), slPx: x.slPx ?? null, tpPx: x.tpPx ?? null, trailPct: x.trailPct ?? null,
     fundingPaid: Number(x.fundingPaid ?? 0), lastFundingAt: x.lastFundingAt?.toDate?.() ?? null,
   };
 }
@@ -811,6 +816,7 @@ export interface PaperRestingOrder {
   reduceOnly: boolean;
   stopLossPct: number | null;
   takeProfitPct: number | null;
+  trailingStopPct?: number | null;
   strategyId: string | null;
   createdAt: Date | null;
 }
@@ -820,7 +826,7 @@ function docToPaperOrder(d: FirebaseFirestore.DocumentSnapshot): PaperRestingOrd
   return {
     id: d.id, agentId: x.agentId, orgId: x.orgId, coin: x.coin, isBuy: x.isBuy, sz: Number(x.sz), limitPx: Number(x.limitPx),
     leverage: Number(x.leverage ?? 1), reduceOnly: !!x.reduceOnly, stopLossPct: x.stopLossPct ?? null, takeProfitPct: x.takeProfitPct ?? null,
-    strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
+    trailingStopPct: x.trailingStopPct ?? null, strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
   };
 }
 
@@ -932,6 +938,20 @@ export async function bookPaperFill(
   });
 }
 
+/** Moves a trailing stop. Only ever tightens, re-checked in the transaction so a racing fill or a looser value can't undo it. */
+export async function updatePaperTrailingStop(agentId: string, coin: string, slPx: number): Promise<void> {
+  const posRef = db().collection(PAPER_POSITIONS).doc(paperPositionId(agentId, coin));
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(posRef);
+    if (!snap.exists) return;
+    const x = snap.data()!;
+    if (!x.trailPct) return;
+    const isLong = Number(x.szi) > 0;
+    if (x.slPx != null && (isLong ? slPx <= x.slPx : slPx >= x.slPx)) return;
+    tx.update(posRef, { slPx, updatedAt: FieldValue.serverTimestamp() });
+  });
+}
+
 /** Credits (or charges) accrued funding on one position and moves its funding clock forward. */
 export async function applyPaperFunding(agentId: string, coin: string, amount: number, at: Date): Promise<void> {
   const accountRef = db().collection(PAPER_ACCOUNTS).doc(agentId);
@@ -948,9 +968,20 @@ export async function applyPaperFunding(agentId: string, coin: string, amount: n
 export interface PaperTradeHistory {
   trades: PaperTradeRecord[];
   stats: { totalPnl: number; fees: number; winRate: number; count: number };
+  /** Since the last reset (or the first fill), over the fills returned. */
+  performance: PaperPerformance;
 }
 
-export async function getPaperTradeHistory(agentId: string, limit = 100): Promise<PaperTradeHistory> {
+/**
+ * The agent's latest paper fills, newest first, with stats. `since` (the
+ * account's last reset) bounds the stats so an old wiped run doesn't count;
+ * the curve starts from `startBalance`.
+ */
+export async function getPaperTradeHistory(
+  agentId: string,
+  limit = 200,
+  opts: { since?: Date | null; startBalance?: number } = {},
+): Promise<PaperTradeHistory> {
   const snap = await db().collection(PAPER_TRADES)
     .where("agentId", "==", agentId)
     .orderBy("createdAt", "desc")
@@ -964,15 +995,15 @@ export async function getPaperTradeHistory(agentId: string, limit = 100): Promis
       strategyId: x.strategyId ?? null, createdAt: x.createdAt?.toDate?.() ?? null,
     };
   });
-  const closing = trades.filter((t) => t.realizedPnl !== 0);
-  const fees = trades.reduce((sum, t) => sum + t.fee, 0);
+  const since = opts.since?.getTime() ?? 0;
+  const run = trades.filter((t) => (t.createdAt?.getTime() ?? Date.now()) >= since);
+  const performance = paperPerformance(
+    run.map((t) => ({ realizedPnl: t.realizedPnl, fee: t.fee, at: t.createdAt?.getTime() ?? null })),
+    opts.startBalance ?? PAPER_START_BALANCE,
+  );
   return {
     trades,
-    stats: {
-      totalPnl: closing.reduce((sum, t) => sum + t.realizedPnl, 0) - fees,
-      fees,
-      winRate: closing.length ? closing.filter((t) => t.realizedPnl > 0).length / closing.length : 0,
-      count: closing.length,
-    },
+    stats: { totalPnl: performance.netPnl, fees: performance.fees, winRate: performance.winRate, count: performance.closed },
+    performance,
   };
 }
