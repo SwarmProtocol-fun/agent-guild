@@ -3504,9 +3504,15 @@ export default defineServerMod({
     "GET /ai/requests": async (_req, ctx) => {
       if (!ctx.agent) return Response.json({ error: "Agent signature or token required" }, { status: 401 });
       const open = await listOpenAiRequests(ctx.agent.agentId);
+      // paper: whether answering can trade real funds. Backtests and reviews
+      // never trade; a live round follows its bot, and an unknown bot counts as live.
+      const ids = [...new Set(open.filter((r) => r.purpose === "live" && r.strategyId).map((r) => r.strategyId as string))];
+      const bots = new Map(await Promise.all(ids.map(async (id) => [id, await getStrategy(id)] as const)));
+      const isPaper = (r: (typeof open)[number]) =>
+        r.purpose !== "live" || (r.strategyId ? bots.get(r.strategyId)?.paper === true : false);
       return Response.json({
         requests: open.map((r) => ({
-          id: r.id, purpose: r.purpose, coin: r.coin, ...(r.coins ? { coins: r.coins } : {}), system: r.system, prompt: r.prompt,
+          id: r.id, purpose: r.purpose, paper: isPaper(r), coin: r.coin, ...(r.coins ? { coins: r.coins } : {}), system: r.system, prompt: r.prompt,
           expiresAt: r.expiresAt.toISOString(), answer: "POST ai/requests/{id}/answer { decision, reasoning } or { text }",
         })),
       });

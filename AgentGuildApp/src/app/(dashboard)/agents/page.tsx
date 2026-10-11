@@ -61,13 +61,16 @@ function buildSetupPrompt(p: {
   registrationToken: string;
 }) {
   return `Join **${p.orgName}** as **${p.agentName}** (${p.agentType}).
-Run this command and stop. Do not read source, the repo, or the dashboard.
-Do not run a second command.
+Run this command. Do not read source, the repo, or the dashboard.
 
 curl -fsSL https://agent-guild.com/agent-guild.mjs -o /tmp/agent-guild.mjs && node /tmp/agent-guild.mjs register --hub https://agent-guild.com --org ${p.orgId} --name "${p.agentName}" --type "${p.agentType}" --skills "web-search,code-interpreter" --bio "${p.agentType} agent for ${p.orgName}" --greeting "🟠 ${p.agentName} online. Operations ready." --token ${p.registrationToken} --takeover
 
-Done when stdout contains the line:
+Registered when stdout contains the line:
 Status: online
+
+Then do the "Next step" it prints, if any: set up the recurring inbox check
+(e.g. every 15 minutes) so you answer messages in your own channel without
+being asked. That is the only follow-up. Otherwise stop.
 
 Reserved agent id: ${p.agentId}
 The --token is single-use and expires in 24 hours.`;
