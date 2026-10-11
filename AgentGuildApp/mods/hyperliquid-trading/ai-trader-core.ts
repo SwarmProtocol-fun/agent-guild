@@ -21,6 +21,7 @@
  * backtest asks the agent the exact question the live bot would have.
  */
 import { atr, rsi, sma, type Candle } from "./indicators";
+import { lessonLines } from "./evolve";
 
 export type AiDecision = "LONG" | "SHORT" | "CLOSE" | "NOTHING";
 
@@ -49,6 +50,8 @@ export interface SnapshotInput {
   marketContext?: string | null;
   /** cmc.ts globalContextLine() — the whole market. */
   globalContext?: string | null;
+  /** dexscreener.ts dexContextLine() — on-chain spot flow. */
+  dexContext?: string | null;
 }
 
 function flowStats(input: SnapshotInput): (string | null)[] {
@@ -89,6 +92,7 @@ export function buildSnapshot(input: SnapshotInput): string {
     input.openInterestUsd != null ? `open_interest_usd=${Math.round(input.openInterestUsd)}` : null,
     ...flowStats(input),
     input.marketContext ? `coinmarketcap: ${input.marketContext}` : null,
+    input.dexContext ? `dexscreener: ${input.dexContext}` : null,
     input.globalContext ? `whole_market: ${input.globalContext}` : null,
   ];
   return lines.filter((l) => l != null).join("\n");
@@ -135,7 +139,7 @@ function goalLines(goal?: string | null): string[] {
   ];
 }
 
-export function systemPrompt(coin: string, position: AiPosition | null, goal?: string | null): string {
+export function systemPrompt(coin: string, position: AiPosition | null, goal?: string | null, lessons?: string | null): string {
   const lines = !position
     ? [
         `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You have no open ${coin} position.`,
@@ -160,7 +164,7 @@ export function systemPrompt(coin: string, position: AiPosition | null, goal?: s
         "",
         "Position size is fixed; your decision is the whole strategy.",
       ];
-  return [...lines, ...goalLines(goal), "", ANSWER_FORMAT].join("\n");
+  return [...lines, ...goalLines(goal), ...lessonLines(lessons), "", ANSWER_FORMAT].join("\n");
 }
 
 /** Maps a decision onto an exchange action. A CLOSE while flat is a no-op. */
@@ -178,9 +182,9 @@ export function decisionToAction(decision: AiDecision, position: AiPosition | nu
 
 
 /** The question an agent answers for one round: its system prompt and the snapshot + position. */
-export function decisionRequest(coin: string, snapshot: string, position: AiPosition | null, goal?: string | null): { system: string; prompt: string } {
+export function decisionRequest(coin: string, snapshot: string, position: AiPosition | null, goal?: string | null, lessons?: string | null): { system: string; prompt: string } {
   return {
-    system: systemPrompt(coin, position, goal),
+    system: systemPrompt(coin, position, goal, lessons),
     prompt: `${snapshot}\n\n${positionLine(coin, position)}\n\nWhat is your decision?`,
   };
 }
@@ -232,6 +236,7 @@ export function buildCoinBlock(input: SnapshotInput & { premiumPct?: number | nu
     input.openInterestUsd != null ? `oi_usd=${Math.round(input.openInterestUsd)}` : null,
     ...flowStats(input),
     input.marketContext ?? null,
+    input.dexContext ?? null,
   ].filter(Boolean).join(" ");
   const bars = input.candles.slice(-MULTI_SNAPSHOT_BARS);
   return [
@@ -250,7 +255,7 @@ const MULTI_ANSWER_FORMAT = [
   "For a pair or hedged trade, list both legs. If you do nothing at all this round, end with the single word NOTHING.",
 ].join("\n");
 
-export function multiSystemPrompt(coins: string[], positions: Record<string, AiPosition>, goal?: string | null): string {
+export function multiSystemPrompt(coins: string[], positions: Record<string, AiPosition>, goal?: string | null, lessons?: string | null): string {
   const held = Object.keys(positions);
   return [
     `You are a trader managing a Hyperliquid perpetuals account with a basket of ${coins.length} coins: ${coins.join(", ")}.`,
@@ -268,6 +273,7 @@ export function multiSystemPrompt(coins: string[], positions: Record<string, AiP
     "- CLOSE: close that coin's position",
     "Every position is the same fixed size; your choices are the whole strategy. Doing nothing is a legitimate choice.",
     ...goalLines(goal),
+    ...lessonLines(lessons),
     "",
     MULTI_ANSWER_FORMAT,
   ].join("\n");
@@ -288,6 +294,7 @@ export function multiDecisionRequest(
   goal?: string | null,
   at = new Date(),
   globalContext?: string | null,
+  lessons?: string | null,
 ): { system: string; prompt: string } {
   const prompt = [
     `BASKET SNAPSHOT — Hyperliquid perps, ${at.toISOString()}`,
@@ -300,7 +307,7 @@ export function multiDecisionRequest(
     "",
     "What are your decisions?",
   ].join("\n");
-  return { system: multiSystemPrompt(coins, positions, goal), prompt };
+  return { system: multiSystemPrompt(coins, positions, goal, lessons), prompt };
 }
 
 /**

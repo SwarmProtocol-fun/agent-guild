@@ -47,6 +47,7 @@ import {
   type Strategy,
   recordAiDecision,
   getAiDecisions,
+  setStrategyEvolution,
   createAiRequest,
   getAiRequest,
   listOpenAiRequests,
@@ -103,7 +104,12 @@ import { buildSmartDca, smartDcaSize, smartDcaTakeProfit } from "./smart-dca";
 import { buildBasisParams, decideBasis, findBasis, mapSpotMarkets, type OpenBasis, type SpotCtx, type SpotMarket, type SpotPair, type SpotToken } from "./basis";
 import { bookImbalance } from "./signals";
 import { coinContextLine, getCoinContexts, getGlobalContext, globalContextLine } from "./cmc";
+import { DEX_TOKENS, dexContextLine, getDexContexts } from "./dexscreener";
 import { intelSection } from "./intel";
+import {
+  REFLECT_ANSWER_MS, REFLECT_CHECK_MS, adoptLessons, parseLessons, planEvolution, readEvolution, reflectionRequest, resetLessons, roundTrips,
+  type BotEvolution,
+} from "./evolve";
 import { getMarketIntel, getMarketIntelWithin } from "./intel-fetch";
 
 /** How long an AI round waits on the free data outlets before asking without them. */
@@ -1227,7 +1233,12 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
     return "error";
   }
   const coinInfo = market.find((m) => m.coin === strategy.coin);
-  const [intel, cmc, imbalance] = await Promise.all([intelFor([strategy.coin]), cmcFor([strategy.coin]), bookImbalanceFor(strategy.coin, network, book)]);
+  const [intel, cmc, dex, imbalance] = await Promise.all([
+    intelFor([strategy.coin]),
+    cmcFor([strategy.coin]),
+    dexFor([strategy.coin], new Map(coinInfo ? [[coinInfo.coin, coinInfo.markPx]] : [])),
+    bookImbalanceFor(strategy.coin, network, book),
+  ]);
   const snapshot = buildSnapshot({
     coin: strategy.coin, candles, interval,
     bid: book?.levels?.[0]?.[0] ? Number(book.levels[0][0].px) : null,
@@ -1236,11 +1247,12 @@ async function runAiStrategy(strategy: Strategy): Promise<"asked" | "decided" | 
     openInterestUsd: coinInfo?.openInterestUsd ?? null,
     bookImbalance: imbalance,
     marketContext: cmc.coin.get(strategy.coin) ?? null,
+    dexContext: dex.get(strategy.coin) ?? null,
     globalContext: cmc.global,
   }) + (intel ? `\n\n${intel}` : "");
   const requestId = await createAiRequest({
     agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id, coin: strategy.coin,
-    ...decisionRequest(strategy.coin, snapshot, held?.position ?? null, params.goal),
+    ...decisionRequest(strategy.coin, snapshot, held?.position ?? null, params.goal, lessonsFor(strategy)),
     expiresAt: new Date(Date.now() + aiAnswerWindow(strategy.paper, params.intervalMs)),
   });
   await touchStrategyRun(strategy.id, { ...params, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
@@ -1458,6 +1470,24 @@ async function cmcFor(coins: string[]): Promise<{ coin: Map<string, string>; glo
   return Promise.race([work, new Promise<typeof empty>((r) => setTimeout(() => r(empty), CMC_WAIT_MS))]);
 }
 
+/** How long an AI round waits on DexScreener before asking without it. */
+const DEX_WAIT_MS = 5_000;
+
+/** DexScreener lines for the `coins` it knows, priced against each perp's mark; empty when it is slow or down. */
+async function dexFor(coins: string[], markPx: Map<string, number>): Promise<Map<string, string>> {
+  const empty = new Map<string, string>();
+  const work = (async () => {
+    const contexts = await getDexContexts(coins);
+    const out = new Map<string, string>();
+    for (const c of coins) {
+      const line = dexContextLine(contexts?.get(c), markPx.get(c), DEX_TOKENS[c]?.perpUnits);
+      if (line) out.set(c, line);
+    }
+    return out;
+  })().catch(() => empty);
+  return Promise.race([work, new Promise<typeof empty>((r) => setTimeout(() => r(empty), DEX_WAIT_MS))]);
+}
+
 async function getPredictedFundings(network: HlNetwork) {
   const raw = await hlInfo<PredictedFundingsRaw>({ type: "predictedFundings" }, network).catch(() => [] as PredictedFundingsRaw);
   return parsePredictedFundings(raw);
@@ -1589,8 +1619,9 @@ async function runBasketStrategy(strategy: Strategy): Promise<"asked" | "decided
     return "error";
   }
   const byCoin = new Map(market.map((m) => [m.coin, m]));
-  const [cmc, imbalances] = await Promise.all([
+  const [cmc, dex, imbalances] = await Promise.all([
     cmcFor(coins),
+    dexFor(coins, new Map(market.map((m) => [m.coin, m.markPx]))),
     Promise.all(coins.map((c) => bookImbalanceFor(c, network))),
   ]);
   const blocks = coins.map((c, i) => buildCoinBlock({
@@ -1600,6 +1631,7 @@ async function runBasketStrategy(strategy: Strategy): Promise<"asked" | "decided
     premiumPct: byCoin.get(c)?.premiumPct ?? null,
     bookImbalance: imbalances[i],
     marketContext: cmc.coin.get(c) ?? null,
+    dexContext: dex.get(c) ?? null,
   }));
   const inBasket = new Set(coins);
   const scan = scannerSection({
@@ -1612,7 +1644,7 @@ async function runBasketStrategy(strategy: Strategy): Promise<"asked" | "decided
   const requestId = await createAiRequest({
     agentId: strategy.agentId, orgId: strategy.orgId, purpose: "live", strategyId: strategy.id,
     coin: strategy.coin, coins,
-    ...multiDecisionRequest(coins, blocks, [scan, intel].filter(Boolean).join("\n\n"), positions, p.goal, new Date(), cmc.global),
+    ...multiDecisionRequest(coins, blocks, [scan, intel].filter(Boolean).join("\n\n"), positions, p.goal, new Date(), cmc.global, lessonsFor(strategy)),
     expiresAt: new Date(Date.now() + aiAnswerWindow(strategy.paper, p.intervalMs)),
   });
   await touchStrategyRun(strategy.id, { ...p, ...(startEquity != null ? { startEquity } : {}), openRequestId: requestId });
@@ -1663,6 +1695,98 @@ async function applyBasketAnswer(
   return { actions };
 }
 
+// ── Self-improving AI bots ───────────────────────────────────────────────────
+//
+// Every few closed trades an AI bot reviews its own round trips and rewrites
+// its lessons (./evolve.ts); a set of lessons that trades worse than the one
+// before it is rolled back. Reviews go to the agent through the same request
+// queue as trading rounds (purpose "reflect") and never trade.
+
+/** The lessons a bot trades with this round — none while self-improvement is off. */
+function lessonsFor(strategy: Strategy): string | null {
+  const ev = strategy.evolution;
+  return ev?.enabled ? ev.lessons : null;
+}
+
+function marketLabel(strategy: Strategy): string {
+  const p = (strategy.params ?? {}) as AiParams;
+  if (Array.isArray(p.coins) && p.coins.length) return `basket ${p.coins.join(", ")}`;
+  if ((p.scanTop ?? 0) > 0) return `the top ${p.scanTop} perps by volume`;
+  return `${strategy.coin} perp`;
+}
+
+async function tripsFor(strategy: Strategy) {
+  return roundTrips(await getAiDecisions(strategy.id, 300), strategy.coin);
+}
+
+/**
+ * One bot's turn in the reflection pass: retire a review the agent didn't
+ * answer, roll back lessons that traded worse than the set before them, or
+ * ask for a review once enough trips have closed. Throttled per bot.
+ */
+async function reflectBot(strategy: Strategy, now = Date.now()): Promise<"asked" | "reverted" | "none"> {
+  let ev = readEvolution(strategy.evolution);
+  if (!ev.enabled) return "none";
+  let retired = false;
+  if (ev.requestId) {
+    const open = await getAiRequest(ev.requestId);
+    if (open?.status === "open" && open.expiresAt.getTime() > now) return "none";
+    if (open?.status === "open") await expireAiRequest(open.id);
+    ev = { ...ev, requestId: null };
+    retired = true;
+  }
+  if (!ev.forceReflect && ev.checkedAt != null && now - ev.checkedAt < REFLECT_CHECK_MS) {
+    if (retired) await setStrategyEvolution(strategy.id, ev);
+    return "none";
+  }
+  const trips = await tripsFor(strategy);
+  const step = planEvolution({ ...ev, checkedAt: now }, trips, now);
+  if (step.kind === "revert") {
+    await setStrategyEvolution(strategy.id, step.evolution);
+    await recordFor(strategy.id)({ reasoning: `Lessons rolled back to v${step.to}'s: ${step.why}.` });
+    return "reverted";
+  }
+  if (step.kind === "none") {
+    await setStrategyEvolution(strategy.id, step.evolution);
+    return "none";
+  }
+  const requestId = await createAiRequest({
+    agentId: strategy.agentId, orgId: strategy.orgId, purpose: "reflect", strategyId: strategy.id, coin: strategy.coin,
+    ...reflectionRequest({ market: marketLabel(strategy), goal: ((strategy.params ?? {}) as AiParams).goal ?? null, evolution: step.evolution, trips }),
+    expiresAt: new Date(now + REFLECT_ANSWER_MS),
+  });
+  await setStrategyEvolution(strategy.id, { ...step.evolution, requestId, forceReflect: false });
+  return "asked";
+}
+
+/** Reflection pass of the AI tick, over every enabled AI bot that hasn't been eliminated. */
+export async function runReflectionPass(strategies: Strategy[]): Promise<{ asked: number; reverted: number }> {
+  const bots = strategies.filter((s) => s.type === "ai" && s.enabled && !(s.params as AiParams).eliminated && s.evolution?.enabled !== false);
+  const results = await Promise.allSettled(bots.map((s) => reflectBot(s)));
+  let asked = 0;
+  let reverted = 0;
+  results.forEach((r, i) => {
+    if (r.status === "rejected") console.error(`[hyperliquid-ai] reflect ${bots[i].id} failed:`, r.reason);
+    else if (r.value === "asked") asked++;
+    else if (r.value === "reverted") reverted++;
+  });
+  return { asked, reverted };
+}
+
+/** The agent's review came back: adopt its lessons as the bot's next version. */
+async function applyReflection(req: AiRequest, text: string): Promise<{ version: number } | { error: string }> {
+  const strategy = req.strategyId ? await getStrategy(req.strategyId) : null;
+  if (!strategy || strategy.type !== "ai") return { error: "Bot no longer exists" };
+  const ev = readEvolution(strategy.evolution);
+  if (ev.requestId !== req.id) return { error: "This review was superseded" };
+  const lessons = parseLessons(text);
+  if (!lessons) return { error: "No lessons found" };
+  const next = adoptLessons(ev, lessons, await tripsFor(strategy), Date.now());
+  await setStrategyEvolution(strategy.id, next);
+  await recordFor(strategy.id)({ reasoning: `Reviewed its trades and adopted lessons v${next.version}:\n${lessons}` });
+  return { version: next.version };
+}
+
 /**
  * Hub tick phase for AI Trader bots: puts a question to every bot whose
  * interval is up, retires rounds the agent didn't answer, and opens the
@@ -1671,7 +1795,8 @@ async function applyBasketAnswer(
  */
 export async function runAiTraderTick(): Promise<{ due: number; asked: number; errors: number }> {
   const now = Date.now();
-  const due = (await getEnabledStrategies())
+  const enabled = await getEnabledStrategies();
+  const due = enabled
     .filter((s) => s.type === "ai" && !s.pendingSignal)
     .filter((s) => {
       const p = s.params as AiParams;
@@ -1680,7 +1805,10 @@ export async function runAiTraderTick(): Promise<{ due: number; asked: number; e
       return now - (s.lastRunAt?.getTime() ?? 0) >= p.intervalMs;
     });
 
-  const results = await Promise.allSettled(due.map((s) => (isBasket(s) ? runBasketStrategy(s) : runAiStrategy(s))));
+  const [results] = await Promise.all([
+    Promise.allSettled(due.map((s) => (isBasket(s) ? runBasketStrategy(s) : runAiStrategy(s)))),
+    runReflectionPass(enabled).catch((err) => console.error("[hyperliquid-ai] reflection pass failed:", err)),
+  ]);
   let asked = 0;
   let errors = 0;
   results.forEach((r, i) => {
@@ -3399,6 +3527,18 @@ export default defineServerMod({
       }
       const body = await req.json().catch(() => ({}));
       const text = typeof body.text === "string" ? body.text : "";
+      if (request.purpose === "reflect") {
+        // A bot's review of its own trades: { text } with a LESSONS block. Never trades.
+        const review = String(body.lessons ?? text);
+        if (!parseLessons(review)) {
+          return Response.json({ error: "No lessons found — end with a LESSONS line, then one lesson per line starting with \"- \"" }, { status: 400 });
+        }
+        const answered = await answerAiRequest(request.id, "NOTHING", review.trim().slice(0, 4000));
+        if (!answered) return Response.json({ error: "This question was already answered or has expired" }, { status: 409 });
+        const adopted = await applyReflection(answered, review);
+        if ("error" in adopted) return Response.json({ ok: true, decision: "LESSONS not adopted", error: adopted.error });
+        return Response.json({ ok: true, decision: `LESSONS v${adopted.version}` });
+      }
       if (request.coins?.length) {
         // A basket round: { decisions: { ETH: "LONG", ... } } or { text } with a DECISIONS block.
         const given = body.decisions && typeof body.decisions === "object"
@@ -3490,6 +3630,34 @@ export default defineServerMod({
       if (denied) return Response.json({ error: denied.error }, { status: denied.status });
       await toggleStrategy(strategy.id, Boolean(body.enabled));
       return Response.json({ ok: true });
+    },
+
+    /**
+     * POST /strategy/:id/evolution — an AI bot's self-improvement. Body: one of
+     * { enabled: boolean } (off: stop reviewing and trade without lessons),
+     * { reflectNow: true } (review on the next tick even with few trips),
+     * { reset: true } (drop the lessons; the bot trades with none until its next review).
+     */
+    "POST /strategy/:id/evolution": async (req, ctx) => {
+      const body = await req.json().catch(() => ({}));
+      const strategy = await getStrategy(ctx.params.id);
+      if (!strategy) return Response.json({ error: "Strategy not found" }, { status: 404 });
+      const denied = await requireOrgAccess(ctx, strategy.orgId);
+      if (denied) return Response.json({ error: denied.error }, { status: denied.status });
+      if (strategy.type !== "ai") return Response.json({ error: "Only AI bots learn from their trades" }, { status: 400 });
+      let ev: BotEvolution = readEvolution(strategy.evolution);
+      if (typeof body.enabled === "boolean") {
+        ev = { ...ev, enabled: body.enabled, ...(body.enabled ? {} : { requestId: null, forceReflect: false }) };
+      } else if (body.reflectNow === true) {
+        if (!ev.enabled) return Response.json({ error: "Turn self-improvement on first" }, { status: 400 });
+        ev = { ...ev, forceReflect: true, checkedAt: null };
+      } else if (body.reset === true) {
+        ev = resetLessons(ev, await tripsFor(strategy), Date.now());
+      } else {
+        return Response.json({ error: "Send { enabled }, { reflectNow: true } or { reset: true }" }, { status: 400 });
+      }
+      await setStrategyEvolution(strategy.id, ev);
+      return Response.json({ ok: true, evolution: ev });
     },
 
     /**

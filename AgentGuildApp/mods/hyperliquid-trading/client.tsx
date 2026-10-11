@@ -125,6 +125,7 @@ interface PaperAccountView {
 }
 
 const PAPER_MODE_KEY = "hyperliquid-trading:paper";
+const TRAIN_OPEN_KEY = "hyperliquid-trading:train-open";
 
 interface Strategy {
   id: string;
@@ -137,6 +138,29 @@ interface Strategy {
   paper?: boolean;
   params?: Record<string, unknown>;
   lastRunAt?: string | null;
+  /** AI bots: lessons from reviewing their own trades (evolve.ts BotEvolution). */
+  evolution?: BotEvolutionView;
+}
+
+interface LessonVersionView {
+  version: number;
+  lessons: string | null;
+  note: "reflected" | "reverted" | "reset";
+  trips: number;
+  avgPct: number | null;
+  winRate: number | null;
+}
+
+interface BotEvolutionView {
+  enabled: boolean;
+  lessons: string | null;
+  version: number;
+  adoptedAt: number | null;
+  note: LessonVersionView["note"];
+  judged: boolean;
+  requestId: string | null;
+  forceReflect?: boolean;
+  history: LessonVersionView[];
 }
 
 interface AiDecisionEntry {
@@ -652,6 +676,102 @@ function OrderBook({ bids, asks, onPick }: { bids: BookLevel[]; asks: BookLevel[
         </span>
       </div>
       {bidRows.map((l) => row(l, "bid"))}
+    </div>
+  );
+}
+
+// ── Self-improvement strip ───────────────────────────────────────────────────
+
+const VERSION_NOTE: Record<LessonVersionView["note"], string> = {
+  reflected: "own review",
+  reverted: "rolled back",
+  reset: "reset",
+};
+
+/** An AI bot's lessons: the current set, the review in flight, and how each past set traded. */
+function EvolutionStrip({ evolution: ev, open, busy, onToggleOpen, onAction }: {
+  evolution: BotEvolutionView;
+  open: boolean;
+  busy: boolean;
+  onToggleOpen: () => void;
+  onAction: (body: { enabled: boolean } | { reflectNow: true } | { reset: true }) => void;
+}) {
+  const lessons = ev.lessons ? ev.lessons.split("\n").map((l) => l.replace(/^- /, "")) : [];
+  const pct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`);
+  return (
+    <div className="rounded-sm border border-[hsl(var(--border))] p-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <button
+          type="button" aria-expanded={open} onClick={onToggleOpen}
+          className="flex items-center gap-1.5 rounded-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]"
+        >
+          <span className={`inline-block text-[9px] transition-transform ${open ? "rotate-90" : ""}`} aria-hidden>▶</span>
+          {ev.enabled ? "Self-improving" : "Self-improvement off"}
+          {ev.version > 0 && <span className={`${monoClass} font-normal ${mutedClass}`}>v{ev.version}</span>}
+        </button>
+        {ev.requestId ? (
+          <span className={`flex items-center gap-1 ${mutedClass}`}><PulseDot tone="live" /> Reviewing its trades…</span>
+        ) : ev.forceReflect ? (
+          <span className={mutedClass}>Review queued for the next tick</span>
+        ) : ev.enabled ? (
+          <span className={mutedClass}>
+            {ev.lessons ? `${lessons.length} lesson${lessons.length === 1 ? "" : "s"}${ev.note === "reverted" ? " · rolled back" : ""}` : "First review after 5 closed trades"}
+          </span>
+        ) : null}
+        <div className="ml-auto flex gap-1">
+          {ev.enabled && (
+            <button type="button" className={secondaryButtonClass("px-1.5 py-0.5 text-[11px]")} disabled={busy || !!ev.requestId} onClick={() => onAction({ reflectNow: true })}>
+              Review now
+            </button>
+          )}
+          <button type="button" className={secondaryButtonClass("px-1.5 py-0.5 text-[11px]")} disabled={busy} onClick={() => onAction({ enabled: !ev.enabled })}>
+            {ev.enabled ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+      </div>
+      {open && (
+        <div className="mt-1.5 space-y-1.5">
+          {lessons.length ? (
+            <ul className="list-disc space-y-0.5 pl-4">
+              {lessons.map((l, i) => <li key={i}>{l}</li>)}
+            </ul>
+          ) : (
+            <p className={mutedClass}>
+              No lessons yet. Every few closed trades the agent reviews why it got in and out and how each trade ended, then writes rules it reads before every decision.
+              A new set that trades worse than the one before it is rolled back.
+            </p>
+          )}
+          {ev.history.length > 0 && (
+            <table className="w-full">
+              <thead>
+                <tr className={`text-left text-[10px] uppercase tracking-wide ${mutedClass}`}>
+                  <th className="pr-2 font-medium">Version</th>
+                  <th className="pr-2 font-medium">From</th>
+                  <th className="pr-2 text-right font-medium">Trips</th>
+                  <th className="pr-2 text-right font-medium">Win</th>
+                  <th className="text-right font-medium">Avg / trip</th>
+                </tr>
+              </thead>
+              <tbody className={monoClass}>
+                {ev.history.map((h) => (
+                  <tr key={h.version} title={h.lessons ?? "no lessons"}>
+                    <td className="pr-2">v{h.version}{h.lessons ? "" : " (none)"}</td>
+                    <td className={`pr-2 font-sans ${mutedClass}`}>{VERSION_NOTE[h.note]}</td>
+                    <td className="pr-2 text-right">{h.trips}</td>
+                    <td className="pr-2 text-right">{h.winRate == null ? "—" : `${Math.round(h.winRate * 100)}%`}</td>
+                    <td className={`text-right ${h.avgPct == null ? "" : pnlClass(h.avgPct)}`}>{pct(h.avgPct)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {ev.lessons && (
+            <button type="button" className={secondaryButtonClass("px-1.5 py-0.5 text-[11px] text-red-600 dark:text-red-400")} disabled={busy} onClick={() => onAction({ reset: true })}>
+              Reset lessons
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1468,6 +1588,23 @@ function TradingPanel({ api }: PanelProps) {
   const [trainEvery, setTrainEvery] = useState("1");
   const [trainStop, setTrainStop] = useState("10");
   const [trainBusy, setTrainBusy] = useState(false);
+  // Collapsed by default so positions and history stay above the fold. Remembered per browser.
+  const [trainOpen, setTrainOpenState] = useState(false);
+  useEffect(() => {
+    try {
+      setTrainOpenState(localStorage.getItem(TRAIN_OPEN_KEY) === "1");
+    } catch {
+      // storage blocked — stay collapsed
+    }
+  }, []);
+  function setTrainOpen(on: boolean) {
+    setTrainOpenState(on);
+    try {
+      localStorage.setItem(TRAIN_OPEN_KEY, on ? "1" : "0");
+    } catch {
+      // storage blocked — the toggle still works for this visit
+    }
+  }
 
   async function loadStrategies() {
     if (!agentId) return;
@@ -1596,9 +1733,13 @@ function TradingPanel({ api }: PanelProps) {
     setTrainCoin(coins.join(","));
     setTrainGoal(goal);
     setPaperMode(true);
-    const el = document.getElementById("trainGoal");
-    el?.scrollIntoView({ behavior: "smooth", block: "center" });
-    el?.focus({ preventScroll: true });
+    setTrainOpen(true);
+    // The form mounts on the next render when it was collapsed.
+    setTimeout(() => {
+      const el = document.getElementById("trainGoal");
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      el?.focus({ preventScroll: true });
+    }, 0);
   }
 
   /** The Scanner's "Run bot": a pairs bot on these coins, on paper unless live is already selected. */
@@ -1668,6 +1809,27 @@ function TradingPanel({ api }: PanelProps) {
       body: JSON.stringify({ enabled }),
     });
     loadStrategies();
+  }
+
+  // ── Self-improvement (AI bots) ────────────────────────────────────────────
+  const [lessonsOpen, setLessonsOpen] = useState<string | null>(null);
+  const [evolveBusyId, setEvolveBusyId] = useState<string | null>(null);
+
+  async function evolveBot(s: Strategy, body: { enabled: boolean } | { reflectNow: true } | { reset: true }) {
+    if ("reset" in body && !confirm("Drop this bot's lessons? It trades without them until its next review. Past versions stay in its history.")) return;
+    setEvolveBusyId(s.id);
+    try {
+      const resp = await api(`strategy/${s.id}/evolution`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (data.error) setStrategyStatus(data.error);
+      loadStrategies();
+    } finally {
+      setEvolveBusyId(null);
+    }
   }
 
   // ── Edit / delete one bot ─────────────────────────────────────────────────
@@ -2010,15 +2172,21 @@ function TradingPanel({ api }: PanelProps) {
       {instantStatus && <p className={`px-1 text-xs ${mutedClass}`}>{instantStatus}</p>}
 
       <form onSubmit={startPaperTraining} className={`${panelClass} space-y-2 px-3 py-2`}>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide">Train a goal</div>
-            <p className={`text-[11px] ${mutedClass}`}>
-              Write the idea. {selectedAgent?.name ?? "The agent"} paper-trades it on mainnet prices, with real fees, on virtual USDC. Fastest is 1 minute.
-            </p>
-          </div>
-          <span className={`text-[11px] ${trainGoal.trim().length > 800 ? "text-red-600 dark:text-red-400" : mutedClass}`}>{trainGoal.trim().length}/800</span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button" aria-expanded={trainOpen} aria-controls="trainBody"
+            className="flex items-center gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[hsl(var(--ring))]"
+            onClick={() => setTrainOpen(!trainOpen)}
+          >
+            <span className={`inline-block text-[10px] transition-transform ${trainOpen ? "rotate-90" : ""}`} aria-hidden>▶</span>
+            <span className="text-xs font-semibold uppercase tracking-wide">Train a goal</span>
+            <span className={`text-[11px] ${mutedClass}`}>
+              {selectedAgent?.name ?? "The agent"} paper-trades your idea on mainnet prices, with real fees, on virtual USDC.
+            </span>
+          </button>
+          {trainOpen && <span className={`text-[11px] ${trainGoal.trim().length > 800 ? "text-red-600 dark:text-red-400" : mutedClass}`}>{trainGoal.trim().length}/800</span>}
         </div>
+        {trainOpen && (<div id="trainBody" className="space-y-2">
         <label htmlFor="trainGoal" className="sr-only">Training goal</label>
         <textarea
           id="trainGoal" name="trainGoal" rows={2} maxLength={800}
@@ -2083,6 +2251,7 @@ function TradingPanel({ api }: PanelProps) {
             {trainBusy ? "Starting…" : "Start paper training"}
           </button>
         </div>
+        </div>)}
         {strategyStatus && <p className={`text-xs ${mutedClass}`}>{strategyStatus}</p>}
       </form>
 
@@ -2187,7 +2356,7 @@ function TradingPanel({ api }: PanelProps) {
             />
             <span className={`text-[11px] ${mutedClass}`}>{network}</span>
           </div>
-          <div className="relative h-[280px] sm:h-[360px] lg:h-auto lg:min-h-[420px] lg:flex-1">
+          <div className="relative h-[280px] sm:h-[360px] lg:h-auto lg:min-h-[360px] lg:flex-1">
             {chartCandles === "loading" ? (
               <Spinner label="Loading chart…" />
             ) : chartCandles === "error" ? (
@@ -2407,7 +2576,7 @@ function TradingPanel({ api }: PanelProps) {
 
       {/* Bottom: positions, orders, bots, history, agent settings. */}
       <div className={panelClass}>
-        <div role="tablist" aria-label="Account" className="flex items-center gap-1 overflow-x-auto border-b border-[hsl(var(--border))] px-1">
+        <div role="tablist" aria-label="Account" className="flex items-center gap-1 overflow-x-auto overflow-y-hidden border-b border-[hsl(var(--border))] px-1">
           {bottomTabs.map((tab) => (
             <button
               key={tab.id}
@@ -2775,6 +2944,13 @@ function TradingPanel({ api }: PanelProps) {
                         </p>
                       );
                     })()}
+                    {s.type === "ai" && s.evolution && (
+                      <EvolutionStrip
+                        evolution={s.evolution} open={lessonsOpen === s.id} busy={evolveBusyId === s.id}
+                        onToggleOpen={() => setLessonsOpen((cur) => (cur === s.id ? null : s.id))}
+                        onAction={(body) => evolveBot(s, body)}
+                      />
+                    )}
                     <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"

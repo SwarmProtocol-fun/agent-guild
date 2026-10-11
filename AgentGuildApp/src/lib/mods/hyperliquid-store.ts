@@ -26,6 +26,7 @@ import type { OpenPair, PairsParams } from "../../../mods/hyperliquid-trading/pa
 import type { BreakoutParams } from "../../../mods/hyperliquid-trading/breakout";
 import type { SmartDcaParams } from "../../../mods/hyperliquid-trading/smart-dca";
 import type { BasisParams, OpenBasis } from "../../../mods/hyperliquid-trading/basis";
+import { readEvolution, type BotEvolution } from "../../../mods/hyperliquid-trading/evolve";
 import {
   PAPER_START_BALANCE,
   bookOrder,
@@ -389,6 +390,12 @@ export interface Strategy {
   webhookToken: string | null;
   /** Trades the agent's paper account instead of its wallet — no signer needed, so it always runs itself. */
   paper: boolean;
+  /**
+   * AI bots only: the lessons the bot wrote from reviewing its own trades
+   * (mods/hyperliquid-trading/evolve.ts). Its own field, never inside params,
+   * so a trading round's params write can't clobber a review that just landed.
+   */
+  evolution?: BotEvolution;
 }
 
 function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
@@ -410,7 +417,13 @@ function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
     pendingContext: data.pendingContext ?? null,
     webhookToken: data.webhookToken ?? null,
     paper: data.paper === true,
+    ...(data.type === "ai" ? { evolution: readEvolution(data.evolution) } : {}),
   };
+}
+
+/** Stores an AI bot's evolution (lessons, history, the review out with the agent). */
+export async function setStrategyEvolution(id: string, evolution: BotEvolution): Promise<void> {
+  await db().collection(STRATEGIES).doc(id).update({ evolution });
 }
 
 export async function createStrategy(
@@ -590,7 +603,8 @@ export interface AiRequest {
   id: string;
   agentId: string;
   orgId: string;
-  purpose: "live" | "backtest";
+  /** "reflect": an AI bot reviewing its own trades — answered with lessons, never traded. */
+  purpose: "live" | "backtest" | "reflect";
   strategyId: string | null;
   coin: string;
   /** A basket round's coins; null for a single-coin round. */
