@@ -267,6 +267,20 @@ describe("paper trading routes", () => {
     expect(store.bookPaperFill).not.toHaveBeenCalled();
   });
 
+  it("limits the whole paper position, not each order", async () => {
+    store.getRiskConfig.mockResolvedValue({ leverage: 3, maxPositionUsd: 150, maxDailyLossUsd: 20 });
+    store.listPaperPositions.mockResolvedValue([{ coin: "ETH", szi: 0.05, entryPx: 2000, leverage: 3, slPx: null, tpPx: null }]);
+    const stacked = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100 }), agentCtx());
+    expect(stacked.status).toBe(400);
+    expect((await stacked.json()).error).toMatch(/\$100\.00 long already open.*over maxPositionUsd 150/);
+    expect(store.bookPaperFill).not.toHaveBeenCalled();
+
+    // Selling against it shrinks the position, so it fills.
+    const reduce = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: false, sizeUsd: 100 }), agentCtx());
+    expect(reduce.status).toBe(200);
+    store.listPaperPositions.mockResolvedValue([]);
+  });
+
   it("passes a trailing stop through to the fill and refuses an out-of-range one", async () => {
     const resp = await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100, trailingStopPct: 3 }), agentCtx());
     expect(resp.status).toBe(200);

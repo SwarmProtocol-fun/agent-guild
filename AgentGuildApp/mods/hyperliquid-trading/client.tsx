@@ -673,12 +673,14 @@ function TradingPanel({ api }: PanelProps) {
 
   // Paper mode: every order, position and new bot goes to the agent's virtual
   // account, filled against the real mainnet book. Remembered per browser.
-  const [paperMode, setPaperModeState] = useState(false);
+  // Paper is the default: the panel is live only once this browser has chosen
+  // live, so a first visit, cleared storage or blocked storage all start on paper.
+  const [paperMode, setPaperModeState] = useState(true);
   useEffect(() => {
     try {
-      setPaperModeState(localStorage.getItem(PAPER_MODE_KEY) === "1");
+      setPaperModeState(localStorage.getItem(PAPER_MODE_KEY) !== "0");
     } catch {
-      // storage blocked — start in live mode
+      // storage blocked — stay on paper
     }
   }, []);
   function setPaperMode(on: boolean) {
@@ -1976,7 +1978,7 @@ function TradingPanel({ api }: PanelProps) {
         </div>
         <Segmented
           label="Trading mode" size="xs" value={paperMode ? "paper" : "live"} onChange={(m) => setPaperMode(m === "paper")}
-          options={[{ id: "live", label: "Live" }, { id: "paper", label: "Paper" }]}
+          options={[{ id: "paper", label: "Paper" }, { id: "live", label: "Live" }]}
         />
         {agentId && (
           <div className="flex items-center gap-2">

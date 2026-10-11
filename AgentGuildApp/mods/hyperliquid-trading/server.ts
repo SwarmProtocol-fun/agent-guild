@@ -124,7 +124,8 @@ import {
   type ScannerResult,
 } from "./scanner";
 import { findPerpAsset, readOraclePxOnchain, type PerpAssetMeta } from "./oracle";
-import { placeOrder as placeHlOrder, MARKET_SLIPPAGE, MIN_ORDER_USD, type PlaceOrderResult } from "./exchange";
+import { placeOrder as placeHlOrder, walletAddress, MARKET_SLIPPAGE, MIN_ORDER_USD, type PlaceOrderResult } from "./exchange";
+import { positionLimitError, signedNotional } from "./risk";
 import {
   MAKER_FEE_RATE,
   PAPER_START_BALANCE,
@@ -324,7 +325,7 @@ const CANDLE_INTERVAL_MS: Record<string, number> = {
   "1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
 };
 
-/** Applied when instant trading is switched on for an agent with no risk limits — the platform signing alone must never be unbounded. */
+/** Applied when instant trading is switched on for an agent with no risk limits, and the limits any live order with none configured is held to — a live order is never unbounded. */
 const INSTANT_DEFAULT_RISK = { leverage: 3, maxPositionUsd: 100, maxDailyLossUsd: 50 };
 
 interface AssetPosition {
@@ -360,14 +361,28 @@ async function enforceRiskAndEnqueue(params: {
   const { orgId, agentId, coin, isBuy, sizeUsd, privateKey, network, orderType = "market", limitPrice, reduceOnly = false, strategyId } = params;
 
   const risk = await getRiskConfig(agentId);
-  if (risk && !reduceOnly) {
-    if (sizeUsd > risk.maxPositionUsd) {
-      return { error: `sizeUsd ${sizeUsd} exceeds configured maxPositionUsd ${risk.maxPositionUsd}` };
+  // No limits set (a passphrase wallet nobody configured) still gets the
+  // defaults: a live order is never unbounded.
+  const limits = risk ?? INSTANT_DEFAULT_RISK;
+  if (!reduceOnly) {
+    if (sizeUsd > limits.maxPositionUsd) {
+      return { error: `sizeUsd ${sizeUsd} exceeds ${risk ? "configured" : "default"} maxPositionUsd ${limits.maxPositionUsd}` };
     }
     const dailyPnl = await getDailyRealizedPnl(agentId);
-    if (dailyPnl <= -risk.maxDailyLossUsd) {
-      return { error: `Daily loss limit reached (${dailyPnl.toFixed(2)} <= -${risk.maxDailyLossUsd})` };
+    if (dailyPnl <= -limits.maxDailyLossUsd) {
+      return { error: `Daily loss limit reached (${dailyPnl.toFixed(2)} <= -${limits.maxDailyLossUsd})` };
     }
+    // Fails closed: if the position can't be read, the order doesn't go.
+    let currentUsd: number;
+    try {
+      const state = await hlInfo<ClearinghouseState>({ type: "clearinghouseState", user: walletAddress(privateKey) }, network);
+      const pos = state.assetPositions.find((a) => a.position.coin === coin)?.position;
+      currentUsd = pos ? Math.sign(Number(pos.szi)) * Math.abs(Number(pos.positionValue)) : 0;
+    } catch (err) {
+      return { error: `Couldn't read the open ${coin} position to check the limit: ${(err as Error).message}` };
+    }
+    const overLimit = positionLimitError(coin, currentUsd, isBuy, sizeUsd, limits.maxPositionUsd);
+    if (overLimit) return { error: overLimit };
   }
 
   const leverage = params.leverage ?? risk?.leverage;
@@ -394,7 +409,11 @@ async function enforceRiskAndEnqueue(params: {
     priority: "normal",
     resources: { requiredTags: ["hyperliquid"] },
     timeoutMs: 30000,
-    maxRetries: reduceOnly ? 0 : 2,
+    // Never re-sent automatically. A timeout or a dead worker can't tell us
+    // whether Hyperliquid took the order, and re-queuing one it did take
+    // doubles the position. Bots re-read the position off Hyperliquid next
+    // tick and decide again from what's actually open.
+    maxRetries: 0,
   });
 
   if (strategyId) {
@@ -559,6 +578,12 @@ async function placePaperOrder(p: PaperOrderParams): Promise<PaperOrderOutcome |
   const mid = market.mids[p.coin];
   const meta = market.meta[p.coin];
   if (!mid || !meta) return { error: `Unknown coin ${p.coin}` };
+
+  if (risk && !reduceOnly) {
+    const held = (await listPaperPositions(p.agentId)).find((x) => x.coin === p.coin);
+    const overLimit = positionLimitError(p.coin, held ? signedNotional(held.szi, mid) : 0, p.isBuy, p.sizeUsd ?? (p.sz ?? 0) * mid, risk.maxPositionUsd);
+    if (overLimit) return { error: overLimit };
+  }
 
   const sz = roundSize(p.sz ?? (p.sizeUsd ?? 0) / mid, meta.szDecimals);
   if (sz <= 0) return { error: `$${p.sizeUsd} is below the smallest ${p.coin} order size (${10 ** -meta.szDecimals} ${p.coin})` };

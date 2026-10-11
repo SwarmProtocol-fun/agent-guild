@@ -25,7 +25,7 @@ vi.mock("@/lib/mods/hyperliquid-store", () => store);
 vi.mock("@/lib/agent-wallets", () => ({
   listAgentWallets: vi.fn(async () => []),
   generateAgentWallet: vi.fn(),
-  getAgentWalletEvmPrivateKey: vi.fn(async () => "0xcustodial"),
+  getAgentWalletEvmPrivateKey: vi.fn(async () => "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"),
 }));
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));
@@ -139,7 +139,7 @@ describe("AI Trader — the agent's own model decides", () => {
     expect(resp.status).toBe(200);
     expect(body).toMatchObject({ decision: "LONG", action: "open-long", taskId: "task-1" });
     expect(enqueueTask).toHaveBeenCalledWith(expect.objectContaining({
-      payload: expect.objectContaining({ coin: "ETH", isBuy: true, sizeUsd: 25, privateKey: "0xcustodial" }),
+      payload: expect.objectContaining({ coin: "ETH", isBuy: true, sizeUsd: 25, privateKey: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" }),
     }));
     expect(store.recordAiDecision).toHaveBeenCalledWith("s1", expect.objectContaining({ decision: "LONG", model: "agent" }));
   });

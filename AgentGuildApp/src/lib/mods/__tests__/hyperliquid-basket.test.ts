@@ -27,7 +27,7 @@ vi.mock("@/lib/mods/hyperliquid-store", () => store);
 vi.mock("@/lib/agent-wallets", () => ({
   listAgentWallets: vi.fn(async () => []),
   generateAgentWallet: vi.fn(),
-  getAgentWalletEvmPrivateKey: vi.fn(async () => "0xcustodial"),
+  getAgentWalletEvmPrivateKey: vi.fn(async () => "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"),
 }));
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));

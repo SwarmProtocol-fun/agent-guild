@@ -40,7 +40,7 @@ const enforceCapability = vi.fn(async () => ({}));
 const getAgentsByOrg = vi.fn(async () => [{ id: "a1", name: "Ada" }] as unknown[]);
 
 vi.mock("@/lib/mods/hyperliquid-store", () => store);
-vi.mock("@/lib/agent-wallets", () => ({ listAgentWallets: vi.fn(async () => []), generateAgentWallet: vi.fn(), getAgentWalletEvmPrivateKey: vi.fn(async () => "0xkey") }));
+vi.mock("@/lib/agent-wallets", () => ({ listAgentWallets: vi.fn(async () => []), generateAgentWallet: vi.fn(), getAgentWalletEvmPrivateKey: vi.fn(async () => "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80") }));
 vi.mock("@/lib/gateway/store", () => ({ enqueueTask, getTask, newTaskId: vi.fn(), recordCompletedTask: vi.fn() }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn() }));
 vi.mock("@/lib/secrets", () => ({ encryptValue: vi.fn(), decryptValue: vi.fn() }));
@@ -88,6 +88,7 @@ function stubMarket() {
         ? json({ levels: [[{ px: "1999.5", sz: "50" }], [{ px: "2000.5", sz: "50" }]] })
         : json({ levels: [[{ px: "2000.9", sz: "50" }], [{ px: "2001.1", sz: "50" }]] });
     }
+    if (body.type === "clearinghouseState") return json({ assetPositions: [], marginSummary: { accountValue: "1000", totalMarginUsed: "0", totalNtlPos: "0" } });
     if (body.type === "candleSnapshot") return json(candles.map((c) => ({ t: c.t, o: String(c.o), h: String(c.h), l: String(c.l), c: String(c.c), v: String(c.v) })));
     throw new Error(`unexpected ${body.type}`);
   }));
