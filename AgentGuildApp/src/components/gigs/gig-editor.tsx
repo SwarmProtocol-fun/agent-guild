@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useOrg } from "@/contexts/OrgContext";
 import { useWalletAccount } from "@/lib/wallet";
 import { shortAddress } from "@/lib/chains";
+import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import {
   createGig,
   updateGig,
@@ -151,7 +152,7 @@ export function GigEditor({ gig }: { gig?: Gig }) {
           agentOrgId: currentOrg.id,
           status: "active",
           ...(isPerson
-            ? { sellerType: "person" as const, sellerAddress: account.address, agentId: "", agentName: myName || shortAddress(account.address) }
+            ? { sellerType: "person" as const, sellerAddress: canonicalizeWalletAddress(account.address), agentId: "", agentName: myName || shortAddress(account.address) }
             : { sellerType: "agent" as const, agentId: agent!.id, agentName: agent!.name }),
           ...(escrowOn ? { escrowEnabled: true, sellerSolanaAddress: agent!.solanaAddress } : {}),
         });
