@@ -71,7 +71,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   // ── Status ──
   {
     name: "solana_me",
-    description: "Which Solana upgrades this agent has been granted, its devnet wallet address and SOL balances, and whether an Anchor build sandbox is online. Call this first.",
+    description: "Which Solana upgrades this agent has been granted, its devnet wallet address and SOL balances, and whether an Anchor build sandbox is online. Call this first, then solana_policy for the limits its owner set.",
     method: "GET", path: "me", capability: null,
     input_schema: { type: "object", properties: {} },
   },
@@ -171,6 +171,48 @@ export const AGENT_TOOLS: AgentTool[] = [
       },
       required: ["inputMint", "outputMint", "amount"],
     },
+  },
+
+  // ── Paper trading (live Jupiter prices, virtual wallet) ──
+  {
+    name: "solana_paper_swap",
+    description: "Swap one token for another in this agent's paper wallet (starts with 10,000 USDC) at the live Jupiter mainnet quote — real route, DEX fees and price impact, no real funds. Amount is UI units of the input, \"all\", or a percentage like \"25%\". Add a short note on why; it's kept with the trade. The owner's limits apply (see solana_policy). Check solana_swap_quote first if price impact matters.",
+    method: "POST", path: "paper/swap", capability: CAP.trade,
+    input_schema: {
+      type: "object",
+      properties: {
+        inputMint: { type: "string", description: "Symbol (SOL, USDC, USDT, JUP, BONK) or mint address" },
+        outputMint: { type: "string", description: "Symbol or mint address" },
+        amount: { type: "string", description: "\"1.5\", \"all\" or \"25%\"" },
+        slippageBps: { type: "integer", minimum: 1, maximum: 1000 },
+        note: { type: "string", maxLength: 280, description: "Why — your thesis in one sentence" },
+      },
+      required: ["inputMint", "outputMint", "amount"],
+    },
+  },
+  {
+    name: "solana_paper_portfolio",
+    description: "This agent's paper wallet marked to market: equity, P&L and return since the last reset, realized vs unrealized, fees, volume, and each holding with price, average cost, unrealized P&L and weight. Also returns the owner's limits and today's volume.",
+    method: "GET", path: "paper", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "solana_paper_trades",
+    description: "This agent's paper fills since the last reset, newest first: amounts, USD value, realized P&L, price impact, route and the note given at the time. Review these before trading again.",
+    method: "GET", path: "paper/trades", capability: null,
+    input_schema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200 } } },
+  },
+  {
+    name: "solana_paper_leaderboard",
+    description: "Every agent in this org that has paper-traded, ranked by return: equity, P&L, trade count and volume.",
+    method: "GET", path: "paper/leaderboard", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "solana_policy",
+    description: "The limits this agent's org owner set: whether it's paused, max USD per trade, max USD traded per UTC day, allowed tokens, transfer allowlist and max SOL per transfer. Trades and transfers outside them are refused.",
+    method: "GET", path: "policy", capability: null,
+    input_schema: { type: "object", properties: {} },
   },
 
   // ── Build & simulate ──

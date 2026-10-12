@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  ArrowLeftRight, Bot, Coins, Droplets, LineChart, FlaskConical, Hammer, History, Lock, Plug, RefreshCw, ScanSearch, Send, Sparkles, Wallet, type LucideProps,
+  ArrowLeftRight, Bot, CandlestickChart, Coins, Droplets, LineChart, FlaskConical, Hammer, History, Lock, Plug, RefreshCw, ScanSearch, Send, Sparkles, Wallet, type LucideProps,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import {
@@ -18,6 +18,7 @@ export const UPGRADES: { key: string; name: string; description: string; icon: C
   { key: "solana-dev-simulate", name: "Build & simulate", icon: FlaskConical, tab: "simulate", description: "Turn plain-JSON instructions into transactions with the program's IDL and dry-run them." },
   { key: "solana-dev-devnet", name: "Act on devnet", icon: Send, tab: "simulate", description: "Sign with its own dev wallet: airdrop, transfer SOL and tokens, send transactions, create tokens, deploy." },
   { key: "solana-dev-anchor", name: "Write Anchor programs", icon: Hammer, tab: "anchor", description: "Build, test and deploy Anchor programs in a sandboxed container." },
+  { key: "solana-dev-trade", name: "Trade (paper)", icon: CandlestickChart, tab: "trade", description: "Swap any token at live Jupiter prices in a 10k USDC paper wallet, with P&L and limits you set." },
   { key: "solana-settlement", name: "Settle jobs", icon: Coins, tab: "settlement", description: "Get paid a job's reward in USDC once the poster approves it, with an on-chain receipt." },
 ];
 
@@ -47,11 +48,11 @@ interface Activity {
 
 const ACTION_ICON: Record<string, ComponentType<LucideProps>> = {
   inspect: ScanSearch, "derive-pda": ScanSearch, simulate: FlaskConical, send: Send, airdrop: Droplets,
-  "create-token": Coins, "create-wallet": Wallet, transfer: Send, price: LineChart, quote: ArrowLeftRight,
+  "create-token": Coins, "create-wallet": Wallet, transfer: Send, price: LineChart, quote: ArrowLeftRight, "paper-swap": CandlestickChart, "paper-reset": CandlestickChart, policy: Lock,
 };
 const ACTION_LABEL: Record<string, string> = {
   inspect: "Inspected", "derive-pda": "Derived PDA", simulate: "Simulated", send: "Sent transaction", airdrop: "Airdrop",
-  "create-token": "Created token", "create-wallet": "Created wallet", transfer: "Transferred", price: "Checked prices", quote: "Swap quote", "anchor-build": "Anchor build", "anchor-test": "Anchor test", "anchor-deploy": "Anchor deploy",
+  "create-token": "Created token", "create-wallet": "Created wallet", transfer: "Transferred", price: "Checked prices", quote: "Swap quote", "paper-swap": "Paper swap", "paper-reset": "Paper wallet reset", policy: "Limits changed", "anchor-build": "Anchor build", "anchor-test": "Anchor test", "anchor-deploy": "Anchor deploy",
 };
 
 export function initials(name: string) {

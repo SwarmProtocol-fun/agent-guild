@@ -13,7 +13,7 @@
  */
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { defineChain, toHex, type EIP1193Provider } from "viem";
 import { WagmiProvider, useAccount, useSignMessage as useWagmiSignMessage } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -159,6 +159,12 @@ if (projectId) {
       icons: [`${origin}/logo.png`],
     },
     ...(featured.ids.length > 0 ? { featuredWalletIds: featured.ids } : {}),
+    // Embedded (email/social) wallets default to a smart account on EVM, but
+    // only on networks that support one (Ethereum does, Tempo and Hyperliquid
+    // don't) — elsewhere they fall back to the EOA. Switching to Tempo for a
+    // payout then swapped the login address, and useAutoSiwe signed the user
+    // in as a different wallet. The EOA is the same address on every chain.
+    defaultAccountTypes: { eip155: "eoa" },
     features: { analytics: false },
   });
 } else {
@@ -171,20 +177,31 @@ if (projectId) {
 // Solana-program components (agent registration, gig escrow, useAgentGuildWrite)
 // call @solana/wallet-adapter-react hooks directly, which throw without a
 // WalletProvider ancestor — so mount one here too, alongside AppKit.
+//
+// With ssr: false (kept: ssr: true also turns off wagmi's EIP-6963 wallet
+// discovery), wagmi's Hydrate calls reconnect() on *every* render of
+// WagmiProvider, updating its store mid-render ("Cannot update a component
+// while rendering Hydrate") and restarting reconnects. So the provider tree is
+// built once and the app is passed in through context: re-renders here only
+// reach <ProviderChildren>, never WagmiProvider.
+const ProviderChildrenContext = createContext<ReactNode>(null);
+function ProviderChildren() {
+  return <>{useContext(ProviderChildrenContext)}</>;
+}
+
 function Provider({ children }: { children: ReactNode }) {
-  const queryClient = useMemo(() => new QueryClient(), []);
-  const solanaWallets = useMemo(() => [new PhantomWalletAdapter(), new SolflareWalletAdapter()], []);
-  return (
+  const tree = useMemo(() => (
     <WagmiProvider config={wagmiAdapter.wagmiConfig}>
-      <QueryClientProvider client={queryClient}>
+      <QueryClientProvider client={new QueryClient()}>
         <ConnectionProvider endpoint={SOLANA_RPC_URL}>
-          <SolanaWalletProviderBase wallets={solanaWallets} autoConnect>
-            <WalletModalProvider>{children}</WalletModalProvider>
+          <SolanaWalletProviderBase wallets={[new PhantomWalletAdapter(), new SolflareWalletAdapter()]} autoConnect>
+            <WalletModalProvider><ProviderChildren /></WalletModalProvider>
           </SolanaWalletProviderBase>
         </ConnectionProvider>
       </QueryClientProvider>
     </WagmiProvider>
-  );
+  ), []);
+  return <ProviderChildrenContext.Provider value={children}>{tree}</ProviderChildrenContext.Provider>;
 }
 
 // Shape of AppKit's Solana WalletConnect provider internals we rely on.

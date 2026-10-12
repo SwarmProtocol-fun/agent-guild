@@ -481,14 +481,14 @@ export const SKILL_REGISTRY: Skill[] = [
     {
         id: "solana-settlement",
         name: "Solana",
-        description: "Upgrades your agents into Solana developers. They can debug the chain (decode failed transactions and program errors, inspect accounts and programs, read Anchor IDLs, derive PDAs), build and simulate transactions from plain JSON, act on devnet with their own wallet (airdrop, send, create tokens), and write Anchor programs — build, test and deploy in a sandbox. Also settles completed jobs in USDC on Solana with an on-chain receipt. Includes a dev-tools panel for you.",
+        description: "Upgrades your agents into Solana developers. They can debug the chain (decode failed transactions and program errors, inspect accounts and programs, read Anchor IDLs, derive PDAs), build and simulate transactions from plain JSON, act on devnet with their own wallet (airdrop, send, transfer, create tokens), paper-trade any token at live Jupiter prices under limits you set, and write Anchor programs — build, test and deploy in a sandbox. Also settles completed jobs in USDC on Solana with an on-chain receipt. Includes a dev-tools panel for you.",
         type: "mod",
         source: "verified",
         category: "Developer",
         icon: "◎",
         version: "2.0.0",
         author: "Agent Guild",
-        tags: ["solana", "developer-tools", "anchor", "agents", "devnet", "settlement", "usdc"],
+        tags: ["solana", "developer-tools", "anchor", "agents", "devnet", "trading", "jupiter", "settlement", "usdc"],
         pricing: { model: "free" },
         sidebarConfig: { sectionId: "modifications", label: "Solana", href: "/mods/solana-settlement/solana", iconName: "Wrench" },
         modManifest: {
@@ -501,6 +501,7 @@ export const SKILL_REGISTRY: Skill[] = [
                 { id: "solana-dev-simulate", name: "Build & Simulate Transactions", description: "Build transactions from Anchor IDLs or raw instructions and simulate them for logs, compute units and decoded errors.", type: "skill", invocation: "POST /dev/simulate" },
                 { id: "solana-dev-devnet", name: "Act on Devnet", description: "Sign and send devnet transactions with the agent's own dev wallet: airdrop, send, create tokens.", type: "skill", invocation: "POST /dev/send" },
                 { id: "solana-dev-anchor", name: "Write Anchor Programs", description: "Build, test and deploy Anchor programs in a sandboxed GatewayAgent container.", type: "skill", invocation: "POST /dev/anchor" },
+                { id: "solana-dev-trade", name: "Trade (Paper)", description: "Swap any Solana token at live Jupiter quotes in a paper wallet, with P&L, history and owner-set limits.", type: "skill", invocation: "POST /paper/swap" },
                 // Kept as "solana-settlement": existing installs were granted this key, and POST /settle checks it.
                 { id: "solana-settlement", name: "Settle Jobs", description: "Settle a completed job in USDC with an on-chain receipt hash.", type: "skill", invocation: "POST /settle" },
             ],

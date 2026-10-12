@@ -9,7 +9,7 @@ import type { Cluster } from "./devtools";
 // CSS variables (--primary is the brand violet), so it follows light/dark
 // and the active skin without hardcoded colors.
 
-export type Tab = "agent" | "tx" | "account" | "idl" | "pda" | "error" | "simulate" | "anchor" | "network" | "market" | "settlement";
+export type Tab = "agent" | "tx" | "account" | "idl" | "pda" | "error" | "simulate" | "anchor" | "network" | "trade" | "settlement";
 
 export interface SelectedAgent {
   agentId: string;
@@ -202,7 +202,8 @@ export function TextInput({ mono: isMono, className, ...rest }: InputHTMLAttribu
 
 export function Select({ className, children, ...rest }: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <select className={cx(inputClass, "w-auto cursor-pointer pr-8", className)} {...rest}>
+    // The browser draws the open list from the select's own colors — set them so it follows dark mode.
+    <select className={cx(inputClass, "w-auto cursor-pointer pr-8 text-[hsl(var(--foreground))] [&_option]:bg-[hsl(var(--popover))] [&_option]:text-[hsl(var(--popover-foreground))]", className)} {...rest}>
       {children}
     </select>
   );

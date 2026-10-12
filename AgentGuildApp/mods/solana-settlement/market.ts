@@ -91,6 +91,10 @@ export interface SwapQuote {
   slippageBps: number;
   usdValue: number | null;
   route: string[];
+  inDecimals: number;
+  outDecimals: number;
+  inSymbol: string | null;
+  outSymbol: string | null;
 }
 
 /** Base units → decimal string without float rounding. */
@@ -148,7 +152,10 @@ export async function swapQuote(
     rate: Number(outUi) / Number(inUi),
     priceImpactPct: Number(q.priceImpactPct) * 100,
     slippageBps,
-    usdValue: q.swapUsdValue != null ? Number(q.swapUsdValue) : null,
+    // Jupiter's own USD value, else priced from the input side.
+    usdValue: q.swapUsdValue != null ? Number(q.swapUsdValue) : inInfo.usdPrice != null ? Number(inUi) * inInfo.usdPrice : null,
     route: (q.routePlan ?? []).map((r) => r.swapInfo?.label ?? "?"),
+    inDecimals: inInfo.decimals, outDecimals: outInfo.decimals,
+    inSymbol: inInfo.symbol, outSymbol: outInfo.symbol,
   };
 }

@@ -70,6 +70,9 @@ service cloud.firestore {
     match /solanaSettlements/{document=**}      { allow read, write: if false; }
     match /solanaSettlementKeys/{document=**}   { allow read, write: if false; }
     match /solanaModActivity/{document=**}     { allow read, write: if false; }
+    match /solanaPaperWallets/{document=**}    { allow read, write: if false; }
+    match /solanaPaperTrades/{document=**}     { allow read, write: if false; }
+    match /solanaAgentPolicies/{document=**}   { allow read, write: if false; }
     // One ciphertext, three wraps (protocol, agent, user). The hub serves
     // it only while those identity NFT copies are still with their holders.
     match /identityVault/{document=**}          { allow read, write: if false; }

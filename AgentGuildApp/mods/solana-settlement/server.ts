@@ -24,7 +24,9 @@ import {
   createTokenAsAgent, transferAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
 } from "./agent";
 import { AGENT_TOOLS } from "./tools";
-import { swapQuote, tokenPrices } from "./market";
+import { resolveMint, swapQuote, tokenPrices, toUi } from "./market";
+import { PaperTradeError, normalizePolicy, transferPolicyViolation, valuePortfolio, type PaperWallet } from "./paper";
+import { bookPaperTrade, getPaperWallet, getPolicy, listOrgPaperWallets, listPaperTrades, resetPaperWallet, setPolicy } from "./paper-store";
 import { listAgentWallets } from "@/lib/agent-wallets";
 
 // ── Request helpers ──────────────────────────────────────────────────────
@@ -35,7 +37,7 @@ class NotFoundError extends Error {}
 function failure(err: unknown): Response {
   if (err instanceof NotFoundError) return Response.json({ error: err.message }, { status: 404 });
   if (err instanceof AccessError) return Response.json({ error: err.message }, { status: err.status });
-  const status = err instanceof DevtoolsInputError || err instanceof SyntaxError ? 400 : 502;
+  const status = err instanceof DevtoolsInputError || err instanceof SyntaxError || err instanceof PaperTradeError ? 400 : 502;
   return Response.json({ error: (err as Error).message }, { status });
 }
 
@@ -99,6 +101,48 @@ async function callerOrgIds(ctx: RouteContext): Promise<string[]> {
   if (!ctx.session?.address) return [];
   const orgs = await getOrganizationsByWalletAdmin(ctx.session.address);
   return orgs.map((org) => org.id);
+}
+
+// ── Paper trading helpers ────────────────────────────────────────────────
+
+/** Marks a paper wallet to market with Jupiter prices (20 mints per call). */
+async function valueWallet(wallet: PaperWallet) {
+  const mints = Object.keys(wallet.holdings);
+  const prices: Record<string, number | null> = {};
+  const symbols: Record<string, string | null> = {};
+  for (let i = 0; i < mints.length; i += 20) {
+    for (const p of await tokenPrices(mints.slice(i, i + 20))) {
+      prices[p.mint] = p.usdPrice;
+      symbols[p.mint] = p.symbol;
+    }
+  }
+  return valuePortfolio(wallet, prices, symbols);
+}
+
+/** "12.5", "all" or "25%" of the paper holding → a UI amount string. */
+function paperAmount(wallet: PaperWallet, mint: string, amount: unknown): string {
+  const text = String(amount ?? "").trim().toLowerCase();
+  if (text !== "all" && text !== "max" && !text.endsWith("%")) return text;
+  const h = wallet.holdings[mint];
+  if (!h || BigInt(h.raw) === 0n) throw new PaperTradeError("The paper wallet holds none of the input token");
+  const pct = text.endsWith("%") ? Number(text.slice(0, -1)) : 100;
+  if (!(pct > 0 && pct <= 100)) throw new PaperTradeError("A percentage amount must be between 0 and 100%");
+  const raw = (BigInt(h.raw) * BigInt(Math.round(pct * 100))) / 10_000n;
+  if (raw <= 0n) throw new PaperTradeError("That share of the holding rounds to zero");
+  return toUi(raw.toString(), h.decimals);
+}
+
+/** Org owner of `orgId`, from a browser session. */
+async function requireOrgOwner(ctx: RouteContext, orgId: string): Promise<void> {
+  if (!ctx.session) throw new AccessError("Sign in as the org owner", 401);
+  const org = (await getOrganizationsByWalletAdmin(ctx.session.address)).find((o) => o.id === orgId);
+  const isOwner = !!org?.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(ctx.session.address);
+  if (!isOwner) throw new AccessError("Only the org owner can change this", 403);
+}
+
+/** Refuses anything the agent's wallet would sign while its owner has paused it. */
+async function assertNotPaused(caller: Caller): Promise<void> {
+  if ((await getPolicy(caller.agentId, caller.orgId)).paused) throw new AccessError("Signing is paused for this agent by its org owner", 403);
 }
 
 // ── Settlement guards ────────────────────────────────────────────────────
@@ -552,6 +596,112 @@ export default defineServerMod({
         return { quote };
       }),
 
+    // ── Paper trading (live Jupiter quotes, virtual wallet) ─────────────
+
+    /** GET /paper — the agent's paper wallet marked to market: equity, P&L, holdings. */
+    "GET /paper": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        const wallet = await getPaperWallet(caller.agentId, caller.orgId);
+        const [portfolio, policy] = await Promise.all([valueWallet(wallet), getPolicy(caller.agentId, caller.orgId)]);
+        const today = new Date().toISOString().slice(0, 10);
+        return { portfolio, policy, volumeTodayUsd: wallet.volumeDay === today ? wallet.volumeToday : 0, since: wallet.resetAt ?? wallet.createdAt };
+      }),
+
+    /**
+     * POST /paper/swap — swap at the live Jupiter quote in the paper wallet.
+     * Body: { agentId?, inputMint, outputMint, amount ("1.5" | "all" | "25%"), slippageBps?, note? }
+     */
+    "POST /paper/swap": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.trade);
+        if (typeof b.inputMint !== "string" || typeof b.outputMint !== "string") throw new DevtoolsInputError("inputMint and outputMint are required");
+        const inputMint = resolveMint(b.inputMint, "inputMint");
+        const outputMint = resolveMint(b.outputMint, "outputMint");
+        const wallet = await getPaperWallet(caller.agentId, caller.orgId);
+        const amount = paperAmount(wallet, inputMint, b.amount);
+        const quote = await swapQuote({ inputMint, outputMint, amount, slippageBps: b.slippageBps != null ? Number(b.slippageBps) : undefined });
+        if (quote.usdValue == null) throw new PaperTradeError("Couldn't price this swap in USD — try a more liquid token");
+        const note = typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 280) : null;
+        try {
+          const { trade, wallet: next } = await bookPaperTrade(caller.agentId, caller.orgId, {
+            inputMint, outputMint, inRaw: BigInt(quote.inAmount), outRaw: BigInt(quote.outAmount),
+            inDecimals: quote.inDecimals, outDecimals: quote.outDecimals, usdValue: quote.usdValue,
+          }, {
+            inSymbol: quote.inSymbol, outSymbol: quote.outSymbol, inUi: quote.inUi, outUi: quote.outUi,
+            priceImpactPct: quote.priceImpactPct, route: quote.route, note,
+          });
+          logActivity(caller, { action: "paper-swap", ok: true, summary: `${trade.inUi} ${trade.inSymbol ?? trade.inputMint.slice(0, 4)} → ${trade.outUi} ${trade.outSymbol ?? trade.outputMint.slice(0, 4)} ($${trade.usdValue.toFixed(2)})` });
+          return { trade, portfolio: await valueWallet(next) };
+        } catch (err) {
+          if (err instanceof PaperTradeError) logActivity(caller, { action: "paper-swap", ok: false, summary: err.message.slice(0, 160) });
+          throw err;
+        }
+      }),
+
+    /** GET /paper/trades — this paper wallet's fills since its last reset, newest first. ?limit=1–200 */
+    "GET /paper/trades": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        const limit = Math.min(Math.max(Number(query(req, "limit") ?? 50) || 50, 1), 200);
+        const [trades, wallet] = await Promise.all([listPaperTrades(caller.agentId, caller.orgId, limit), getPaperWallet(caller.agentId, caller.orgId)]);
+        const since = wallet.resetAt ?? "";
+        return { trades: trades.filter((t) => t.at >= since) };
+      }),
+
+    /** POST /paper/reset — back to 10,000 USDC. Org owner only, so an agent can't wipe its own record. Body: { agentId } */
+    "POST /paper/reset": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await resolveCaller(ctx, b.agentId as string);
+        await requireOrgOwner(ctx, caller.orgId);
+        const wallet = await resetPaperWallet(caller.agentId, caller.orgId);
+        logActivity(caller, { action: "paper-reset", ok: true, summary: `paper wallet reset to $${wallet.startUsd.toLocaleString()}` });
+        return { portfolio: await valueWallet(wallet) };
+      }),
+
+    /** GET /paper/leaderboard — every paper wallet in the caller's org(s), ranked by return. */
+    "GET /paper/leaderboard": (_req, ctx) =>
+      handle(async () => {
+        const orgIds = await callerOrgIds(ctx);
+        if (!orgIds.length) throw new AccessError("No org for this caller", 403);
+        const rows = (await Promise.all(orgIds.map(async (orgId) => {
+          const [wallets, agents] = await Promise.all([listOrgPaperWallets(orgId), getAgentsByOrg(orgId)]);
+          const names = new Map(agents.map((a) => [a.id, a.name]));
+          return Promise.all(wallets.filter((w) => w.tradeCount > 0).map(async (w) => {
+            const p = await valueWallet(w);
+            return { agentId: w.agentId, name: names.get(w.agentId) ?? w.agentId, orgId, equityUsd: p.equityUsd, pnlUsd: p.pnlUsd, returnPct: p.returnPct, tradeCount: p.tradeCount, volumeUsd: p.volumeUsd };
+          }));
+        }))).flat();
+        rows.sort((a, b) => b.returnPct - a.returnPct);
+        return { leaderboard: rows };
+      }),
+
+    // ── Policy (owner-set limits per agent) ─────────────────────────────
+
+    /** GET /policy — this agent's limits: pause, trade size, daily volume, allowed tokens, transfer allowlist. */
+    "GET /policy": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        return { policy: await getPolicy(caller.agentId, caller.orgId) };
+      }),
+
+    /** POST /policy — org owner edits an agent's limits. Body: { agentId, ...fields to change } */
+    "POST /policy": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await resolveCaller(ctx, b.agentId as string);
+        await requireOrgOwner(ctx, caller.orgId);
+        const isAddress = (v: string) => { try { return !!new PublicKey(v); } catch { return false; } };
+        const { agentId: _a, ...fields } = b;
+        const mints = Array.isArray(fields.allowedMints) ? fields.allowedMints.map((m) => { try { return resolveMint(String(m)); } catch { return String(m); } }) : undefined;
+        const policy = normalizePolicy({ ...fields, ...(mints ? { allowedMints: mints } : {}) }, await getPolicy(caller.agentId, caller.orgId), isAddress);
+        await setPolicy(caller.agentId, caller.orgId, policy, ctx.session!.address);
+        logActivity(caller, { action: "policy", ok: true, summary: policy.paused ? "paused by owner" : "limits updated by owner" });
+        return { policy };
+      }),
+
     // ── Build & simulate ────────────────────────────────────────────────
 
     /**
@@ -617,6 +767,7 @@ export default defineServerMod({
         const b = await body(req);
         const caller = await requireCaller(ctx, b.agentId as string, CAP.devnet);
         const cluster = parseCluster(b.cluster);
+        await assertNotPaused(caller);
         const result = await sendAsAgent(caller, cluster, b.instructions as InstructionSpec[], {
           computeUnitLimit: b.computeUnitLimit as number | undefined, priorityFee: b.priorityFee as number | undefined,
         });
@@ -635,7 +786,10 @@ export default defineServerMod({
         const caller = await requireCaller(ctx, b.agentId as string, CAP.devnet);
         const cluster = parseCluster(b.cluster);
         if (typeof b.to !== "string" || b.amount == null) throw new DevtoolsInputError("to and amount are required");
-        const out = await transferAsAgent(caller, cluster, { to: b.to, amount: b.amount as string | number, mint: (b.mint as string | undefined) || null });
+        const mint = (b.mint as string | undefined) || null;
+        const violation = transferPolicyViolation(await getPolicy(caller.agentId, caller.orgId), { to: b.to.trim(), sol: mint ? null : Number(b.amount) });
+        if (violation) throw new AccessError(violation, 403);
+        const out = await transferAsAgent(caller, cluster, { to: b.to, amount: b.amount as string | number, mint });
         logActivity(caller, {
           action: "transfer", cluster, ok: true, signature: out.signature, explorerUrl: out.explorerUrl,
           summary: `${out.amountUi} ${out.mint ? out.mint.slice(0, 6) + "…" : "SOL"} → ${out.to.slice(0, 6)}…`,
@@ -649,6 +803,7 @@ export default defineServerMod({
         const b = await body(req);
         const caller = await requireCaller(ctx, b.agentId as string, CAP.devnet);
         const cluster = parseCluster(b.cluster);
+        await assertNotPaused(caller);
         const out = await createTokenAsAgent(caller, cluster, { decimals: b.decimals as number | undefined, mintAmount: b.mintAmount as string | undefined });
         logActivity(caller, { action: "create-token", cluster, ok: true, summary: `mint ${out.mint}`, explorerUrl: out.explorerUrl });
         return { cluster, ...out };
@@ -667,7 +822,10 @@ export default defineServerMod({
         const caller = await requireCaller(ctx, b.agentId as string, CAP.anchor);
         const action = b.action as "build" | "test" | "deploy";
         // Deploying signs with the agent's dev wallet, so it needs the devnet upgrade too.
-        if (action === "deploy") await requireCaller(ctx, b.agentId as string, CAP.devnet);
+        if (action === "deploy") {
+          await requireCaller(ctx, b.agentId as string, CAP.devnet);
+          await assertNotPaused(caller);
+        }
         const cluster = b.cluster != null ? parseCluster(b.cluster) : undefined;
         const out = await enqueueAnchorJob(caller, { action, files: b.files as Record<string, string>, anchorVersion: b.anchorVersion as string | undefined, cluster });
         logActivity(caller, { action: `anchor-${action}`, ...(cluster ? { cluster } : {}), ok: true, summary: `queued (${out.workersOnline} worker${out.workersOnline === 1 ? "" : "s"} online)`, taskId: out.taskId });

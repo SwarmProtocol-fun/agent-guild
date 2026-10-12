@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Connection } from "@solana/web3.js";
 import {
-  Activity, Bot, Bug, ChevronsUpDown, Coins, FileCode, Fingerprint, FlaskConical, Hammer, LineChart, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
+  Activity, Bot, CandlestickChart, Bug, ChevronsUpDown, Coins, FileCode, Fingerprint, FlaskConical, Hammer, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
@@ -13,16 +13,25 @@ import { AgentAvatar, AgentTab, type AgentsState } from "./agent-tab";
 import { SimulateTab } from "./simulate-tab";
 import { AnchorTab } from "./anchor-tab";
 import { SettlementTab } from "./settlement-tab";
-import { MarketTab } from "./market-tab";
+import { TradeTab } from "./trade-tab";
 import { Button, Notice, TextInput, cx, muted, type Env, type Seed, type SelectedAgent, type Tab } from "./ui";
 
 // The Solana panel shell. The sidebar's agent switcher decides who the
-// Agent / Simulate / Anchor views act as; the debug tools work without one.
+// Overview / Trade / Simulate / Anchor views act as; the debug tools and
+// price quotes work without one.
 
 interface NavItem { id: Tab; label: string; icon: ComponentType<LucideProps>; capability?: string }
 
+// Agent-facing views first (what the agent is and does), then developer tooling.
 const NAV: { group: string; items: NavItem[] }[] = [
-  { group: "Agent", items: [{ id: "agent", label: "Overview", icon: Bot }] },
+  {
+    group: "Agent",
+    items: [
+      { id: "agent", label: "Overview", icon: Bot },
+      { id: "trade", label: "Trade", icon: CandlestickChart, capability: "solana-dev-trade" },
+      { id: "settlement", label: "Payouts", icon: Coins, capability: "solana-settlement" },
+    ],
+  },
   {
     group: "Debug",
     items: [
@@ -40,7 +49,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { id: "anchor", label: "Anchor programs", icon: Hammer, capability: "solana-dev-anchor" },
     ],
   },
-  { group: "Chain", items: [{ id: "network", label: "Network", icon: Activity }, { id: "market", label: "Market", icon: LineChart }, { id: "settlement", label: "Settlement", icon: Coins, capability: "solana-settlement" }] },
+  { group: "Chain", items: [{ id: "network", label: "Network", icon: Activity }] },
 ];
 
 const CLUSTERS: { id: Cluster; label: string }[] = [
@@ -64,7 +73,9 @@ function loadPrefs(): Prefs {
   return fallback;
 }
 
-const DETECTED_LABEL = { tx: "Transaction", address: "Address", error: "Error code" } as const;
+const OPTION_COLORS = "bg-[hsl(var(--popover))] text-[hsl(var(--popover-foreground))]";
+
+const DETECTED_LABEL ={ tx: "Transaction", address: "Address", error: "Error code" } as const;
 
 function SolanaPanel({ modId, address, api }: PanelProps) {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
@@ -250,13 +261,16 @@ function SolanaPanel({ modId, address, api }: PanelProps) {
                 </div>
                 <ChevronsUpDown className={cx("h-4 w-4 shrink-0", muted)} aria-hidden />
               </div>
-              <select id="solana-agent" className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+              {/* Invisible native select over the card. The open list is drawn by the
+                  browser from the select's own colors, so it needs explicit popover
+                  colors — transparent + inherited light text reads as white-on-white. */}
+              <select id="solana-agent" className={cx("absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed", OPTION_COLORS)}
                 value={agentId ?? ""} disabled={!agents?.length}
                 onChange={(e) => setPrefs((p) => ({ ...p, agentId: e.target.value || null }))}>
-                <option value="">No agent</option>
+                <option value="" className={OPTION_COLORS}>No agent</option>
                 {[...new Set((agents ?? []).map((a) => a.orgName))].map((org) => (
-                  <optgroup key={org} label={org}>
-                    {agents!.filter((a) => a.orgName === org).map((a) => <option key={a.agentId} value={a.agentId}>{a.name}</option>)}
+                  <optgroup key={org} label={org} className={OPTION_COLORS}>
+                    {agents!.filter((a) => a.orgName === org).map((a) => <option key={a.agentId} value={a.agentId} className={OPTION_COLORS}>{a.name}</option>)}
                   </optgroup>
                 ))}
               </select>
@@ -314,8 +328,8 @@ function SolanaPanel({ modId, address, api }: PanelProps) {
               <div hidden={tab !== "simulate"}><SimulateTab env={env} /></div>
               <div hidden={tab !== "anchor"}><AnchorTab env={env} seed={seeds.anchor} /></div>
               <div hidden={tab !== "network"}><NetworkTool env={env} status={status} address={agent?.devWallet ?? address} /></div>
-              <div hidden={tab !== "market"}><MarketTab api={api} /></div>
-              <div hidden={tab !== "settlement"}><SettlementTab api={api} /></div>
+              <div hidden={tab !== "trade"}><TradeTab env={env} api={api} /></div>
+              <div hidden={tab !== "settlement"}><SettlementTab api={api} agents={agents ?? []} /></div>
             </div>
           )}
         </main>

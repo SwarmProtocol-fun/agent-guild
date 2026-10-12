@@ -28,6 +28,7 @@ const w = vi.hoisted(() => {
     disconnect: vi.fn(),
     signMessageAsync: vi.fn(),
     createAppKit: vi.fn(),
+    wagmiProviderRenders: 0,
   };
 });
 
@@ -46,7 +47,8 @@ vi.mock("@reown/appkit/networks", () => ({ solanaDevnet: SOLANA_DEVNET }));
 vi.mock("@reown/appkit-adapter-wagmi", () => ({ WagmiAdapter: class { wagmiConfig = {}; } }));
 vi.mock("@reown/appkit-adapter-solana/react", () => ({ SolanaAdapter: class {} }));
 vi.mock("wagmi", () => ({
-  WagmiProvider: Pass,
+  // Counts renders: the real one (ssr: false) calls reconnect() on each.
+  WagmiProvider: ({ children }: { children?: ReactNode }) => { w.wagmiProviderRenders += 1; return <>{children}</>; },
   useAccount: () => w.wagmi,
   useSignMessage: () => ({ signMessageAsync: w.signMessageAsync }),
 }));
@@ -570,6 +572,11 @@ describe("module setup", () => {
     expect(w.createAppKit.mock.calls[0][0].defaultNetwork).toMatchObject({ id: 1 });
   });
 
+  it("keeps embedded wallets on their EOA so switching EVM chains keeps the address", async () => {
+    await loadAdapter();
+    expect(w.createAppKit.mock.calls[0][0].defaultAccountTypes).toEqual({ eip155: "eoa" });
+  });
+
   it("defaults AppKit to Solana when Solana was chosen before", async () => {
     localStorage.setItem("agentguild.loginChain", "solana");
     await loadAdapter();
@@ -703,5 +710,19 @@ describe("useEvmSender — chain switching", () => {
     await result.current!.sendContractCall({ to: EVM, data: "0x", chain: TEMPO });
     expect(p.request).toHaveBeenCalledWith({ method: "wallet_switchEthereumChain", params: [{ chainId: "0xa5bf" }] });
     expect(w.switchNetwork).not.toHaveBeenCalled();
+  });
+});
+
+describe("Provider", () => {
+  it("renders WagmiProvider once — a re-render with new children doesn't re-run wagmi's reconnect", async () => {
+    const { Provider } = await loadAdapter();
+    w.wagmiProviderRenders = 0;
+    const { rerender } = render(<Provider><p>first</p></Provider>);
+    expect(screen.getByText("first")).toBeTruthy();
+    rerender(<Provider><p>second</p></Provider>);
+    rerender(<Provider><p>third</p></Provider>);
+    expect(screen.getByText("third")).toBeTruthy();
+    expect(screen.queryByText("first")).toBeNull();
+    expect(w.wagmiProviderRenders).toBe(1);
   });
 });

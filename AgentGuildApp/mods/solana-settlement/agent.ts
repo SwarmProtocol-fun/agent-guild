@@ -15,7 +15,7 @@ import type { RouteContext } from "@agent-guild/sdk";
 // Server-side capability reads must use the admin SDK: lib/skills.ts's
 // resolver uses the browser Firestore SDK, which is unauthenticated on the
 // server and denied by the rules on modInstallations/agentSkills/subscriptions.
-import { getAgent, getAgentCapabilities, getModInstallations } from "@/lib/firestore-admin";
+import { enableModCapabilities, getAgent, getAgentCapabilities } from "@/lib/firestore-admin";
 import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { listAgentWallets, generateAgentWallet, getAgentWalletKeypair } from "@/lib/agent-wallets";
@@ -56,6 +56,7 @@ export const CAP = {
   simulate: "solana-dev-simulate",
   devnet: "solana-dev-devnet",
   anchor: "solana-dev-anchor",
+  trade: "solana-dev-trade",
   settle: "solana-settlement",
 } as const;
 export type CapKey = (typeof CAP)[keyof typeof CAP];
@@ -116,13 +117,10 @@ const REGISTRY_MOD_ID = "mod-solana-settlement";
  * and there's no other UI to toggle capabilities on an existing install.
  */
 export async function enableAllUpgrades(orgId: string): Promise<{ installed: boolean; enabled: CapKey[] }> {
-  const install = (await getModInstallations(orgId)).find((i) => i.modId === REGISTRY_MOD_ID);
-  if (!install) return { installed: false, enabled: [] };
-  const missing = Object.values(CAP).filter((c) => !install.enabledCapabilities.includes(c));
-  if (missing.length) {
-    await adminDb().collection("modInstallations").doc(install.id).update({ enabledCapabilities: [...install.enabledCapabilities, ...missing] });
-  }
-  return { installed: true, enabled: missing };
+  // Shared helper: also counts a Market install (an installedSkills row with
+  // no modInstallations doc yet), which is how every org gets this mod.
+  const out = await enableModCapabilities(orgId, REGISTRY_MOD_ID, Object.values(CAP));
+  return { installed: out.installed, enabled: out.enabled as CapKey[] };
 }
 
 // ── Activity log ─────────────────────────────────────────────────────────

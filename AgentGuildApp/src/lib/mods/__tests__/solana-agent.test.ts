@@ -5,14 +5,12 @@ import type { ServerMod, RouteContext } from "../sdk";
 // Capabilities granted to the test agent; tests flip entries on and off.
 const granted = new Set<string>();
 
-const updateInstall = vi.fn(async (_data: unknown) => {});
 // Activity rows, keyed by doc id like the real collection.
 const activityRows = vi.hoisted(() => new Map<string, Record<string, unknown>>());
 vi.mock("@/lib/firebase-admin", () => ({
   adminDb: () => ({
     collection: (name: string) => ({
       doc: (id: string) => ({
-        update: (d: unknown) => updateInstall(d),
         set: async (d: Record<string, unknown>) => { if (name === "solanaModActivity") activityRows.set(id, d); },
       }),
       where: (field: string, _op: string, value: unknown) => ({
@@ -33,7 +31,7 @@ vi.mock("@/lib/solana/platform", () => ({ agentAlreadyRegistered: vi.fn(), getAg
 vi.mock("@/lib/solana/client", () => ({ getScoreEventHistoryForAsn: vi.fn() }));
 vi.mock("@/lib/firestore-admin", () => ({
   getAgentCapabilities: vi.fn(async () => [...granted].map((key) => ({ key }))),
-  getModInstallations: vi.fn(async () => [{ id: "inst1", modId: "mod-solana-settlement", enabledCapabilities: ["solana-settlement"] }]),
+  enableModCapabilities: vi.fn(async () => ({ installed: true, enabled: ["solana-dev-inspect"] })),
   getAgent: vi.fn(async (id: string) => (id === "a1" ? { id: "a1", orgId: "o1", name: "chef" } : null)),
   getAgentsByOrg: vi.fn(async () => []),
   getOrganizationsByWalletAdmin: vi.fn(async () => [{ id: "o1", name: "Org", ownerAddress: "OWNER" }]),
@@ -41,6 +39,16 @@ vi.mock("@/lib/firestore-admin", () => ({
 vi.mock("@/lib/auth-guard", () => ({
   requireOrgMembershipByAddress: vi.fn(async (addr: string) => (addr === "OUTSIDER" ? { ok: false, status: 403, error: "Not a member" } : { ok: true })),
 }));
+const policy = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
+vi.mock("../../../../mods/solana-settlement/paper-store", async () => {
+  const { DEFAULT_POLICY } = await import("../../../../mods/solana-settlement/paper");
+  return {
+    getPolicy: vi.fn(async () => ({ ...DEFAULT_POLICY, ...(policy.current ?? {}) })),
+    setPolicy: vi.fn(async (_a: string, _o: string, p: Record<string, unknown>) => { policy.current = p; }),
+    getPaperWallet: vi.fn(), resetPaperWallet: vi.fn(), listOrgPaperWallets: vi.fn(async () => []),
+    listPaperTrades: vi.fn(async () => []), bookPaperTrade: vi.fn(),
+  };
+});
 const devKey = Keypair.generate();
 const listAgentWallets = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/agent-wallets", () => ({
@@ -77,6 +85,7 @@ const DEV_WALLETS = () => [{ id: "w1", chain: "solana", label: "solana-dev", org
 
 beforeEach(() => {
   granted.clear();
+  policy.current = null;
   listAgentWallets.mockImplementation(async () => DEV_WALLETS());
   enqueueTask.mockClear();
 });
@@ -221,10 +230,19 @@ describe("discovery and upgrades", () => {
 
   it("only the org owner can enable all upgrades", async () => {
     expect((await call("POST", "/upgrade", SESSION_CTX("SOMEONE"), { orgId: "o1" })).status).toBe(403);
+    const fa = await import("@/lib/firestore-admin");
     const res = await call("POST", "/upgrade", SESSION_CTX(), { orgId: "o1" });
     expect(res.status).toBe(200);
-    expect((await res.json()).enabled).toEqual(["solana-dev-inspect", "solana-dev-simulate", "solana-dev-devnet", "solana-dev-anchor"]);
-    expect(updateInstall).toHaveBeenCalledWith({ enabledCapabilities: ["solana-settlement", "solana-dev-inspect", "solana-dev-simulate", "solana-dev-devnet", "solana-dev-anchor"] });
+    // Goes through the shared helper, which also handles a Market install with no modInstallations doc yet.
+    expect(fa.enableModCapabilities).toHaveBeenCalledWith("o1", "mod-solana-settlement", ["solana-dev-inspect", "solana-dev-simulate", "solana-dev-devnet", "solana-dev-anchor", "solana-dev-trade", "solana-settlement"]);
+  });
+
+  it("tells the owner to install from the Market when the org doesn't own the mod", async () => {
+    const fa = await import("@/lib/firestore-admin");
+    vi.mocked(fa.enableModCapabilities).mockResolvedValueOnce({ installed: false, enabled: [] });
+    const res = await call("POST", "/upgrade", SESSION_CTX(), { orgId: "o1" });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toMatch(/Market/);
   });
 });
 
@@ -283,5 +301,44 @@ describe("wallet, history and transfer tools", () => {
     const settle = tools.find((t: { name: string }) => t.name === "solana_settle_job");
     expect(settle).toMatchObject({ method: "POST", path: "settle", capability: "solana-settlement" });
     expect(settle.input_schema.properties.amountUsdc).toBeUndefined();
+  });
+});
+
+describe("owner policy", () => {
+  it("only the org owner can change an agent's limits", async () => {
+    expect((await call("POST", "/policy", AGENT_CTX, { paused: true })).status).toBe(401);
+    expect((await call("POST", "/policy", SESSION_CTX("SOMEONE"), { agentId: "a1", paused: true })).status).toBe(403);
+    const res = await call("POST", "/policy", SESSION_CTX(), { agentId: "a1", paused: true, maxTradeUsd: 100 });
+    expect(res.status).toBe(200);
+    expect((await res.json()).policy).toMatchObject({ paused: true, maxTradeUsd: 100 });
+    expect((await call("POST", "/policy", SESSION_CTX(), { agentId: "a1", maxTradeUsd: -5 })).status).toBe(400);
+  });
+
+  it("a paused agent can't sign transfers, sends or token mints", async () => {
+    granted.add("solana-dev-devnet");
+    policy.current = { paused: true };
+    const to = Keypair.generate().publicKey.toBase58();
+    for (const [path, body] of [
+      ["/dev/transfer", { to, amount: "0.1" }],
+      ["/dev/send", { instructions: [{ kind: "transfer", to, sol: 0.1 }] }],
+      ["/dev/token", { decimals: 6 }],
+    ] as const) {
+      const res = await call("POST", path, AGENT_CTX, body);
+      expect(res.status, path).toBe(403);
+      expect((await res.json()).error).toMatch(/paused/);
+    }
+  });
+
+  it("transfers respect the allowlist and SOL cap", async () => {
+    granted.add("solana-dev-devnet");
+    const ok = Keypair.generate().publicKey.toBase58();
+    policy.current = { transferAllowlist: [ok], maxTransferSol: 1 };
+    expect((await call("POST", "/dev/transfer", AGENT_CTX, { to: Keypair.generate().publicKey.toBase58(), amount: "0.1" })).status).toBe(403);
+    expect((await call("POST", "/dev/transfer", AGENT_CTX, { to: ok, amount: "2" })).status).toBe(403);
+  });
+
+  it("paper swaps need the trade upgrade; reset is owner-only", async () => {
+    expect((await call("POST", "/paper/swap", AGENT_CTX, { inputMint: "USDC", outputMint: "SOL", amount: "10" })).status).toBe(403);
+    expect((await call("POST", "/paper/reset", AGENT_CTX, {})).status).toBe(401);
   });
 });

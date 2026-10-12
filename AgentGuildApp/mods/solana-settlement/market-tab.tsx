@@ -1,27 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { ArrowDownUp, ArrowLeftRight, LineChart, RefreshCw } from "lucide-react";
-import {
-  Badge, Button, Card, ErrorNote, Field, PageHeader, Select, Skeleton, Stat, TextInput, cx, mono, muted, timeAgo, useRunner,
-} from "./ui";
+import { useCallback, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
+import { Badge, Button, Card, ErrorNote, Skeleton, Stat, cx, mono, muted, timeAgo } from "./ui";
 
-// The Market view: what agents see through solana_token_price and
-// solana_swap_quote. Mainnet data from Jupiter, read-only — the same
-// numbers an agent reasons with before it acts.
+// Market data pieces used by the Trade view: what agents see through
+// solana_token_price and solana_swap_quote. Mainnet data from Jupiter,
+// read-only — the same numbers an agent reasons with before it acts.
 
-type Api = (path: string, init?: RequestInit) => Promise<Response>;
+export type Api = (path: string, init?: RequestInit) => Promise<Response>;
 
 interface Price { mint: string; symbol: string | null; usdPrice: number | null; priceChange24hPct: number | null }
-interface Quote {
+export interface Quote {
   inUi: string; outUi: string; minOutUi: string; rate: number; priceImpactPct: number;
   slippageBps: number; usdValue: number | null; route: string[]; inputMint: string; outputMint: string;
+  inSymbol: string | null; outSymbol: string | null;
 }
 
-const WATCH = ["SOL", "USDC", "USDT", "JUP", "BONK"];
-const TOKENS = ["SOL", "USDC", "USDT", "JUP", "BONK"];
+/** Tokens offered as one-click picks; any other symbol or mint address works too. */
+export const TOKENS = ["USDC", "SOL", "USDT", "JUP", "BONK"];
 
-async function getJson<T>(api: Api, path: string): Promise<T> {
+export async function getJson<T>(api: Api, path: string): Promise<T> {
   const res = await api(path);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
@@ -41,103 +40,58 @@ function pct(n: number | null): string {
   return `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(2)}%`;
 }
 
-export function MarketTab({ api }: { api: Api }) {
+/** Live USD prices for the common tokens, refreshed every 30s. */
+export function PricesCard({ api }: { api: Api }) {
   const [prices, setPrices] = useState<Price[] | null>(null);
-  const [pricesError, setPricesError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [pricedAt, setPricedAt] = useState<number | null>(null);
   const [, tick] = useState(0);
 
-  const loadPrices = useCallback(() => {
-    setPricesError(null);
-    getJson<{ prices: Price[] }>(api, `market/price?mints=${WATCH.join(",")}`)
+  const load = useCallback(() => {
+    setError(null);
+    getJson<{ prices: Price[] }>(api, `market/price?mints=${TOKENS.join(",")}`)
       .then((d) => { setPrices(d.prices); setPricedAt(Date.now()); })
-      .catch((err: Error) => setPricesError(err.message));
+      .catch((err: Error) => setError(err.message));
   }, [api]);
 
   useEffect(() => {
-    loadPrices();
-    const t = setInterval(loadPrices, 30_000);
+    load();
+    const t = setInterval(load, 30_000);
     const clock = setInterval(() => tick((n) => n + 1), 10_000);
     return () => { clearInterval(t); clearInterval(clock); };
-  }, [loadPrices]);
-
-  const [from, setFrom] = useState("SOL");
-  const [to, setTo] = useState("USDC");
-  const [amount, setAmount] = useState("1");
-  const [slippage, setSlippage] = useState("50");
-  const quote = useRunner<Quote>();
-
-  function onQuote(e?: FormEvent) {
-    e?.preventDefault();
-    const q = new URLSearchParams({ inputMint: from.trim(), outputMint: to.trim(), amount: amount.trim(), slippageBps: slippage });
-    quote.run(async () => (await getJson<{ quote: Quote }>(api, `market/quote?${q}`)).quote);
-  }
+  }, [load]);
 
   return (
-    <div className="space-y-4">
-      <PageHeader icon={LineChart} title="Market"
-        description="Live mainnet prices and swap routes from Jupiter — what agents read with solana_token_price and solana_swap_quote. Read-only; nothing is traded." />
-
-      <Card title="Prices" description={pricedAt ? `Updated ${timeAgo(pricedAt)} · refreshes every 30s` : "Loading…"}
-        actions={<Button className="h-8" variant="ghost" icon={RefreshCw} onClick={loadPrices}>Refresh</Button>}>
-        {pricesError ? <ErrorNote message={pricesError} onRetry={loadPrices} /> : (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-            {(prices ?? WATCH.map(() => null)).map((p, i) => p ? (
-              <Stat key={p.mint} label={p.symbol ?? p.mint.slice(0, 6)} value={usd(p.usdPrice)}
-                sub={<span className={cx(p.priceChange24hPct != null && p.priceChange24hPct > 0 && "text-green-600 dark:text-green-400", p.priceChange24hPct != null && p.priceChange24hPct < 0 && "text-red-600 dark:text-red-400")}>{pct(p.priceChange24hPct)} 24h</span>} />
-            ) : <Skeleton key={i} className="h-[68px]" />)}
-          </div>
-        )}
-      </Card>
-
-      <Card title={<span className="flex items-center gap-2"><ArrowLeftRight className="h-4 w-4" aria-hidden />Swap quote</span>}
-        description="Best route across Solana DEXes for an exact input amount. Symbols or any mint address.">
-        <form className="space-y-3" onSubmit={onQuote}>
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-end">
-            <Field label="Pay">{(id) => <TokenInput id={id} value={from} onChange={setFrom} />}</Field>
-            <Button className="justify-self-center" variant="ghost" icon={ArrowDownUp} aria-label="Swap direction" title="Swap direction"
-              onClick={() => { setFrom(to); setTo(from); }} />
-            <Field label="Receive">{(id) => <TokenInput id={id} value={to} onChange={setTo} />}</Field>
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <Field label="Amount" className="w-36">{(id) => <TextInput id={id} mono inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />}</Field>
-            <Field label="Max slippage">{(id) => (
-              <Select id={id} value={slippage} onChange={(e) => setSlippage(e.target.value)}>
-                {[["10", "0.1%"], ["50", "0.5%"], ["100", "1%"], ["300", "3%"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-              </Select>
-            )}</Field>
-            <Button type="submit" variant="primary" loading={quote.loading} disabled={!amount.trim() || !from.trim() || !to.trim()}>Get quote</Button>
-          </div>
-        </form>
-
-        {quote.error && <div className="mt-3"><ErrorNote message={quote.error} onRetry={() => onQuote()} /></div>}
-        {quote.data && <QuoteResult q={quote.data} from={from} to={to} />}
-      </Card>
-    </div>
+    <Card title="Prices" description={pricedAt ? `Mainnet, via Jupiter · updated ${timeAgo(pricedAt)}` : "Mainnet, via Jupiter"}
+      actions={<Button className="h-8" variant="ghost" icon={RefreshCw} onClick={load}>Refresh</Button>}>
+      {error ? <ErrorNote message={error} onRetry={load} /> : (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          {(prices ?? TOKENS.map(() => null)).map((p, i) => p ? (
+            <Stat key={p.mint} label={p.symbol ?? p.mint.slice(0, 6)} value={usd(p.usdPrice)}
+              sub={<span className={cx(p.priceChange24hPct != null && p.priceChange24hPct > 0 && "text-green-600 dark:text-green-400", p.priceChange24hPct != null && p.priceChange24hPct < 0 && "text-red-600 dark:text-red-400")}>{pct(p.priceChange24hPct)} 24h</span>} />
+          ) : <Skeleton key={i} className="h-[68px]" />)}
+        </div>
+      )}
+    </Card>
   );
 }
 
-function TokenInput({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
-  return (
-    <>
-      <TextInput id={id} mono list={`${id}-tokens`} value={value} onChange={(e) => onChange(e.target.value)} placeholder="SOL or mint address" />
-      <datalist id={`${id}-tokens`}>{TOKENS.map((t) => <option key={t} value={t} />)}</datalist>
-    </>
-  );
-}
-
-function QuoteResult({ q, from, to }: { q: Quote; from: string; to: string }) {
-  const label = (v: string) => (v.length > 10 ? `${v.slice(0, 4)}…` : v.toUpperCase());
+/** What a swap would fill at right now: output, rate, slippage floor, impact, route. */
+export function QuoteSummary({ q }: { q: Quote }) {
+  const inLabel = q.inSymbol ?? `${q.inputMint.slice(0, 4)}…`;
+  const outLabel = q.outSymbol ?? `${q.outputMint.slice(0, 4)}…`;
   const impactTone = q.priceImpactPct >= 1 ? "danger" : q.priceImpactPct >= 0.3 ? "warning" : "success";
   return (
-    <div className="mt-4 space-y-3 border-t border-[hsl(var(--border))]/60 pt-4">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="font-mono text-2xl font-semibold tabular-nums">{q.outUi}</span>
-        <span className={cx("text-sm", muted)}>{label(to)} for {q.inUi} {label(from)}</span>
+    <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <span className={cx("text-xs", muted)}>You get about</span>
+        <span className="font-mono text-xl font-semibold tabular-nums">{q.outUi}</span>
+        <span className="text-sm">{outLabel}</span>
+        <span className={cx("text-xs", muted)}>for {q.inUi} {inLabel}</span>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Stat label="Rate" value={`1 ${label(from)} = ${q.rate.toLocaleString(undefined, { maximumSignificantDigits: 6 })}`} />
-        <Stat label="Minimum received" value={q.minOutUi} sub={`after ${(q.slippageBps / 100).toString()}% slippage`} />
+      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+        <Stat wrap label="Rate" value={`1 ${inLabel} = ${q.rate.toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${outLabel}`} />
+        <Stat wrap label="At least" value={q.minOutUi} sub={`after ${q.slippageBps / 100}% slippage`} />
         <Stat label="Price impact" value={<Badge tone={impactTone}>{q.priceImpactPct < 0.01 ? "<0.01%" : `${q.priceImpactPct.toFixed(2)}%`}</Badge>} />
         <Stat label="Value" value={usd(q.usdValue)} />
       </div>

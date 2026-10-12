@@ -119,6 +119,78 @@ async function agentRelay(agentId: string, episodeId: string | null): Promise<{ 
   return { relay, ep };
 }
 
+/**
+ * What GET /agent/tools serves, so `guild_mod_tools dimos-bench` /
+ * `mod call dimos-bench …` work like every other mod's tools — not only the
+ * dedicated guild_sim_* MCP tools. Paths are relative to /api/mods/dimos-bench.
+ */
+const AGENT_TOOLS = [
+  {
+    name: "dimos_sim_observe",
+    description: "DimSim: what the robot sees in this agent's running attempt (an operator starts it in the DimSim panel with \"agent drives\" picked for this agent): camera image (base64 JPEG), pose, task, steps left, and on the first view a driving guide plus lessons from earlier attempts. With after, waits for a newer view. 404 = no attempt started for this agent yet.",
+    method: "GET", path: "drive",
+    input_schema: {
+      type: "object",
+      properties: {
+        episodeId: { type: "string", description: "Attempt id (default: this agent's newest running attempt)" },
+        after: { type: "integer", description: "Wait for a view newer than this seq" },
+      },
+    },
+  },
+  {
+    name: "dimos_sim_act",
+    description: "DimSim: one move on the view with this seq — turn in place (degrees, + = left), then walk forward (metres, -1..2) — or look (4-way photos), or done when the goal is reached. Returns the next view.",
+    method: "POST", path: "drive/act",
+    input_schema: {
+      type: "object",
+      properties: {
+        episodeId: { type: "string", description: "Attempt id from dimos_sim_observe" },
+        seq: { type: "integer", description: "seq of the view this move answers" },
+        turn: { type: "number", description: "Degrees to turn first, -180..180 (+ = left)" },
+        forward: { type: "number", description: "Metres to walk after turning, -1..2" },
+        look: { type: "boolean", description: "Photograph all four directions instead of moving" },
+        done: { type: "boolean", description: "The robot has reached the goal" },
+        thought: { type: "string", description: "What you see and why this move (shown in the panel)" },
+      },
+      required: ["episodeId", "seq"],
+    },
+  },
+  {
+    name: "dimos_sim_lesson",
+    description: "DimSim: after an attempt this agent drove has ended, save one or two sentences for next time (where the target and obstacles are). Later attempts read it back.",
+    method: "POST", path: "drive/lesson",
+    input_schema: {
+      type: "object",
+      properties: { episodeId: { type: "string" }, lesson: { type: "string" } },
+      required: ["episodeId", "lesson"],
+    },
+  },
+  {
+    name: "dimos_suites",
+    description: "dimOS eval suites that runs can be filed against.",
+    method: "GET", path: "suites",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "dimos_runs",
+    description: "Newest 50 eval runs (summaries only), optionally for one suite or agent ({agentId} = this agent).",
+    method: "GET", path: "runs",
+    input_schema: { type: "object", properties: { suite: { type: "string" }, agentId: { type: "string" } } },
+  },
+  {
+    name: "dimos_run_feedback",
+    description: "Failed/errored cases of a run plus earlier improvement notes, to plan the next generation.",
+    method: "GET", path: "runs/{runId}/feedback",
+    input_schema: { type: "object", properties: { runId: { type: "string" } }, required: ["runId"] },
+  },
+  {
+    name: "dimos_lineage",
+    description: "Score per generation of a lineage and a plateau / continue-or-stop signal.",
+    method: "GET", path: "lineages/{lineageId}",
+    input_schema: { type: "object", properties: { lineageId: { type: "string" } }, required: ["lineageId"] },
+  },
+];
+
 /** A run without its per-case rows — what list views need. */
 function brief(run: BenchRun): Omit<BenchRun, "results"> {
   const copy: Partial<BenchRun> = { ...run };
@@ -132,6 +204,21 @@ export default defineServerMod({
   },
 
   routes: {
+    /** GET /agent/tools — LLM tool definitions for the agent-facing routes. Public: describes routes, grants nothing. */
+    "GET /agent/tools": {
+      public: true,
+      handler: () => Response.json({
+        mod: "dimos-bench",
+        basePath: "/api/mods/dimos-bench",
+        auth: "Authorization: Bearer agt_… (mods:call scope), Ed25519 agent/sig/ts, or agentId/apiKey",
+        notes: [
+          "DimSim runs in the operator's browser: there is nothing to drive until they start an attempt for this agent in the DimSim panel with \"agent drives\" (own model). Then call dimos_sim_observe and answer each view with dimos_sim_act.",
+          "Eval runs are submitted by the python client in mods/dimos-bench/python (POST /runs, signed).",
+        ],
+        tools: AGENT_TOOLS,
+      }),
+    },
+
     /**
      * POST /runs — submit one `dimos evals run` result. Agent-signed only
      * (agent/sig/ts over "POST:/mods/dimos-bench/runs:<ts>"): the run is
