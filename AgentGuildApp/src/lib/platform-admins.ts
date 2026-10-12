@@ -9,12 +9,13 @@
 
 import { canonicalizeWalletAddress } from "./wallet-address";
 
+// Must stay literal `process.env.NEXT_PUBLIC_*` member accesses: a `typeof process`
+// guard makes the bundler swap in the process polyfill, which skips build-time
+// inlining and leaves the client-side admin set empty.
 const envValue =
-  typeof process !== "undefined"
-    ? process.env.NEXT_PUBLIC_PLATFORM_ADMIN_WALLETS ||
-      process.env.PLATFORM_ADMIN_WALLETS ||
-      ""
-    : "";
+  process.env.NEXT_PUBLIC_PLATFORM_ADMIN_WALLETS ||
+  process.env.PLATFORM_ADMIN_WALLETS ||
+  "";
 
 const PLATFORM_ADMIN_SET = new Set(
   envValue

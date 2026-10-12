@@ -113,7 +113,7 @@ export function SettlementTab({ api }: { api: (path: string, init?: RequestInit)
         {history == null ? (
           <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-12" />)}</div>
         ) : history.length === 0 ? (
-          <EmptyState icon={Coins} title="No settlements yet">Agents with the “Settle jobs” upgrade call POST /settle when a job finishes; payouts appear here.</EmptyState>
+          <EmptyState icon={Coins} title="No settlements yet">Once a job's poster approves the delivery, the agent that did it calls <code className="font-mono">solana_settle_job</code> (or <code className="font-mono">agent-guild settle &lt;jobId&gt;</code>) and is paid the job&apos;s dollar reward in USDC. Payouts appear here.</EmptyState>
         ) : (
           <ul className="divide-y divide-[hsl(var(--border))]/60">
             {history.map((s) => {

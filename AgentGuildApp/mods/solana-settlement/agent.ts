@@ -9,8 +9,8 @@
  * It only ever signs for devnet/testnet: `sendAsAgent` refuses mainnet, and
  * the cluster → RPC mapping is server-controlled (never a caller URL).
  */
-import { Connection, LAMPORTS_PER_SOL, PublicKey, type Keypair } from "@solana/web3.js";
-import { createMint, getOrCreateAssociatedTokenAccount, mintTo } from "@solana/spl-token";
+import { Connection, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction, type Keypair } from "@solana/web3.js";
+import { createMint, getMint, getOrCreateAssociatedTokenAccount, mintTo, transferChecked } from "@solana/spl-token";
 import type { RouteContext } from "@agent-guild/sdk";
 // Server-side capability reads must use the admin SDK: lib/skills.ts's
 // resolver uses the browser Firestore SDK, which is unauthenticated on the
@@ -20,7 +20,8 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { listAgentWallets, generateAgentWallet, getAgentWalletKeypair } from "@/lib/agent-wallets";
 import { enqueueTask, getTask, getAvailableWorkers } from "@/lib/gateway/store";
-import { PUBLIC_RPC, DevtoolsInputError, explorerUrl, parsePubkey } from "./devtools";
+import { PUBLIC_RPC, DevtoolsInputError, TOKEN_2022_PROGRAM, TOKEN_PROGRAM, explorerUrl, parsePubkey } from "./devtools";
+import { toRaw, toUi } from "./market";
 import { buildInstructions, computeBudgetInstructions, compileTransaction, decodeTxError, simulate, type InstructionSpec, type BuildOptions } from "./txbuilder";
 
 // ── Clusters ─────────────────────────────────────────────────────────────
@@ -140,17 +141,34 @@ export interface Activity {
   explorerUrl?: string;
 }
 
-// In-memory, like the settlement history: per-mod persistent storage isn't
-// built yet (docs/mod-sdk.md "Not built yet"). Survives until a restart.
-const activity: Activity[] = [];
+// Firestore (admin SDK only; the rules give browsers no access). Doc ids
+// sort newest-first, so one agent's feed is an equality filter on agentId
+// ordered by id — no composite index needed.
+const ACTIVITY = "solanaModActivity";
+const ACTIVITY_ID_CEILING = 9_999_999_999_999;
 
-export function logActivity(caller: Caller, entry: Omit<Activity, "at" | "agentId" | "orgId" | "via">): void {
-  activity.unshift({ at: new Date().toISOString(), agentId: caller.agentId, orgId: caller.orgId, via: caller.via, ...entry });
-  if (activity.length > 300) activity.length = 300;
+function activityId(at: number): string {
+  return `${String(ACTIVITY_ID_CEILING - at).padStart(13, "0")}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function activityFor(agentId: string, limit = 50): Activity[] {
-  return activity.filter((a) => a.agentId === agentId).slice(0, limit);
+/** Records what an agent did. Fire-and-forget: a failed log write never fails the action. */
+export function logActivity(caller: Caller, entry: Omit<Activity, "at" | "agentId" | "orgId" | "via">): void {
+  const now = Date.now();
+  const row: Activity = { at: new Date(now).toISOString(), agentId: caller.agentId, orgId: caller.orgId, via: caller.via, ...entry };
+  // Firestore rejects undefined fields.
+  const clean = Object.fromEntries(Object.entries(row).filter(([, v]) => v !== undefined));
+  void Promise.resolve()
+    .then(() => adminDb().collection(ACTIVITY).doc(activityId(now)).set(clean))
+    .catch((err) => console.warn("[solana] activity log write failed:", (err as Error).message));
+}
+
+export async function activityFor(agentId: string, orgId: string, limit = 50): Promise<Activity[]> {
+  const snap = await adminDb().collection(ACTIVITY)
+    .where("agentId", "==", agentId)
+    .orderBy("__name__")
+    .limit(limit)
+    .get();
+  return snap.docs.map((d) => d.data() as Activity).filter((a) => a.orgId === orgId);
 }
 
 // ── Dev wallet ───────────────────────────────────────────────────────────
@@ -288,6 +306,59 @@ export async function createTokenAsAgent(
     tokenAccount = ata.address.toBase58();
   }
   return { mint: mint.toBase58(), tokenAccount, mintedRaw: raw.toString(), explorerUrl: explorerUrl("address", mint.toBase58(), cluster) };
+}
+
+export interface TransferResult {
+  signature: string;
+  explorerUrl: string;
+  to: string;
+  /** null for SOL. */
+  mint: string | null;
+  amountRaw: string;
+  amountUi: string;
+  /** The recipient's token account (created if it didn't exist). */
+  recipientTokenAccount: string | null;
+}
+
+/**
+ * Sends SOL, or an SPL / Token-2022 token, from the agent's dev wallet.
+ * `amount` is in UI units ("1.5"). For tokens the recipient's associated
+ * token account is created (paid by the agent) when missing.
+ */
+export async function transferAsAgent(
+  caller: Caller,
+  cluster: ServerCluster,
+  params: { to: string; amount: string | number; mint?: string | null },
+): Promise<TransferResult> {
+  assertSigningCluster(cluster);
+  const to = parsePubkey(params.to, "to");
+  const conn = connectionFor(cluster);
+  const payer = await devKeypair(caller);
+
+  if (!params.mint) {
+    const raw = toRaw(params.amount, 9);
+    const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: to, lamports: raw }));
+    const signature = await sendAndConfirmTransaction(conn, tx, [payer], { commitment: "confirmed" });
+    return { signature, explorerUrl: explorerUrl("tx", signature, cluster), to: to.toBase58(), mint: null, amountRaw: raw.toString(), amountUi: toUi(raw.toString(), 9), recipientTokenAccount: null };
+  }
+
+  const mint = parsePubkey(params.mint, "mint");
+  const owner = (await conn.getAccountInfo(mint))?.owner.toBase58();
+  if (owner !== TOKEN_PROGRAM && owner !== TOKEN_2022_PROGRAM) throw new DevtoolsInputError(`${mint.toBase58()} is not a token mint on ${cluster}`);
+  const programId = new PublicKey(owner);
+  const { decimals } = await getMint(conn, mint, "confirmed", programId);
+  const raw = toRaw(params.amount, decimals);
+  const source = await getOrCreateAssociatedTokenAccount(conn, payer, mint, payer.publicKey, false, "confirmed", undefined, programId);
+  if (source.amount < raw) {
+    throw new DevtoolsInputError(`The dev wallet holds ${toUi(source.amount.toString(), decimals)} of this token — not enough to send ${toUi(raw.toString(), decimals)}`);
+  }
+  // allowOwnerOffCurve: the recipient may be a PDA (a vault, an escrow).
+  const dest = await getOrCreateAssociatedTokenAccount(conn, payer, mint, to, true, "confirmed", undefined, programId);
+  const signature = await transferChecked(conn, payer, source.address, mint, dest.address, payer, raw, decimals, [], { commitment: "confirmed" }, programId);
+  return {
+    signature, explorerUrl: explorerUrl("tx", signature, cluster), to: to.toBase58(), mint: mint.toBase58(),
+    amountRaw: raw.toString(), amountUi: toUi(raw.toString(), decimals), recipientTokenAccount: dest.address.toBase58(),
+  };
 }
 
 // ── Anchor sandbox ───────────────────────────────────────────────────────

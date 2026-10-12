@@ -9,7 +9,7 @@ import type { Cluster } from "./devtools";
 // CSS variables (--primary is the brand violet), so it follows light/dark
 // and the active skin without hardcoded colors.
 
-export type Tab = "agent" | "tx" | "account" | "idl" | "pda" | "error" | "simulate" | "anchor" | "network" | "settlement";
+export type Tab = "agent" | "tx" | "account" | "idl" | "pda" | "error" | "simulate" | "anchor" | "network" | "market" | "settlement";
 
 export interface SelectedAgent {
   agentId: string;

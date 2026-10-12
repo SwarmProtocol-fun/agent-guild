@@ -2,7 +2,9 @@ import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { settleOnChains, hashJobResult, getBalance, verifyReceipt } from "@/lib/settlement/registry";
 import { agentAlreadyRegistered, getAgentSlashingHistoryOnChain, mintIdentityToken } from "@/lib/solana/platform";
 import { getScoreEventHistoryForAsn } from "@/lib/solana/client";
-import { getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { getAgent, getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
+import { getJob } from "@/lib/jobs-admin";
+import { isPayable, parseUsdReward } from "@/lib/job-payouts";
 import {
   claimSolanaSettlement, getSolanaSettlement, listSolanaSettlements, markSolanaSettlementPaid,
   releaseSolanaSettlementClaim, saveSolanaSettlement, solanaSettlementTotal,
@@ -12,16 +14,17 @@ import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
   DevtoolsInputError, clusterStatus, inspectAccount, inspectTransaction, fetchIdl,
-  derivePda, decodeProgramError, parseErrorCode, priorityFees, rentExempt, explorerUrl,
+  derivePda, decodeProgramError, parseErrorCode, priorityFees, rentExempt, explorerUrl, walletHoldings, addressHistory,
   type SeedSpec,
 } from "./devtools";
 import type { InstructionSpec } from "./txbuilder";
 import {
   CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, requireCaller, resolveCaller, capabilityMap, hasCapability,
   logActivity, activityFor, getDevWallet, DEV_WALLET_LABEL, ensureDevWallet, sendAsAgent, simulateAsAgent, airdropToAgent,
-  createTokenAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
+  createTokenAsAgent, transferAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
 } from "./agent";
 import { AGENT_TOOLS } from "./tools";
+import { swapQuote, tokenPrices } from "./market";
 import { listAgentWallets } from "@/lib/agent-wallets";
 
 // ── Request helpers ──────────────────────────────────────────────────────
@@ -71,6 +74,15 @@ async function readTool<T extends object>(req: Request, ctx: RouteContext, descr
   });
 }
 
+/** "self" in an address slot means the calling agent's dev wallet. */
+async function resolveSelf(ctx: RouteContext, req: Request, address: string): Promise<string> {
+  if (address !== "self") return address;
+  const caller = await resolveCaller(ctx, query(req, "agentId"));
+  const wallet = await getDevWallet(caller);
+  if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet yet — create one first (solana_create_wallet)");
+  return wallet.address;
+}
+
 function receiptOf(record: SolanaSettlementRecord) {
   return {
     chain: "solana" as const,
@@ -89,6 +101,66 @@ async function callerOrgIds(ctx: RouteContext): Promise<string[]> {
   return orgs.map((org) => org.id);
 }
 
+// ── Settlement guards ────────────────────────────────────────────────────
+
+/** Mainnet USDC. Paying it from the platform wallet is opt-in (SOLANA_SETTLEMENT_ALLOW_MAINNET=1). */
+const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const DEFAULT_MAX_SETTLE_USDC = 100;
+
+function assertSettlementChainAllowed(): void {
+  const mainnet = process.env.SOLANA_USDC_MINT === MAINNET_USDC_MINT || /mainnet/i.test(process.env.SOLANA_RPC_URL ?? "");
+  if (mainnet && process.env.SOLANA_SETTLEMENT_ALLOW_MAINNET !== "1") {
+    throw new AccessError("Platform-paid settlement is disabled on mainnet (set SOLANA_SETTLEMENT_ALLOW_MAINNET=1 to allow it)", 403);
+  }
+}
+
+function maxSettleUsdc(): number {
+  const n = Number(process.env.SOLANA_SETTLEMENT_MAX_USDC);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_SETTLE_USDC;
+}
+
+/** The signed agent settles for itself; a session must own the agent's org. */
+async function settleCaller(ctx: RouteContext, agentIdHint: unknown): Promise<{ agentId: string; orgId: string }> {
+  if (ctx.agent) return { agentId: ctx.agent.agentId, orgId: ctx.agent.orgId };
+  if (!ctx.session) throw new AccessError("Authentication required", 401);
+  if (typeof agentIdHint !== "string" || !agentIdHint) throw new DevtoolsInputError("agentId is required for a browser session");
+  const agent = await getAgent(agentIdHint);
+  if (!agent) throw new NotFoundError("Agent not found");
+  const org = (await getOrganizationsByWalletAdmin(ctx.session.address)).find((o) => o.id === agent.orgId);
+  const isOwner = !!org?.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(ctx.session.address);
+  if (!isOwner) throw new AccessError("Only the owner of this agent's org can settle its jobs", 403);
+  return { agentId: agentIdHint, orgId: agent.orgId };
+}
+
+/** The job behind a settlement and what it pays — from Firestore, not the request. */
+async function payableJob(taskId: string, agentId: string, orgId: string) {
+  const [job, agent] = await Promise.all([getJob(taskId), getAgent(agentId)]);
+  if (!job || (job.orgId !== orgId && job.sellerOrgId !== orgId)) throw new NotFoundError(`No job ${taskId} in this org`);
+  if (!agent) throw new NotFoundError("Agent not found");
+  if (job.takenByAgentId !== agentId) throw new AccessError(`Job ${taskId} was not taken by agent ${agentId}`, 403);
+  if (job.status !== "completed" || !isPayable(job)) {
+    throw new AccessError(`Job ${taskId} isn't payable — it must be completed, approved by the poster, and not escrowed or prepaid`, 409);
+  }
+  const amount = parseUsdReward(job.reward);
+  if (amount == null) throw new DevtoolsInputError(`Job ${taskId} has no dollar reward ("${job.reward ?? ""}") to settle in USDC`);
+  if (amount > maxSettleUsdc()) throw new AccessError(`Job reward ${amount} USDC is over the ${maxSettleUsdc()} USDC settlement cap`, 403);
+  return { job, amount, agent };
+}
+
+/** The recipient must be one of the agent's own Solana wallets; defaults to its identity wallet. */
+async function settlementWallet(agentId: string, orgId: string, identity: string | undefined, requested: unknown): Promise<string> {
+  const custodial = (await listAgentWallets(agentId)).filter((w) => w.chain === "solana" && w.orgId === orgId).map((w) => w.publicKey);
+  const own = [...(identity ? [identity] : []), ...custodial];
+  if (requested == null || requested === "") {
+    if (!own.length) throw new DevtoolsInputError("This agent has no Solana wallet to pay — register its identity key or create a wallet");
+    return own[0];
+  }
+  if (typeof requested !== "string" || !own.includes(requested)) {
+    throw new AccessError("agentWallet must be one of this agent's own Solana wallets", 403);
+  }
+  return requested;
+}
+
 export default defineServerMod({
   setup(ctx) {
     ctx.log.info("solana-settlement mod loaded");
@@ -96,85 +168,86 @@ export default defineServerMod({
 
   routes: {
     /**
-     * POST /settle — called when a GatewayAgent job finishes. Expects the
-     * job's raw result so the receipt hash is computed the same way on
-     * every call, not trusted from the caller. Requires the calling agent
-     * to hold the "solana-settle" capability (installed via this plugin's
-     * SKILL_REGISTRY entry) — see docs/mod-sdk.md's capability system.
+     * POST /settle — pays an agent in USDC from the platform's Solana
+     * wallet for an approved job, with the job's receipt hash in a Memo.
      *
-     * Body: { orgId?, agentId?, agentWallet, taskId, exitCode, executionTimeMs,
-     *         stdout?, amountUsdc, creditScore, trustScore }
+     * Everything that moves money comes from server records, never the
+     * request: the job (taskId = a job id) must be completed, approved,
+     * taken by this agent and not paid another way; the amount is the
+     * job's dollar reward (capped by SOLANA_SETTLEMENT_MAX_USDC); the
+     * recipient must be one of the agent's own Solana wallets; the credit
+     * and trust scores written on-chain are the agent record's.
      *
-     * orgId/agentId are only read from the body as a fallback for browser
-     * sessions — a request carrying a verified agent signature (ctx.agent)
-     * always wins, so a session can't settle a payment on behalf of an
-     * agentId it merely typed into the request.
+     * Callers: the job's agent (signed), or the owner of that agent's org
+     * from a browser session.
+     *
+     * Body: { taskId, agentWallet?, agentId? (session only), amountUsdc? (must
+     *         match the reward if sent), exitCode?, executionTimeMs?, stdout? }
      */
-    "POST /settle": async (req, ctx) => {
-      const body = await req.json();
-      const agentId = ctx.agent?.agentId ?? body.agentId;
-      const orgId = ctx.agent?.orgId ?? body.orgId;
-      const { agentWallet, taskId, exitCode, executionTimeMs, stdout, amountUsdc, creditScore, trustScore } = body;
-      const amount = typeof amountUsdc === "number" ? amountUsdc : Number(amountUsdc);
+    "POST /settle": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const taskId = typeof b.taskId === "string" ? b.taskId.trim() : "";
+        if (!taskId) throw new DevtoolsInputError("taskId (the job id) is required");
 
-      if (!orgId || !agentId || !agentWallet || !taskId || amountUsdc == null || !Number.isFinite(amount)) {
-        return Response.json({ error: "orgId, agentId, agentWallet, taskId, amountUsdc are required" }, { status: 400 });
-      }
+        const { agentId, orgId } = await settleCaller(ctx, b.agentId);
+        if (!(await hasCapability(agentId, orgId, CAP.settle))) {
+          throw new AccessError(`Agent ${agentId} doesn't have the "${CAP.settle}" capability`, 403);
+        }
+        assertSettlementChainAllowed();
 
-      // Capability key must match the agentSkills id in lib/skills.ts. Resolved
-      // with the admin SDK (see agent.ts) — the browser-SDK resolver is denied server-side.
-      if (!(await hasCapability(agentId, orgId, CAP.settle))) {
-        return Response.json({ error: `Agent ${agentId} doesn't have the "${CAP.settle}" capability` }, { status: 403 });
-      }
+        const { job, amount, agent } = await payableJob(taskId, agentId, orgId);
+        if (b.amountUsdc != null && Number(b.amountUsdc) !== amount) {
+          throw new DevtoolsInputError(`amountUsdc ${b.amountUsdc} doesn't match job ${taskId}'s reward of ${amount} USDC`);
+        }
+        const agentWallet = await settlementWallet(agentId, orgId, agent.solanaAddress, b.agentWallet);
 
-      // Claim the task before paying. A retry finds the claim and returns
-      // the first receipt instead of sending a second USDC transfer.
-      const claim = await claimSolanaSettlement(agentId, taskId, orgId);
-      if (claim.state === "conflict") return Response.json({ error: "Task already settled for another org" }, { status: 409 });
-      if (claim.state === "pending") return Response.json({ error: "Settlement already in progress for this task" }, { status: 409 });
-      if (claim.state === "done") return Response.json({ receipt: receiptOf(claim.record), replayed: true, persisted: true });
+        // Claim the task before paying. A retry finds the claim and returns
+        // the first receipt instead of sending a second USDC transfer.
+        const claim = await claimSolanaSettlement(agentId, taskId, orgId);
+        if (claim.state === "conflict") return Response.json({ error: "Task already settled for another org" }, { status: 409 });
+        if (claim.state === "pending") return Response.json({ error: "Settlement already in progress for this task" }, { status: 409 });
+        if (claim.state === "done") return { receipt: receiptOf(claim.record), replayed: true, persisted: true };
 
-      const resultHash = hashJobResult({ taskId, exitCode: exitCode ?? 0, executionTimeMs: executionTimeMs ?? 0, stdout });
-
-      let settled: Awaited<ReturnType<typeof settleOnChains>>;
-      try {
-        settled = await settleOnChains(["solana"], {
-          agentId,
-          agentWallet,
-          taskId,
-          resultHash,
-          amountUsdc: amount,
-          creditScore: creditScore ?? 680,
-          trustScore: trustScore ?? 50,
+        const resultHash = hashJobResult({
+          taskId, exitCode: Number(b.exitCode ?? 0), executionTimeMs: Number(b.executionTimeMs ?? 0),
+          stdout: typeof b.stdout === "string" ? b.stdout : job.deliveryNotes,
         });
-      } catch (err) {
-        await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
-        throw err;
-      }
 
-      const { receipts, errors } = settled;
-      if (receipts.length === 0) {
-        await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
-        return Response.json({ error: "Settlement failed", details: errors }, { status: 502 });
-      }
+        let settled: Awaited<ReturnType<typeof settleOnChains>>;
+        try {
+          settled = await settleOnChains(["solana"], {
+            agentId, agentWallet, taskId, resultHash, amountUsdc: amount,
+            creditScore: agent.creditScore ?? 680,
+            trustScore: agent.trustScore ?? 50,
+          });
+        } catch (err) {
+          await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
+          throw err;
+        }
 
-      const receipt = receipts[0];
-      const record: SolanaSettlementRecord = {
-        orgId, agentId, taskId, txSig: receipt.txSig, explorerUrl: receipt.explorerUrl,
-        amountUsdc: amount, resultHash: receipt.receiptHash, reputationUpdated: Boolean(receipt.reputationUpdated),
-        at: new Date().toISOString(),
-      };
-      try {
-        await saveSolanaSettlement(record);
-      } catch (err) {
-        // The transfer already landed. Pin the sig on the claim so a retry
-        // returns this receipt and does not pay again.
-        await markSolanaSettlementPaid(record).catch(() => {});
-        return Response.json({ receipt, persisted: false, error: (err as Error).message });
-      }
+        const { receipts, errors } = settled;
+        if (receipts.length === 0) {
+          await releaseSolanaSettlementClaim(agentId, taskId).catch(() => {});
+          return Response.json({ error: "Settlement failed", details: errors }, { status: 502 });
+        }
 
-      return Response.json({ receipt, persisted: true });
-    },
+        const receipt = receipts[0];
+        const record: SolanaSettlementRecord = {
+          orgId, agentId, taskId, txSig: receipt.txSig, explorerUrl: receipt.explorerUrl,
+          amountUsdc: amount, resultHash: receipt.receiptHash, reputationUpdated: Boolean(receipt.reputationUpdated),
+          at: new Date().toISOString(),
+        };
+        try {
+          await saveSolanaSettlement(record);
+        } catch (err) {
+          // The transfer already landed. Pin the sig on the claim so a retry
+          // returns this receipt and does not pay again.
+          await markSolanaSettlementPaid(record).catch(() => {});
+          return { receipt, amountUsdc: amount, agentWallet, persisted: false, error: (err as Error).message };
+        }
+        return { receipt, amountUsdc: amount, agentWallet, persisted: true };
+      }),
 
     /** GET /history — this caller's orgs only. Rows survive a process restart. */
     "GET /history": async (_req, ctx) => ({ history: await listSolanaSettlements(await callerOrgIds(ctx)) }),
@@ -370,7 +443,7 @@ export default defineServerMod({
         const agentId = ctx.agent?.agentId ?? query(req, "agentId");
         if (!agentId) throw new DevtoolsInputError("agentId query param is required for a browser session");
         const caller = await resolveCaller(ctx, agentId);
-        return { activity: activityFor(caller.agentId) };
+        return { activity: await activityFor(caller.agentId, caller.orgId) };
       }),
 
     // ── Read & debug (every route takes ?cluster=devnet|testnet|mainnet-beta) ──
@@ -438,6 +511,46 @@ export default defineServerMod({
     /** GET /dev/rent/:bytes — rent-exempt minimum for an account of this size. */
     "GET /dev/rent/:bytes": (req, ctx) =>
       readTool(req, ctx, `rent for ${ctx.params.bytes} bytes`, async (conn) => ({ rent: await rentExempt(conn, Number(ctx.params.bytes)) })),
+
+    /** GET /dev/holdings/:address — SOL plus every non-empty SPL/Token-2022 balance. `self` = the agent's dev wallet. */
+    "GET /dev/holdings/:address": (req, ctx) =>
+      readTool(req, ctx, `holdings ${ctx.params.address}`, async (conn, cluster) => {
+        const holdings = await walletHoldings(conn, await resolveSelf(ctx, req, ctx.params.address));
+        return { holdings: { ...holdings, sol: holdings.lamports / LAMPORTS_PER_SOL }, explorerUrl: explorerUrl("address", holdings.address, cluster) };
+      }),
+
+    /** GET /dev/history/:address — recent transactions, newest first. ?limit=1–100&before=<signature> pages back. */
+    "GET /dev/history/:address": (req, ctx) =>
+      readTool(req, ctx, `history ${ctx.params.address}`, async (conn) => {
+        const address = await resolveSelf(ctx, req, ctx.params.address);
+        const limit = query(req, "limit");
+        const history = await addressHistory(conn, address, { limit: limit ? Number(limit) : undefined, before: query(req, "before") ?? undefined });
+        return { address, history, nextBefore: history.at(-1)?.signature ?? null };
+      }),
+
+    // ── Market data (mainnet, read-only, via Jupiter) ──────────────────
+
+    /** GET /market/price?mints=SOL,USDC,<mint> — USD prices and 24h change. */
+    "GET /market/price": (req, ctx) =>
+      handle(async () => {
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const mints = (query(req, "mints") ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+        const prices = await tokenPrices(mints);
+        if (caller) logActivity(caller, { action: "price", ok: true, summary: prices.map((p) => `${p.symbol ?? p.mint.slice(0, 6)} $${p.usdPrice ?? "?"}`).join(", ").slice(0, 160) });
+        return { prices };
+      }),
+
+    /** GET /market/quote?inputMint=SOL&outputMint=USDC&amount=1.5&slippageBps=50 — best mainnet swap route. Quote only; nothing is signed. */
+    "GET /market/quote": (req, ctx) =>
+      handle(async () => {
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const [inputMint, outputMint, amount] = ["inputMint", "outputMint", "amount"].map((k) => query(req, k));
+        if (!inputMint || !outputMint || !amount) throw new DevtoolsInputError("inputMint, outputMint and amount are required");
+        const slippage = query(req, "slippageBps");
+        const quote = await swapQuote({ inputMint, outputMint, amount, slippageBps: slippage ? Number(slippage) : undefined });
+        if (caller) logActivity(caller, { action: "quote", ok: true, summary: `${quote.inUi} → ${quote.outUi} via ${quote.route.join(" › ") || "?"}` });
+        return { quote };
+      }),
 
     // ── Build & simulate ────────────────────────────────────────────────
 
@@ -513,6 +626,21 @@ export default defineServerMod({
           ...(result.signature ? { signature: result.signature, explorerUrl: result.explorerUrl } : {}),
         });
         return { cluster, ...result };
+      }),
+
+    /** POST /dev/transfer — send SOL or a token from the agent's dev wallet. Body: { agentId?, cluster?, to, amount (UI units), mint? } */
+    "POST /dev/transfer": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.devnet);
+        const cluster = parseCluster(b.cluster);
+        if (typeof b.to !== "string" || b.amount == null) throw new DevtoolsInputError("to and amount are required");
+        const out = await transferAsAgent(caller, cluster, { to: b.to, amount: b.amount as string | number, mint: (b.mint as string | undefined) || null });
+        logActivity(caller, {
+          action: "transfer", cluster, ok: true, signature: out.signature, explorerUrl: out.explorerUrl,
+          summary: `${out.amountUi} ${out.mint ? out.mint.slice(0, 6) + "…" : "SOL"} → ${out.to.slice(0, 6)}…`,
+        });
+        return { cluster, ...out };
       }),
 
     /** POST /dev/token — create an SPL mint owned by the agent; optionally mint to itself. Body: { agentId?, cluster?, decimals?, mintAmount? } */

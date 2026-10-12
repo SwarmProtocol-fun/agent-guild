@@ -42,12 +42,15 @@ import { parseWalletIds } from "./wallet-ids";
 
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID;
 
-// EVM chains selectable in the wallet modal — kept short on purpose so the
-// network picker stays out of the way. Ethereum first: it's the network the
+// EVM chains registered with AppKit. Ethereum first: it's the network the
 // embedded wallet switches to for its EVM login account (EmbeddedEvmSync).
+// Sepolia (ETH lending pool) and Tempo (settlement payouts) are here because
+// embedded (email/social) wallets refuse raw wallet_switchEthereumChain and
+// can only move to networks AppKit knows — see useEvmSender. The account
+// menu is ours, so users never see AppKit's network picker anyway.
 // Other registry chains (Base, Avalanche, …) are still used server-side and by
 // the crypto checkout, which talks to the injected wallet directly.
-const WALLET_EVM_CHAINS = ["ethereum", "hyperliquid"] as const;
+const WALLET_EVM_CHAINS = ["ethereum", "hyperliquid", "sepolia", "tempo"] as const;
 const evmNetworks = WALLET_EVM_CHAINS
   .map((key) => CHAIN_CONFIGS[key])
   .filter((c) => c && c.chainId > 0)
@@ -362,30 +365,48 @@ function useSolanaMessageSigner(): SolanaMessageSigner | null {
 
 // Talks to the EIP-1193 provider directly so the target chain (e.g. Sepolia
 // for the ETH lending pool) needn't be one of the modal's selectable networks.
+// Embedded (email/social) wallets are the exception: their secure iframe
+// rejects wallet_switchEthereumChain ("Requested RPC call is not allowed"),
+// so they switch through AppKit, which only knows WALLET_EVM_CHAINS.
 function useEvmSender(): EvmSender | null {
-  const { address, isConnected } = useAppKitAccount({ namespace: "eip155" });
+  const { address, isConnected, embeddedWalletInfo } = useAppKitAccount({ namespace: "eip155" });
   const { walletProvider } = useAppKitProvider<EIP1193Provider>("eip155");
+  const { switchNetwork } = useAppKitNetwork();
   if (!isConnected || !address || !walletProvider) return null;
+  const ensureChain = async (chain: EvmChainParams) => {
+    if (Number(await walletProvider.request({ method: "eth_chainId" })) === chain.chainId) return;
+    if (embeddedWalletInfo) {
+      const network = evmNetworks.find((n) => Number(n.id) === chain.chainId);
+      if (!network) throw new Error(`Your email/social wallet can't switch to ${chain.name}. Connect an external wallet (e.g. MetaMask) to pay on this network.`);
+      await switchNetwork(network);
+      return;
+    }
+    await switchOrAddChain(walletProvider, chain);
+  };
   return {
     address,
     sendNativeTransfer: async ({ to, valueWei, chainId }) => {
-      const current = Number(await walletProvider.request({ method: "eth_chainId" }));
-      if (current !== chainId) {
-        await walletProvider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: toHex(chainId) }] });
-      }
+      await ensureChain(chainParamsFor(chainId));
       return walletProvider.request({
         method: "eth_sendTransaction",
         params: [{ from: address as `0x${string}`, to: to as `0x${string}`, value: toHex(valueWei) }],
       });
     },
     sendContractCall: async ({ to, data, chain }) => {
-      await switchOrAddChain(walletProvider, chain);
+      await ensureChain(chain);
       return walletProvider.request({
         method: "eth_sendTransaction",
         params: [{ from: address as `0x${string}`, to: to as `0x${string}`, data }],
       });
     },
   };
+}
+
+/** EIP-3085 params for a registry chain id (falls back to a bare id for unknown chains). */
+function chainParamsFor(chainId: number): EvmChainParams {
+  const c = Object.values(CHAIN_CONFIGS).find((cfg) => cfg.chainId === chainId);
+  if (!c) return { chainId, name: `chain ${chainId}`, nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 }, rpcUrl: "" };
+  return { chainId, name: c.name, nativeCurrency: c.nativeCurrency, rpcUrl: c.rpc, explorerUrl: c.explorer.baseUrl };
 }
 
 /** Switch to `chain`; if the wallet has never seen it (EIP-3085 code 4902), add it and switch. */

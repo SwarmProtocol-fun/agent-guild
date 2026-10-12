@@ -3049,9 +3049,9 @@ async function cmdAssignments() {
 }
 
 /**
- * agent-guild settle <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]
+ * agent-guild settle <jobId> [--amount <usdc>] [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]
  *
- * Settles a finished job on Solana devnet: a real SPL USDC-devnet transfer to
+ * Settles an approved job on Solana devnet: a real SPL USDC-devnet transfer to
  * this agent's own wallet (deterministic from its Ed25519 identity key — see
  * solanaAddressFromEd25519Pem) plus an on-chain Memo receipt, via the
  * solana-settlement mod's POST /settle. Authenticates the same Ed25519 way
@@ -3059,9 +3059,12 @@ async function cmdAssignments() {
  * "POST:/mods/solana-settlement/settle:<ts>" — which the mod dispatcher
  * verifies the same way /api/v1/* does (see AgentGuildApp/src/lib/mods/runtime.ts).
  *
- * This agent's org must have the "solana-settlement" mod installed, or the
- * hub returns 403 — that's an org-admin action, not something this command
- * can grant itself.
+ * The hub pays the job's own dollar reward (--amount is only a check that
+ * it matches) and writes the agent record's scores, so the job must be
+ * completed, approved by its poster and taken by this agent. This agent's
+ * org must have the "solana-settlement" mod installed, or the hub returns
+ * 403 — that's an org-admin action, not something this command can grant
+ * itself.
  */
 // ---------------------------------------------------------------------------
 // DimSim driving (`agent-guild sim …`) — the dimos-bench mod's drive relay.
@@ -3424,15 +3427,14 @@ async function cmdSim() {
 
 async function cmdSettle() {
   const taskId = process.argv[3];
-  const amountUsdc = parseFloat(arg("--amount"));
+  const amountArg = arg("--amount");
+  const amountUsdc = amountArg == null ? null : parseFloat(amountArg);
   const exitCode = parseInt(arg("--exit-code") || "0", 10);
   const executionTimeMs = parseInt(arg("--exec-ms") || "0", 10);
   const stdout = arg("--stdout");
-  const creditScore = arg("--credit-score");
-  const trustScore = arg("--trust-score");
 
-  if (!taskId || !Number.isFinite(amountUsdc)) {
-    console.error('Usage: agent-guild settle <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]');
+  if (!taskId || (amountUsdc != null && !Number.isFinite(amountUsdc))) {
+    console.error('Usage: agent-guild settle <jobId> [--amount <usdc>] [--exit-code <n>] [--exec-ms <n>] [--stdout "<text>"]');
     process.exit(1);
   }
 
@@ -3455,9 +3457,7 @@ async function cmdSettle() {
         exitCode,
         executionTimeMs,
         ...(stdout ? { stdout } : {}),
-        amountUsdc,
-        ...(creditScore ? { creditScore: parseInt(creditScore, 10) } : {}),
-        ...(trustScore ? { trustScore: parseInt(trustScore, 10) } : {}),
+        ...(amountUsdc != null ? { amountUsdc } : {}),
       }),
     }
   );
@@ -3471,9 +3471,9 @@ async function cmdSettle() {
     process.exit(1);
   }
 
-  const { receipt } = await resp.json();
-  console.log(`Settled ${amountUsdc} USDC (devnet) for task ${taskId}`);
-  console.log(`  Wallet:    ${agentWallet}`);
+  const { receipt, amountUsdc: paid, agentWallet: paidTo, replayed } = await resp.json();
+  console.log(`${replayed ? "Already settled" : "Settled"} ${paid ?? amountUsdc ?? "?"} USDC (devnet) for job ${taskId}`);
+  console.log(`  Wallet:    ${paidTo ?? agentWallet}`);
   console.log(`  Tx:        ${receipt.txSig}`);
   console.log(`  Explorer:  ${receipt.explorerUrl}`);
   console.log(`  Receipt:   ${receipt.receiptHash}`);
@@ -6384,7 +6384,7 @@ Task Assignment Commands:
   reject      <assignmentId> "<reason>"                  — reject a pending assignment
   complete    <assignmentId> [--notes "..."]             — mark assignment as completed
   assignments [--status pending] [--limit 20]            — list your assignments
-  settle      <taskId> --amount <usdc> [--exit-code <n>] [--exec-ms <n>] [--stdout "..."]  — settle a finished job on Solana devnet (USDC + on-chain receipt)
+  settle      <jobId> [--amount <usdc>] [--exit-code <n>] [--exec-ms <n>] [--stdout "..."]  — get paid the reward for an approved job on Solana devnet (USDC + on-chain receipt)
   work-mode   [available|busy|offline|paused] [--capacity N] [--auto-accept]  — manage work mode
 
 Gig Order Commands (job-board / marketplace orders assigned to you — see /jobs, /gigs):

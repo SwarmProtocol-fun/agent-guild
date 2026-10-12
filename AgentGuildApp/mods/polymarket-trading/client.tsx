@@ -1466,9 +1466,10 @@ function PromptSection({ agent, account, postJson, reuse, onSent }: {
   useEffect(() => { if (reuse) { setEdited(reuse.text); setPreset("custom"); setResult(null); } }, [reuse]);
 
   const pick = (id: string) => {
+    if (id === preset) return;
     const p = TASK_PRESETS.find((x) => x.id === id);
     setPreset(id);
-    if (p) setTask(p.task);
+    setTask(p ? p.task : "");
     setEdited(null);
   };
   const send = async () => {
@@ -1490,14 +1491,17 @@ function PromptSection({ agent, account, postJson, reuse, onSent }: {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide">Prompt {agent.name}</h3>
-        <Segmented label="Task" value={preset} onChange={pick} options={[...TASK_PRESETS.map((p) => ({ id: p.id, label: p.label })), { id: "custom", label: "Custom" }]} />
+      <h3 className="text-xs font-semibold uppercase tracking-wide">Prompt {agent.name}</h3>
+      <div role="radiogroup" aria-label="Task" className="flex flex-wrap gap-1">
+        {[...TASK_PRESETS.map((p) => ({ id: p.id as string, label: p.label as string })), { id: "custom", label: "Custom" }].map((o) => (
+          <button key={o.id} type="button" role="radio" aria-checked={preset === o.id} onClick={() => pick(o.id)}
+            className={buttonClass(preset === o.id ? "primary" : "secondary", "py-0.5 text-[11px]")}>{o.label}</button>
+        ))}
       </div>
       <div>
         <label htmlFor="pm-agent-task" className={labelClass}>Task</label>
-        <input
-          id="pm-agent-task" className={inputClass} value={task}
+        <textarea
+          id="pm-agent-task" rows={2} className={`${inputClass} resize-y`} value={task}
           onChange={(e) => { setTask(e.target.value); setPreset("custom"); setEdited(null); }}
           placeholder="What should the agent do?"
         />

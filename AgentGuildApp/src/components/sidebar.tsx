@@ -16,13 +16,14 @@ import {
   Command, Coins, Stethoscope, Brain, UserCog, Network, HardDrive, BookOpen, Store, Building2,
   Link as LinkIcon, Zap, Palette, Megaphone, Wrench, Plug, Puzzle, Sparkles,
   Monitor, Globe, Code as CodeIcon, Bot, ShieldAlert, Flag, Package, History,
-  TrendingUp, DollarSign, Settings2, Database,
+  DollarSign, Settings2, Database,
   Star, Search, X, Hexagon, Upload, Layers, Diamond, Landmark, Dumbbell,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MaturityBadge } from "@/components/ui/maturity-badge";
 import { MOD_MANIFESTS } from "@/lib/mods/generated/manifests";
 import { HIDDEN_MOD_IDS, HIDDEN_NAV_IDS } from "@/lib/hidden-features";
+import { isPlatformAdmin } from "@/lib/platform-admins";
 
 /** Map iconName strings from sidebarConfig to lucide components */
 const ICON_MAP: Record<string, typeof LayoutDashboard> = {
@@ -119,8 +120,7 @@ const ALL_SECTIONS: NavSection[] = [
     collapsible: true,
     items: [
       { id: "dashboard", href: "/dashboard", label: "Dashboard", icon: BarChart3, maturity: "production" },
-      { id: "credit", href: "/analytics/credit", label: "Credit", icon: TrendingUp, maturity: "production" },
-      { id: "lending", href: "/lending", label: "Lending", icon: Landmark, maturity: "beta" },
+      { id: "lending", href: "/lending", label: "Credit & Lending", icon: Landmark, maturity: "beta" },
       { id: "activity", href: "/activity", label: "Activity", icon: Activity, maturity: "production" },
       { id: "doctor", href: "/doctor", label: "Health", icon: Stethoscope, maturity: "production" },
       { id: "agent-map", href: "/agent-map", label: "Agent Map", icon: Map, maturity: "production" },
@@ -210,6 +210,7 @@ const PLATFORM_ADMIN_ADDRESS = (process.env.NEXT_PUBLIC_ADMIN_ADDRESS || "").toL
 
 function isAdminAddress(addr: string | null | undefined): boolean {
   if (!addr) return false;
+  if (isPlatformAdmin(addr)) return true;
   const lower = addr.toLowerCase();
   return lower === PLATFORM_ADMIN_ADDRESS
     || lower === "0x723708273e811a07d90d2e81e799b9ab27f0b549"

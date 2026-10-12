@@ -607,12 +607,11 @@ describe("module setup", () => {
     expect(w.createAppKit.mock.calls[0][0].defaultNetwork).toMatchObject({ id: 1 });
   });
 
-  it("only exposes Ethereum, Hyperliquid and Solana Devnet in the modal", async () => {
+  it("registers Ethereum (first), Hyperliquid, Sepolia, Tempo and Solana Devnet", async () => {
     await loadAdapter();
     const ids = w.createAppKit.mock.calls[0][0].networks.map((n: { id: unknown }) => n.id);
     expect(ids[0]).toBe(1);
-    expect(ids).toHaveLength(3);
-    expect(ids[2]).toBe(SOLANA_DEVNET.id);
+    expect(ids).toEqual([1, 998, 11155111, 42431, SOLANA_DEVNET.id]);
   });
 
   it("the remembered login chain survives clearWalletStorage", async () => {
@@ -637,5 +636,72 @@ describe("module setup", () => {
       process.env.NEXT_PUBLIC_REOWN_PROJECT_ID = prev;
       warn.mockRestore();
     }
+  });
+});
+
+describe("useEvmSender — chain switching", () => {
+  const TEMPO = { chainId: 42431, name: "Tempo Testnet (Moderato)", rpcUrl: "https://rpc.moderato.tempo.xyz", nativeCurrency: { name: "Tempo", symbol: "TEMPO", decimals: 18 } };
+  const UNKNOWN = { ...TEMPO, chainId: 777777, name: "Nowhere Chain" };
+
+  /** EVM provider on `chainId` that rejects wallet_switchEthereumChain like the embedded wallet's iframe. */
+  function provider(chainId: number) {
+    return {
+      request: vi.fn(async ({ method }: { method: string }) => {
+        if (method === "eth_chainId") return `0x${chainId.toString(16)}`;
+        if (method === "wallet_switchEthereumChain") throw new Error("Requested RPC call is not allowed");
+        if (method === "eth_sendTransaction") return "0xtx";
+        return null;
+      }),
+    };
+  }
+
+  it("embedded wallet switches to Tempo through AppKit, never the raw RPC", async () => {
+    embeddedBoth("eip155");
+    const p = provider(1);
+    w.providers.eip155 = p;
+    const a = await loadAdapter();
+    const { result } = renderHook(() => a.useEvmSender!());
+    await expect(result.current!.sendContractCall({ to: EVM, data: "0xabcd", chain: TEMPO })).resolves.toBe("0xtx");
+    expect(w.switchNetwork).toHaveBeenCalledTimes(1);
+    expect(w.switchNetwork.mock.calls[0][0]).toMatchObject({ id: 42431 });
+    expect(p.request.mock.calls.map(([r]) => r.method)).not.toContain("wallet_switchEthereumChain");
+  });
+
+  it("embedded wallet switches to Sepolia through AppKit for native transfers", async () => {
+    embeddedBoth("eip155");
+    w.providers.eip155 = provider(1);
+    const a = await loadAdapter();
+    const { result } = renderHook(() => a.useEvmSender!());
+    await result.current!.sendNativeTransfer({ to: EVM, valueWei: 1n, chainId: 11155111 });
+    expect(w.switchNetwork.mock.calls[0][0]).toMatchObject({ id: 11155111 });
+  });
+
+  it("embedded wallet gets a clear error for a chain AppKit doesn't know", async () => {
+    embeddedBoth("eip155");
+    w.providers.eip155 = provider(1);
+    const a = await loadAdapter();
+    const { result } = renderHook(() => a.useEvmSender!());
+    await expect(result.current!.sendContractCall({ to: EVM, data: "0x", chain: UNKNOWN })).rejects.toThrow(/can't switch to Nowhere Chain/);
+    expect(w.switchNetwork).not.toHaveBeenCalled();
+  });
+
+  it("skips switching when already on the chain", async () => {
+    embeddedBoth("eip155");
+    w.providers.eip155 = provider(42431);
+    const a = await loadAdapter();
+    const { result } = renderHook(() => a.useEvmSender!());
+    await result.current!.sendContractCall({ to: EVM, data: "0x", chain: TEMPO });
+    expect(w.switchNetwork).not.toHaveBeenCalled();
+  });
+
+  it("external wallets still switch via wallet_switchEthereumChain", async () => {
+    w.accounts.eip155 = { isConnected: true, address: EVM, status: "connected" };
+    const p = { request: vi.fn(async ({ method }: { method: string }) => (method === "eth_chainId" ? "0x1" : "0xtx")) };
+    w.providers.eip155 = p;
+    const a = await loadAdapter();
+    const { result } = renderHook(() => a.useEvmSender!());
+    await result.current!.sendContractCall({ to: EVM, data: "0x", chain: TEMPO });
+    expect(p.request).toHaveBeenCalledWith({ method: "wallet_switchEthereumChain", params: [{ chainId: "0xa5bf" }] });
+    expect(w.switchNetwork).not.toHaveBeenCalled();
   });
 });

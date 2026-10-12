@@ -6,8 +6,27 @@ import type { ServerMod, RouteContext } from "../sdk";
 const granted = new Set<string>();
 
 const updateInstall = vi.fn(async (_data: unknown) => {});
+// Activity rows, keyed by doc id like the real collection.
+const activityRows = vi.hoisted(() => new Map<string, Record<string, unknown>>());
 vi.mock("@/lib/firebase-admin", () => ({
-  adminDb: () => ({ collection: () => ({ doc: () => ({ update: (d: unknown) => updateInstall(d) }) }) }),
+  adminDb: () => ({
+    collection: (name: string) => ({
+      doc: (id: string) => ({
+        update: (d: unknown) => updateInstall(d),
+        set: async (d: Record<string, unknown>) => { if (name === "solanaModActivity") activityRows.set(id, d); },
+      }),
+      where: (field: string, _op: string, value: unknown) => ({
+        orderBy: () => ({
+          limit: (n: number) => ({
+            get: async () => ({
+              docs: [...activityRows.entries()].sort(([a], [b]) => a.localeCompare(b))
+                .filter(([, d]) => d[field] === value).slice(0, n).map(([, d]) => ({ data: () => d })),
+            }),
+          }),
+        }),
+      }),
+    }),
+  }),
 }));
 vi.mock("@/lib/settlement/registry", () => ({ settleOnChains: vi.fn(), hashJobResult: vi.fn(), getBalance: vi.fn(), verifyReceipt: vi.fn() }));
 vi.mock("@/lib/solana/platform", () => ({ agentAlreadyRegistered: vi.fn(), getAgentSlashingHistoryOnChain: vi.fn(), mintIdentityToken: vi.fn() }));
@@ -206,5 +225,63 @@ describe("discovery and upgrades", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).enabled).toEqual(["solana-dev-inspect", "solana-dev-simulate", "solana-dev-devnet", "solana-dev-anchor"]);
     expect(updateInstall).toHaveBeenCalledWith({ enabledCapabilities: ["solana-settlement", "solana-dev-inspect", "solana-dev-simulate", "solana-dev-devnet", "solana-dev-anchor"] });
+  });
+});
+
+describe("activity log", () => {
+  beforeEach(() => activityRows.clear());
+
+  it("persists what the agent did, newest first, scoped to its org", async () => {
+    granted.add("solana-dev-inspect");
+    await call("POST", "/dev/pda", AGENT_CTX, { programId: "11111111111111111111111111111111", seeds: [{ type: "string", value: "a" }] });
+    await new Promise((r) => setTimeout(r, 5));
+    await call("POST", "/dev/pda", AGENT_CTX, { programId: "11111111111111111111111111111111", seeds: [{ type: "string", value: "b" }] });
+    await vi.waitFor(() => expect(activityRows.size).toBe(2));
+    // A row from another org with the same agent id must not leak in.
+    activityRows.set("0", { agentId: "a1", orgId: "other", action: "send", ok: true, summary: "x", at: "" });
+
+    const res = await call("GET", "/activity", AGENT_CTX);
+    const { activity } = await res.json();
+    expect(activity).toHaveLength(2);
+    expect(activity.every((a: { orgId: string; action: string }) => a.orgId === "o1" && a.action === "derive-pda")).toBe(true);
+    expect(new Date(activity[0].at).getTime()).toBeGreaterThanOrEqual(new Date(activity[1].at).getTime());
+  });
+});
+
+describe("wallet, history and transfer tools", () => {
+  it("transfer needs the devnet upgrade and refuses mainnet", async () => {
+    const to = Keypair.generate().publicKey.toBase58();
+    expect((await call("POST", "/dev/transfer", AGENT_CTX, { to, amount: "0.1" })).status).toBe(403);
+    granted.add("solana-dev-devnet");
+    const res = await call("POST", "/dev/transfer", AGENT_CTX, { to, amount: "0.1", cluster: "mainnet-beta" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/only signs on devnet\/testnet/);
+    expect((await call("POST", "/dev/transfer", AGENT_CTX, { amount: "0.1" })).status).toBe(400);
+  });
+
+  it("holdings and history need the inspect upgrade for agents", async () => {
+    expect((await call("GET", "/dev/holdings/self", AGENT_CTX)).status).toBe(403);
+    expect((await call("GET", "/dev/history/self", AGENT_CTX)).status).toBe(403);
+  });
+
+  it("\"self\" fails clearly when the agent has no dev wallet", async () => {
+    granted.add("solana-dev-inspect");
+    listAgentWallets.mockImplementation(async () => []);
+    const res = await call("GET", "/dev/holdings/self", AGENT_CTX);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/no dev wallet/);
+  });
+
+  it("market tools validate input before calling out", async () => {
+    granted.add("solana-dev-inspect");
+    expect((await call("GET", "/market/quote?inputMint=SOL", AGENT_CTX)).status).toBe(400);
+    expect((await call("GET", "/market/price", AGENT_CTX)).status).toBe(400);
+  });
+
+  it("lists solana_settle_job so agents can get paid without the CLI", async () => {
+    const { tools } = await (await call("GET", "/agent/tools", { agent: null, session: null })).json();
+    const settle = tools.find((t: { name: string }) => t.name === "solana_settle_job");
+    expect(settle).toMatchObject({ method: "POST", path: "settle", capability: "solana-settlement" });
+    expect(settle.input_schema.properties.amountUsdc).toBeUndefined();
   });
 });

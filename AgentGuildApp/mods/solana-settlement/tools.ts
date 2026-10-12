@@ -133,6 +133,46 @@ export const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: { cluster } },
   },
 
+  {
+    name: "solana_holdings",
+    description: "A wallet's SOL balance and every non-empty SPL Token / Token-2022 balance (mint, symbol when known, UI amount, token account). Pass address \"self\" for this agent's dev wallet.",
+    method: "GET", path: "dev/holdings/{address}", capability: CAP.inspect,
+    input_schema: { type: "object", properties: { address: { type: "string", description: "Wallet address (base58), or \"self\"" }, cluster }, required: ["address"] },
+  },
+  {
+    name: "solana_history",
+    description: "Recent transactions touching an address, newest first: signature, time, success/failure, memo. Page back with before=<nextBefore>. Inspect any signature with solana_inspect_transaction. Pass address \"self\" for this agent's dev wallet.",
+    method: "GET", path: "dev/history/{address}", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: { address: { type: "string", description: "Address (base58), or \"self\"" }, limit: { type: "integer", minimum: 1, maximum: 100, description: "Defaults to 20." }, before: { type: "string", description: "Signature to page back from" }, cluster },
+      required: ["address"],
+    },
+  },
+
+  // ── Market data (mainnet, read-only) ──
+  {
+    name: "solana_token_price",
+    description: "Live USD price and 24h change for up to 20 mainnet tokens, from Jupiter. Accepts symbols (SOL, USDC, USDT, JUP, BONK) or mint addresses.",
+    method: "GET", path: "market/price", capability: CAP.inspect,
+    input_schema: { type: "object", properties: { mints: { type: "string", description: "Comma-separated, e.g. \"SOL,USDC\"" } }, required: ["mints"] },
+  },
+  {
+    name: "solana_swap_quote",
+    description: "Best mainnet swap route from Jupiter for an amount of one token into another: output amount, worst case after slippage, rate, price impact, USD value and the DEXes routed through. Information only — nothing is signed or traded.",
+    method: "GET", path: "market/quote", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        inputMint: { type: "string", description: "Symbol (SOL, USDC…) or mint address" },
+        outputMint: { type: "string", description: "Symbol or mint address" },
+        amount: { type: "string", description: "Amount of the input token in UI units, e.g. \"1.5\"" },
+        slippageBps: { type: "integer", minimum: 1, maximum: 1000, description: "Defaults to 50 (0.5%)." },
+      },
+      required: ["inputMint", "outputMint", "amount"],
+    },
+  },
+
   // ── Build & simulate ──
   {
     name: "solana_simulate",
@@ -163,6 +203,21 @@ export const AGENT_TOOLS: AgentTool[] = [
     description: "Simulate, then sign with the agent's dev wallet and send a transaction on devnet/testnet. Same instruction format as solana_simulate. If simulation fails nothing is sent and the decoded error is returned. Returns the signature, explorer link, CU used, logs and the addresses of any new:<label> accounts.",
     method: "POST", path: "dev/send", capability: CAP.devnet,
     input_schema: { type: "object", properties: { instructions, cluster: signingCluster, ...budget }, required: ["instructions"] },
+  },
+  {
+    name: "solana_transfer",
+    description: "Send SOL, or an SPL / Token-2022 token (pass its mint), from the agent's dev wallet on devnet/testnet. Amount is in UI units. For tokens the recipient's token account is created if missing. Simpler than solana_send for plain payments.",
+    method: "POST", path: "dev/transfer", capability: CAP.devnet,
+    input_schema: {
+      type: "object",
+      properties: {
+        to: address("Recipient wallet"),
+        amount: { type: "string", description: "UI amount, e.g. \"0.25\"" },
+        mint: address("Token mint — omit to send SOL"),
+        cluster: signingCluster,
+      },
+      required: ["to", "amount"],
+    },
   },
   {
     name: "solana_create_token",
@@ -197,5 +252,20 @@ export const AGENT_TOOLS: AgentTool[] = [
     description: "Status of an Anchor job: queued/claimed/running/completed/failed, and when done the exit code, compiler/test log tail, generated IDLs, program ids, .so sizes and (for deploy) the deploy signature.",
     method: "GET", path: "dev/anchor/{taskId}", capability: CAP.anchor,
     input_schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
+  },
+
+  // ── Get paid ──
+  {
+    name: "solana_settle_job",
+    description: "Get paid for a job this agent finished: once the poster approved it, the platform sends the job's dollar reward in USDC (devnet) to this agent's Solana wallet with an on-chain receipt. The amount comes from the job — you only name it. Safe to retry; a settled job returns its first receipt.",
+    method: "POST", path: "settle", capability: CAP.settle,
+    input_schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "The job id" },
+        agentWallet: address("Which of this agent's own Solana wallets to pay — defaults to its identity wallet"),
+      },
+      required: ["taskId"],
+    },
   },
 ];

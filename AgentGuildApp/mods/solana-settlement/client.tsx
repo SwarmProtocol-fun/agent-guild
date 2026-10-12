@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Connection } from "@solana/web3.js";
 import {
-  Activity, Bot, Bug, ChevronsUpDown, Coins, FileCode, Fingerprint, FlaskConical, Hammer, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
+  Activity, Bot, Bug, ChevronsUpDown, Coins, FileCode, Fingerprint, FlaskConical, Hammer, LineChart, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
@@ -13,6 +13,7 @@ import { AgentAvatar, AgentTab, type AgentsState } from "./agent-tab";
 import { SimulateTab } from "./simulate-tab";
 import { AnchorTab } from "./anchor-tab";
 import { SettlementTab } from "./settlement-tab";
+import { MarketTab } from "./market-tab";
 import { Button, Notice, TextInput, cx, muted, type Env, type Seed, type SelectedAgent, type Tab } from "./ui";
 
 // The Solana panel shell. The sidebar's agent switcher decides who the
@@ -39,7 +40,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { id: "anchor", label: "Anchor programs", icon: Hammer, capability: "solana-dev-anchor" },
     ],
   },
-  { group: "Chain", items: [{ id: "network", label: "Network", icon: Activity }, { id: "settlement", label: "Settlement", icon: Coins, capability: "solana-settlement" }] },
+  { group: "Chain", items: [{ id: "network", label: "Network", icon: Activity }, { id: "market", label: "Market", icon: LineChart }, { id: "settlement", label: "Settlement", icon: Coins, capability: "solana-settlement" }] },
 ];
 
 const CLUSTERS: { id: Cluster; label: string }[] = [
@@ -267,7 +268,7 @@ function SolanaPanel({ modId, address, api }: PanelProps) {
             )}
           </div>
 
-          <nav aria-label="Solana tools" className="-mx-4 overflow-x-auto px-4 lg:mx-0 lg:overflow-visible lg:px-0">
+          <nav aria-label="Solana tools" className="-mx-4 overflow-x-auto px-4 [scrollbar-width:none] lg:mx-0 lg:overflow-visible lg:px-0 [&::-webkit-scrollbar]:hidden">
             <div className="flex gap-1 lg:block lg:space-y-4">
               {NAV.map((g) => (
                 <div key={g.group} className="flex gap-1 lg:block lg:space-y-0.5">
@@ -313,6 +314,7 @@ function SolanaPanel({ modId, address, api }: PanelProps) {
               <div hidden={tab !== "simulate"}><SimulateTab env={env} /></div>
               <div hidden={tab !== "anchor"}><AnchorTab env={env} seed={seeds.anchor} /></div>
               <div hidden={tab !== "network"}><NetworkTool env={env} status={status} address={agent?.devWallet ?? address} /></div>
+              <div hidden={tab !== "market"}><MarketTab api={api} /></div>
               <div hidden={tab !== "settlement"}><SettlementTab api={api} /></div>
             </div>
           )}

@@ -1,6 +1,7 @@
 /**
- * Lending Marketplace — browse and fund community pools or individual (solo)
- * loan requests from agents, and track your own positions/returns.
+ * Credit & Lending — agent credit scores, plus the lending marketplace: browse
+ * and fund community pools or individual (solo) loan requests from agents, and
+ * track your own positions/returns. /analytics/credit redirects to ?tab=credit.
  *
  * Route: /lending
  */
@@ -23,6 +24,7 @@ import { db } from "@/lib/firebase";
 import { OnChainSendStep } from "@/components/lending/onchain-send-step";
 import { CreateLoanOfferDialog } from "@/components/lending/create-loan-offer-dialog";
 import { BorrowPanel } from "@/components/lending/borrow-panel";
+import { AgentCreditPanel } from "@/components/credit/agent-credit-panel";
 import type { Agent } from "@/lib/firestore";
 import type { LendingPayout, LendingPool, Loan, LoanOffer, PoolPosition, PoolWithdrawalRequest } from "@/lib/lending/types";
 import { poolSharePrice as sharePrice, freeShares, poolSupplyApy, poolUtilization, positionEarnings } from "@/lib/lending/math";
@@ -33,7 +35,8 @@ import { useWalletTransfer } from "@/components/lending/use-wallet-transfer";
 import { walletLinkMessage } from "@/lib/solana/wallet-link";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 
-type Tab = "borrow" | "pools" | "fund" | "offers" | "positions";
+type Tab = "credit" | "borrow" | "pools" | "fund" | "offers" | "positions";
+const TABS: readonly Tab[] = ["credit", "borrow", "pools", "fund", "offers", "positions"];
 
 function fmt(n: number): string {
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -127,6 +130,12 @@ export default function LendingMarketplacePage() {
         load();
     }, [load, refreshKey]);
 
+    // Deep link: /lending?tab=credit (the old /analytics/credit route redirects here).
+    useEffect(() => {
+        const tab = new URLSearchParams(window.location.search).get("tab") as Tab | null;
+        if (tab && TABS.includes(tab)) setActiveTab(tab);
+    }, []);
+
     // Resolve borrower names for open loan requests (best-effort, client-side).
     useEffect(() => {
         const missing = openLoans.filter((l) => !(l.borrowerAgentId in agentNames));
@@ -153,16 +162,17 @@ export default function LendingMarketplacePage() {
             <div>
                 <h1 className="text-xl font-bold flex items-center gap-2">
                     <Landmark className="h-5 w-5 text-emerald-500" />
-                    Lending Marketplace
+                    Credit &amp; Lending
                 </h1>
                 <p className="text-sm text-muted-foreground mt-1">
-                    Apply for a loan for one of your agents, fund a community pool (USDC, SOL or ETH — you earn in the asset you deposit — or a USDC/ETH or USDC/SOL market, where borrowers lock ETH or SOL against USDC loans), or back a single agent&apos;s loan directly in USDC for a higher rate.
+                    Track your agents&apos; credit standing, apply for a loan for one of your agents, fund a community pool (USDC, SOL or ETH — you earn in the asset you deposit — or a USDC/ETH or USDC/SOL market, where borrowers lock ETH or SOL against USDC loans), or back a single agent&apos;s loan directly in USDC for a higher rate.
                 </p>
             </div>
 
             {/* Tabs */}
             <div className="flex items-center gap-1 border-b border-border">
                 {([
+                    { key: "credit", label: "Agent Credit" },
                     { key: "borrow", label: "Borrow" },
                     { key: "pools", label: "Pools" },
                     { key: "fund", label: `Fund a Loan (${openLoans.length})` },
@@ -182,13 +192,15 @@ export default function LendingMarketplacePage() {
                 ))}
             </div>
 
-            {error && (
+            {error && activeTab !== "credit" && (
                 <div className="p-2 rounded-lg border border-red-500/20 bg-red-500/5 flex items-center gap-2 text-xs text-red-400">
                     <AlertCircle className="h-3.5 w-3.5 shrink-0" /> {error}
                 </div>
             )}
 
-            {loading ? (
+            {activeTab === "credit" ? (
+                <AgentCreditPanel />
+            ) : loading ? (
                 <div className="flex items-center justify-center py-16">
                     <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>

@@ -66,6 +66,25 @@ function decodeMemoLog(log: { data: Hex; topics: [Hex, ...Hex[]] | [] }) {
   }
 }
 
+/**
+ * The public RPC is load-balanced: the head we just read can be a block or
+ * two ahead of the node that serves the next eth_getLogs, which then rejects
+ * the range ("block range extends beyond current head block"). Wait for it to
+ * catch up and ask again — don't shrink the range, or a transfer in the newest
+ * blocks would be missed and /payouts/cancel would release a paid job.
+ */
+async function behindHeadRetry<T>(fn: () => Promise<T>, attempts = 5, delayMs = 400): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = `${(err as Error)?.message ?? ""} ${(err as { details?: string })?.details ?? ""}`;
+      if (i >= attempts - 1 || !/beyond current head/i.test(msg)) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 function readClient() {
   const chain = getChain("tempo");
   if (!chain) throw new Error("Unknown chain: tempo");
@@ -211,9 +230,9 @@ export class TempoSettlementAdapter implements SettlementAdapter {
     for (let from = p.fromBlock, windows = 0; from <= head; from += LOG_WINDOW, windows++) {
       if (windows >= MAX_LOG_WINDOWS) throw new Error("Payment started too long ago to search for — pass the transaction hash");
       const to = from + LOG_WINDOW - 1n < head ? from + LOG_WINDOW - 1n : head;
-      const logs = await client.getLogs({
+      const logs = await behindHeadRetry(() => client.getLogs({
         address: token as Hex, event: TRANSFER_WITH_MEMO, args: { to: p.to as Hex, memo: p.memo }, fromBlock: from, toBlock: to,
-      });
+      }));
       for (const log of logs) {
         const t = { from: log.args.from!, to: log.args.to!, amount: log.args.amount!, memo: log.args.memo! };
         if (log.transactionHash && log.blockNumber != null && pays(t)) return { ...t, txHash: log.transactionHash, blockNumber: log.blockNumber };

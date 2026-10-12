@@ -8,6 +8,7 @@ import { getChain, USDC_DECIMALS } from "@/lib/chains";
 // Firestore SDK, which is unauthenticated here and denied by the rules.
 import { getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listOrgJobsByStatus } from "@/lib/jobs-admin";
+import { isPayable, parseUsdReward } from "@/lib/job-payouts";
 import { generateAgentWallet, listAgentWallets } from "@/lib/agent-wallets";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import type { Job, Organization } from "@/lib/firestore";
@@ -84,18 +85,7 @@ async function requireOwner(ctx: RouteContext, orgId: unknown): Promise<Organiza
 
 // ── Amounts and memos ────────────────────────────────────────────────────
 
-/**
- * A job's reward is free text ("150", "$50", "25 USDC", "0.5 SOL"). Only
- * dollar amounts become a suggested payout; anything else is left for the
- * owner to type, rather than guessing an exchange rate.
- */
-export function parseUsdReward(reward: string | undefined): number | null {
-  if (!reward) return null;
-  const m = reward.trim().match(/^\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(usd|usdc|usdt|pathusd|dollars?)?$/i);
-  if (!m) return null;
-  const n = Number(m[1].replace(/,/g, ""));
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
+export { parseUsdReward };
 
 function checkAmount(value: unknown, label: string): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -118,17 +108,6 @@ const jobUnit = (jobId: string): PayoutUnit => ({ kind: "job", jobId });
 
 const evmWallets = async (agentId: string) =>
   (await listAgentWallets(agentId)).filter((w) => w.chain === "evm").map((w) => ({ address: w.publicKey, label: w.label ?? null }));
-
-/** Approved jobs this org posted that went to an agent and were not already paid some other way. */
-function isPayable(job: Job): boolean {
-  if (!job.takenByAgentId) return false;
-  // Delivery marks a job "completed" with review pending — pay only once the
-  // poster approved it (jobs from before reviews existed have no reviewStatus).
-  if (job.reviewStatus && job.reviewStatus !== "approved") return false;
-  // Escrowed or prepaid gig orders, and Hedera bounties, already moved money.
-  if (job.escrow || job.upfrontVerifiedAt || job.hederaScheduledTxId) return false;
-  return true;
-}
 
 /** What the owner's wallet has to send for one reserved job. */
 function transferOf(p: TempoPayout) {

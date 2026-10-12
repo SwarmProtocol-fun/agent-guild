@@ -382,6 +382,33 @@ export async function walletHoldings(conn: Connection, address: string): Promise
   return { address: owner.toBase58(), lamports, tokens };
 }
 
+// ── Address history ──────────────────────────────────────────────────────
+
+export interface HistoryEntry {
+  signature: string;
+  slot: number;
+  blockTime: string | null;
+  ok: boolean;
+  /** The transaction error as JSON when it failed — inspect the signature for the decoded name. */
+  err: unknown;
+  memo: string | null;
+}
+
+/** Most recent transactions touching an address, newest first. `before` pages backwards. */
+export async function addressHistory(conn: Connection, address: string, opts: { limit?: number; before?: string } = {}): Promise<HistoryEntry[]> {
+  const limit = opts.limit ?? 20;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DevtoolsInputError("limit must be an integer 1–100");
+  const sigs = await conn.getSignaturesForAddress(parsePubkey(address), { limit, ...(opts.before ? { before: opts.before } : {}) });
+  return sigs.map((s) => ({
+    signature: s.signature,
+    slot: s.slot,
+    blockTime: s.blockTime ? new Date(s.blockTime * 1000).toISOString() : null,
+    ok: !s.err,
+    err: s.err ? toPlainJson(s.err) : null,
+    memo: s.memo ?? null,
+  }));
+}
+
 // ── Transaction inspector ────────────────────────────────────────────────
 
 export interface TxReport {

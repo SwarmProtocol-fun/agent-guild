@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Bot, Coins, Droplets, FlaskConical, Hammer, History, Lock, Plug, RefreshCw, ScanSearch, Send, Sparkles, Wallet, type LucideProps,
+  ArrowLeftRight, Bot, Coins, Droplets, LineChart, FlaskConical, Hammer, History, Lock, Plug, RefreshCw, ScanSearch, Send, Sparkles, Wallet, type LucideProps,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import {
@@ -14,11 +14,11 @@ import {
 // wallet, how to plug its runtime in, and a live feed of what it has done.
 
 export const UPGRADES: { key: string; name: string; description: string; icon: ComponentType<LucideProps>; tab: Tab }[] = [
-  { key: "solana-dev-inspect", name: "Read & debug chain", icon: ScanSearch, tab: "tx", description: "Decode failed transactions and program errors, inspect accounts and programs, read IDLs, derive PDAs." },
+  { key: "solana-dev-inspect", name: "Read & debug chain", icon: ScanSearch, tab: "tx", description: "Decode failed transactions, inspect accounts, balances and history, read IDLs, derive PDAs, check prices and swap quotes." },
   { key: "solana-dev-simulate", name: "Build & simulate", icon: FlaskConical, tab: "simulate", description: "Turn plain-JSON instructions into transactions with the program's IDL and dry-run them." },
-  { key: "solana-dev-devnet", name: "Act on devnet", icon: Send, tab: "network", description: "Sign and send with its own dev wallet: airdrop, send transactions, create tokens, deploy." },
+  { key: "solana-dev-devnet", name: "Act on devnet", icon: Send, tab: "simulate", description: "Sign with its own dev wallet: airdrop, transfer SOL and tokens, send transactions, create tokens, deploy." },
   { key: "solana-dev-anchor", name: "Write Anchor programs", icon: Hammer, tab: "anchor", description: "Build, test and deploy Anchor programs in a sandboxed container." },
-  { key: "solana-settlement", name: "Settle jobs", icon: Coins, tab: "settlement", description: "Get paid in USDC on Solana for completed jobs, with an on-chain receipt." },
+  { key: "solana-settlement", name: "Settle jobs", icon: Coins, tab: "settlement", description: "Get paid a job's reward in USDC once the poster approves it, with an on-chain receipt." },
 ];
 
 export interface AgentsState {
@@ -47,11 +47,11 @@ interface Activity {
 
 const ACTION_ICON: Record<string, ComponentType<LucideProps>> = {
   inspect: ScanSearch, "derive-pda": ScanSearch, simulate: FlaskConical, send: Send, airdrop: Droplets,
-  "create-token": Coins, "create-wallet": Wallet,
+  "create-token": Coins, "create-wallet": Wallet, transfer: Send, price: LineChart, quote: ArrowLeftRight,
 };
 const ACTION_LABEL: Record<string, string> = {
   inspect: "Inspected", "derive-pda": "Derived PDA", simulate: "Simulated", send: "Sent transaction", airdrop: "Airdrop",
-  "create-token": "Created token", "create-wallet": "Created wallet", "anchor-build": "Anchor build", "anchor-test": "Anchor test", "anchor-deploy": "Anchor deploy",
+  "create-token": "Created token", "create-wallet": "Created wallet", transfer: "Transferred", price: "Checked prices", quote: "Swap quote", "anchor-build": "Anchor build", "anchor-test": "Anchor test", "anchor-deploy": "Anchor deploy",
 };
 
 export function initials(name: string) {
@@ -77,6 +77,9 @@ export function AgentTab({ env, modId, agents }: { env: Env; modId: string; agen
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [decimals, setDecimals] = useState("9");
   const [mintAmount, setMintAmount] = useState("1000");
+  const [sendTo, setSendTo] = useState("");
+  const [sendAmount, setSendAmount] = useState("0.1");
+  const [sendMint, setSendMint] = useState("");
 
   const agentId = agent?.agentId;
   const { agentApi } = env; // stable per selected agent (useCallback in the panel shell)
@@ -222,6 +225,18 @@ export function AgentTab({ env, modId, agents }: { env: Env; modId: string; agen
                   onClick={() => act("airdrop", "dev/airdrop", { sol: 1, cluster: signingCluster }, (d) => `+1 SOL · balance ${d.balanceSol} SOL`)}>Airdrop 1 SOL</Button>
                 <a className="inline-flex h-9 items-center rounded-md px-3 text-sm text-[hsl(var(--primary))] hover:underline" href="https://faucet.solana.com" target="_blank" rel="noreferrer">faucet.solana.com ↗</a>
               </div>
+              <form className="space-y-2 border-t border-[hsl(var(--border))]/60 pt-3" onSubmit={(e) => {
+                e.preventDefault();
+                act("send", "dev/transfer", { to: sendTo.trim(), amount: sendAmount.trim(), mint: sendMint.trim() || undefined, cluster: signingCluster },
+                  (d) => `Sent ${d.amountUi} ${d.mint ? "tokens" : "SOL"} to ${String(d.to).slice(0, 6)}…`);
+              }}>
+                <Field label="Send to">{(id) => <TextInput id={id} mono placeholder="Recipient address" value={sendTo} onChange={(e) => setSendTo(e.target.value)} />}</Field>
+                <div className="flex flex-wrap items-end gap-2">
+                  <Field label="Amount" className="w-28">{(id) => <TextInput id={id} mono inputMode="decimal" value={sendAmount} onChange={(e) => setSendAmount(e.target.value)} />}</Field>
+                  <Field label="Token mint" className="min-w-0 flex-1 basis-40">{(id) => <TextInput id={id} mono placeholder="Empty = SOL" value={sendMint} onChange={(e) => setSendMint(e.target.value)} />}</Field>
+                  <Button type="submit" icon={Send} disabled={!canDevnet || !sendTo.trim() || !sendAmount.trim()} loading={busy === "send"}>Send</Button>
+                </div>
+              </form>
               <form className="flex flex-wrap items-end gap-2 border-t border-[hsl(var(--border))]/60 pt-3" onSubmit={(e) => {
                 e.preventDefault();
                 act("token", "dev/token", { decimals: Number(decimals), mintAmount, cluster: signingCluster }, (d) => `Created mint ${d.mint}`);
@@ -237,13 +252,15 @@ export function AgentTab({ env, modId, agents }: { env: Env; modId: string; agen
 
         {/* Connect */}
         <Card title={<span className="flex items-center gap-2"><Plug className="h-4 w-4" aria-hidden />Connect the agent</span>}
-          description="Load these tools into the agent's LLM loop. Each call is a signed request to this mod.">
+          description="Agents on the Agent Guild CLI or MCP server already have these tools — no setup. Other runtimes load the definitions and sign each call.">
           <div className="space-y-3">
-            <CodeBlock title="Tool definitions" code={`curl ${toolsUrl}`} maxHeight="max-h-24" wrap />
+            <CodeBlock title="From the agent's machine" code={`agent-guild mod tools ${modId}\nagent-guild mod call ${modId} solana_me`} maxHeight="max-h-24" wrap />
+            <CodeBlock title="Tool definitions (any runtime)" code={`curl ${toolsUrl}`} maxHeight="max-h-24" wrap />
             <ol className={cx("list-decimal space-y-1 pl-4 text-xs", muted)}>
               <li>Call <code className="font-mono text-[hsl(var(--foreground))]">solana_me</code> to see which upgrades it has.</li>
-              <li>Debug with <code className="font-mono text-[hsl(var(--foreground))]">solana_inspect_transaction</code> on a failing signature.</li>
-              <li>Always <code className="font-mono text-[hsl(var(--foreground))]">solana_simulate</code> before <code className="font-mono text-[hsl(var(--foreground))]">solana_send</code>.</li>
+              <li>Debug with <code className="font-mono text-[hsl(var(--foreground))]">solana_inspect_transaction</code> on a failing signature; check balances with <code className="font-mono text-[hsl(var(--foreground))]">solana_holdings</code> (address <code className="font-mono">self</code>).</li>
+              <li>Always <code className="font-mono text-[hsl(var(--foreground))]">solana_simulate</code> before <code className="font-mono text-[hsl(var(--foreground))]">solana_send</code>; plain payments can use <code className="font-mono text-[hsl(var(--foreground))]">solana_transfer</code>.</li>
+              <li>After a poster approves its work, <code className="font-mono text-[hsl(var(--foreground))]">solana_settle_job</code> pays the reward.</li>
             </ol>
             <div className="flex items-center justify-between gap-2 rounded-lg border border-[hsl(var(--border))] px-3 py-2 text-xs">
               <span className="flex items-center gap-2"><Hammer className="h-3.5 w-3.5" aria-hidden />Anchor sandbox</span>
@@ -259,7 +276,7 @@ export function AgentTab({ env, modId, agents }: { env: Env; modId: string; agen
       </div>
 
       {/* Activity */}
-      <Card title={<span className="flex items-center gap-2"><History className="h-4 w-4" aria-hidden />Activity</span>} description="What this agent has done with the mod. Live; resets when the server restarts.">
+      <Card title={<span className="flex items-center gap-2"><History className="h-4 w-4" aria-hidden />Activity</span>} description="What this agent has done with the mod, newest first. Updates live.">
         {activity === null ? (
           <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-10" />)}</div>
         ) : activity.length === 0 ? (
