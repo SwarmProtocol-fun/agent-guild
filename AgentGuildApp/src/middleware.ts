@@ -14,6 +14,7 @@ import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { getClientIp } from "@/lib/client-ip";
 import { isSessionRevoked } from "@/lib/session-revocation";
+import { isHiddenRoute } from "@/lib/hidden-features";
 
 const SESSION_COOKIE = "agent_guild_session";
 
@@ -266,6 +267,12 @@ export async function middleware(req: NextRequest) {
     response.headers.set("x-session-address", session.sub);
     response.headers.set("x-session-role", session.role);
     response.headers.set("x-session-id", session.sid);
+  }
+
+  // Features hidden until fully tested (lib/hidden-features) — pages only;
+  // their APIs stay up so existing data and agents keep working.
+  if (!pathname.startsWith("/api/") && isHiddenRoute(pathname)) {
+    return withSecurityHeaders(NextResponse.redirect(new URL("/dashboard", req.url)));
   }
 
   // Check protected page routes

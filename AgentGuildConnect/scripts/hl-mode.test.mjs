@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveHlMode, liveModeLabel, formatPaperResult, closestCommand, summarizeHlStatus, formatHlStatus } from "./hl-mode.mjs";
+import { resolveHlMode, liveModeLabel, testnetModeLabel, formatPaperResult, formatWalletResult, formatTestnetSetup, closestCommand, summarizeHlStatus, formatHlStatus, summarizeTradingInbox, formatTradingInbox } from "./hl-mode.mjs";
 
 const tool = (name, method = "POST") => ({ name, method, path: "x" });
 
@@ -31,7 +31,7 @@ test("reads take the caller's mode; unknown POSTs are treated as live", () => {
   assert.equal(resolveHlMode(tool("hyperliquid_price", "GET"), {}).mode, "PAPER");
   assert.equal(resolveHlMode(tool("hyperliquid_price", "GET"), {}, { live: true }).mode, "LIVE");
   assert.equal(resolveHlMode(tool("hyperliquid_stop_all_bots"), {}).mode, "PAPER");
-  assert.throws(() => resolveHlMode(tool("hyperliquid_new_thing"), {}), /may trade real funds/);
+  assert.throws(() => resolveHlMode(tool("hyperliquid_new_thing"), {}), /may trade a wallet.*--testnet/);
 });
 
 test("formatPaperResult prints the fill, paper P&L and balance", () => {
@@ -90,7 +90,7 @@ test("status: names each blocker", () => {
   assert.match(all, /No free margin/);
   assert.match(all, /AI bots ask your own model/);
   assert.match(all, /2 bot signal\(s\) waiting/);
-  assert.deepEqual(s.bots, { running: 1, paper: 1, live: 0 });
+  assert.deepEqual(s.bots, { running: 1, paper: 1, testnet: 0, live: 0 });
   assert.equal(s.canTrade, false);
 });
 
@@ -108,7 +108,7 @@ test("status: an open position with nothing blocking reads as trading; failed re
 });
 
 test("ai_answer with no known bot counts as live", () => {
-  assert.throws(() => resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r9" }), /can't be matched to a paper bot/);
+  assert.throws(() => resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r9" }), /can't be matched to a paper or testnet bot/);
   assert.deepEqual(
     { mode: resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r9" }, { live: true }).mode, trades: resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r9" }, { live: true }).trades },
     { mode: "LIVE", trades: true },
@@ -122,11 +122,104 @@ test("trades is true only for calls that can place a live order", () => {
   assert.equal(resolveHlMode(tool("hyperliquid_breakout_bot"), {}, { live: true }).trades, true);
 });
 
-test("liveModeLabel: mainnet orders need --mainnet; unknown network never trades", () => {
-  assert.equal(liveModeLabel("testnet"), "LIVE (TESTNET)");
+test("liveModeLabel: a testnet wallet is TESTNET; mainnet orders need --mainnet; unknown network never trades", () => {
+  assert.equal(liveModeLabel("testnet"), "TESTNET");
   assert.throws(() => liveModeLabel("mainnet"), /MAINNET.*--mainnet/);
-  assert.equal(liveModeLabel("mainnet", { mainnet: true }), "LIVE (MAINNET)");
-  assert.equal(liveModeLabel("mainnet", { trades: false }), "LIVE (MAINNET)");
+  assert.equal(liveModeLabel("mainnet", { mainnet: true }), "LIVE");
+  assert.equal(liveModeLabel("mainnet", { trades: false }), "LIVE");
   assert.throws(() => liveModeLabel(null), /Can't confirm which network/);
   assert.equal(liveModeLabel(null, { trades: false }), "LIVE (NETWORK UNKNOWN)");
+});
+
+test("TESTNET: --testnet or network: testnet, never paper and never mainnet", () => {
+  const trade = resolveHlMode(tool("hyperliquid_trade"), { coin: "ETH" }, { testnet: true });
+  assert.deepEqual(trade, { mode: "TESTNET", trades: true, input: { coin: "ETH", network: "testnet" } });
+  assert.equal(resolveHlMode(tool("hyperliquid_close"), { coin: "ETH", network: "testnet" }).mode, "TESTNET");
+  const train = resolveHlMode(tool("hyperliquid_paper_train"), { goal: "x" }, { testnet: true });
+  assert.deepEqual([train.mode, train.input.network], ["TESTNET", "testnet"]);
+  assert.equal(resolveHlMode(tool("hyperliquid_paper_train"), { goal: "x" }).mode, "PAPER");
+  const bot = resolveHlMode(tool("hyperliquid_rule_bot"), { type: "dca" }, { testnet: true });
+  assert.deepEqual(bot.input, { type: "dca", network: "testnet" });
+  assert.throws(() => resolveHlMode(tool("hyperliquid_rule_bot"), { paper: true, network: "testnet" }), /pick one/);
+  assert.equal(resolveHlMode(tool("hyperliquid_testnet_setup"), {}).mode, "TESTNET");
+  assert.equal(resolveHlMode(tool("hyperliquid_testnet_account", "GET"), {}).mode, "TESTNET");
+  // A testnet bot's question is answered without a flag; a live bot's still needs --live.
+  assert.equal(resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r1" }, { aiRequestMode: "TESTNET" }).mode, "TESTNET");
+  assert.throws(() => resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r1" }, { aiRequestMode: "LIVE" }), /live bot/);
+  assert.equal(resolveHlMode(tool("hyperliquid_ai_answer"), { id: "r1" }, { aiRequestMode: "NONE" }).mode, "PAPER");
+});
+
+test("1.6 tools that place no order work on paper without flags", () => {
+  assert.equal(resolveHlMode(tool("hyperliquid_rule_bot"), { type: "dca" }).input.paper, true);
+  assert.equal(resolveHlMode(tool("hyperliquid_toggle_bot"), { id: "s1" }).mode, "PAPER");
+  assert.equal(resolveHlMode(tool("hyperliquid_backtest"), { type: "dca" }).mode, "PAPER");
+});
+
+test("testnetModeLabel: a testnet order needs the testnet wallet", () => {
+  assert.equal(testnetModeLabel("testnet"), "TESTNET");
+  assert.throws(() => testnetModeLabel("mainnet"), /MAINNET/);
+  assert.throws(() => testnetModeLabel(null), /hyperliquid_testnet_setup/);
+  assert.equal(testnetModeLabel(null, { trades: false }), "TESTNET");
+});
+
+test("formatWalletResult: the fill, its testnet tx, protection and P&L", () => {
+  const fill = { network: "testnet", status: "filled", oid: 77, sz: 0.01, avgPx: 2000.5, realizedPnl: null, txHash: "0xfeed",
+    explorerUrl: "https://app.hyperliquid-testnet.xyz/explorer/tx/0xfeed", stopLossPx: 1900.5, takeProfitPx: 2200.6, protectionError: null };
+  assert.deepEqual(formatWalletResult({ taskId: "t1", network: "testnet", fill }, { side: "buy", coin: "ETH" }), [
+    "Fill (TESTNET): BUY 0.01 ETH @ 2,000.5  order 77  task t1",
+    "Testnet tx: 0xfeed  https://app.hyperliquid-testnet.xyz/explorer/tx/0xfeed",
+    "Protection: stop loss @ 1,900.5 · take profit @ 2,200.6",
+  ]);
+  const closed = formatWalletResult({ taskId: "t2", closing: { coin: "ETH", side: "long" }, fill: { ...fill, stopLossPx: null, takeProfitPx: null, realizedPnl: 1.25 } });
+  assert.equal(closed[0], "Fill (TESTNET): CLOSE LONG 0.01 ETH @ 2,000.5  order 77  task t2");
+  assert.equal(closed.at(-1), "Testnet P&L: +$1.25");
+  assert.match(formatWalletResult({ taskId: "t3" })[0], /queued for a worker/);
+  assert.deepEqual(formatWalletResult({ paper: true, taskId: "x" }), []);
+});
+
+test("formatTestnetSetup: the wallet and how it was funded", () => {
+  const lines = formatTestnetSetup({ address: "0xabc", enabled: true, funding: { status: "sent", amountUsd: 500, balance: 500, from: "0xhub" } });
+  assert.equal(lines[0], "Testnet wallet: 0xabc (testnet trading turned on)");
+  assert.match(lines[1], /^Funded: \+\$500\.00 testnet USDC/);
+  assert.match(formatTestnetSetup({ address: "0xabc", funding: { status: "manual", balance: 0, message: "Claim at drip" } })[1], /Claim at drip/);
+});
+
+test("status: testnet positions, idle pauses and waiting questions", () => {
+  const s = summarizeHlStatus({
+    me: me({ wallet: { configured: true, network: "testnet", instant: true } }),
+    paper: paper(),
+    strategies: [
+      { id: "s1", coin: "ETH", type: "ai", enabled: true, paper: false, network: "testnet" },
+      { id: "s2", coin: "BTC", type: "ai", enabled: false, paper: true, params: { idlePausedAt: Date.now() - 1000 } },
+    ],
+    testnet: { enabled: true, address: "0xabc", accountValue: 480, positions: [{ coin: "SOL", side: "long", sz: 1, entryPx: 150, unrealizedPnl: -2, protected: false }], recentFills: [] },
+    requests: [{ id: "r1", mode: "TESTNET", coin: "ETH", expiresAt: "2026-10-12T10:00:00Z" }, { id: "r2", mode: "NONE", coin: "ETH" }],
+  }, { autoReply: true });
+  assert.deepEqual(s.bots, { running: 1, paper: 0, testnet: 1, live: 0 });
+  assert.equal(s.questions.length, 1);
+  const all = s.reasons.join("\n");
+  assert.match(all, /Testnet long SOL has no stop loss/);
+  assert.match(all, /Bot s2 \(BTC\) was paused by idle safety/);
+  const lines = formatHlStatus(s);
+  assert.ok(lines.includes("Testnet: on (0xabc), pass --testnet"));
+  assert.ok(lines.some((l) => l.startsWith("  TESTNET LONG 1 SOL @ 150") && l.endsWith("NO STOP LOSS")));
+  assert.ok(lines.includes("  TESTNET ETH  id r1  expires 2026-10-12T10:00:00Z"));
+});
+
+test("inbox trading: positions, big moves, unprotected positions and questions", () => {
+  const t = summarizeTradingInbox({
+    paper: paper({ positions: [{ coin: "ETH", szi: 0.1, entryPx: 2000, markPx: 2200, unrealizedPnl: 20 }] }),
+    testnet: { enabled: true, positions: [{ coin: "BTC", side: "short", sz: 0.001, entryPx: 60000, notionalUsd: 60, unrealizedPnl: -0.5, protected: true, stopLossPx: 63000 }] },
+    requests: { requests: [{ id: "r1", mode: "TESTNET", coin: "BTC", expiresAt: "2026-10-12T10:00:00Z" }, { id: "b1", mode: "NONE", coin: "SOL" }] },
+    strategies: { strategies: [] },
+  });
+  assert.equal(t.positions.length, 2);
+  assert.deepEqual(t.bigMoves.map((p) => p.coin), ["ETH"]);
+  assert.deepEqual(t.questions.map((q) => q.id), ["r1"]);
+  const lines = formatTradingInbox(t, "ag");
+  assert.equal(lines[0], "1 AI trading question(s) waiting for your decision:");
+  assert.ok(lines.some((l) => l.includes(`ag mod call hyperliquid-trading hyperliquid_ai_answer '{"id":"r1"`)));
+  assert.ok(lines.some((l) => l.startsWith("  [PAPER] LONG 0.1 ETH") && l.includes("BIG MOVE +9.1%")));
+  assert.ok(lines.some((l) => l.startsWith("  [TESTNET] SHORT 0.001 BTC")));
+  assert.equal(summarizeTradingInbox({ paper: paper(), testnet: { enabled: false }, requests: { requests: [] }, strategies: { strategies: [] } }), null);
 });

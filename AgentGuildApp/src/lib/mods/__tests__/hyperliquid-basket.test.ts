@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// These tests assert the worker queue (enqueueTask). Testnet orders sign natively by default; hyperliquid-testnet.test.ts covers that path.
+process.env.HYPERLIQUID_EXECUTION = "worker";
+
 const store = {
+  // Live orders in flight: none, so only the open position is checked.
+  reserveLiveExposure: vi.fn(async ({ check }: { check: (pendingUsd: number) => string | null }) => {
+    const error = check(0);
+    return error ? { error } : { id: "res-1" };
+  }),
+  bindLiveExposure: vi.fn(async () => {}),
+  releaseLiveExposure: vi.fn(async () => {}),
   getEnabledStrategies: vi.fn(),
   getStrategy: vi.fn(),
   touchStrategyRun: vi.fn(),
@@ -8,7 +18,7 @@ const store = {
   markStrategyPending: vi.fn(),
   clearStrategyPending: vi.fn(),
   recordAiDecision: vi.fn(),
-  getAiDecisions: vi.fn(),
+  getAiDecisions: vi.fn(async () => [] as unknown[]),
   createAiRequest: vi.fn(async () => "req-1"),
   getAiRequest: vi.fn(),
   listOpenAiRequests: vi.fn(),

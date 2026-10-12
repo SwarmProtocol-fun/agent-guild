@@ -44,6 +44,13 @@ const store = {
   setWhaleUniverse: vi.fn(),
   acquireTickLock: vi.fn(async () => true),
   releaseTickLock: vi.fn(),
+  recordPrompt: vi.fn(async () => "p1"),
+  listPrompts: vi.fn(async () => [] as unknown[]),
+  listPromptTemplates: vi.fn(async () => [] as unknown[]),
+  getPromptTemplate: vi.fn(async () => null as unknown),
+  createPromptTemplate: vi.fn(async () => "t1"),
+  updatePromptTemplate: vi.fn(),
+  deletePromptTemplate: vi.fn(),
   PaperError: class PaperError extends Error {},
   PAPER_START_CASH: 1000,
 };
@@ -183,6 +190,62 @@ describe("polymarket mod routes", () => {
     expect(postAgentDmMessage).toHaveBeenCalledWith({
       agentId: "a1", orgId: "org1", agentName: "Trader", senderAddress: OWNER, text: "Make one paper trade",
     });
+  });
+
+  it("a sent prompt is kept in history with its task and market; a history failure doesn't fail the send", async () => {
+    const prompt = route("POST /prompt");
+    await prompt(post({ agentId: "a1", text: "full", task: " buy it ", source: "market", conditionId: "0xc" }), asOwner);
+    expect(store.recordPrompt).toHaveBeenCalledWith({
+      agentId: "a1", orgId: "org1", senderAddress: OWNER, task: "buy it", text: "full", source: "market", conditionId: "0xc", channelId: "c1", messageId: "m1",
+    });
+    await prompt(post({ agentId: "a1", text: "full", source: "evil", conditionId: "not-an-id" }), asOwner);
+    expect(store.recordPrompt).toHaveBeenLastCalledWith(expect.objectContaining({ task: null, source: "tab", conditionId: null }));
+    store.recordPrompt.mockRejectedValueOnce(new Error("down"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await prompt(post({ agentId: "a1", text: "full" }), asOwner)).status).toBe(200);
+    errSpy.mockRestore();
+  });
+
+  it("prompt history is for signed-in org members only", async () => {
+    store.listPrompts.mockResolvedValueOnce([{ id: "p1", task: "t", text: "x", source: "tab", conditionId: null, senderAddress: OWNER, createdAt: new Date(0) }]);
+    const history = route("GET /prompts/:agentId");
+    const res = await history(new Request("http://x/"), { ...asMember, params: { agentId: "a1" } });
+    expect((await res.json()).prompts[0]).toMatchObject({ id: "p1", createdAt: "1970-01-01T00:00:00.000Z" });
+    expect((await history(new Request("http://x/"), { ...asAgent, params: { agentId: "a1" } })).status).toBe(401);
+    expect((await history(new Request("http://x/"), ctx({ session: { address: "0xcccccccccccccccccccccccccccccccccccccccc" }, params: { agentId: "a1" } }))).status).toBe(403);
+  });
+
+  it("the prompt library is org-scoped: members save and delete, agents only read", async () => {
+    const save = route("POST /prompt-library/save");
+    const del = route("POST /prompt-library/delete");
+    expect((await save(post({ agentId: "a1", name: "n", text: "t" }), asAgent)).status).toBe(403);
+    expect((await save(post({ agentId: "a1", name: " ", text: "t" }), asMember)).status).toBe(400);
+    const ok = await save(post({ agentId: "a1", name: " Fade ", text: " spikes " }), asMember);
+    expect(await ok.json()).toEqual({ id: "t1", name: "Fade", text: "spikes" });
+    expect(store.createPromptTemplate).toHaveBeenCalledWith({ orgId: "org1", createdBy: MEMBER, name: "Fade", text: "spikes" });
+
+    // Another org's template can't be overwritten or deleted by id.
+    store.getPromptTemplate.mockResolvedValue({ id: "t9", orgId: "org2", name: "x", text: "y" });
+    expect((await save(post({ agentId: "a1", id: "t9", name: "n", text: "t" }), asMember)).status).toBe(404);
+    expect((await del(post({ agentId: "a1", id: "t9" }), asMember)).status).toBe(404);
+    expect(store.updatePromptTemplate).not.toHaveBeenCalled();
+    expect(store.deletePromptTemplate).not.toHaveBeenCalled();
+
+    store.getPromptTemplate.mockResolvedValue({ id: "t2", orgId: "org1", name: "x", text: "y" });
+    expect((await save(post({ agentId: "a1", id: "t2", name: "n", text: "t" }), asMember)).status).toBe(200);
+    expect(store.updatePromptTemplate).toHaveBeenCalledWith("t2", { name: "n", text: "t" });
+    expect((await del(post({ agentId: "a1", id: "t2" }), asAgent)).status).toBe(403);
+    expect((await del(post({ agentId: "a1", id: "t2" }), asMember)).status).toBe(200);
+    expect(store.deletePromptTemplate).toHaveBeenCalledWith("t2");
+    store.getPromptTemplate.mockResolvedValue(null);
+
+    store.listPromptTemplates.mockResolvedValueOnce(Array.from({ length: 50 }, (_, i) => ({ id: `t${i}` })));
+    expect((await save(post({ agentId: "a1", name: "n", text: "t" }), asMember)).status).toBe(400);
+
+    store.listPromptTemplates.mockResolvedValueOnce([{ id: "t1", orgId: "org1", name: "Fade", text: "spikes", createdBy: OWNER, updatedAt: null }]);
+    const list = await route("GET /prompt-library/:agentId")(new Request("http://x/"), { ...asAgent, params: { agentId: "a1" } });
+    expect((await list.json()).templates).toEqual([{ id: "t1", name: "Fade", text: "spikes", createdBy: OWNER, updatedAt: null }]);
+    expect(store.listPromptTemplates).toHaveBeenLastCalledWith("org1");
   });
 
   it("GET /me reports whether the org installed the mod", async () => {

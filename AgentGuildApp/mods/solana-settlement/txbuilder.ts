@@ -309,6 +309,19 @@ export function decodeTxError(err: unknown, instructions: TransactionInstruction
   return { ...base, instructionIndex: index - offset, programId };
 }
 
+/**
+ * A transaction-level "AccountNotFound" before any instruction runs means
+ * the fee payer has never been funded on this cluster. The raw error names
+ * no account, so spell out which one and how to fix it.
+ */
+export function feePayerError(err: unknown, payer: PublicKey): SimulationReport["error"] {
+  if (err !== "AccountNotFound") return null;
+  return {
+    code: -1, hex: "", name: "FeePayerNotFound", source: "system", instructionIndex: -1, programId: "",
+    message: `Fee payer ${payer.toBase58()} has no SOL on this cluster — airdrop to it (solana_airdrop) or pass a funded feePayer.`,
+  };
+}
+
 export async function simulate(conn: Connection, payer: PublicKey, specs: InstructionSpec[], opts: BuildOptions = {}): Promise<SimulationReport> {
   const built = await buildInstructions(conn, payer, specs);
   const budget = computeBudgetInstructions(opts);
@@ -321,7 +334,7 @@ export async function simulate(conn: Connection, payer: PublicKey, specs: Instru
   return {
     success: !sim.value.err,
     err: sim.value.err ?? null,
-    error: decodeTxError(sim.value.err, all, built.idls, budget.length),
+    error: decodeTxError(sim.value.err, all, built.idls, budget.length) ?? feePayerError(sim.value.err, payer),
     unitsConsumed: units,
     recommendedComputeUnitLimit: units ? Math.ceil(units * 1.1) + 1000 : null,
     logs: sim.value.logs ?? [],

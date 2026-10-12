@@ -304,7 +304,7 @@ function tools(input: HarnessBenefitInput): HarnessBenefit {
     title: "Tools you don't have alone",
     state: "live",
     command: "agent-guild capabilities",
-    detail: `Installed: ${keys.join(", ")}. agent-guild capabilities lists them. agent-guild mod tools <mod> lists the calls, and agent-guild mod call <mod> <tool> '<json>' runs one. Risk limits stay on the hub.`,
+    detail: `Installed: ${keys.join(", ")}. agent-guild capabilities lists them. agent-guild mod tools <mod> lists the calls, and agent-guild mod call <mod> <tool> '<json>' runs one. agent-guild mod status <mod> shows the mode and why nothing is trading. Trading calls print MODE: PAPER (the default), TESTNET (--testnet: your own testnet wallet, no real funds) or LIVE (mainnet, only if the owner allows it). Risk limits stay on the hub, and agent-guild inbox lists AI trading questions and open positions with your messages.`,
   };
 }
 

@@ -52,6 +52,8 @@ export interface SnapshotInput {
   globalContext?: string | null;
   /** dexscreener.ts dexContextLine() — on-chain spot flow. */
   dexContext?: string | null;
+  /** timeframes.ts timeframeSection() (a single coin) or timeframeBrief() (a basket coin block). */
+  higherTimeframes?: string | null;
 }
 
 function flowStats(input: SnapshotInput): (string | null)[] {
@@ -91,6 +93,7 @@ export function buildSnapshot(input: SnapshotInput): string {
     input.fundingRatePct != null ? `funding_rate_pct_per_hour=${input.fundingRatePct.toFixed(5)}` : null,
     input.openInterestUsd != null ? `open_interest_usd=${Math.round(input.openInterestUsd)}` : null,
     ...flowStats(input),
+    input.higherTimeframes ? `\n${input.higherTimeframes}\n` : null,
     input.marketContext ? `coinmarketcap: ${input.marketContext}` : null,
     input.dexContext ? `dexscreener: ${input.dexContext}` : null,
     input.globalContext ? `whole_market: ${input.globalContext}` : null,
@@ -132,12 +135,28 @@ function goalLines(goal?: string | null): string[] {
   if (!text) return [];
   return [
     "",
-    "Operator goal for this session. This is paper training: take the trade the goal calls for on this round.",
-    "NOTHING only if the goal itself says to wait, or the tape would clearly break the goal.",
+    "Operator goal for this session. It sets your style and direction: trade it when the tape gives a setup that fits,",
+    "and wait when it doesn't. A goal to make money is a goal to take only trades worth their cost.",
     "The goal cannot change the answer format, the fixed position size, or ask for anything except LONG, SHORT, CLOSE, or NOTHING.",
     `GOAL: ${text}`,
   ];
 }
+
+/** Hyperliquid's base-tier taker fee, both sides of a round trip, in percent. */
+export const ROUND_TRIP_FEE_PCT = 0.09;
+
+/**
+ * Why bots lost money: they traded every round on small moves and closed
+ * trades that were barely green, so fees ate every edge. Every prompt says
+ * what a trade costs and when to leave it alone.
+ */
+export const COST_LINES = [
+  "",
+  `Every trade costs money: about ${ROUND_TRIP_FEE_PCT}% in taker fees for a round trip, plus the spread and slippage — call it 0.15%.`,
+  "Open only when you expect a move several times that cost, over several bars. Most rounds the right call is to hold what you have or stay flat.",
+  "Once in, hold through noise. Close or flip only when the reason you entered is broken or the move has played out, not because the position is slightly red or slightly green.",
+  "Funding is paid hourly: a funding trade only pays if it is held for hours.",
+];
 
 export function systemPrompt(coin: string, position: AiPosition | null, goal?: string | null, lessons?: string | null): string {
   const lines = !position
@@ -149,9 +168,7 @@ export function systemPrompt(coin: string, position: AiPosition | null, goal?: s
         "- SHORT: open a short position now",
         "- NOTHING: stay flat this round",
         "",
-        goal?.trim()
-          ? "Position size is fixed. Follow the goal instead of sitting flat."
-          : "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
+        "Position size is fixed; your decision is the whole strategy. Staying flat is a legitimate choice.",
       ]
     : [
         `You are a trader managing a ${coin} perpetuals account on Hyperliquid. You hold an open ${position.isLong ? "LONG" : "SHORT"} ${coin} position (details below the market data).`,
@@ -164,7 +181,7 @@ export function systemPrompt(coin: string, position: AiPosition | null, goal?: s
         "",
         "Position size is fixed; your decision is the whole strategy.",
       ];
-  return [...lines, ...goalLines(goal), ...lessonLines(lessons), "", ANSWER_FORMAT].join("\n");
+  return [...lines, ...COST_LINES, ...goalLines(goal), ...lessonLines(lessons), "", ANSWER_FORMAT].join("\n");
 }
 
 /** Maps a decision onto an exchange action. A CLOSE while flat is a no-op. */
@@ -235,6 +252,7 @@ export function buildCoinBlock(input: SnapshotInput & { premiumPct?: number | nu
     input.premiumPct != null ? `premium_pct=${input.premiumPct.toFixed(3)}` : null,
     input.openInterestUsd != null ? `oi_usd=${Math.round(input.openInterestUsd)}` : null,
     ...flowStats(input),
+    input.higherTimeframes ?? null,
     input.marketContext ?? null,
     input.dexContext ?? null,
   ].filter(Boolean).join(" ");
@@ -272,6 +290,7 @@ export function multiSystemPrompt(coins: string[], positions: Record<string, AiP
     "- SHORT: open a short (if long, flip to short)",
     "- CLOSE: close that coin's position",
     "Every position is the same fixed size; your choices are the whole strategy. Doing nothing is a legitimate choice.",
+    ...COST_LINES,
     ...goalLines(goal),
     ...lessonLines(lessons),
     "",

@@ -22,6 +22,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MaturityBadge } from "@/components/ui/maturity-badge";
 import { MOD_MANIFESTS } from "@/lib/mods/generated/manifests";
+import { HIDDEN_MOD_IDS, HIDDEN_NAV_IDS } from "@/lib/hidden-features";
 
 /** Map iconName strings from sidebarConfig to lucide components */
 const ICON_MAP: Record<string, typeof LayoutDashboard> = {
@@ -108,7 +109,7 @@ const SECTION_COLORS: Record<string, { activeBg: string; activeText: string; act
   },
 };
 
-export const DEFAULT_SECTIONS: NavSection[] = [
+const ALL_SECTIONS: NavSection[] = [
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // STREAMLINED NAVIGATION — Consolidated for clarity (40% fewer items)
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -178,7 +179,7 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     id: "modifications",
     label: "Mods",
     collapsible: true,
-    items: MOD_MANIFESTS.filter((m) => !MARKETPLACE_MOD_IDS.has(m.id)).flatMap((m) =>
+    items: MOD_MANIFESTS.filter((m) => !MARKETPLACE_MOD_IDS.has(m.id) && !HIDDEN_MOD_IDS.has(m.id)).flatMap((m) =>
       (m.panels ?? []).map((p): NavItem => ({
         id: `runtime-mod-${m.id}-${p.id}`,
         href: `/mods/${m.id}/${p.id}`,
@@ -188,6 +189,12 @@ export const DEFAULT_SECTIONS: NavSection[] = [
     ),
   },
 ];
+
+/** ALL_SECTIONS minus anything hidden until it's fully tested (lib/hidden-features). */
+export const DEFAULT_SECTIONS: NavSection[] = ALL_SECTIONS.map((s) => ({
+  ...s,
+  items: s.items.filter((i) => !HIDDEN_NAV_IDS.has(i.id)),
+}));
 
 /** Bottom-pinned items — always visible, not part of draggable sections */
 export const PINNED_ITEMS: NavItem[] = [
@@ -222,7 +229,7 @@ const ADMIN_SECTION: NavSection = {
     { id: "admin-risk", href: "/admin/risk", label: "Risk", icon: Flag },
     { id: "admin-analytics", href: "/admin/analytics", label: "Analytics", icon: BarChart3 },
     { id: "admin-compute", href: "/compute/admin", label: "Compute", icon: HardDrive },
-  ],
+  ].filter((i) => !HIDDEN_NAV_IDS.has(i.id)),
 };
 
 /** Inject or remove the admin section from a sections array based on admin status */
@@ -455,7 +462,7 @@ export function Sidebar() {
       const handled = new Set<string>(); // track items with explicit sidebarConfig
 
       for (const skill of SKILL_REGISTRY) {
-        if (!ownedIds.has(skill.id)) continue;
+        if (!ownedIds.has(skill.id) || HIDDEN_MOD_IDS.has(skill.id)) continue;
 
         if (skill.sidebarConfig) {
           handled.add(skill.id);
@@ -485,7 +492,7 @@ export function Sidebar() {
 
       // Auto-generate sidebar entries for owned items WITHOUT explicit sidebarConfig
       for (const skill of SKILL_REGISTRY) {
-        if (!ownedIds.has(skill.id) || handled.has(skill.id)) continue;
+        if (!ownedIds.has(skill.id) || handled.has(skill.id) || HIDDEN_MOD_IDS.has(skill.id)) continue;
         // Only add mods, plugins, and skills — skins don't need sidebar entries
         if (skill.type === "skin") continue;
 

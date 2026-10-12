@@ -18,6 +18,7 @@ import { NextRequest } from "next/server";
 import { adminDb } from "@/lib/firebase-admin";
 import type { Query } from "firebase-admin/firestore";
 import { getVerifiedItems } from "@/lib/verified-registry";
+import { HIDDEN_MOD_IDS } from "@/lib/hidden-features";
 import { computeRankingScore } from "@/lib/submission-protocol";
 
 interface BrowseItem {
@@ -76,6 +77,7 @@ export async function GET(req: NextRequest) {
                 featured: featuredOnly || undefined,
             });
             for (const v of verified) {
+                if (HIDDEN_MOD_IDS.has(v.id)) continue;
                 items.push({
                     id: v.id,
                     name: v.name,

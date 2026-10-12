@@ -1,6 +1,6 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
 import { enableModCapabilities, enforceCapability, getAgent, getAgentCapabilities, getAgentsByOrg, getModInstallStatus, getOrganizationsByWalletAdmin, postAgentDmMessage } from "@/lib/firestore-admin";
-import { MAX_PROMPT_CHARS } from "./agent-prompt";
+import { MAX_PROMPT_CHARS, parseTemplate, TEMPLATES_PER_ORG } from "./agent-prompt";
 import { listAgentWallets, generateAgentWallet, getAgentWalletEvmPrivateKey } from "@/lib/agent-wallets";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
@@ -50,6 +50,13 @@ import {
   setWhaleUniverse,
   acquireTickLock,
   releaseTickLock,
+  recordPrompt,
+  listPrompts,
+  listPromptTemplates,
+  getPromptTemplate,
+  createPromptTemplate,
+  updatePromptTemplate,
+  deletePromptTemplate,
 } from "@/lib/mods/polymarket-store";
 import {
   getTrendingEvents,
@@ -1474,8 +1481,9 @@ export default defineServerMod({
      * already installed the mod from the Market.
      */
     /**
-     * POST /prompt { agentId, text } — send the agent instructions in its
-     * private DM. Owner only: the daemon gives tools (and so trading) only to
+     * POST /prompt { agentId, text, task?, source?, conditionId? } — send the
+     * agent instructions in its private DM and keep a copy in its prompt
+     * history. Owner only: the daemon gives tools (and so trading) only to
      * DMs from the org owner, so anyone else's prompt couldn't act anyway.
      */
     "POST /prompt": async (req, ctx) => {
@@ -1490,7 +1498,77 @@ export default defineServerMod({
         agentId: body.agentId, orgId: access.orgId, agentName: agent?.name || "Agent",
         senderAddress: ctx.session!.address, text,
       });
+      // History is a convenience: a failed write must not report the DM as unsent.
+      await recordPrompt({
+        agentId: body.agentId, orgId: access.orgId, senderAddress: ctx.session!.address,
+        task: typeof body.task === "string" && body.task.trim() ? body.task.trim().slice(0, 500) : null,
+        text, source: body.source === "market" ? "market" : "tab",
+        conditionId: typeof body.conditionId === "string" && /^0x[0-9a-fA-F]{1,64}$/.test(body.conditionId) ? body.conditionId : null,
+        channelId: sent.channelId, messageId: sent.messageId,
+      }).catch((err) => console.error("[polymarket] prompt history write failed:", err));
       return json(sent);
+    },
+
+    /** GET /prompts/:agentId — the last 25 prompts sent to this agent from the panel. Org members. */
+    "GET /prompts/:agentId": async (_req, ctx) => {
+      if (!ctx.session) return fail("Sign in to see prompt history", 401);
+      const access = await requireAgentAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const prompts = await listPrompts(ctx.params.agentId);
+      return json({
+        prompts: prompts.map((p) => ({
+          id: p.id, task: p.task, text: p.text, source: p.source, conditionId: p.conditionId,
+          senderAddress: p.senderAddress, createdAt: p.createdAt?.toISOString() ?? null,
+        })),
+      });
+    },
+
+    /** GET /prompt-library/:agentId — saved AI Predictor instructions for the agent's org. Members and the agent itself. */
+    "GET /prompt-library/:agentId": async (_req, ctx) => {
+      const access = await requireAgentAccess(ctx, ctx.params.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const templates = await listPromptTemplates(access.orgId);
+      return json({
+        templates: templates.map((t) => ({
+          id: t.id, name: t.name, text: t.text, createdBy: t.createdBy, updatedAt: t.updatedAt?.toISOString() ?? null,
+        })),
+      });
+    },
+
+    /**
+     * POST /prompt-library/save { agentId, name, text, id? } — save (or
+     * overwrite by id) a shared AI Predictor prompt for the agent's org. Signed-in
+     * org members only; agents can read the library but not change it.
+     */
+    "POST /prompt-library/save": async (req, ctx) => {
+      if (!ctx.session || ctx.agent) return fail("Sign in to save prompts", 403);
+      const body = await req.json().catch(() => ({}));
+      const access = await requireAgentAccess(ctx, body.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const parsed = parseTemplate(body);
+      if (typeof parsed === "string") return fail(parsed);
+      if (body.id != null) {
+        const existing = typeof body.id === "string" ? await getPromptTemplate(body.id) : null;
+        if (!existing || existing.orgId !== access.orgId) return fail("Prompt not found", 404);
+        await updatePromptTemplate(existing.id, parsed);
+        return json({ id: existing.id, ...parsed });
+      }
+      const all = await listPromptTemplates(access.orgId);
+      if (all.length >= TEMPLATES_PER_ORG) return fail(`Your org already has ${TEMPLATES_PER_ORG} saved prompts. Delete one first.`);
+      const id = await createPromptTemplate({ orgId: access.orgId, createdBy: ctx.session.address, ...parsed });
+      return json({ id, ...parsed });
+    },
+
+    /** POST /prompt-library/delete { agentId, id } — remove a saved prompt from the agent's org. Signed-in org members. */
+    "POST /prompt-library/delete": async (req, ctx) => {
+      if (!ctx.session || ctx.agent) return fail("Sign in to delete prompts", 403);
+      const body = await req.json().catch(() => ({}));
+      const access = await requireAgentAccess(ctx, body.agentId);
+      if ("error" in access) return fail(access.error, access.status);
+      const existing = typeof body.id === "string" ? await getPromptTemplate(body.id) : null;
+      if (!existing || existing.orgId !== access.orgId) return fail("Prompt not found", 404);
+      await deletePromptTemplate(existing.id);
+      return json({ ok: true });
     },
 
     "POST /grant": async (req, ctx) => {

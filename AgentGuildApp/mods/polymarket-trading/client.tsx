@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
-import { buildAgentPrompt, MAX_PROMPT_CHARS, TASK_PRESETS } from "./agent-prompt";
+import { buildAgentPrompt, buildMarketTask, MARKET_ASKS, MAX_PROMPT_CHARS, TASK_PRESETS, TEMPLATE_NAME_MAX } from "./agent-prompt";
 import type { FleetBotType } from "./fleet";
 
 // ── Types (mirrors of the server's JSON) ─────────────────────────────────────
@@ -64,11 +64,12 @@ const AI_PRESETS: { label: string; text: string }[] = [
 ];
 const AI_INSTRUCTIONS_MAX = 2000;
 
-/** Free-text strategy for an AI Predictor bot, plus preset chips that append a line. */
-function InstructionsField({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
+/** Free-text strategy for an AI Predictor bot, plus preset chips that append a line and the org's saved prompts. */
+function InstructionsField({ id, value, onChange, library }: { id: string; value: string; onChange: (v: string) => void; library?: PromptLibrary }) {
   return (
     <div>
       <label className={labelClass} htmlFor={id}>Instructions for the agent (optional)</label>
+      {library && <LibraryBar id={id} value={value} onChange={onChange} library={library} />}
       <textarea
         id={id} className={`${inputClass} min-h-[84px] resize-y text-xs`} maxLength={AI_INSTRUCTIONS_MAX} value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -82,6 +83,110 @@ function InstructionsField({ id, value, onChange }: { id: string; value: string;
         <span className={`ml-auto text-[11px] ${mutedClass}`}>{value.length}/{AI_INSTRUCTIONS_MAX}</span>
       </div>
       <p className={`mt-1 text-[11px] ${mutedClass}`}>Sent with every round&apos;s question. The agent still answers BUY_YES, BUY_NO, SELL or HOLD within your size and loss limits.</p>
+    </div>
+  );
+}
+
+
+interface PromptTemplate { id: string; name: string; text: string; createdBy: string; updatedAt: string | null }
+interface PromptLibrary {
+  templates: PromptTemplate[] | null;
+  error: string | null;
+  save: (name: string, text: string, id?: string) => Promise<PromptTemplate>;
+  remove: (id: string) => Promise<void>;
+}
+
+/** The agent's org's saved AI Predictor prompts, shared by everyone in the org. */
+function usePromptLibrary(agentId: string, call: Call, postJson: PostJson): PromptLibrary {
+  const [templates, setTemplates] = useState<PromptTemplate[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    call<{ templates: PromptTemplate[] }>(`prompt-library/${agentId}`)
+      .then(({ templates }) => { setTemplates(templates); setError(null); })
+      .catch((e: Error) => { setTemplates([]); setError(e.message); });
+  }, [agentId, call]);
+  useEffect(() => { load(); }, [load]);
+  const save = useCallback(async (name: string, text: string, id?: string) => {
+    const saved = await postJson<{ id: string; name: string; text: string }>("prompt-library/save", { agentId, name, text, ...(id ? { id } : {}) });
+    load();
+    return { ...saved, createdBy: "", updatedAt: null };
+  }, [agentId, postJson, load]);
+  const remove = useCallback(async (id: string) => {
+    await postJson("prompt-library/delete", { agentId, id });
+    load();
+  }, [agentId, postJson, load]);
+  return { templates, error, save, remove };
+}
+
+/** Load, save, overwrite and delete saved prompts above an instructions box. */
+function LibraryBar({ id, value, onChange, library }: { id: string; value: string; onChange: (v: string) => void; library: PromptLibrary }) {
+  const [selected, setSelected] = useState("");
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const current = library.templates?.find((t) => t.id === selected) ?? null;
+  const changed = !!current && current.text !== value.trim();
+
+  const run = async (fn: () => Promise<string>) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      setMsg({ tone: "success", text: await fn() });
+    } catch (err) {
+      setMsg({ tone: "danger", text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const load = (tid: string) => {
+    setSelected(tid);
+    setMsg(null);
+    const t = library.templates?.find((x) => x.id === tid);
+    if (t) onChange(t.text);
+  };
+  const saveNew = () => {
+    if (!name.trim()) return;
+    run(async () => {
+      const t = await library.save(name, value);
+      setSelected(t.id);
+      setNaming(false);
+      setName("");
+      return `Saved "${t.name}" for your org.`;
+    });
+  };
+
+  return (
+    <div className="mb-2 space-y-1">
+      <div className="flex flex-wrap items-center gap-1">
+        <label className="sr-only" htmlFor={`${id}-lib`}>Saved prompts</label>
+        <select id={`${id}-lib`} className={`${inputClass} w-auto max-w-[220px] py-0.5 text-xs`} value={selected} onChange={(e) => load(e.target.value)}>
+          <option value="">{library.templates == null ? "Loading saved prompts…" : library.templates.length ? "Load a saved prompt…" : "No saved prompts yet"}</option>
+          {library.templates?.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+        {current && changed && (
+          <button type="button" className={buttonClass("secondary", "py-0.5 text-[11px]")} disabled={busy || !value.trim()}
+            onClick={() => run(async () => { await library.save(current.name, value, current.id); return `Updated "${current.name}".`; })}>Update &quot;{current.name}&quot;</button>
+        )}
+        <button type="button" className={buttonClass("secondary", "py-0.5 text-[11px]")} disabled={busy || !value.trim()} onClick={() => { setNaming(!naming); setMsg(null); }}>Save as…</button>
+        {current && (
+          <button type="button" className={buttonClass("secondary", "py-0.5 text-[11px]")} disabled={busy}
+            onClick={() => { if (window.confirm(`Delete "${current.name}" for everyone in your org?`)) run(async () => { await library.remove(current.id); setSelected(""); return `Deleted "${current.name}".`; }); }}>Delete</button>
+        )}
+      </div>
+      {naming && (
+        // Not a <form>: this sits inside the bot forms, and Enter must save the prompt, not submit the bot.
+        <div className="flex gap-1">
+          <label className="sr-only" htmlFor={`${id}-name`}>Prompt name</label>
+          <input
+            id={`${id}-name`} autoFocus className={`${inputClass} py-0.5 text-xs`} maxLength={TEMPLATE_NAME_MAX} value={name}
+            onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveNew(); } }}
+            placeholder="Name, e.g. Fed fundamentals only"
+          />
+          <button type="button" className={buttonClass("primary", "py-0.5 text-[11px]")} disabled={busy || !name.trim()} onClick={saveNew}>{busy ? "Saving…" : "Save"}</button>
+        </div>
+      )}
+      {(msg || library.error) && <p className={`text-[11px] ${msg?.tone === "success" ? mutedClass : "text-red-600 dark:text-red-400"}`}>{msg?.text ?? library.error}</p>}
     </div>
   );
 }
@@ -313,7 +418,7 @@ const BOT_HELP: Record<Bot["type"], string> = {
   "near-liq": "Arms when a ≥ $100k Hyperliquid BTC position is within 0.5% of liquidation; fires only after a ≥ $5k liquidation on that same side in the last 2 minutes. Watches the largest Hyperliquid accounts only (list refreshed every 6h). No backtest exists.",
 };
 
-type Tab = "positions" | "trades" | "bots" | "orders" | "agent" | "settings";
+type Tab = "positions" | "trades" | "bots" | "prompt" | "orders" | "agent" | "settings";
 interface InstallStatus { installed: boolean; enabled: boolean }
 type Browse = "trending" | "btc" | "search";
 
@@ -495,6 +600,7 @@ function PolymarketPanel({ api }: PanelProps) {
   // Bottom tabs
   const [tab, setTab] = useState<Tab>("positions");
   const [tradesKey, setTradesKey] = useState(0);
+  const [promptKey, setPromptKey] = useState(0);
 
   if (agentsError) return <div className="p-4"><Note tone="danger">{agentsError} <button className="underline" onClick={loadAgents}>Retry</button></Note></div>;
   if (!agents) return <div className={`p-4 text-sm ${mutedClass}`}>Loading your agents…</div>;
@@ -636,6 +742,13 @@ function PolymarketPanel({ api }: PanelProps) {
                   <p className={`mt-1 whitespace-pre-line ${mutedClass}`}>{market.description || "None published."}</p>
                 </details>
               </div>
+              {agent && (
+                <MarketAsk
+                  key={`${agent.agentId}-${market.conditionId}`} agent={agent} account={account} market={market}
+                  outcomeIndex={outcomeIndex} ask={book?.asks[0]?.price ?? null} postJson={postJson}
+                  onSent={() => setPromptKey((k) => k + 1)}
+                />
+              )}
             </div>
           )}
         </Section>
@@ -694,6 +807,7 @@ function PolymarketPanel({ api }: PanelProps) {
             ["positions", `Positions${account ? ` (${account.positions.length})` : ""}`],
             ["trades", "Trades"],
             ["bots", "Bots"],
+            ["prompt", "Prompt"],
             ...(mode === "live" ? [["orders", "Open orders"]] : []),
             ["agent", "Agent"],
             ["settings", "Settings"],
@@ -711,7 +825,8 @@ function PolymarketPanel({ api }: PanelProps) {
           {tab === "trades" && agentId && <TradesTab key={`${agentId}-${tradesKey}`} agentId={agentId} call={call} />}
           {tab === "bots" && agentId && <BotsTab key={agentId} agentId={agentId} mode={mode} market={market} outcomeIndex={outcomeIndex} call={call} postJson={postJson} maxOrderUsd={account?.account.risk.maxOrderUsd ?? 25} />}
           {tab === "orders" && agentId && <OrdersTab key={agentId} agentId={agentId} call={call} />}
-          {tab === "agent" && agent && <AgentTab agent={agent} account={account} caps={caps} install={install} postJson={postJson} />}
+          {tab === "prompt" && agent && <PromptTab key={agentId} agent={agent} account={account} call={call} postJson={postJson} historyKey={promptKey} />}
+          {tab === "agent" && agent && <AgentTab agent={agent} account={account} caps={caps} install={install} postJson={postJson} onPrompt={() => setTab("prompt")} />}
           {tab === "settings" && agent && <SettingsTab agent={agent} account={account} postJson={postJson} onChange={() => { loadAccount(); loadAgents(); }} />}
         </div>
       </div>
@@ -919,6 +1034,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
   const [edit, setEdit] = useState({ size: "", maxLoss: "", instructions: "" });
   const [openLog, setOpenLog] = useState<string | null>(null);
   const [log, setLog] = useState<BotLog[] | null>(null);
+  const library = usePromptLibrary(agentId, call, postJson);
 
   const load = useCallback(() => { call<{ bots: Bot[] }>(`bots/${agentId}`).then(({ bots }) => setBots(bots)).catch((e: Error) => setError(e.message)); }, [agentId, call]);
   useEffect(() => { load(); const t = setInterval(load, 15_000); return () => clearInterval(t); }, [load]);
@@ -995,7 +1111,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
                 <input id="pm-ai-hours" className={`${inputClass} ${monoClass}`} inputMode="decimal" value={aiHours} onChange={(e) => setAiHours(e.target.value)} />
               </div>
             )}
-            <InstructionsField id="pm-ai-instructions" value={aiInstructions} onChange={setAiInstructions} />
+            <InstructionsField id="pm-ai-instructions" value={aiInstructions} onChange={setAiInstructions} library={library} />
           </>
         )}
         {type === "price-trigger" && (
@@ -1051,7 +1167,7 @@ function BotsTab({ agentId, mode, market, outcomeIndex, call, postJson, maxOrder
               <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); saveEdit(b); }}>
                 <div><label className={labelClass} htmlFor={`pm-e-size-${b.id}`}>USD/trade</label><input id={`pm-e-size-${b.id}`} className={`${inputClass} ${monoClass} w-24`} inputMode="decimal" value={edit.size} onChange={(e) => setEdit({ ...edit, size: e.target.value })} /></div>
                 <div><label className={labelClass} htmlFor={`pm-e-loss-${b.id}`}>Stop after losing</label><input id={`pm-e-loss-${b.id}`} className={`${inputClass} ${monoClass} w-28`} inputMode="decimal" value={edit.maxLoss} onChange={(e) => setEdit({ ...edit, maxLoss: e.target.value })} placeholder="no limit" /></div>
-                {b.type === "ai" && <div className="w-full"><InstructionsField id={`pm-e-instr-${b.id}`} value={edit.instructions} onChange={(v) => setEdit({ ...edit, instructions: v })} /></div>}
+                {b.type === "ai" && <div className="w-full"><InstructionsField id={`pm-e-instr-${b.id}`} value={edit.instructions} onChange={(v) => setEdit({ ...edit, instructions: v })} library={library} /></div>}
                 <button className={buttonClass("primary", "py-1 text-xs")}>Save</button>
               </form>
             )}
@@ -1136,8 +1252,8 @@ function CopyBlock({ text, label }: { text: string; label: string }) {
 }
 
 /** How to put the agent to work: what it has, the instructions to send it, and how other runtimes call the tools. */
-function AgentTab({ agent, account, caps, install, postJson }: {
-  agent: MyAgent; account: AccountView | null; caps: Record<string, boolean> | null; install: InstallStatus | null; postJson: PostJson;
+function AgentTab({ agent, account, caps, install, onPrompt }: {
+  agent: MyAgent; account: AccountView | null; caps: Record<string, boolean> | null; install: InstallStatus | null; postJson: PostJson; onPrompt: () => void;
 }) {
   const mode = account?.account.mode ?? agent.mode;
   const origin = typeof window === "undefined" ? "https://agent-guild.com" : window.location.origin;
@@ -1183,13 +1299,156 @@ function AgentTab({ agent, account, caps, install, postJson }: {
           <CopyBlock label="CLI · MCP · HTTP" text={cli} />
         </div>
       </div>
-      <PromptSection agent={agent} account={account} postJson={postJson} />
+      <div className="flex flex-wrap items-center gap-2 border-t border-[hsl(var(--border))] pt-4 text-xs">
+        <h3 className="font-semibold uppercase tracking-wide">2 · Prompt {agent.name}</h3>
+        <span className={mutedClass}>Write or pick a task and send it to the agent&apos;s DM.</span>
+        <button type="button" className={buttonClass("primary", "py-0.5 text-xs")} onClick={onPrompt}>Open the Prompt tab</button>
+      </div>
     </div>
   );
 }
 
-/** "2 · Prompt your agent": the full briefing plus a task, editable, sent to the agent's DM or copied. */
-function PromptSection({ agent, account, postJson }: { agent: MyAgent; account: AccountView | null; postJson: PostJson }) {
+/** The Prompt tab: compose and send a briefing, and see (and reuse) what was sent before. */
+function PromptTab({ agent, account, call, postJson, historyKey }: {
+  agent: MyAgent; account: AccountView | null; call: Call; postJson: PostJson; historyKey: number;
+}) {
+  const [reuse, setReuse] = useState<{ text: string; n: number } | null>(null);
+  const [sentKey, setSentKey] = useState(0);
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+      <div className="lg:col-span-3">
+        <PromptSection agent={agent} account={account} postJson={postJson} reuse={reuse} onSent={() => setSentKey((k) => k + 1)} />
+      </div>
+      <div className="lg:col-span-2">
+        <PromptHistory agentId={agent.agentId} agentName={agent.name} call={call} refreshKey={historyKey + sentKey}
+          onReuse={(text) => setReuse((r) => ({ text, n: (r?.n ?? 0) + 1 }))} />
+      </div>
+    </div>
+  );
+}
+
+interface PromptLogView { id: string; task: string | null; text: string; source: "tab" | "market"; conditionId: string | null; senderAddress: string; createdAt: string | null }
+
+/** Prompts sent to this agent from the panel, newest first. */
+function PromptHistory({ agentId, agentName, call, refreshKey, onReuse }: {
+  agentId: string; agentName: string; call: Call; refreshKey: number; onReuse: (text: string) => void;
+}) {
+  const [prompts, setPrompts] = useState<PromptLogView[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  useEffect(() => {
+    call<{ prompts: PromptLogView[] }>(`prompts/${agentId}`)
+      .then(({ prompts }) => { setPrompts(prompts); setError(null); })
+      .catch((e: Error) => { setPrompts([]); setError(e.message); });
+  }, [agentId, call, refreshKey]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide">Sent to {agentName}</h3>
+        <a className="text-[11px] underline" href={`/chat?agent=${encodeURIComponent(agentId)}`}>Replies in the DM</a>
+      </div>
+      {error && <Note tone="danger">{error}</Note>}
+      {!prompts ? <p className={`text-xs ${mutedClass}`}>Loading…</p> : !prompts.length && !error ? (
+        <p className={`text-xs ${mutedClass}`}>Nothing sent yet. Prompts you send from here or from a market show up in this list.</p>
+      ) : (
+        <ul className="max-h-[440px] space-y-1 overflow-y-auto">
+          {prompts.map((p) => (
+            <li key={p.id} className="rounded-sm border border-[hsl(var(--border))] px-2 py-1.5 text-xs">
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className={`flex flex-wrap gap-x-2 text-[11px] ${mutedClass}`}>
+                    <span className={monoClass}>{p.createdAt ? new Date(p.createdAt).toLocaleString() : "just now"}</span>
+                    {p.source === "market" && <Badge tone="neutral">market</Badge>}
+                  </div>
+                  <div className="mt-0.5 line-clamp-2 break-words">{p.task || p.text.split("\n").find((l) => l.startsWith("Your task now:"))?.slice(15) || p.text.slice(0, 160)}</div>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button type="button" className="text-[11px] underline" onClick={() => setOpen(open === p.id ? null : p.id)} aria-expanded={open === p.id}>{open === p.id ? "Hide" : "View"}</button>
+                  <button type="button" className="text-[11px] underline" onClick={() => onReuse(p.text)}>Reuse</button>
+                </div>
+              </div>
+              {open === p.id && <pre className={`${monoClass} mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words border-t border-[hsl(var(--border))] pt-1 text-[11px] leading-relaxed`}>{p.text}</pre>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** "Ask <agent>" beside a market: a one-line question with the market's id and outcome filled in, sent with the full briefing. */
+function MarketAsk({ agent, account, market, outcomeIndex, ask, postJson, onSent }: {
+  agent: MyAgent; account: AccountView | null; market: Market; outcomeIndex: number; ask: number | null; postJson: PostJson; onSent: () => void;
+}) {
+  const [question, setQuestion] = useState<string>(MARKET_ASKS[0].ask);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const outcome = market.outcomes[outcomeIndex];
+  const task = buildMarketTask({
+    conditionId: market.conditionId, question: market.question, outcome: outcome?.name ?? "", outcomeIndex, ask, endDate: market.endDate,
+  }, question);
+  const text = buildAgentPrompt(
+    { agentId: agent.agentId, name: agent.name },
+    { mode: account?.account.mode ?? agent.mode, cash: account?.cash ?? null, risk: account?.account.risk ?? null },
+    task,
+  );
+
+  const send = async (e: FormEvent) => {
+    e.preventDefault();
+    setSending(true);
+    setResult(null);
+    try {
+      await postJson("prompt", { agentId: agent.agentId, text, task, source: "market", conditionId: market.conditionId });
+      setResult({ tone: "success", text: `Sent to ${agent.name}.` });
+      onSent();
+    } catch (err) {
+      setResult({ tone: "danger", text: (err as Error).message });
+    } finally {
+      setSending(false);
+    }
+  };
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+  };
+
+  return (
+    <form className="space-y-1.5 border-t border-[hsl(var(--border))] pt-2" onSubmit={send}>
+      <div className="flex flex-wrap items-center justify-between gap-1">
+        <label htmlFor="pm-market-ask" className="text-[11px] font-semibold uppercase tracking-wide">Ask {agent.name} · {outcome?.name}</label>
+        <div className="flex flex-wrap gap-1">
+          {MARKET_ASKS.map((a) => (
+            <button key={a.id} type="button" className={buttonClass(question === a.ask ? "primary" : "secondary", "py-0.5 text-[11px]")} onClick={() => setQuestion(a.ask)}>{a.label}</button>
+          ))}
+        </div>
+      </div>
+      <div className="flex gap-1">
+        <input id="pm-market-ask" className={`${inputClass} text-xs`} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="What should the agent do with this market?" />
+        {agent.isOwner && (
+          <button type="submit" className={buttonClass("primary", "shrink-0 text-xs")} disabled={sending || !question.trim() || text.length > MAX_PROMPT_CHARS}>{sending ? "Sending…" : "Send"}</button>
+        )}
+        <button type="button" className={buttonClass("secondary", "shrink-0 text-xs")} onClick={copy}>{copied ? "Copied" : "Copy"}</button>
+      </div>
+      <details className="text-[11px]">
+        <summary className={`cursor-pointer ${mutedClass}`}>Full message ({text.length.toLocaleString()} chars, includes the trading briefing)</summary>
+        <pre className={`${monoClass} mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-sm border border-[hsl(var(--border))] p-2 leading-relaxed`}>{text}</pre>
+      </details>
+      {!agent.isOwner && <p className={`text-[11px] ${mutedClass}`}>Only the org owner can send prompts; copy it to them instead.</p>}
+      {result && (
+        <Note tone={result.tone}>
+          {result.text}{" "}
+          {result.tone === "success" && <a className="underline" href={`/chat?agent=${encodeURIComponent(agent.agentId)}`}>Watch the reply</a>}
+        </Note>
+      )}
+    </form>
+  );
+}
+
+/** Compose the full briefing plus a task, editable, sent to the agent's DM or copied. */
+function PromptSection({ agent, account, postJson, reuse, onSent }: {
+  agent: MyAgent; account: AccountView | null; postJson: PostJson; reuse: { text: string; n: number } | null; onSent: () => void;
+}) {
   const [preset, setPreset] = useState<string>(TASK_PRESETS[0].id);
   const [task, setTask] = useState<string>(TASK_PRESETS[0].task);
   const [edited, setEdited] = useState<string | null>(null);
@@ -1204,6 +1463,7 @@ function PromptSection({ agent, account, postJson }: { agent: MyAgent; account: 
   ), [agent.agentId, agent.name, agent.mode, account?.account.mode, account?.cash, account?.account.risk, task]);
   const text = edited ?? generated;
   const tooLong = text.length > MAX_PROMPT_CHARS;
+  useEffect(() => { if (reuse) { setEdited(reuse.text); setPreset("custom"); setResult(null); } }, [reuse]);
 
   const pick = (id: string) => {
     const p = TASK_PRESETS.find((x) => x.id === id);
@@ -1215,8 +1475,9 @@ function PromptSection({ agent, account, postJson }: { agent: MyAgent; account: 
     setSending(true);
     setResult(null);
     try {
-      await postJson("prompt", { agentId: agent.agentId, text });
+      await postJson("prompt", { agentId: agent.agentId, text, task: edited == null ? task : undefined, source: "tab" });
       setResult({ tone: "success", text: `Sent to ${agent.name}'s DM.` });
+      onSent();
     } catch (err) {
       setResult({ tone: "danger", text: (err as Error).message });
     } finally {
@@ -1228,9 +1489,9 @@ function PromptSection({ agent, account, postJson }: { agent: MyAgent; account: 
   };
 
   return (
-    <div className="space-y-3 border-t border-[hsl(var(--border))] pt-4">
+    <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide">2 · Prompt {agent.name}</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide">Prompt {agent.name}</h3>
         <Segmented label="Task" value={preset} onChange={pick} options={[...TASK_PRESETS.map((p) => ({ id: p.id, label: p.label })), { id: "custom", label: "Custom" }]} />
       </div>
       <div>

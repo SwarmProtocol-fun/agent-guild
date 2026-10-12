@@ -85,6 +85,23 @@ export function sharpe(equity: number[], barMs: number): number | null {
   return (mean / sd) * Math.sqrt(barsPerYear);
 }
 
+/**
+ * Sortino ratio of per-bar returns, annualized like sharpe: the mean over the
+ * downside deviation, so upside swings don't count as risk. Null with too
+ * little data or no losing bars.
+ */
+export function sortino(equity: number[], barMs: number): number | null {
+  if (equity.length < 3) return null;
+  const rets: number[] = [];
+  for (let i = 1; i < equity.length; i++) {
+    if (equity[i - 1] > 0) rets.push(equity[i] / equity[i - 1] - 1);
+  }
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+  const downside = Math.sqrt(rets.reduce((s, r) => s + Math.min(0, r) ** 2, 0) / rets.length);
+  if (!downside) return null;
+  return (mean / downside) * Math.sqrt((365 * 24 * 3_600_000) / barMs);
+}
+
 /** Population standard deviation of the last `length` values, or null if there aren't enough. */
 export function stdev(values: number[], length: number): number | null {
   const mean = sma(values, length);

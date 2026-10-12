@@ -27,6 +27,8 @@ import type { BreakoutParams } from "../../../mods/hyperliquid-trading/breakout"
 import type { SmartDcaParams } from "../../../mods/hyperliquid-trading/smart-dca";
 import type { BasisParams, OpenBasis } from "../../../mods/hyperliquid-trading/basis";
 import { readEvolution, type BotEvolution } from "../../../mods/hyperliquid-trading/evolve";
+import { openReservations, reservedUsd, type LiveReservation } from "../../../mods/hyperliquid-trading/risk";
+import { getTask } from "@/lib/gateway/store";
 import {
   PAPER_START_BALANCE,
   bookOrder,
@@ -160,6 +162,24 @@ export async function setInstantTrading(
 
 export async function deleteInstantTrading(agentId: string): Promise<void> {
   await db().collection(INSTANT).doc(agentId).delete();
+}
+
+// ── Testnet top-ups ──────────────────────────────────────────────────────────
+
+const TESTNET_TOPUPS = "hyperliquidTestnetTopUps";
+
+/** When the hub last sent this agent testnet USDC, and how much in total. */
+export async function getTestnetTopUp(agentId: string): Promise<{ lastAt: Date | null; totalUsd: number; count: number }> {
+  const snap = await db().collection(TESTNET_TOPUPS).doc(agentId).get();
+  const d = snap.data();
+  return { lastAt: d?.lastAt?.toDate?.() ?? null, totalUsd: Number(d?.totalUsd ?? 0), count: Number(d?.count ?? 0) };
+}
+
+export async function recordTestnetTopUp(agentId: string, data: { orgId: string; address: string; amountUsd: number }): Promise<void> {
+  await db().collection(TESTNET_TOPUPS).doc(agentId).set({
+    orgId: data.orgId, address: data.address, lastAt: FieldValue.serverTimestamp(),
+    totalUsd: FieldValue.increment(data.amountUsd), count: FieldValue.increment(1),
+  }, { merge: true });
 }
 
 // ── Risk config ──────────────────────────────────────────────────────────────
@@ -342,6 +362,16 @@ export interface AiParams {
   flips?: Record<string, "long" | "short">;
   /** The coins a scanTop bot holds positions in — kept when they drop out of the top N, never claimed by another bot. */
   owned?: string[];
+  /** false turns off the entry gate, minimum hold, brackets and auto-pause (mods/hyperliquid-trading/discipline.ts). */
+  discipline?: boolean;
+  /** Auto-pause only judges trades closed after this (ms): the first disciplined round, or the last pause. */
+  guardSince?: number | null;
+  /** Rounds in a row the agent let expire unanswered. Reset by any answer. */
+  missedRounds?: number;
+  /** Missed rounds in a row before idle safety closes the bot's positions and pauses it (default 3). */
+  idleCloseAfter?: number;
+  /** When idle safety last paused this bot (ms). */
+  idlePausedAt?: number | null;
 }
 
 /**
@@ -391,6 +421,12 @@ export interface Strategy {
   /** Trades the agent's paper account instead of its wallet — no signer needed, so it always runs itself. */
   paper: boolean;
   /**
+   * The only network a non-paper bot may trade on. "testnet" bots refuse to
+   * sign if the agent's wallet is on mainnet. Null for paper bots and for
+   * older live bots, which follow the wallet.
+   */
+  network?: "testnet" | "mainnet" | null;
+  /**
    * AI bots only: the lessons the bot wrote from reviewing its own trades
    * (mods/hyperliquid-trading/evolve.ts). Its own field, never inside params,
    * so a trading round's params write can't clobber a review that just landed.
@@ -417,6 +453,7 @@ function docToStrategy(d: FirebaseFirestore.QueryDocumentSnapshot): Strategy {
     pendingContext: data.pendingContext ?? null,
     webhookToken: data.webhookToken ?? null,
     paper: data.paper === true,
+    network: data.network === "testnet" || data.network === "mainnet" ? data.network : null,
     ...(data.type === "ai" ? { evolution: readEvolution(data.evolution) } : {}),
   };
 }
@@ -1254,5 +1291,68 @@ export async function listOrgBotFills(orgId: string, limit = 2000): Promise<{ st
   return snap.docs.filter((d) => d.data().status === "filled").map((d) => {
     const x = d.data();
     return { strategyId: x.strategyId ?? null, realizedPnl: Number(x.realizedPnl ?? 0), fee: Number(x.fee ?? 0), at: x.createdAt?.toDate?.().getTime() ?? null };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Live exposure reservations — hyperliquidLiveExposure/{agentId}
+//
+// A live order can sit in the worker queue (or be mid-flight natively) for
+// seconds before Hyperliquid shows it as a position, so the max-position
+// check also counts the agent's orders that are still in flight. The check
+// and the reservation happen in one transaction on the agent's doc, so two
+// orders sent at once are checked one after the other.
+// ---------------------------------------------------------------------------
+
+const LIVE_EXPOSURE = "hyperliquidLiveExposure";
+const TASK_DONE = new Set(["completed", "failed", "timeout", "cancelled"]);
+
+/**
+ * Reserve `usd` (signed) of `coin` for one live order. `check` gets the
+ * signed USD already in flight in that coin and returns an error to refuse.
+ * Fails closed: a Firestore or task-read failure throws.
+ */
+export async function reserveLiveExposure(p: {
+  agentId: string;
+  coin: string;
+  usd: number;
+  check: (pendingUsd: number) => string | null;
+}): Promise<{ id: string } | { error: string }> {
+  const ref = db().collection(LIVE_EXPOSURE).doc(p.agentId);
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const entries: LiveReservation[] = Array.isArray(snap.data()?.entries) ? snap.data()!.entries : [];
+    const bound = [...new Set(entries.map((e) => e.taskId).filter((t): t is string => !!t))];
+    const status = new Map(await Promise.all(bound.map(async (id) => [id, (await getTask(id))?.status ?? null] as const)));
+    // A task we can't find (deleted) is done; one we can read and isn't terminal still counts.
+    const open = openReservations(entries, Date.now(), (id) => {
+      const s = status.get(id);
+      return s != null && !TASK_DONE.has(s);
+    });
+    const error = p.check(reservedUsd(open, p.coin));
+    if (error) return { error };
+    const id = db().collection(LIVE_EXPOSURE).doc().id;
+    tx.set(ref, { entries: [...open, { id, coin: p.coin, usd: p.usd, taskId: null, at: Date.now() }], updatedAt: FieldValue.serverTimestamp() });
+    return { id };
+  });
+}
+
+/** The order was queued as `taskId`: it now counts until that task ends. */
+export async function bindLiveExposure(agentId: string, id: string, taskId: string): Promise<void> {
+  const ref = db().collection(LIVE_EXPOSURE).doc(agentId);
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const entries: LiveReservation[] = Array.isArray(snap.data()?.entries) ? snap.data()!.entries : [];
+    tx.set(ref, { entries: entries.map((e) => (e.id === id ? { ...e, taskId } : e)), updatedAt: FieldValue.serverTimestamp() });
+  });
+}
+
+/** Drop a reservation: the order was refused, failed to queue, or (native) already shows on Hyperliquid. */
+export async function releaseLiveExposure(agentId: string, id: string): Promise<void> {
+  const ref = db().collection(LIVE_EXPOSURE).doc(agentId);
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const entries: LiveReservation[] = Array.isArray(snap.data()?.entries) ? snap.data()!.entries : [];
+    tx.set(ref, { entries: entries.filter((e) => e.id !== id), updatedAt: FieldValue.serverTimestamp() });
   });
 }

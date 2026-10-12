@@ -23,8 +23,9 @@ vi.mock("@/lib/auth-guard", () => ({
   requireOrgMembershipByAddress: vi.fn(async (addr: string) => (addr === "OUTSIDER" ? { ok: false, status: 403, error: "Not a member" } : { ok: true })),
 }));
 const devKey = Keypair.generate();
+const listAgentWallets = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/agent-wallets", () => ({
-  listAgentWallets: vi.fn(async () => [{ id: "w1", chain: "solana", label: "solana-dev", orgId: "o1", publicKey: devKey.publicKey.toBase58() }]),
+  listAgentWallets,
   generateAgentWallet: vi.fn(),
   getAgentWalletKeypair: vi.fn(async () => devKey),
 }));
@@ -53,8 +54,11 @@ async function call(method: string, path: string, ctxBase: object, body?: unknow
 
 const FILES = { "Anchor.toml": "", "programs/x/src/lib.rs": "" };
 
+const DEV_WALLETS = () => [{ id: "w1", chain: "solana", label: "solana-dev", orgId: "o1", publicKey: devKey.publicKey.toBase58() }];
+
 beforeEach(() => {
   granted.clear();
+  listAgentWallets.mockImplementation(async () => DEV_WALLETS());
   enqueueTask.mockClear();
 });
 
@@ -87,6 +91,22 @@ describe("devnet safety", () => {
   it("rejects arbitrary RPC URLs as a cluster", async () => {
     granted.add("solana-dev-simulate");
     expect((await call("POST", "/dev/simulate", AGENT_CTX, { cluster: "http://169.254.169.254", instructions: [] })).status).toBe(400);
+  });
+});
+
+describe("simulate fee payer", () => {
+  it("explains a missing dev wallet instead of failing with a bare AccountNotFound", async () => {
+    granted.add("solana-dev-simulate");
+    listAgentWallets.mockImplementation(async () => []);
+    const res = await call("POST", "/dev/simulate", AGENT_CTX, { instructions: [{ kind: "transfer", to: devKey.publicKey.toBase58(), sol: 1 }] });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/no dev wallet yet/);
+  });
+
+  it("rejects a malformed feePayer as bad input", async () => {
+    granted.add("solana-dev-simulate");
+    const res = await call("POST", "/dev/simulate", AGENT_CTX, { feePayer: "not-a-key", instructions: [] });
+    expect(res.status).toBe(400);
   });
 });
 

@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const store = {
+  // Live orders in flight: none, so only the open position is checked.
+  reserveLiveExposure: vi.fn(async ({ check }: { check: (pendingUsd: number) => string | null }) => {
+    const error = check(0);
+    return error ? { error } : { id: "res-1" };
+  }),
+  bindLiveExposure: vi.fn(async () => {}),
+  releaseLiveExposure: vi.fn(async () => {}),
   getEnabledStrategies: vi.fn(async () => [] as unknown[]),
   getStrategy: vi.fn(),
   touchStrategyRun: vi.fn(),

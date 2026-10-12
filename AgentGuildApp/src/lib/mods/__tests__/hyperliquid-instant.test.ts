@@ -1,6 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { openReservations, reservedUsd, type LiveReservation } from "../../../../mods/hyperliquid-trading/risk";
+
+// These tests assert the worker queue (enqueueTask). Testnet orders sign natively by default; hyperliquid-testnet.test.ts covers that path.
+process.env.HYPERLIQUID_EXECUTION = "worker";
 
 const store = {
+  // Live orders in flight: none, so only the open position is checked.
+  reserveLiveExposure: vi.fn(async ({ check }: { agentId?: string; coin: string; usd: number; check: (pendingUsd: number) => string | null }): Promise<{ id: string } | { error: string }> => {
+    const error = check(0);
+    return error ? { error } : { id: "res-1" };
+  }),
+  bindLiveExposure: vi.fn(async (_agentId: string, _id: string, _taskId: string) => {}),
+  releaseLiveExposure: vi.fn(async (_agentId: string, _id: string) => {}),
   getInstantTrading: vi.fn(),
   setInstantTrading: vi.fn(),
   deleteInstantTrading: vi.fn(),
@@ -178,5 +189,92 @@ describe("live risk gate", () => {
   it("queues a live order with no automatic retry, so a timeout can never send it twice", async () => {
     expect((await trade({ isBuy: true, sizeUsd: 20 })).status).toBe(200);
     expect(enqueueTask).toHaveBeenCalledWith(expect.objectContaining({ maxRetries: 0 }));
+  });
+});
+
+describe("live orders still in flight count toward the position limit", () => {
+  const instantOn = { agentId: "a1", orgId: "org1", walletId: "w1", address: KEY_ADDRESS, network: "mainnet" };
+  const trade = (body: Record<string, unknown>) =>
+    route("POST /trade")(post({ coin: "ETH", ...body }), ctx({ agent: { agentId: "a1", orgId: "org1" } }));
+
+  // The store's semantics in memory: check, then reserve; bound reservations count while their task is open.
+  let entries: LiveReservation[] = [];
+  const openTasks = new Set<string>();
+  const passThrough = store.reserveLiveExposure.getMockImplementation()!;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    entries = [];
+    openTasks.clear();
+    let n = 0;
+    enqueueTask.mockImplementation(async () => { const id = `task-${++n}`; openTasks.add(id); return id; });
+    store.getInstantTrading.mockResolvedValue(instantOn);
+    store.getRiskConfig.mockResolvedValue({ leverage: 3, maxPositionUsd: 100, maxDailyLossUsd: 50 });
+    store.getDailyRealizedPnl.mockResolvedValue(0);
+    openPositions = [];
+    clearinghouseFails = false;
+    store.reserveLiveExposure.mockImplementation(async ({ coin, usd, check }: { coin: string; usd: number; check: (p: number) => string | null }) => {
+      entries = openReservations(entries, Date.now(), (id) => openTasks.has(id));
+      const error = check(reservedUsd(entries, coin));
+      if (error) return { error };
+      const id = `res-${entries.length + 1}-${Date.now()}`;
+      entries.push({ id, coin, usd, taskId: null, at: Date.now() });
+      return { id };
+    });
+    store.bindLiveExposure.mockImplementation(async (_a: string, id: string, taskId: string) => {
+      entries = entries.map((e) => (e.id === id ? { ...e, taskId } : e));
+    });
+    store.releaseLiveExposure.mockImplementation(async (_a: string, id: string) => {
+      entries = entries.filter((e) => e.id !== id);
+    });
+  });
+  afterEach(() => {
+    store.reserveLiveExposure.mockImplementation(passThrough);
+    enqueueTask.mockImplementation(async () => "task-1");
+  });
+
+  it("refuses a second $60 long while the first is still queued, then allows it once that task ends", async () => {
+    expect((await trade({ isBuy: true, sizeUsd: 60 })).status).toBe(200);
+    expect(store.bindLiveExposure).toHaveBeenCalledWith("a1", expect.any(String), "task-1");
+
+    // Hyperliquid shows no position yet: the first order hasn't filled.
+    const second = await trade({ isBuy: true, sizeUsd: 60 });
+    expect(second.status).toBe(400);
+    expect((await second.json()).error).toMatch(/\$120\.00 position, over maxPositionUsd 100 \(counting \$60\.00 of ETH live orders still in flight\)/);
+    expect(enqueueTask).toHaveBeenCalledTimes(1);
+
+    // It filled: the task is done and the position now shows it, so it's counted once.
+    openTasks.delete("task-1");
+    openPositions = [{ coin: "ETH", szi: "0.03", positionValue: "60" }];
+    expect((await trade({ isBuy: true, sizeUsd: 30 })).status).toBe(200);
+  });
+
+  it("an in-flight sell nets against a buy, and other coins don't count", async () => {
+    expect((await trade({ isBuy: false, sizeUsd: 60 })).status).toBe(200);
+    expect((await trade({ isBuy: true, sizeUsd: 100 })).status).toBe(200); // -60 + 100 = $40 long
+    expect((await trade({ coin: "BTC", isBuy: true, sizeUsd: 100 })).status).toBe(200);
+  });
+
+  it("releases the reservation when the order can't be queued", async () => {
+    enqueueTask.mockImplementationOnce(async () => { throw new Error("queue down"); });
+    await trade({ isBuy: true, sizeUsd: 60 }).catch(() => {});
+    expect(store.releaseLiveExposure).toHaveBeenCalledTimes(1);
+    expect(entries).toEqual([]);
+  });
+
+  it("fails closed when the in-flight orders can't be read", async () => {
+    store.reserveLiveExposure.mockRejectedValueOnce(new Error("firestore unavailable"));
+    const resp = await trade({ isBuy: true, sizeUsd: 20 });
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toMatch(/Couldn't check this agent's live orders in flight: firestore unavailable/);
+    expect(enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it("a reduce-only close is never held back by reservations", async () => {
+    expect((await trade({ isBuy: true, sizeUsd: 60 })).status).toBe(200);
+    openPositions = [{ coin: "ETH", szi: "0.03", positionValue: "60" }];
+    const close = await route("POST /close")(post({ coin: "ETH" }), ctx({ agent: { agentId: "a1", orgId: "org1" } }));
+    expect(close.status).toBe(200);
+    expect(store.reserveLiveExposure).toHaveBeenCalledTimes(1);
   });
 });

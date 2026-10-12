@@ -8,7 +8,8 @@
  * it is capped and can be stopped midway.
  */
 import { useRef, useState, type FormEvent } from "react";
-import { runBacktest, type BacktestResult, type BacktestStrategy, type Direction } from "./backtest";
+import { MONTE_CARLO_MIN_TRIPS, monteCarlo, runBacktest, splitResult, type BacktestResult, type BacktestStrategy, type Direction, type FundingPoint } from "./backtest";
+import { judge, luckLine } from "./agent-backtest";
 import { BREAKOUT_DEFAULTS, breakoutWarmup, type BreakoutParams } from "./breakout";
 import { SMART_DCA_DEFAULTS, type SmartDcaParams } from "./smart-dca";
 import type { AiDecision } from "./ai-trader-core";
@@ -22,6 +23,8 @@ const INTERVAL_MS: Record<Interval, number> = { "15m": 900_000, "1h": 3_600_000,
 const KIND_LABEL: Record<Kind, string> = { hold: "Buy & hold", dca: "DCA", grid: "Grid", sniper: "Sniper", breakout: "Breakout", ai: "AI Trader" };
 /** Questions one AI backtest may put to the agent — each is a real run of its model. */
 export const MAX_AI_BACKTEST_DECISIONS = 48;
+/** Longest history one rule backtest replays (Hyperliquid keeps the latest 5000 bars per interval). */
+const MAX_BARS = 5000;
 /** Bars of history before the first AI decision, so its snapshot is as full as the live bot's. */
 const AI_WARMUP_BARS = 112;
 
@@ -47,7 +50,7 @@ function tone(n: number | null) {
 }
 
 /** Strategy equity vs buy & hold, as two lines; stretches to its box. */
-function EquityChart({ result, candles, startIndex }: { result: BacktestResult; candles: Candle[]; startIndex: number }) {
+function EquityChart({ result, candles, startIndex, splitAt }: { result: BacktestResult; candles: Candle[]; startIndex: number; splitAt?: number | null }) {
   const W = 1000;
   const H = 220;
   const eq = result.equity;
@@ -71,6 +74,12 @@ function EquityChart({ result, candles, startIndex }: { result: BacktestResult; 
         <line x1={0} x2={W} y1={y(result.startingBalance)} y2={y(result.startingBalance)} className="stroke-[hsl(var(--border))]" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" />
         <path d={path(hold)} fill="none" className="stroke-[hsl(var(--muted-foreground))]" strokeWidth={1.25} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
         <path d={path(eq.map((e) => e.value))} fill="none" className={up ? "stroke-green-500" : "stroke-red-500"} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+        {splitAt != null && (
+          <>
+            <rect x={x(splitAt)} y={0} width={W - x(splitAt)} height={H} className="fill-[hsl(var(--muted-foreground))]" opacity={0.07} />
+            <line x1={x(splitAt)} x2={x(splitAt)} y1={0} y2={H} className="stroke-[hsl(var(--muted-foreground))]" strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
+          </>
+        )}
         {eq.map((e, i) => tradeTs.has(e.t) && (
           <line key={e.t} x1={x(i)} x2={x(i)} y1={H - 6} y2={H} className="stroke-amber-500" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
         ))}
@@ -81,6 +90,7 @@ function EquityChart({ result, candles, startIndex }: { result: BacktestResult; 
           <span><span className={`inline-block h-0.5 w-3 align-middle ${up ? "bg-green-500" : "bg-red-500"}`} /> strategy</span>
           <span><span className="inline-block h-0.5 w-3 align-middle bg-[hsl(var(--muted-foreground))]" /> buy &amp; hold</span>
           <span><span className="inline-block h-2 w-0.5 align-middle bg-amber-500" /> fills</span>
+          {splitAt != null && <span><span className="inline-block h-2 w-2 align-middle bg-[hsl(var(--muted-foreground))]/20" /> held out</span>}
         </span>
         <span>{new Date(eq[eq.length - 1].t).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
       </div>
@@ -125,6 +135,8 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
   const [sniperTarget, setSniperTarget] = useState(String(ip.targetPrice ?? ""));
   const [aiDecisions, setAiDecisions] = useState("24");
   const [maxDd, setMaxDd] = useState(String(ip.maxDrawdownPct ?? 50));
+  const [discipline, setDiscipline] = useState(String(ip.discipline) !== "false");
+  const [holdOutPct, setHoldOutPct] = useState("30");
   const [direction, setDirection] = useState<Direction>(ip.direction === "short" ? "short" : "long");
   const [stopLoss, setStopLoss] = useState(String(ip.stopLossPct ?? ""));
   const [takeProfit, setTakeProfit] = useState(String(ip.takeProfitPct ?? ""));
@@ -142,7 +154,7 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [outcome, setOutcome] = useState<{ result: BacktestResult; candles: Candle[]; startIndex: number; spec: BotSpec | null } | null>(null);
+  const [outcome, setOutcome] = useState<{ result: BacktestResult; candles: Candle[]; startIndex: number; spec: BotSpec | null; fundingModelled: boolean; holdOut: number } | null>(null);
   const [startStatus, setStartStatus] = useState<string | null>(null);
   const stopRef = useRef(false);
 
@@ -157,11 +169,13 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
     setRunning(true);
     try {
       const barMs = INTERVAL_MS[interval];
-      const want = kind === "ai" ? decisionCount + AI_WARMUP_BARS : Math.min(1000, Math.max(50, Number(bars) || 500));
-      const resp = await api(`candles/${encodeURIComponent(coin)}?interval=${interval}&network=${dataNetwork}&bars=${want}`);
+      const want = kind === "ai" ? decisionCount + AI_WARMUP_BARS : Math.min(MAX_BARS, Math.max(50, Number(bars) || 500));
+      const resp = await api(`candles/${encodeURIComponent(coin)}?interval=${interval}&network=${dataNetwork}&bars=${want}&funding=1`);
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       const candles: Candle[] = data.candles ?? [];
+      const funding: FundingPoint[] | null = Array.isArray(data.funding) ? data.funding : null;
+      const maxLeverage = Number(data.maxLeverage) || undefined;
       if (candles.length < (kind === "ai" ? 40 : 10)) throw new Error(`Only ${candles.length} ${coin} bars of ${interval} history on ${dataNetwork}.`);
 
       const size = Number(sizeUsd);
@@ -212,6 +226,7 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         strategy = {
           type: "ai",
           everyBars: 1,
+          discipline,
           decide: async ({ candles: seen, position }) => {
             const r = await api("ai/ask", {
               method: "POST",
@@ -242,6 +257,7 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
             intervalMs: barMs, maxDrawdownPct: Number(maxDd),
             ...(lev > 1 ? { leverage: lev } : {}),
             ...(typeof ip.goal === "string" && ip.goal ? { goal: ip.goal } : {}),
+            ...(discipline ? {} : { discipline: false }),
           },
         };
       }
@@ -251,10 +267,12 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         startingBalance: Number(balance), sizeUsd: kind === "hold" ? Number(balance) * 0.99 * lev : size, leverage: lev,
         maxDrawdownStopPct: kind === "ai" ? Number(maxDd) : undefined,
         ...(kind === "ai" ? {} : triggers),
+        funding: funding ?? undefined, maxLeverage,
         onProgress: (done, total) => setProgress({ done, total }),
         shouldStop: () => stopRef.current,
       });
-      setOutcome({ result, candles, startIndex, spec });
+      const holdOut = kind === "ai" ? 0 : Math.min(50, Math.max(0, Number(holdOutPct) || 0));
+      setOutcome({ result, candles, startIndex, spec, fundingModelled: funding != null, holdOut });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -272,6 +290,11 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
 
   const r = outcome?.result;
   const kinds = Object.keys(KIND_LABEL) as Kind[];
+  const splitAt = r && outcome?.holdOut ? Math.floor(r.equity.length * (1 - outcome.holdOut / 100)) : null;
+  const split = r && splitAt != null ? splitResult(r, splitAt) : null;
+  const mc = r ? monteCarlo(r.trips, r.startingBalance) : null;
+  const st = r?.stats;
+  const usd = (n: number | null) => (n == null ? "—" : `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(2)}`);
 
   return (
     <div className="grid gap-3 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
@@ -324,9 +347,15 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         </div>
 
         {kind !== "ai" && (
-          <div>
-            <label htmlFor="btBars" className={labelClass}>History (bars, max 1000)</label>
-            <input id="btBars" type="number" min="50" max="1000" className={inputClass} value={bars} onChange={(e) => setBars(e.target.value)} />
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label htmlFor="btBars" className={labelClass}>History (bars, max {MAX_BARS})</label>
+              <input id="btBars" type="number" min="50" max={MAX_BARS} className={inputClass} value={bars} onChange={(e) => setBars(e.target.value)} />
+            </div>
+            <div>
+              <label htmlFor="btHoldOut" className={labelClass} title="The last part of the history is scored on its own: an edge that only shows up before it is likely overfit.">Hold out last %</label>
+              <input id="btHoldOut" type="number" min="0" max="50" className={inputClass} value={holdOutPct} onChange={(e) => setHoldOutPct(e.target.value)} />
+            </div>
           </div>
         )}
         {kind === "dca" && (
@@ -452,6 +481,10 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
                 <input id="btDd" type="number" min="1" max="95" className={inputClass} value={maxDd} onChange={(e) => setMaxDd(e.target.value)} />
               </div>
             </div>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={discipline} onChange={(e) => setDiscipline(e.target.checked)} />
+              Guard trades like the live bot (entry gate, minimum hold, ATR stop/target, auto-pause)
+            </label>
             <p className={`text-[11px] ${muted}`}>
               One decision per {interval} bar over the last {decisionCount} bars. Your agent answers each one on its own model through
               its daemon (<span className={mono}>agent-guild daemon</span>), so the daemon must be running; each answer takes as long
@@ -477,9 +510,9 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
         {!agentId && <p className={`text-xs ${muted}`}>Pick an agent first.</p>}
         {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
         <p className={`text-[11px] ${muted}`}>
-          Fills at the next bar&apos;s open with 0.05% slippage and Hyperliquid&apos;s 0.045% taker fee; stops and take
-          profits fill inside the bar at their price (stop first if a bar hits both). Funding isn&apos;t modelled.
-          Past results don&apos;t predict future ones.
+          Fills at the next bar&apos;s open with 0.05% slippage and Hyperliquid&apos;s 0.045% taker fee; stops, liquidation
+          (at the coin&apos;s max leverage) and take profits fill inside the bar at their price, adverse side first. Hourly
+          funding is charged on whatever is held. Past results don&apos;t predict future ones.
         </p>
       </form>
 
@@ -513,10 +546,63 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
               <Tile label="Sharpe" hint="Annualized, from per-bar returns">{r.sharpe != null ? r.sharpe.toFixed(2) : "—"}</Tile>
               <Tile label="Final equity">${r.finalEquity.toFixed(2)}</Tile>
               <Tile label="Fills">{r.trades.length}{r.skippedForMargin ? <span className={`ml-1 text-xs font-normal ${muted}`}>({r.skippedForMargin} skipped)</span> : null}</Tile>
-              <Tile label="Win rate" hint="Share of closing fills that realized a profit">{r.winRate != null ? `${(r.winRate * 100).toFixed(0)}% of ${r.closingTrades}` : "—"}</Tile>
               <Tile label="Fees">${r.feesPaid.toFixed(2)}</Tile>
+              <Tile label="Funding" hint={outcome?.fundingModelled ? `Net funding paid over ${r.fundingPayments} hourly payments (negative = received)` : "Funding history wasn't available for this run"}>
+                {outcome?.fundingModelled ? <span className={r.fundingPaid > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"}>{usd(-r.fundingPaid)}</span> : <span className={muted}>n/a</span>}
+              </Tile>
             </div>
-            {outcome && <EquityChart result={r} candles={outcome.candles} startIndex={outcome.startIndex} />}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Tile label="Round trips" hint="Positions opened and closed again (a flip counts as one close and one open)">{st!.trips}</Tile>
+              <Tile label="Trip win rate" hint="Share of round trips that made money after fees and funding">{st!.winRate != null ? `${(st!.winRate * 100).toFixed(0)}%` : "—"}</Tile>
+              <Tile label="Profit factor" hint="Gross winning trips over gross losing trips. Under 1 loses money; 1.5+ is solid">
+                <span className={st!.profitFactor == null ? "" : st!.profitFactor >= 1 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}>
+                  {st!.profitFactor != null ? st!.profitFactor.toFixed(2) : st!.trips ? "no losses" : "—"}
+                </span>
+              </Tile>
+              <Tile label="Avg trip" hint="Expectancy: average net result per round trip in USD, and the plain average of each trip's % of its size. They can disagree in sign when small trips win and large ones lose.">
+                <span className={tone(st!.expectancy)}>{usd(st!.expectancy)}</span>
+                {st!.expectancyPct != null && <span className={`ml-1 text-xs font-normal ${muted}`}>{pct(st!.expectancyPct)}</span>}
+              </Tile>
+              <Tile label="Avg win / loss">{usd(st!.avgWin)} <span className={muted}>/</span> {usd(st!.avgLoss)}</Tile>
+              <Tile label="Avg hold" hint="Bars a round trip stayed open">{st!.avgBarsHeld != null ? `${st!.avgBarsHeld.toFixed(1)} bars` : "—"}</Tile>
+              <Tile label="Exposure" hint="Share of bars spent holding a position">{r.exposurePct.toFixed(0)}%</Tile>
+              <Tile label="Sortino" hint="Like Sharpe, but only downside moves count as risk">{r.sortino != null ? r.sortino.toFixed(2) : "—"}</Tile>
+            </div>
+            {(r.liquidations > 0 || st!.maxConsecutiveLosses >= 3) && (
+              <p className="text-xs text-red-600 dark:text-red-400">
+                {r.liquidations > 0 && `Liquidated ${r.liquidations}× — lower the leverage or add a stop loss. `}
+                {st!.maxConsecutiveLosses >= 3 && `Longest losing streak: ${st!.maxConsecutiveLosses} trips in a row.`}
+              </p>
+            )}
+            {outcome && <EquityChart result={r} candles={outcome.candles} startIndex={outcome.startIndex} splitAt={split ? splitAt : null} />}
+
+            {split && (
+              <div className="rounded-sm border border-[hsl(var(--border))] p-2 text-xs">
+                <div className="grid grid-cols-[auto_repeat(4,minmax(0,1fr))] gap-x-3 gap-y-1">
+                  <span />
+                  <span className={muted}>Return</span>
+                  <span className={muted}>vs hold</span>
+                  <span className={muted}>Drawdown</span>
+                  <span className={muted}>Trips</span>
+                  {([["In sample", split.inSample], [`Held out (last ${outcome!.holdOut}%)`, split.outOfSample]] as const).map(([label, sg]) => (
+                    <div key={label} className="contents">
+                      <span className="font-medium">{label}</span>
+                      <span className={`${mono} ${tone(sg.returnPct)}`}>{pct(sg.returnPct)}</span>
+                      <span className={`${mono} ${tone(sg.edgePct)}`}>{pct(sg.edgePct)}</span>
+                      <span className={mono}>−{sg.maxDrawdownPct.toFixed(2)}%</span>
+                      <span className={mono}>{sg.trips}{sg.tripWinRate != null ? ` · ${(sg.tripWinRate * 100).toFixed(0)}% won` : ""}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-1.5 font-medium">{judge(split.inSample, split.outOfSample)}</p>
+              </div>
+            )}
+
+            <p className={`text-xs ${muted}`}>
+              {mc
+                ? luckLine(mc).trim() + ` Worst-case drawdown (95th percentile): −${mc.p95DrawdownPct.toFixed(1)}%.`
+                : `Monte Carlo needs at least ${MONTE_CARLO_MIN_TRIPS} closed round trips; this run had ${st!.trips}.`}
+            </p>
 
             {r.decisions.length > 0 && (
               <details className="rounded-sm border border-[hsl(var(--border))]" open>
@@ -531,9 +617,46 @@ export function BacktestPanel({ api, agentId, coin: defaultCoin, initial, onStar
                         <span className={`ml-auto ${mono}`}>{d.price.toLocaleString()}</span>
                       </div>
                       {d.reasoning && <p className={`mt-0.5 ${muted}`}>{d.reasoning}</p>}
+                      {d.note && <p className="mt-0.5 text-amber-600 dark:text-amber-400">{d.note}</p>}
                     </li>
                   ))}
                 </ul>
+              </details>
+            )}
+
+            {r.trips.length > 0 && (
+              <details className="rounded-sm border border-[hsl(var(--border))]">
+                <summary className="cursor-pointer px-2 py-1.5 text-xs font-semibold uppercase tracking-wide">Round trips ({r.trips.length})</summary>
+                <div className="max-h-72 overflow-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className={`text-left text-[10px] uppercase tracking-wide ${muted}`}>
+                        <th className="px-2 py-1 font-medium">Opened</th>
+                        <th className="px-2 py-1 font-medium">Side</th>
+                        <th className="px-2 py-1 font-medium text-right">Entry → exit</th>
+                        <th className="px-2 py-1 font-medium text-right">Bars</th>
+                        <th className="px-2 py-1 font-medium text-right">Net</th>
+                        <th className="px-2 py-1 font-medium">Exit</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[hsl(var(--border))]">
+                      {r.trips.map((t, i) => (
+                        <tr key={i}>
+                          <td className={`px-2 py-1 ${mono} ${muted}`}>{new Date(t.openedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit" })}</td>
+                          <td className={`px-2 py-1 font-semibold ${t.side === "long" ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>{t.side}</td>
+                          <td className={`px-2 py-1 text-right ${mono}`}>
+                            {t.entryPx.toLocaleString(undefined, { maximumFractionDigits: 6 })} → {t.exitPx.toLocaleString(undefined, { maximumFractionDigits: 6 })}
+                          </td>
+                          <td className={`px-2 py-1 text-right ${mono}`}>{t.bars}</td>
+                          <td className={`px-2 py-1 text-right ${mono} ${tone(t.pnl)}`} title={`fees ${usd(t.fees)}, funding ${usd(t.funding)}`}>
+                            {usd(t.pnl)} <span className={muted}>{pct(t.pnlPct)}</span>
+                          </td>
+                          <td className={`px-2 py-1 ${muted}`}>{t.exitReason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </details>
             )}
 

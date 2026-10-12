@@ -18,7 +18,7 @@
  */
 import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
-import { nextNonce, orderAction, orderWire, signL1Action, type L1Action, type OrderRequest } from "./signing";
+import { nextNonce, orderAction, orderWire, signL1Action, signUsdSend, usdSendAction, type L1Action, type OrderRequest } from "./signing";
 
 export type HlNetwork = "testnet" | "mainnet";
 
@@ -53,6 +53,10 @@ export interface PlaceOrderResult {
   raw: Record<string, unknown>;
   triggers: { stopLoss?: { triggerPx: number; raw: unknown }; takeProfit?: { triggerPx: number; raw: unknown } } | null;
   realizedPnl: number | null;
+  /** Hyperliquid transaction hash of the fill, read back from userFills by oid. Null when it didn't fill or the lookup failed. */
+  txHash?: string | null;
+  /** Explorer link for txHash. */
+  explorerUrl?: string | null;
 }
 
 /** The order was refused before or by Hyperliquid — nothing was placed (except, for trigger failures, see `triggers`). */
@@ -163,14 +167,17 @@ export async function placeOrder(p: PlaceOrderParams): Promise<PlaceOrderResult>
 
   // Realized PnL only appears per fill (closedPnl), keyed by the order's oid —
   // the daily-loss guard and trade history need it on closes. Best effort.
+  // The fill's transaction hash comes from the same place. Best effort too.
   let realizedPnl: number | null = null;
-  if (reduceOnly && raw.oid != null) {
+  let txHash: string | null = null;
+  if (raw.oid != null && status.filled) {
     try {
-      const fills = await post<{ oid: number; closedPnl: string }[]>(network, "/info", { type: "userFills", user: walletAddress(privateKey) });
+      const fills = await post<{ oid: number; closedPnl: string; hash?: string }[]>(network, "/info", { type: "userFills", user: walletAddress(privateKey) });
       const mine = fills.filter((f) => f.oid === raw.oid);
-      if (mine.length) realizedPnl = mine.reduce((sum, f) => sum + Number(f.closedPnl || 0), 0);
+      if (reduceOnly && mine.length) realizedPnl = mine.reduce((sum, f) => sum + Number(f.closedPnl || 0), 0);
+      txHash = mine.find((f) => f.hash)?.hash ?? null;
     } catch {
-      // the trade already executed; a missing PnL shouldn't fail it
+      // the trade already executed; a missing PnL or hash shouldn't fail it
     }
   }
 
@@ -203,5 +210,25 @@ export async function placeOrder(p: PlaceOrderParams): Promise<PlaceOrderResult>
   return {
     coin, isBuy, sizeUsd, sz, midPriceAtOrder: mid, limitPx, reduceOnly,
     leverage: p.leverage ?? null, raw, triggers, realizedPnl,
+    txHash, explorerUrl: txHash ? explorerTxUrl(network, txHash) : null,
   };
+}
+
+/** Hyperliquid's explorer page for one transaction. */
+export function explorerTxUrl(network: HlNetwork, hash: string): string {
+  return `${network === "mainnet" ? "https://app.hyperliquid.xyz" : "https://app.hyperliquid-testnet.xyz"}/explorer/tx/${hash}`;
+}
+
+/**
+ * Sends `amount` USDC from the key's Hyperliquid account to `destination`
+ * (usdSend). The hub uses it on testnet only, to top up agents' testnet
+ * wallets from its own funded testnet account.
+ */
+export async function sendUsd(network: HlNetwork, privateKey: string, destination: string, amount: number): Promise<{ ok: true } | { error: string }> {
+  const time = nextNonce();
+  const action = usdSendAction(destination, amount, time, network === "mainnet");
+  const signature = await signUsdSend(privateKey, action);
+  const resp = await post<ExchangeResponse>(network, "/exchange", { action, nonce: time, signature, vaultAddress: null, expiresAfter: null });
+  const err = errorOf(resp);
+  return err ? { error: err } : { ok: true };
 }

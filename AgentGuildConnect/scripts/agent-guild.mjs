@@ -12,7 +12,7 @@
  *   agent-guild check       [--since <timestamp>] [--history] [--json] [--verify]
  *   agent-guild send        <channelId> "<text>"
  *   agent-guild reply       <channelId> <messageId> "<text>"
- *   agent-guild inbox       [--json] — messages waiting for your reply (no replyCommand = you answer them)
+ *   agent-guild inbox       [--json] — messages waiting for your reply (no replyCommand = you answer them), AI trading questions, open positions
  *   agent-guild status      — show agent status + heartbeat
  *   agent-guild discover    [--skill <id>] [--type <type>] [--status <status>]
  *   agent-guild profile     [--skills <s1,s2>] [--bio <bio>]
@@ -55,7 +55,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openIdentityVault, sealIdentityVault } from "./identity-vault-crypto.mjs";
 import { buildToolRequest, checkModId, formatToolList } from "./mod-tools.mjs";
-import { resolveHlMode, liveModeLabel, formatPaperResult, closestCommand, summarizeHlStatus, formatHlStatus } from "./hl-mode.mjs";
+import { resolveHlMode, liveModeLabel, testnetModeLabel, formatPaperResult, formatWalletResult, formatTestnetSetup, closestCommand, summarizeHlStatus, formatHlStatus, summarizeTradingInbox, formatTradingInbox } from "./hl-mode.mjs";
 
 // build-standalone.mjs sets this to true in the single file served at
 // agent-guild.com/agent-guild.mjs. That copy is paper-only for Hyperliquid
@@ -1482,21 +1482,49 @@ function printInboxStatus(config) {
   console.log(`  Keep a recurring check (every ${INBOX_CHECK_EVERY}): ${cliInvocation()} inbox, then \`reply\` to each.`);
 }
 
-/** agent-guild inbox [--json] — messages the daemon queued for this agent to answer. */
+/**
+ * The trading part of `inbox`, read live from the hub so it works without the
+ * daemon: AI questions waiting, open positions, big moves, idle pauses. Null
+ * when this agent has no Hyperliquid mod (or nothing to report).
+ */
+async function tradingInbox(config) {
+  let privateKey;
+  try { ({ privateKey } = ensureKeypair()); } catch { return null; }
+  const read = (path) => modRequest(config, privateKey, HL_MOD, "GET", path).catch((err) => err);
+  const paper = await read(`paper/${config.agentId}`);
+  // 401/403/404: the mod isn't installed for this agent — say nothing.
+  if (paper instanceof Error && /\((401|403|404)\)/.test(paper.message)) return null;
+  const [testnet, requests, strategies] = await Promise.all([read(`testnet/${config.agentId}`), read("ai/requests"), read(`strategy/${config.agentId}`)]);
+  return summarizeTradingInbox({ paper, testnet, requests, strategies });
+}
+
+/** agent-guild inbox [--json] — messages the daemon queued for this agent to answer, plus its trading. */
 async function cmdInbox() {
   const config = loadConfig();
   const cli = cliInvocation();
   const pending = pendingInbox();
   const daemon = daemonIsRunning();
+  const trading = await tradingInbox(config).catch(() => null);
   if (hasFlag("--json")) {
     console.log(JSON.stringify({
       daemonRunning: daemon,
       autoReply: hasReplyRuntime(config),
       pending: pending.map((m) => ({ ...m, reply: `${cli} reply ${m.channelId} ${m.id} "<your answer>"` })),
+      trading: trading ? {
+        ...trading,
+        questions: trading.questions.map((q) => ({
+          ...q,
+          answer: `${cli} mod call hyperliquid-trading hyperliquid_ai_answer '{"id":"${q.id}","decision":"LONG|SHORT|CLOSE|NOTHING","reasoning":"..."}'`,
+        })),
+      } : null,
     }, null, 2));
     return;
   }
   if (!daemon) console.log(`Daemon not running — new messages are not being collected. Start it: ${cli} daemon\n`);
+  if (trading) {
+    for (const line of formatTradingInbox(trading, cli)) console.log(line);
+    console.log("");
+  }
   if (!pending.length) {
     console.log("Inbox empty: no messages waiting for your reply.");
     return;
@@ -1833,8 +1861,8 @@ async function cmdDaemon() {
   const scheduleTrade = () => {
     tradeTimer = setTimeout(async () => {
       try {
-        const state = await answerTradeRequests(config, privateKey);
-        tradeDelay = state === "busy" ? 2000 : state === "idle" ? 15000 : 5 * 60 * 1000;
+        const state = await answerTradeRequests(config, privateKey, webhookConfig);
+        tradeDelay = state === "busy" ? 2000 : state === "idle" || state === "queued" ? 15000 : 5 * 60 * 1000;
       } catch (err) {
         console.error(`[${new Date().toISOString()}] trading: ${err.message}`);
         tradeDelay = 60000;
@@ -2682,12 +2710,11 @@ async function replyPollTick(config, privateKey, daemonState, webhookConfig, ove
  * Retries on transient failures with exponential backoff.
  */
 async function forwardToWebhook(config, messages, webhookConfig, timestamp) {
-  const { url, secret, retries } = webhookConfig;
   const { privateKey } = ensureKeypair();
   const harness = await currentPlaybook(config, privateKey);
 
   for (const msg of messages) {
-    const payload = {
+    await deliverWebhook(webhookConfig, "message.received", {
       event: "message.received",
       agentId: config.agentId,
       agentName: config.agentName,
@@ -2703,53 +2730,55 @@ async function forwardToWebhook(config, messages, webhookConfig, timestamp) {
         ...(harness.playbook ? { playbook: harness.playbook, playbookGeneration: harness.generation } : {}),
       },
       deliveredAt: Date.now(),
-    };
+    }, `msg ${msg.id}`, timestamp, config.agentId);
+  }
+}
 
-    const body = JSON.stringify(payload);
+/**
+ * POSTs one event to the webhook with an HMAC-SHA256 signature
+ * (X-Agent-Guild-Signature), retrying 429/5xx and network errors with
+ * exponential backoff. Returns whether it was delivered.
+ */
+async function deliverWebhook(webhookConfig, event, payload, label, timestamp = new Date().toISOString(), agentId = payload.agentId) {
+  const { url, secret, retries } = webhookConfig;
+  const body = JSON.stringify(payload);
+  const headers = { "Content-Type": "application/json" };
+  if (secret) {
+    const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
+    headers["X-Agent-Guild-Signature"] = `sha256=${hmac}`;
+  }
+  headers["X-Agent-Guild-Agent"] = agentId;
+  headers["X-Agent-Guild-Event"] = event;
+  headers["X-Agent-Guild-Delivery"] = crypto.randomUUID();
 
-    // HMAC-SHA256 signature for webhook verification
-    const headers = { "Content-Type": "application/json" };
-    if (secret) {
-      const hmac = crypto.createHmac("sha256", secret).update(body).digest("hex");
-      headers["X-Agent-Guild-Signature"] = `sha256=${hmac}`;
-    }
-    headers["X-Agent-Guild-Agent"] = config.agentId;
-    headers["X-Agent-Guild-Event"] = "message.received";
-    headers["X-Agent-Guild-Delivery"] = crypto.randomUUID();
-
-    let delivered = false;
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const resp = await fetch(url, { method: "POST", headers, body });
-        if (resp.ok || (resp.status >= 200 && resp.status < 300)) {
-          delivered = true;
-          break;
-        }
-        // Retryable status codes
-        if (resp.status === 429 || resp.status >= 500) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
-          console.warn(`[${timestamp}] webhook ${resp.status} for msg ${msg.id} — retry ${attempt + 1}/${retries} in ${delay}ms`);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
-        // Non-retryable client error
-        console.error(`[${timestamp}] webhook rejected msg ${msg.id} (${resp.status})`);
-        break;
-      } catch (err) {
-        if (attempt < retries) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
-          console.warn(`[${timestamp}] webhook error for msg ${msg.id}: ${err.message} — retry ${attempt + 1}/${retries} in ${delay}ms`);
-          await new Promise(r => setTimeout(r, delay));
-        } else {
-          console.error(`[${timestamp}] webhook failed for msg ${msg.id} after ${retries + 1} attempts: ${err.message}`);
-        }
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch(url, { method: "POST", headers, body });
+      if (resp.ok) {
+        console.log(`[${timestamp}] webhook delivered ${label}`);
+        return true;
+      }
+      // Retryable status codes
+      if (resp.status === 429 || resp.status >= 500) {
+        const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
+        console.warn(`[${timestamp}] webhook ${resp.status} for ${label} — retry ${attempt + 1}/${retries} in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      // Non-retryable client error
+      console.error(`[${timestamp}] webhook rejected ${label} (${resp.status})`);
+      return false;
+    } catch (err) {
+      if (attempt < retries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt), 15000);
+        console.warn(`[${timestamp}] webhook error for ${label}: ${err.message} — retry ${attempt + 1}/${retries} in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        console.error(`[${timestamp}] webhook failed for ${label} after ${retries + 1} attempts: ${err.message}`);
       }
     }
-
-    if (delivered) {
-      console.log(`[${timestamp}] webhook delivered msg ${msg.id}`);
-    }
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4681,7 +4710,7 @@ const MCP_TOOLS = {
     argv: () => ["status"],
   },
   guild_inbox: {
-    description: "Messages waiting for this agent's reply (its DM, and #Agent Hub lines that name it). Unless a replyCommand is set, nothing answers them but you: call this on a recurring schedule (e.g. every 15 minutes) and answer each with guild_reply.",
+    description: "Messages waiting for this agent's reply (its DM, and #Agent Hub lines that name it), plus its trading: AI trading questions waiting for a decision, open paper/testnet positions, big P&L moves and bots paused by idle safety. Unless a replyCommand is set, nothing answers them but you: call this on a recurring schedule (e.g. every 15 minutes), answer each message with guild_reply and each trading question with guild_mod_call hyperliquid_ai_answer.",
     properties: {},
     argv: () => ["inbox", "--json"],
   },
@@ -4880,13 +4909,14 @@ const MCP_TOOLS = {
       mod: str("Mod id, e.g. polymarket-trading"),
       tool: str("Tool name from guild_mod_tools, e.g. polymarket_markets"),
       input: { type: "object", description: "The tool's arguments" },
-      live: { type: "boolean", description: "hyperliquid-trading only: trade real funds. Leave unset for paper (the default); live also needs the org owner's live-trading policy." },
+      testnet: { type: "boolean", description: "hyperliquid-trading only: trade this agent's own testnet wallet (MODE: TESTNET, no real funds). Set it up once with tool hyperliquid_testnet_setup." },
+      live: { type: "boolean", description: "hyperliquid-trading only: trade real funds on mainnet (MODE: LIVE). Leave unset for paper (the default); live also needs the org owner's live-trading policy." },
     },
     required: ["mod", "tool"],
-    argv: (a) => ["mod", "call", a.mod, a.tool, JSON.stringify(a.input || {}), ...(a.live ? ["--live"] : [])],
+    argv: (a) => ["mod", "call", a.mod, a.tool, JSON.stringify(a.input || {}), ...(a.testnet ? ["--testnet"] : []), ...(a.live ? ["--live", "--mainnet"] : [])],
   },
   guild_mod_status: {
-    description: "Read-only status of an installed mod. For hyperliquid-trading: MODE (PAPER unless live), paper balance and equity, open positions, running bots, and why the agent isn't trading. Call it before trading and whenever nothing seems to happen.",
+    description: "Read-only status of an installed mod. For hyperliquid-trading: MODE (PAPER unless testnet or live), paper and testnet balances, open positions with their stop losses, running bots, AI questions waiting, and why the agent isn't trading. Call it before trading and whenever nothing seems to happen.",
     properties: { mod: str("Mod id, e.g. hyperliquid-trading") },
     required: ["mod"],
     argv: (a) => ["mod", "status", a.mod],
@@ -4941,7 +4971,7 @@ async function handleMcpRequest(msg) {
       protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-guild", version: "1.1.0" },
-      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). Messages to this agent are not answered for you unless a replyCommand is set: set up a recurring check (e.g. every 15 minutes) that calls guild_inbox and answers each message with guild_reply. guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Installed mods: guild_capabilities lists them, guild_mod_tools lists a mod's tools, guild_mod_call runs one (no vault binding needed; signed with this agent's key), guild_mod_status shows PAPER/LIVE, the paper balance, open positions and why the agent isn't trading. hyperliquid-trading trades paper unless live is set: hyperliquid_paper_trade / hyperliquid_paper_close. Also: guild_grow, messages, assignments, and DimSim. Call guild_status first if you are not sure you are registered.",
+      instructions: "Tools for any agent registered on Agent Guild (agent-guild.com). Messages to this agent are not answered for you unless a replyCommand is set: set up a recurring check (e.g. every 15 minutes) that calls guild_inbox and answers each message with guild_reply. guild_vault_put seals memory or capabilities so the protocol, this agent, and the user can each open it. guild_vault_get opens a slot with this agent's identity key. The hub stores the three wraps, not the plaintext. Installed mods: guild_capabilities lists them, guild_mod_tools lists a mod's tools, guild_mod_call runs one (no vault binding needed; signed with this agent's key), guild_mod_status shows PAPER/TESTNET/LIVE, balances, open positions and why the agent isn't trading. hyperliquid-trading trades paper by default (hyperliquid_paper_trade / hyperliquid_paper_close); testnet: true trades the agent's own testnet wallet (run hyperliquid_testnet_setup once); live is mainnet, real funds. Also: guild_grow, messages, assignments, and DimSim. Call guild_status first if you are not sure you are registered.",
     };
   }
   if (method === "ping") return {};
@@ -5234,8 +5264,9 @@ function modUsage(msg) {
   if (msg) console.error(msg);
   console.error(`Usage:
   mod tools <mod> [--json]                 — list the agent tools a mod serves (e.g. polymarket-trading)
-  mod call <mod> <tool> ['<json input>'] [--live]  — run one, signed as this agent (Hyperliquid: paper unless --live)
-  mod status <mod> [--json]                — read-only: PAPER/LIVE, paper balance, open positions, why it isn't trading`);
+  mod call <mod> <tool> ['<json input>'] [--testnet | --live --mainnet]  — run one, signed as this agent
+                                           (Hyperliquid: PAPER by default; --testnet = your testnet wallet; --live --mainnet = real funds)
+  mod status <mod> [--json]                — read-only: PAPER/TESTNET/LIVE, balances, open positions, why it isn't trading`);
   process.exit(1);
 }
 
@@ -5273,26 +5304,37 @@ async function cmdMod() {
     return;
   }
 
-  // Hyperliquid: paper unless --live, and MODE is always the first line.
+  // Hyperliquid: PAPER unless --testnet or --live, and MODE is always the first line.
   const live = hasFlag("--live");
-  let aiRequestPaper;
+  const testnet = hasFlag("--testnet");
+  let aiRequest;
   if (tool.name === "hyperliquid_ai_answer" && input.id) {
     const { requests = [] } = await modRequest(config, privateKey, mod, "GET", "ai/requests");
-    aiRequestPaper = requests.find((r) => r.id === input.id)?.paper;
+    aiRequest = requests.find((r) => r.id === input.id);
   }
   let resolved;
   let modeLine;
   try {
-    resolved = resolveHlMode(tool, input, { live, aiRequestPaper });
+    resolved = resolveHlMode(tool, input, { live, testnet, aiRequestMode: aiRequest?.mode, aiRequestPaper: aiRequest?.paper });
     modeLine = resolved.mode;
-    if (resolved.mode === "LIVE") {
+    if (resolved.mode !== "PAPER" && resolved.trades) {
       // The network the hub would trade on, checked before anything is sent.
       let network = null;
-      try { network = (await modRequest(config, privateKey, mod, "GET", "me")).wallet?.network ?? null; } catch { /* unknown: refused below if it trades */ }
-      modeLine = liveModeLabel(network, { trades: resolved.trades, mainnet: hasFlag("--mainnet") });
+      try { network = (await modRequest(config, privateKey, mod, "GET", "me")).wallet?.network ?? null; } catch { /* unknown: refused below */ }
+      modeLine = resolved.mode === "TESTNET"
+        ? testnetModeLabel(network)
+        : liveModeLabel(network, { trades: true, mainnet: hasFlag("--mainnet") });
+      // Say which network is meant, so the hub refuses rather than trade the other one.
+      if ("network" in (tool.input_schema?.properties || {}) && resolved.input.network == null) {
+        resolved = { ...resolved, input: { ...resolved.input, network: modeLine === "TESTNET" ? "testnet" : "mainnet" } };
+      }
+    } else if (resolved.mode === "LIVE") {
+      let network = null;
+      try { network = (await modRequest(config, privateKey, mod, "GET", "me")).wallet?.network ?? null; } catch { /* only a label */ }
+      modeLine = liveModeLabel(network, { trades: false });
     }
   } catch (err) {
-    console.error(`MODE: ${live ? "LIVE" : "PAPER"} — refused. ${err.message}`);
+    console.error(`MODE: ${testnet ? "TESTNET" : live ? "LIVE" : "PAPER"} — refused. ${err.message}`);
     process.exit(1);
   }
   console.log(`MODE: ${modeLine}`);
@@ -5301,6 +5343,10 @@ async function cmdMod() {
   const data = await modRequest(config, privateKey, mod, req.method, req.path, req.body, req.query);
   const side = typeof input.isBuy === "boolean" ? (input.isBuy ? "buy" : "sell") : undefined;
   for (const line of formatPaperResult(data, { side, coin: input.coin })) console.log(line);
+  for (const line of formatWalletResult(data, { side, coin: input.coin })) console.log(line);
+  if (tool.name === "hyperliquid_testnet_setup" || tool.name === "hyperliquid_testnet_fund") {
+    for (const line of formatTestnetSetup(data)) console.log(line);
+  }
   console.log(JSON.stringify(data, null, 2));
 }
 
@@ -5318,9 +5364,11 @@ async function modStatus(config, privateKey, mod) {
     return;
   }
   const read = (path) => modRequest(config, privateKey, mod, "GET", path).catch((err) => err);
-  const [me, paper, strat] = await Promise.all([read("me"), read(`paper/${config.agentId}`), read(`strategy/${config.agentId}`)]);
+  const [me, paper, strat, testnet, queue] = await Promise.all([
+    read("me"), read(`paper/${config.agentId}`), read(`strategy/${config.agentId}`), read(`testnet/${config.agentId}`), read("ai/requests"),
+  ]);
   const status = summarizeHlStatus(
-    { me, paper, strategies: strat instanceof Error ? [] : strat.strategies },
+    { me, paper, strategies: strat instanceof Error ? [] : strat.strategies, testnet, requests: queue instanceof Error ? [] : queue.requests },
     { autoReply: hasReplyRuntime(config) },
   );
   if (hasFlag("--json")) console.log(JSON.stringify(status, null, 2));
@@ -5351,10 +5399,11 @@ function parseTradeDecision(text, words = TRADE_VENUES[0].words) {
 /**
  * Answers every open AI bot question for this agent, oldest first, across
  * every trading mod. Returns "busy" if it answered something, "idle" if the
- * queues were empty, or "off" when no mod is installed / no replyCommand
- * (poll slowly then).
+ * queues were empty, "queued" when there's no replyCommand and the questions
+ * were left for the agent (pushed to its webhook, listed by `inbox`), or
+ * "off" when no trading mod is installed (poll slowly then).
  */
-async function answerTradeRequests(config, privateKey) {
+async function answerTradeRequests(config, privateKey, webhookConfig = null) {
   const queues = [];
   for (const venue of TRADE_VENUES) {
     try {
@@ -5372,8 +5421,13 @@ async function answerTradeRequests(config, privateKey) {
   const replyScript = join(__dirname, "grok-reply.mjs");
   const command = config.replyCommand || (existsSync(replyScript) ? `node ${replyScript}` : null);
   if (!command) {
-    console.error(`[${new Date().toISOString()}] trading: ${total} trade question(s) waiting, but no replyCommand is configured to answer them`);
-    return "off";
+    // No model here to answer with: push each new question to the agent's
+    // webhook (once), and leave it for `inbox`, which lists every open one.
+    const fresh = await pushTradeQuestions(config, queues, webhookConfig);
+    if (fresh) {
+      console.log(`[${new Date().toISOString()}] trading: ${fresh} new trade question(s) for you${webhookConfig ? " (sent to your webhook)" : ""} — answer them via \`agent-guild inbox\` before they expire`);
+    }
+    return "queued";
   }
 
   for (const { venue, requests } of queues) {
@@ -5418,6 +5472,43 @@ async function answerTradeRequests(config, privateKey) {
   return "busy";
 }
 
+/**
+ * Questions this daemon has not announced yet are sent to the webhook as
+ * `trade.question` events (same signing as message.received) and remembered
+ * in state.pushedTrade so each goes out once. Returns how many were new.
+ */
+async function pushTradeQuestions(config, queues, webhookConfig) {
+  const state = loadState();
+  const seen = state.pushedTrade || {};
+  const open = new Set();
+  let fresh = 0;
+  for (const { venue, requests } of queues) {
+    for (const r of requests) {
+      open.add(r.id);
+      if (seen[r.id]) continue;
+      seen[r.id] = Date.now();
+      fresh++;
+      if (!webhookConfig) continue;
+      await deliverWebhook(webhookConfig, "trade.question", {
+        event: "trade.question",
+        agentId: config.agentId,
+        agentName: config.agentName,
+        question: {
+          id: r.id, mod: venue.mod, mode: r.mode ?? (r.paper ? "PAPER" : "LIVE"), coin: r.coin, coins: r.coins ?? null,
+          expiresAt: r.expiresAt, system: r.system, prompt: r.prompt,
+          answer: `agent-guild mod call ${venue.mod} ${venue.mod === HL_MOD ? "hyperliquid_ai_answer" : "polymarket_ai_answer"} '{"id":"${r.id}","decision":"..."}'`,
+        },
+        deliveredAt: Date.now(),
+      }, `trade question ${r.id}`);
+    }
+  }
+  // Forget ids no longer open, so the record stays small.
+  for (const id of Object.keys(seen)) if (!open.has(id)) delete seen[id];
+  state.pushedTrade = seen;
+  saveState(state);
+  return fresh;
+}
+
 function hlUsage(msg) {
   console.error(`${msg}
 
@@ -5425,7 +5516,13 @@ Usage (paper by default — virtual USDC on the real order book):
   hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>   — paper order; prints the fill
   hyperliquid close --coin <COIN>                                  — close the paper position; prints paper P&L
   hyperliquid account                                              — paper balance, equity, open positions
-  mod status hyperliquid-trading                                   — PAPER/LIVE and why this agent isn't trading
+  mod status hyperliquid-trading                                   — PAPER/TESTNET/LIVE and why this agent isn't trading
+
+Testnet (MODE: TESTNET — this agent's own custodial wallet on Hyperliquid testnet, no real funds):
+  hyperliquid testnet [--fund]                                     — turn it on (once) and top up testnet USDC
+  hyperliquid trade --testnet --coin <COIN> --side buy|sell --size-usd <n>  — real testnet order; prints fill + testnet tx
+  hyperliquid close --testnet --coin <COIN>                        — close it; prints testnet P&L + tx
+  hyperliquid account --testnet                                    — testnet balance, positions with SL/TP, fills with tx hashes
 ${STANDALONE ? `
 Live trading: mod call hyperliquid-trading hyperliquid_trade '<json>' --live (the org owner must allow it).` : `
 Live (testnet wallet; needs --live and the org owner's live-trading policy):
@@ -5499,6 +5596,35 @@ async function cmdHyperliquid() {
   const config = loadConfig();
   const { privateKey } = ensureKeypair();
   const live = hasFlag("--live");
+
+  // TESTNET: the agent's own custodial wallet on Hyperliquid testnet, no passphrase, no real funds.
+  if (sub === "testnet" || (hasFlag("--testnet") && (sub === "trade" || sub === "close" || sub === "account"))) {
+    console.log("MODE: TESTNET");
+    if (sub === "testnet") {
+      const res = await hlRequest(config, privateKey, "POST", hasFlag("--fund") ? "testnet/fund" : "testnet/setup", {});
+      for (const line of formatTestnetSetup(res)) console.log(line);
+      if (hasFlag("--json")) console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+    if (sub === "account") {
+      console.log(JSON.stringify(await hlRequest(config, privateKey, "GET", `testnet/${config.agentId}`), null, 2));
+      return;
+    }
+    const coin = (arg("--coin") || "").toUpperCase();
+    if (!coin) hlUsage("--coin is required");
+    let res;
+    let side;
+    if (sub === "trade") {
+      side = arg("--side");
+      if (side !== "buy" && side !== "sell") hlUsage("--side must be buy or sell");
+      res = await hlRequest(config, privateKey, "POST", "trade", { coin, isBuy: side === "buy", sizeUsd: positiveNumber("--size-usd"), network: "testnet" });
+    } else {
+      res = await hlRequest(config, privateKey, "POST", "close", { coin, network: "testnet" });
+    }
+    for (const line of formatWalletResult(res, { side, coin })) console.log(line);
+    if (hasFlag("--json")) console.log(JSON.stringify(res, null, 2));
+    return;
+  }
 
   // Paper is the default: trade/close/account go to the virtual account unless --live.
   if (!live && (sub === "trade" || sub === "close" || sub === "account")) {
@@ -6310,12 +6436,14 @@ Identity vault (one ciphertext, three keys — protocol, this agent, and the use
 Installed Mods (a human installs from the dashboard; testnet only):
   capabilities [--json]                                    — what this agent's org has installed for it
   mod tools <mod> [--json]                                 — the agent tools a mod serves (e.g. polymarket-trading)
-  mod call <mod> <tool> ['<json>'] [--live]                — run one, e.g. mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'
-  mod status <mod> [--json]                                — PAPER/LIVE, paper balance, open positions, why it isn't trading
+  mod call <mod> <tool> ['<json>'] [--testnet | --live --mainnet]  — run one, e.g. mod call polymarket-trading polymarket_markets '{"q":"bitcoin"}'
+  mod status <mod> [--json]                                — PAPER/TESTNET/LIVE, balances, open positions, why it isn't trading
   hyperliquid trade --coin <COIN> --side buy|sell --size-usd <n>  — PAPER by default; prints MODE and the fill
   hyperliquid close --coin <COIN>                          — close the paper position; prints paper P&L
   hyperliquid account                                      — paper balance and open positions
-  (Hyperliquid calls print MODE: PAPER or MODE: LIVE first. Live needs --live and the org owner's live-trading policy:)
+  hyperliquid testnet [--fund]                             — TESTNET: this agent's own testnet wallet, funded with testnet USDC
+  hyperliquid trade|close|account --testnet ...            — the same on testnet; fills print the testnet tx
+  (Hyperliquid calls print MODE: PAPER, TESTNET or LIVE first. LIVE (mainnet) needs --live --mainnet and the org owner's live-trading policy:)
   hyperliquid setup --key-file <path> --max-position-usd <n> --max-daily-loss-usd <n> --leverage <n>
   hyperliquid status | pending
   hyperliquid trade --live --coin <COIN> --side buy|sell --size-usd <n>

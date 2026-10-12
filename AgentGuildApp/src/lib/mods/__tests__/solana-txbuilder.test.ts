@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Connection, Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { BN, BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import idlJson from "@/lib/solana/idl/agent_guild.json";
-import { buildInstructions, coerceArg, resolveAddress, type AddressContext } from "../../../../mods/solana-settlement/txbuilder";
+import { buildInstructions, coerceArg, feePayerError, resolveAddress, type AddressContext } from "../../../../mods/solana-settlement/txbuilder";
 import { DevtoolsInputError } from "../../../../mods/solana-settlement/devtools";
 
 const idl = idlJson as unknown as Idl;
@@ -106,5 +106,18 @@ describe("buildInstructions", () => {
     await expect(buildInstructions(offline, payer, [])).rejects.toThrow(/required/);
     await expect(buildInstructions(offline, payer, [{ programId: PROGRAM.toBase58(), instruction: "claim_task", idl, accounts: { claimer: "payer" } }]))
       .rejects.toThrow(/no account "claimer" — one of claimant, taskAccount/);
+  });
+});
+
+describe("feePayerError", () => {
+  it("names the unfunded fee payer behind a bare AccountNotFound", () => {
+    const e = feePayerError("AccountNotFound", payer);
+    expect(e?.name).toBe("FeePayerNotFound");
+    expect(e?.message).toContain(payer.toBase58());
+  });
+
+  it("leaves other errors alone", () => {
+    expect(feePayerError(null, payer)).toBeNull();
+    expect(feePayerError({ InstructionError: [0, { Custom: 1 }] }, payer)).toBeNull();
   });
 });

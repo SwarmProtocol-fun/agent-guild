@@ -20,7 +20,7 @@ import { adminDb } from "@/lib/firebase-admin";
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { listAgentWallets, generateAgentWallet, getAgentWalletKeypair } from "@/lib/agent-wallets";
 import { enqueueTask, getTask, getAvailableWorkers } from "@/lib/gateway/store";
-import { PUBLIC_RPC, DevtoolsInputError, explorerUrl } from "./devtools";
+import { PUBLIC_RPC, DevtoolsInputError, explorerUrl, parsePubkey } from "./devtools";
 import { buildInstructions, computeBudgetInstructions, compileTransaction, decodeTxError, simulate, type InstructionSpec, type BuildOptions } from "./txbuilder";
 
 // ── Clusters ─────────────────────────────────────────────────────────────
@@ -238,7 +238,15 @@ export async function sendAsAgent(caller: Caller, cluster: ServerCluster, specs:
 
 export async function simulateAsAgent(caller: Caller, cluster: ServerCluster, specs: InstructionSpec[], opts: BuildOptions = {}, feePayer?: string) {
   // Default payer is the agent's dev wallet so "payer"/"self" placeholders mean the agent.
-  const payer = feePayer ? new PublicKey(feePayer) : new PublicKey((await getDevWallet(caller))?.address ?? PublicKey.default);
+  let payer: PublicKey;
+  if (feePayer) {
+    payer = parsePubkey(feePayer, "feePayer");
+  } else {
+    const wallet = await getDevWallet(caller);
+    // Without a payer every simulation fails with a bare AccountNotFound.
+    if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet yet — create one (POST /dev/wallet, needs the devnet upgrade) or pass a funded feePayer address");
+    payer = new PublicKey(wallet.address);
+  }
   return simulate(connectionFor(cluster), payer, specs, opts);
 }
 

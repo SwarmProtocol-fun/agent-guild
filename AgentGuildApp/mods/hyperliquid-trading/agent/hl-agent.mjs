@@ -28,14 +28,11 @@
 
 const BASE = "/api/mods/hyperliquid-trading";
 
-/** Paper and decision routes never decrypt a wallet, so they must not demand the passphrase. */
-const NO_SECRET = new Set([
-  "hyperliquid_paper_trade",
-  "hyperliquid_paper_close",
-  "hyperliquid_paper_cancel",
-  "hyperliquid_paper_train",
-  "hyperliquid_ai_answer",
-]);
+/**
+ * The only tools that decrypt the wallet to sign. Everything else (paper,
+ * bots, backtests, answers) must not demand the passphrase or receive it.
+ */
+const NEEDS_SECRET = new Set(["hyperliquid_trade", "hyperliquid_close"]);
 
 function config(env = process.env) {
   const url = (env.AGENT_GUILD_URL || "https://agent-guild.com").replace(/\/$/, "");
@@ -49,8 +46,9 @@ function config(env = process.env) {
 }
 
 function makeRequest(cfg) {
-  return async function request(method, path, body) {
+  return async function request(method, path, body, query = {}) {
     const u = new URL(`${cfg.url}${BASE}/${path}`);
+    for (const [k, v] of Object.entries(query)) u.searchParams.set(k, typeof v === "object" ? JSON.stringify(v) : String(v));
     const headers = { "Content-Type": "application/json" };
     if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
     else {
@@ -71,7 +69,7 @@ export async function connect(env = process.env) {
   const { tools } = await request("GET", "agent/tools");
   const byName = new Map(tools.map((t) => [t.name, t]));
 
-  /** Run one tool from the manifest. Fills {path} segments, injects masterSecret into POST bodies. */
+  /** Run one tool from the manifest. Fills {path} segments, sends GET inputs as the query, injects masterSecret into trade/close. */
   async function call(name, input = {}) {
     const tool = byName.get(name);
     if (!tool) throw new Error(`Unknown tool ${name}`);
@@ -82,8 +80,8 @@ export async function connect(env = process.env) {
       if (value == null) throw new Error(`${name} needs ${key}`);
       return encodeURIComponent(String(value));
     });
-    if (tool.method === "GET") return request("GET", path);
-    if (NO_SECRET.has(name)) return request("POST", path, rest);
+    if (tool.method === "GET") return request("GET", path, undefined, rest);
+    if (!NEEDS_SECRET.has(name)) return request("POST", path, rest);
     if (!cfg.masterSecret && !me.wallet?.instant) {
       throw new Error("HL_MASTER_SECRET is required to place or close trades (or turn on instant trading for this agent)");
     }

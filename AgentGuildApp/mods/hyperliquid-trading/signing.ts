@@ -106,3 +106,40 @@ export function nextNonce(): number {
   lastNonce = Math.max(Date.now(), lastNonce + 1);
   return lastNonce;
 }
+
+/** A USDC transfer between Hyperliquid accounts (the SDK's usd_transfer). User-signed, not an L1 action. */
+export interface UsdSendAction {
+  type: "usdSend";
+  signatureChainId: "0x66eee";
+  hyperliquidChain: "Mainnet" | "Testnet";
+  destination: string;
+  amount: string;
+  time: number;
+}
+
+export function usdSendAction(destination: string, amount: number, time: number, mainnet: boolean): UsdSendAction {
+  return {
+    type: "usdSend", signatureChainId: "0x66eee", hyperliquidChain: mainnet ? "Mainnet" : "Testnet",
+    destination, amount: String(amount), time,
+  };
+}
+
+/** The SDK's sign_usd_transfer_action: EIP-712 "HyperliquidTransaction:UsdSend" on chain 0x66eee. */
+export async function signUsdSend(privateKey: string, action: UsdSendAction): Promise<Signature> {
+  const account = privateKeyToAccount((privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`) as Hex);
+  const signature = await account.signTypedData({
+    domain: { name: "HyperliquidSignTransaction", version: "1", chainId: Number(action.signatureChainId), verifyingContract: "0x0000000000000000000000000000000000000000" },
+    types: {
+      "HyperliquidTransaction:UsdSend": [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "destination", type: "string" },
+        { name: "amount", type: "string" },
+        { name: "time", type: "uint64" },
+      ],
+    },
+    primaryType: "HyperliquidTransaction:UsdSend",
+    message: { hyperliquidChain: action.hyperliquidChain, destination: action.destination, amount: action.amount, time: BigInt(action.time) },
+  });
+  const { r, s, v, yParity } = parseSignature(signature);
+  return { r, s, v: v != null ? Number(v) : 27 + yParity };
+}

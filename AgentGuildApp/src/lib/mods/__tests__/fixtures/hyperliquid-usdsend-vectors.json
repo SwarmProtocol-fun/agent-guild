@@ -1,0 +1,40 @@
+[
+  {
+    "mainnet": false,
+    "destination": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "amount": 500,
+    "time": 1760000000000,
+    "action": {
+      "destination": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "amount": "500",
+      "time": 1760000000000,
+      "type": "usdSend",
+      "signatureChainId": "0x66eee",
+      "hyperliquidChain": "Testnet"
+    },
+    "signature": {
+      "r": "0xad7623c422354fae6d3d2881fac7b5c9cc674721af8fa9ee33d1dd4952ace874",
+      "s": "0xcf7fa330f2d374871548e3f8e45ee5dcb5fe9b803398f475ec06b65fe2300c6",
+      "v": 28
+    }
+  },
+  {
+    "mainnet": true,
+    "destination": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+    "amount": 12.5,
+    "time": 1760000123456,
+    "action": {
+      "destination": "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "amount": "12.5",
+      "time": 1760000123456,
+      "type": "usdSend",
+      "signatureChainId": "0x66eee",
+      "hyperliquidChain": "Mainnet"
+    },
+    "signature": {
+      "r": "0x69958c4513f5569e35daccfdf13eaf15136aaea5e46656e353abdc592d7124d1",
+      "s": "0x460b3ddb0680886617e17cb0c7b26dfada6cd5ab4487319371ab77227206ed8f",
+      "v": 28
+    }
+  }
+]

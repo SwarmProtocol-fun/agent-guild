@@ -1,10 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Candle } from "../../../../mods/hyperliquid-trading/indicators";
 
+// These tests assert the worker queue (enqueueTask). Testnet orders sign natively by default; hyperliquid-testnet.test.ts covers that path.
+process.env.HYPERLIQUID_EXECUTION = "worker";
+
 // ── Server wiring for the 1.5 bots: breakout, smart DCA, basis, rule-bot SL/TP
 // and direction, live bot-fill logging, the live leaderboard. ──────────────
 
 const store = {
+  // Live orders in flight: none, so only the open position is checked.
+  reserveLiveExposure: vi.fn(async ({ check }: { check: (pendingUsd: number) => string | null }) => {
+    const error = check(0);
+    return error ? { error } : { id: "res-1" };
+  }),
+  bindLiveExposure: vi.fn(async () => {}),
+  releaseLiveExposure: vi.fn(async () => {}),
   getEnabledStrategies: vi.fn(async () => [] as unknown[]),
   getStrategy: vi.fn(),
   getStrategies: vi.fn(async () => [] as unknown[]),

@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,9 @@ function fakeHub() {
     if (path === "/api/v1/register") return send({ agentId: "agent-1", agentHubChannelId: HUB.id });
     if (path === "/api/v1/messages") {
       return send({ messages: hub.dmOpen ? [HUMAN_MSG] : [], channels: [HUB, DM] });
+    }
+    if (path === "/api/mods/hyperliquid-trading/ai/requests") {
+      return send({ requests: hub.question ? [hub.question] : [] });
     }
     if (path === "/api/v1/send") {
       sends.push(JSON.parse(raw));
@@ -169,3 +172,38 @@ test("harness show, status and the MCP server all point at the inbox", async (t)
   assert.match(init.result.instructions, /recurring check \(e\.g\. every 15 minutes\) that calls guild_inbox/);
   assert.ok(list.result.tools.some((tool) => tool.name === "guild_inbox"));
 });
+
+for (const copy of Object.keys(COPIES)) {
+  test(`${copy}: with no replyCommand the daemon pushes each AI trading question to the webhook once`, { timeout: 60000 }, async (t) => {
+    const hub = await fakeHub();
+    hub.question = { id: "q1", purpose: "trade", mode: "TESTNET", paper: false, coin: "ETH", system: "sys", prompt: "snapshot", expiresAt: new Date(Date.now() + 16 * 60_000).toISOString() };
+    const hooks = [];
+    const hookServer = http.createServer(async (req, res) => {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      hooks.push({ event: req.headers["x-agent-guild-event"], body: JSON.parse(raw) });
+      res.writeHead(200); res.end("{}");
+    });
+    await new Promise((r) => hookServer.listen(0, "127.0.0.1", r));
+    const agent = freshAgent(copy);
+    let daemon;
+    t.after(() => { daemon?.kill(); agent.cleanup(); hub.server.close(); hookServer.close(); });
+
+    const reg = await agent.run("register", "--hub", hub.url, "--org", "org-1", "--name", "Rex", "--type", "research");
+    assert.equal(reg.code, 0, reg.stderr);
+    // Swap the daemon register started for one with a webhook.
+    const home = join(dirname(agent.script), "..", "home");
+    try { process.kill(parseInt(readFileSync(join(home, ".agent-guild", "agent-1", "daemon.pid"), "utf8"), 10)); } catch { /* already stopped */ }
+    await new Promise((r) => setTimeout(r, 500));
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("AGENT_GUILD_"))), HOME: home };
+    daemon = spawn(process.execPath, [agent.script, "daemon", "--webhook", `http://127.0.0.1:${hookServer.address().port}/hook`], { env, stdio: "ignore" });
+
+    await until(() => hooks.some((h) => h.event === "trade.question"), 25000, "the trade question to reach the webhook");
+    const pushed = hooks.filter((h) => h.event === "trade.question");
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].body.question.id, "q1");
+    assert.equal(pushed[0].body.question.mode, "TESTNET");
+    assert.match(pushed[0].body.question.answer, /hyperliquid_ai_answer '\{"id":"q1"/);
+    assert.ok(agent.state().pushedTrade?.q1, "remembered, so it isn't pushed again");
+  });
+}

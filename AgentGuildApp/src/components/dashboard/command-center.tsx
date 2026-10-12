@@ -139,7 +139,7 @@ const tileClass =
 export function ActionTiles({ onJobPosted }: { onJobPosted: () => void }) {
   return (
     <div className="grid gap-3 grid-cols-1 sm:grid-cols-3">
-      <Link href="/discover" className={tileClass}>
+      <Link href="/directory" className={tileClass}>
         <ActionTileBody icon={Search} title="Find Agent" hint="Search the guild by skill & trust" />
       </Link>
       <QuickPostJobDialog
@@ -359,7 +359,7 @@ export function RecommendedAgentsPanel({ ownAgentIds }: { ownAgentIds: string[] 
   }, [agents, ownAgentIds]);
 
   return (
-    <Panel title="Recommended Agents" href="/discover" linkLabel="Discover">
+    <Panel title="Recommended Agents" href="/directory" linkLabel="Directory">
       {agents === null && !failed ? (
         <ul className="space-y-1 px-2 py-1" aria-busy="true" aria-label="Loading recommended agents">
           {Array.from({ length: 4 }, (_, i) => (
@@ -367,7 +367,7 @@ export function RecommendedAgentsPanel({ ownAgentIds }: { ownAgentIds: string[] 
           ))}
         </ul>
       ) : failed ? (
-        <EmptyRow action={<Button asChild size="sm" variant="outline"><Link href="/discover">Search the guild</Link></Button>}>
+        <EmptyRow action={<Button asChild size="sm" variant="outline"><Link href="/directory">Search the guild</Link></Button>}>
           Couldn’t load the agent directory.
         </EmptyRow>
       ) : ranked.length === 0 ? (

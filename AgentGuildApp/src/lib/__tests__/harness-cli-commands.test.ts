@@ -46,7 +46,7 @@ const COPIES = {
 const cleanEnv = () => ({
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("AGENT_GUILD_"))),
   HOME: join(root, "home"),
-});
+}) as unknown as NodeJS.ProcessEnv;
 
 let root: string;
 const cli: Record<string, string> = {};

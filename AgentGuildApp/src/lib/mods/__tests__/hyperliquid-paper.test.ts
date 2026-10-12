@@ -148,6 +148,13 @@ describe("paper engine", () => {
 // ── Server: routes, paper bots, the paper tick ─────────────────────────────
 
 const store = {
+  // Live orders in flight: none, so only the open position is checked.
+  reserveLiveExposure: vi.fn(async ({ check }: { check: (pendingUsd: number) => string | null }) => {
+    const error = check(0);
+    return error ? { error } : { id: "res-1" };
+  }),
+  bindLiveExposure: vi.fn(async () => {}),
+  releaseLiveExposure: vi.fn(async () => {}),
   getEnabledStrategies: vi.fn(async () => [] as unknown[]),
   getStrategy: vi.fn(),
   touchStrategyRun: vi.fn(),
@@ -229,6 +236,15 @@ describe("paper trading routes", () => {
     store.getRiskConfig.mockResolvedValue(null);
     store.getPaperAccount.mockResolvedValue({ agentId: "a1", orgId: "org1", balance: 10_000, startBalance: 10_000, dailyPnl: 0 });
     stubMarket();
+  });
+
+  it("protects every paper entry: the default stop loss and take profit when nothing sets one", async () => {
+    const data = await (await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100 }), agentCtx())).json();
+    expect(store.bookPaperFill.mock.calls[0][1]).toMatchObject({ stopLossPct: 5, takeProfitPct: 10 });
+    expect(data.protection).toEqual({ stopLossPct: 5, takeProfitPct: 10, trailingStopPct: null });
+    store.bookPaperFill.mockClear();
+    await route("POST /paper/trade")(post({ coin: "ETH", isBuy: true, sizeUsd: 100, stopLossPct: 2, takeProfitPct: 3 }), agentCtx());
+    expect(store.bookPaperFill.mock.calls[0][1]).toMatchObject({ stopLossPct: 2, takeProfitPct: 3 });
   });
 
   it("fills a market order against the real mainnet book at the taker fee — no wallet or passphrase", async () => {
@@ -411,7 +427,7 @@ describe("paper trading routes", () => {
     expect(data).toMatchObject({ id: "s-new", paper: true, coin: "ETH", goal, sizeUsd: 25, firstRound: "waiting" });
     expect(store.createStrategy).toHaveBeenCalledWith(expect.objectContaining({
       type: "ai", coin: "ETH", paper: true, wallet: "", sizeUsd: 25,
-      params: expect.objectContaining({ goal, intervalMs: 60_000, maxDrawdownPct: 10 }),
+      params: expect.objectContaining({ goal, intervalMs: 15 * 60_000, maxDrawdownPct: 10 }),
     }));
     expect(enforceCapability).toHaveBeenCalledWith("a1", "org1", "hyperliquid-run-strategy");
     expect(enqueueTask).not.toHaveBeenCalled();
@@ -426,6 +442,9 @@ describe("paper trading routes", () => {
     expect(short.status).toBe(400);
     const tooFast = await route("POST /paper/train")(post({ coin: "BTC", goal, intervalMs: 30_000 }), agentCtx());
     expect(tooFast.status).toBe(400);
+    // 1 minute is no longer the default, but can still be asked for.
+    const oneMinute = await route("POST /paper/train")(post({ coin: "SOL", goal, intervalMs: 60_000 }), agentCtx());
+    expect(oneMinute.status).toBe(200);
   });
 
   it("lists paper tools in the agent manifest", async () => {

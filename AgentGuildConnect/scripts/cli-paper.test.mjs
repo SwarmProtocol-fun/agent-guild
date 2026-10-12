@@ -22,12 +22,22 @@ const TOOLS = [
   { name: "hyperliquid_paper_account", method: "GET", path: "paper/{agentId}", input_schema: { type: "object", properties: {} } },
   { name: "hyperliquid_paper_trade", method: "POST", path: "paper/trade", input_schema: { type: "object", properties: { coin: {}, isBuy: {}, sizeUsd: {} }, required: ["coin", "isBuy", "sizeUsd"] } },
   { name: "hyperliquid_paper_close", method: "POST", path: "paper/close", input_schema: { type: "object", properties: { coin: {} }, required: ["coin"] } },
-  { name: "hyperliquid_trade", method: "POST", path: "trade", input_schema: { type: "object", properties: { coin: {}, isBuy: {}, sizeUsd: {} }, required: ["coin", "isBuy", "sizeUsd"] } },
+  { name: "hyperliquid_trade", method: "POST", path: "trade", input_schema: { type: "object", properties: { coin: {}, isBuy: {}, sizeUsd: {}, network: {} }, required: ["coin", "isBuy", "sizeUsd"] } },
 ];
 
-function fakeHub({ network = null } = {}) {
+/** What a hub with testnet support adds (mod 1.7). */
+const TESTNET_TOOLS = [
+  ...TOOLS,
+  { name: "hyperliquid_close", method: "POST", path: "close", input_schema: { type: "object", properties: { coin: {}, network: {} }, required: ["coin"] } },
+  { name: "hyperliquid_testnet_setup", method: "POST", path: "testnet/setup", input_schema: { type: "object", properties: {} } },
+  { name: "hyperliquid_testnet_account", method: "GET", path: "testnet/{agentId}", input_schema: { type: "object", properties: {} } },
+  { name: "hyperliquid_ai_requests", method: "GET", path: "ai/requests", input_schema: { type: "object", properties: {} } },
+];
+
+function fakeHub({ network = null, tools = TOOLS } = {}) {
   const calls = [];
   let position = null;
+  let testnetPosition = null;
   const server = http.createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -37,7 +47,7 @@ function fakeHub({ network = null } = {}) {
     const send = (status, data) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); };
     const p = url.pathname.replace("/api/mods/hyperliquid-trading/", "");
     if (url.pathname === "/api/v1/capabilities") return send(200, { capabilities: [{ key: "hyperliquid-trade", slug: "hyperliquid-trading" }, { key: "hyperliquid-close", slug: "hyperliquid-trading" }] });
-    if (p === "agent/tools") return send(200, { tools: TOOLS });
+    if (p === "agent/tools") return send(200, { tools });
     if (p === "me") {
       return send(200, {
         agentId: "agent-1", orgId: "org-1", via: "agent",
@@ -51,7 +61,42 @@ function fakeHub({ network = null } = {}) {
       const positions = position ? [{ coin: "ETH", szi: position.sz, entryPx: position.entryPx, markPx: 3850, leverage: 1, unrealizedPnl: 0.2 }] : [];
       return send(200, { network: "mainnet", startBalance: 10000, dailyPnl: 0, balance: 9999.99, equity: 10000.19, available: 9980, unrealizedPnl: 0.2, positions, orders: [] });
     }
+    if (p === "trade" && body.network === "testnet") {
+      if (network !== "testnet") return send(409, { error: "This agent's trading wallet is on MAINNET (real funds), not testnet" });
+      testnetPosition = { sz: 0.0052, entryPx: 3812.4 };
+      return send(200, {
+        taskId: "tn-1", network: "testnet", mode: "TESTNET",
+        fill: { network: "testnet", status: "filled", oid: 77, sz: 0.0052, avgPx: 3812.4, realizedPnl: null, txHash: "0xfeed01",
+          explorerUrl: "https://app.hyperliquid-testnet.xyz/explorer/tx/0xfeed01", stopLossPx: 3621.8, takeProfitPx: 4193.6, protectionError: null },
+      });
+    }
     if (p === "trade") return send(200, { taskId: "live-1" });
+    if (p === "close" && body.network === "testnet") {
+      if (!testnetPosition) return send(404, { error: "No open ETH position" });
+      testnetPosition = null;
+      return send(200, {
+        taskId: "tn-2", network: "testnet", mode: "TESTNET", closing: { coin: body.coin, side: "long", sizeUsd: 20 },
+        fill: { network: "testnet", status: "filled", oid: 80, sz: 0.0052, avgPx: 3900, realizedPnl: 0.45, txHash: "0xfeed02",
+          explorerUrl: "https://app.hyperliquid-testnet.xyz/explorer/tx/0xfeed02", stopLossPx: null, takeProfitPx: null, protectionError: null },
+      });
+    }
+    if (p === "testnet/setup") {
+      network = "testnet";
+      return send(200, { ok: true, mode: "TESTNET", network: "testnet", address: "0xabc", enabled: true,
+        funding: { status: "sent", amountUsd: 500, balance: 500, from: "0xhub" }, risk: { leverage: 3, maxPositionUsd: 100, maxDailyLossUsd: 50 } });
+    }
+    if (p === "testnet/agent-1") {
+      if (network !== "testnet") return send(200, { mode: "TESTNET", enabled: false });
+      const positions = testnetPosition
+        ? [{ coin: "ETH", side: "long", sz: testnetPosition.sz, entryPx: testnetPosition.entryPx, notionalUsd: 20, unrealizedPnl: 1.5, stopLossPx: 3621.8, takeProfitPx: 4193.6, protected: true }]
+        : [];
+      return send(200, { mode: "TESTNET", enabled: true, network: "testnet", address: "0xabc", accountValue: 500, positions, recentFills: [] });
+    }
+    if (p === "ai/requests") {
+      return send(200, { requests: testnetPosition
+        ? [{ id: "q1", purpose: "trade", mode: "TESTNET", paper: false, coin: "ETH", system: "sys", prompt: "snapshot", expiresAt: "2026-10-12T10:16:00Z" }]
+        : [] });
+    }
     if (p === "paper/trade") {
       position = { sz: 0.0052, entryPx: 3812.4 };
       return send(200, { taskId: "pt-1", paper: true, filled: { sz: 0.0052, avgPx: 3812.4, fee: 0.0071, realizedPnl: 0 }, resting: null, balance: 9999.99 });
@@ -179,7 +224,7 @@ for (const copy of Object.keys(COPIES)) {
 
     const live = await agent.run("mod", "call", "hyperliquid-trading", "hyperliquid_trade", '{"coin":"ETH","isBuy":true,"sizeUsd":20}');
     assert.equal(live.code, 1);
-    assert.match(live.stderr, /MODE: PAPER — refused\. hyperliquid_trade trades real funds/);
+    assert.match(live.stderr, /MODE: PAPER — refused\. hyperliquid_trade trades a wallet\. Paper is the default: .*--testnet/);
 
     const dca = await agent.run("hyperliquid", "strategy", "dca", "--coin", "ETH", "--size-usd", "20", "--interval-ms", "60000");
     assert.notEqual(dca.code, 0);
@@ -202,15 +247,17 @@ for (const copy of Object.keys(COPIES)) {
     assert.equal(main.calls.filter((c) => c.method === "POST").length, 0);
     const sent = await a.run(...order, "--mainnet");
     assert.equal(sent.code, 0, sent.stderr);
-    assert.match(sent.stdout, /^MODE: LIVE \(MAINNET\)$/m);
-    assert.deepEqual(main.calls.filter((c) => c.method === "POST").map((c) => c.path), ["/api/mods/hyperliquid-trading/trade"]);
+    assert.match(sent.stdout, /^MODE: LIVE$/m);
+    const posts = main.calls.filter((c) => c.method === "POST");
+    assert.deepEqual(posts.map((c) => c.path), ["/api/mods/hyperliquid-trading/trade"]);
+    assert.equal(posts[0].body.network, "mainnet", "the hub is told which network was meant");
 
     const test_ = await fakeHub({ network: "testnet" });
     const b = freshAgent(test_.url, copy);
     t.after(() => { test_.server.close(); b.cleanup(); });
     const r = await b.run(...order);
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout, /^MODE: LIVE \(TESTNET\)$/m);
+    assert.match(r.stdout, /^MODE: TESTNET$/m);
 
     const none = await fakeHub();
     const c = freshAgent(none.url, copy);
@@ -219,6 +266,63 @@ for (const copy of Object.keys(COPIES)) {
     assert.equal(unknown.code, 1);
     assert.match(unknown.stderr, /Can't confirm which network/);
     assert.equal(none.calls.filter((x) => x.method === "POST").length, 0);
+  });
+}
+
+for (const copy of Object.keys(COPIES)) {
+  test(`${copy}: TESTNET: setup → trade (fill + testnet tx + SL/TP) → inbox → close with testnet P&L`, async (t) => {
+    const hub = await fakeHub({ tools: TESTNET_TOOLS });
+    const agent = freshAgent(hub.url, copy);
+    t.after(() => { hub.server.close(); agent.cleanup(); });
+
+    // Before setup, a testnet order is refused here and never sent.
+    const early = await agent.run("mod", "call", "hyperliquid-trading", "hyperliquid_trade", '{"coin":"ETH","isBuy":true,"sizeUsd":20}', "--testnet");
+    assert.equal(early.code, 1);
+    assert.match(early.stderr, /MODE: TESTNET — refused\. No testnet wallet yet\. Run: .*hyperliquid_testnet_setup/);
+
+    const setup = await agent.run("mod", "call", "hyperliquid-trading", "hyperliquid_testnet_setup");
+    assert.equal(setup.code, 0, setup.stderr);
+    assert.match(setup.stdout, /^MODE: TESTNET\nTestnet wallet: 0xabc \(testnet trading turned on\)\nFunded: \+\$500\.00 testnet USDC/);
+
+    const open = await agent.run("mod", "call", "hyperliquid-trading", "hyperliquid_trade", '{"coin":"ETH","isBuy":true,"sizeUsd":20}', "--testnet");
+    assert.equal(open.code, 0, open.stderr);
+    assert.match(open.stdout, /^MODE: TESTNET\nFill \(TESTNET\): BUY 0\.0052 ETH @ 3,812\.4  order 77  task tn-1\nTestnet tx: 0xfeed01  https:\/\/app\.hyperliquid-testnet\.xyz\/explorer\/tx\/0xfeed01\nProtection: stop loss @ 3,621\.8 · take profit @ 4,193\.6/);
+
+    const inbox = await agent.run("inbox");
+    assert.equal(inbox.code, 0, inbox.stderr);
+    assert.match(inbox.stdout, /1 AI trading question\(s\) waiting for your decision:\n  \[TESTNET\] ETH  id q1/);
+    assert.match(inbox.stdout, /  \[TESTNET\] LONG 0\.0052 ETH @ 3,812\.4  uPnL \+\$1\.50/);
+    const inboxJson = JSON.parse((await agent.run("inbox", "--json")).stdout);
+    assert.equal(inboxJson.trading.questions[0].id, "q1");
+    assert.match(inboxJson.trading.questions[0].answer, /hyperliquid_ai_answer '\{"id":"q1"/);
+
+    const status = await agent.run("mod", "status", "hyperliquid-trading");
+    assert.match(status.stdout, /Testnet: on \(0xabc\), pass --testnet/);
+    assert.match(status.stdout, /  TESTNET LONG 0\.0052 ETH @ 3,812\.4  uPnL \+\$1\.50  SL 3,621\.8 TP 4,193\.6/);
+
+    const close = await agent.run("hyperliquid", "close", "--testnet", "--coin", "ETH");
+    assert.equal(close.code, 0, close.stderr);
+    assert.match(close.stdout, /^MODE: TESTNET\nFill \(TESTNET\): CLOSE LONG 0\.0052 ETH @ 3,900  order 80  task tn-2\nTestnet tx: 0xfeed02/);
+    assert.match(close.stdout, /Testnet P&L: \+\$0\.45/);
+
+    const posts = hub.calls.filter((c) => c.method === "POST");
+    assert.deepEqual(posts.map((c) => [c.path.replace("/api/mods/hyperliquid-trading/", ""), c.body?.network ?? null]), [
+      ["testnet/setup", null], ["trade", "testnet"], ["close", "testnet"],
+    ]);
+    assert.ok(hub.calls.every((c) => c.signed));
+  });
+
+  test(`${copy}: MCP: guild_mod_call with testnet: true trades the testnet wallet`, async (t) => {
+    const hub = await fakeHub({ tools: TESTNET_TOOLS, network: "testnet" });
+    const agent = freshAgent(hub.url, copy);
+    t.after(() => { hub.server.close(); agent.cleanup(); });
+    await agent.run("capabilities");
+    const r = await agent.mcp([
+      { method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+      { method: "tools/call", params: { name: "guild_mod_call", arguments: { mod: "hyperliquid-trading", tool: "hyperliquid_trade", input: { coin: "ETH", isBuy: true, sizeUsd: 20 }, testnet: true } } },
+    ]);
+    const text = r[2].result.content.map((c) => c.text).join("");
+    assert.match(text, /^MODE: TESTNET\nFill \(TESTNET\): BUY 0\.0052 ETH[\s\S]*Testnet tx: 0xfeed01/);
   });
 }
 

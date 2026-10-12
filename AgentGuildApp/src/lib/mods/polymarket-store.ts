@@ -10,6 +10,8 @@
  *   polymarketAiRequests      — AI Predictor questions waiting for the agent's own model
  *   polymarketPaperOrders     — resting paper limit orders (maker bots), filled from the real trade tape
  *   polymarketFeeds           — shared feed caches (whale universe) and the tick lock
+ *   polymarketPrompts         — prompts the owner sent an agent from the panel (history)
+ *   polymarketPromptLibrary   — saved AI Predictor instructions, shared across an org
  *
  * Server-only (Firebase Admin SDK). Only import from the mod's server.ts.
  */
@@ -28,6 +30,8 @@ const BOT_LOG = "log";
 const AI_REQUESTS = "polymarketAiRequests";
 const PAPER_ORDERS = "polymarketPaperOrders";
 const FEEDS = "polymarketFeeds";
+const PROMPTS = "polymarketPrompts";
+const PROMPT_LIBRARY = "polymarketPromptLibrary";
 
 function db() {
   return adminDb();
@@ -699,4 +703,71 @@ export async function releaseTickLock(holder: string): Promise<void> {
     const snap = await tx.get(ref);
     if (snap.data()?.holder === holder) tx.set(ref, { holder: null, until: 0 });
   });
+}
+
+// ── Prompts ─────────────────────────────────────────────────────────────────
+
+export interface PmPromptLog {
+  id: string;
+  agentId: string;
+  orgId: string;
+  senderAddress: string;
+  /** The short task the operator typed or picked; the full text is what the agent got. */
+  task: string | null;
+  text: string;
+  /** "tab" for the Prompt tab, "market" for the quick ask beside a market. */
+  source: "tab" | "market";
+  conditionId: string | null;
+  channelId: string;
+  messageId: string;
+  createdAt: Date | null;
+}
+
+export async function recordPrompt(data: Omit<PmPromptLog, "id" | "createdAt">): Promise<string> {
+  const ref = await db().collection(PROMPTS).add({ ...data, createdAt: FieldValue.serverTimestamp() });
+  return ref.id;
+}
+
+/** Newest first. Single-field query and an in-memory sort, so no composite index is needed. */
+export async function listPrompts(agentId: string, limit = 25): Promise<PmPromptLog[]> {
+  const snap = await db().collection(PROMPTS).where("agentId", "==", agentId).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data(), createdAt: toDate(d.get("createdAt")) }) as PmPromptLog)
+    .sort((a, b) => (b.createdAt?.getTime() ?? Infinity) - (a.createdAt?.getTime() ?? Infinity))
+    .slice(0, limit);
+}
+
+export interface PmPromptTemplate {
+  id: string;
+  orgId: string;
+  name: string;
+  text: string;
+  createdBy: string;
+  createdAt: Date | null;
+  updatedAt: Date | null;
+}
+
+export async function listPromptTemplates(orgId: string): Promise<PmPromptTemplate[]> {
+  const snap = await db().collection(PROMPT_LIBRARY).where("orgId", "==", orgId).get();
+  return snap.docs
+    .map((d) => ({ id: d.id, ...d.data(), createdAt: toDate(d.get("createdAt")), updatedAt: toDate(d.get("updatedAt")) }) as PmPromptTemplate)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function getPromptTemplate(id: string): Promise<PmPromptTemplate | null> {
+  const snap = await db().collection(PROMPT_LIBRARY).doc(id).get();
+  return snap.exists ? ({ id: snap.id, ...snap.data(), createdAt: toDate(snap.get("createdAt")), updatedAt: toDate(snap.get("updatedAt")) } as PmPromptTemplate) : null;
+}
+
+export async function createPromptTemplate(data: Pick<PmPromptTemplate, "orgId" | "name" | "text" | "createdBy">): Promise<string> {
+  const ref = await db().collection(PROMPT_LIBRARY).add({ ...data, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+  return ref.id;
+}
+
+export async function updatePromptTemplate(id: string, patch: Pick<PmPromptTemplate, "name" | "text">): Promise<void> {
+  await db().collection(PROMPT_LIBRARY).doc(id).update({ ...patch, updatedAt: FieldValue.serverTimestamp() });
+}
+
+export async function deletePromptTemplate(id: string): Promise<void> {
+  await db().collection(PROMPT_LIBRARY).doc(id).delete();
 }

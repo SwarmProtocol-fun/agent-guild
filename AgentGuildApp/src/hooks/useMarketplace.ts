@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { useOrg } from "@/contexts/OrgContext";
+import { HIDDEN_MOD_IDS } from "@/lib/hidden-features";
 import { useWalletAccount } from "@/lib/wallet";
 import { useSession } from "@/contexts/SessionContext";
 import {
@@ -272,7 +273,7 @@ export function useMarketplace() {
             tags: c.tags,
             pricing: c.pricing,
         }));
-        return [...SKILL_REGISTRY, ...communitySkills];
+        return [...SKILL_REGISTRY.filter((s) => !HIDDEN_MOD_IDS.has(s.id)), ...communitySkills];
     }, [communityItems]);
 
     const communityItemMap = useMemo(() => {

@@ -11,7 +11,7 @@ import { EDITABLE_PARAMS } from "./bot-edit";
 /** Bot settings edited as text rather than numbers. */
 const TEXT_PARAMS = new Set(["goal", "direction", "mode", "interval"]);
 /** Yes/no settings, sent as booleans. */
-const BOOL_PARAMS = new Set(["allowShort", "exitOnMid"]);
+const BOOL_PARAMS = new Set(["allowShort", "exitOnMid", "discipline"]);
 /** Settings that are objects — not editable in the flat form (delete and recreate to change them). */
 const OBJECT_PARAMS = new Set(["smart"]);
 /** Choices for the settings that only take a few values. */
@@ -21,6 +21,7 @@ const PARAM_CHOICES: Record<string, string[]> = {
   interval: ["1m", "5m", "15m", "1h", "4h", "1d"],
   allowShort: ["true", "false"],
   exitOnMid: ["true", "false"],
+  discipline: ["true", "false"],
 };
 /** A signal bot's direction is buy/sell; the rule bots' is long/short. */
 function choicesFor(type: string, key: string): string[] | undefined {
@@ -35,7 +36,7 @@ const PARAM_LABELS: Record<string, string> = {
   stopLossPct: "Stop loss %", takeProfitPct: "Take profit %", bbLength: "Band length", bbMult: "Band width (σ)",
   squeezeLookback: "Squeeze lookback", squeezeWithin: "Squeeze within (bars)", adxLength: "ADX length", minAdx: "Min ADX",
   allowShort: "Short breakdowns", exitOnMid: "Exit at mid band", entryAprPct: "Enter at APR %", exitAprPct: "Exit under APR %",
-  minBasisPct: "Min basis %", maxHoldHours: "Max hold (hours)",
+  minBasisPct: "Min basis %", maxHoldHours: "Max hold (hours)", discipline: "Guard trades",
 };
 import { activeAssetCtxSubscription, hlWsUrl, parseActiveAssetCtx } from "./oracle";
 
@@ -1585,7 +1586,7 @@ function TradingPanel({ api }: PanelProps) {
   /** Scan the most-traded perps each round instead of a fixed coin list. */
   const [trainScan, setTrainScan] = useState(false);
   const [trainSize, setTrainSize] = useState("25");
-  const [trainEvery, setTrainEvery] = useState("1");
+  const [trainEvery, setTrainEvery] = useState("15");
   const [trainStop, setTrainStop] = useState("10");
   const [trainBusy, setTrainBusy] = useState(false);
   // Collapsed by default so positions and history stay above the fold. Remembered per browser.
@@ -1840,7 +1841,9 @@ function TradingPanel({ api }: PanelProps) {
     for (const k of EDITABLE_PARAMS[s.type] ?? []) {
       if (OBJECT_PARAMS.has(k)) continue;
       const v = s.params?.[k];
-      fields[k] = v == null ? (k === "direction" && s.type !== "signal" ? "long" : "") : k === "intervalMs" ? String(Number(v) / 60_000) : String(v);
+      // Unset means the default: a rule bot runs long, an AI bot's trades are guarded.
+      const unset = k === "direction" && s.type !== "signal" ? "long" : k === "discipline" ? "true" : "";
+      fields[k] = v == null ? unset : k === "intervalMs" ? String(Number(v) / 60_000) : String(v);
     }
     setEditingBot({ id: s.id, sizeUsd: String(s.sizeUsd), fields, error: null, saving: false });
   }
@@ -1854,6 +1857,7 @@ function TradingPanel({ api }: PanelProps) {
       let value: unknown = text === "" ? null : BOOL_PARAMS.has(k) ? text === "true" : TEXT_PARAMS.has(k) ? text : Number(text);
       // A rule bot with no direction stored is long; don't send "long" as a change.
       if (k === "direction" && s.type !== "signal" && value === "long" && before == null) continue;
+      if (k === "discipline" && value === true && before == null) continue;
       if (k === "intervalMs" && value != null) value = Math.round(Number(value) * 60_000);
       if (value !== (before ?? null)) params[k] = value;
     }
@@ -2228,7 +2232,7 @@ function TradingPanel({ api }: PanelProps) {
           </div>
           <div>
             <label htmlFor="trainEvery" className={labelClass}>Decide every</label>
-            <select id="trainEvery" name="trainEvery" className={`${inputClass} w-auto`} value={trainEvery} onChange={(e) => setTrainEvery(e.target.value)} title="1 minute is the fastest. The agent still has up to 3 minutes to answer each round.">
+            <select id="trainEvery" name="trainEvery" className={`${inputClass} w-auto`} value={trainEvery} onChange={(e) => setTrainEvery(e.target.value)} title="1 minute is the fastest, but moves that small rarely cover fees. The agent still has up to 3 minutes to answer each round.">
               <option value="1">1 minute</option>
               <option value="5">5 minutes</option>
               <option value="15">15 minutes</option>
