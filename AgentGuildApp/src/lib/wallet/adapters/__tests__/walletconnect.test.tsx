@@ -203,6 +203,50 @@ describe("useWallet — login account", () => {
     expect(result.current).toEqual({ address: null, chainId: null, status: "disconnected" });
   });
 
+  describe("embedded wallet EOA / smart account", () => {
+    const SMART = "0x5555555555555555555555555555555555555555";
+    const both = [{ address: EVM, type: "eoa" }, { address: SMART, type: "smartAccount" }];
+    const embeddedEvm = (address: string, accounts?: object[]) => {
+      w.accounts.eip155 = { isConnected: true, address, status: "connected", embeddedWalletInfo: { user: { accounts } } };
+      w.caipNetwork = { id: 1, chainNamespace: "eip155" };
+      w.wagmi = { address, chainId: 1, status: "connected" };
+    };
+
+    it("logs in as the smart account even when the active network reports the EOA", async () => {
+      embeddedEvm(EVM, both);
+      const a = await loadAdapter();
+      const { result } = renderHook(() => a.useWallet());
+      expect(result.current.address).toBe(SMART);
+    });
+
+    it("keeps the smart account after switching to a network that only reports the EOA", async () => {
+      embeddedEvm(SMART, both);
+      const a = await loadAdapter();
+      const { result, rerender } = renderHook(() => a.useWallet());
+      expect(result.current.address).toBe(SMART);
+      embeddedEvm(EVM, undefined);
+      rerender();
+      expect(result.current.address).toBe(SMART);
+    });
+
+    it("doesn't map a different wallet's EOA to the remembered smart account", async () => {
+      embeddedEvm(SMART, both);
+      const a = await loadAdapter();
+      const { result, rerender } = renderHook(() => a.useWallet());
+      embeddedEvm(STALE_EVM, undefined);
+      rerender();
+      expect(result.current.address).toBe(STALE_EVM);
+    });
+
+    it("uses the reported address for an external (non-embedded) wallet", async () => {
+      w.accounts.eip155 = { isConnected: true, address: EVM, status: "connected" };
+      w.caipNetwork = { id: 1, chainNamespace: "eip155" };
+      const a = await loadAdapter();
+      const { result } = renderHook(() => a.useWallet());
+      expect(result.current.address).toBe(EVM);
+    });
+  });
+
   it("takes the EVM chainId from the active network when wagmi has none", async () => {
     w.caipNetwork = { id: 999, chainNamespace: "eip155" };
     w.accounts.eip155 = { isConnected: true, address: EVM, status: "connected" };
@@ -572,9 +616,9 @@ describe("module setup", () => {
     expect(w.createAppKit.mock.calls[0][0].defaultNetwork).toMatchObject({ id: 1 });
   });
 
-  it("keeps embedded wallets on their EOA so switching EVM chains keeps the address", async () => {
+  it("keeps AppKit's default smart account for embedded wallets (existing logins are keyed to it)", async () => {
     await loadAdapter();
-    expect(w.createAppKit.mock.calls[0][0].defaultAccountTypes).toEqual({ eip155: "eoa" });
+    expect(w.createAppKit.mock.calls[0][0].defaultAccountTypes).toBeUndefined();
   });
 
   it("defaults AppKit to Solana when Solana was chosen before", async () => {

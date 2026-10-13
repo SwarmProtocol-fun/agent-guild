@@ -159,12 +159,11 @@ if (projectId) {
       icons: [`${origin}/logo.png`],
     },
     ...(featured.ids.length > 0 ? { featuredWalletIds: featured.ids } : {}),
-    // Embedded (email/social) wallets default to a smart account on EVM, but
-    // only on networks that support one (Ethereum does, Tempo and Hyperliquid
-    // don't) — elsewhere they fall back to the EOA. Switching to Tempo for a
-    // payout then swapped the login address, and useAutoSiwe signed the user
-    // in as a different wallet. The EOA is the same address on every chain.
-    defaultAccountTypes: { eip155: "eoa" },
+    // Embedded (email/social) wallets keep AppKit's default smart account on
+    // EVM: existing users' accounts are keyed to it. Networks without smart
+    // accounts (Tempo, Hyperliquid) fall back to the EOA — useLoginAccount
+    // pins the login to the smart account so that switch doesn't change who
+    // is signed in.
     features: { analytics: false },
   });
 } else {
@@ -281,6 +280,34 @@ function mapAppKitStatus(status: "connected" | "disconnected" | "connecting" | "
   return status === "connected" ? "connected" : status === "disconnected" || status === undefined ? "disconnected" : "connecting";
 }
 
+type EmbeddedAccount = { address: string; type: string };
+const EMBEDDED_EVM_KEY = "agentguild.embeddedEvmLogin";
+
+/**
+ * The login address for an embedded (email/social) wallet's EVM account.
+ * The wallet holds an EOA and a smart account, and AppKit reports whichever
+ * the active network supports — the smart account on Ethereum, the EOA on
+ * Tempo/Hyperliquid — so the login flipped between two wallets on network
+ * switches. Always log in as the smart account: it's what existing accounts
+ * are keyed to. The EOA → smart account pair is remembered (outside
+ * clearWalletStorage's prefixes) for sessions that report only the EOA.
+ */
+export function pinEmbeddedEvmLogin(address: string, accounts: EmbeddedAccount[] | undefined): string {
+  const smart = accounts?.find((a) => a.type === "smartAccount")?.address;
+  const eoa = accounts?.find((a) => a.type === "eoa")?.address;
+  try {
+    if (smart) {
+      if (eoa) localStorage.setItem(EMBEDDED_EVM_KEY, JSON.stringify({ eoa, smart }));
+      return smart;
+    }
+    const pinned = JSON.parse(localStorage.getItem(EMBEDDED_EVM_KEY) ?? "null") as { eoa?: string; smart?: string } | null;
+    if (pinned?.smart && pinned.eoa?.toLowerCase() === address.toLowerCase()) return pinned.smart;
+  } catch {
+    // localStorage unavailable or corrupt — fall back to the reported address.
+  }
+  return smart ?? address;
+}
+
 // The login account is the active namespace's account, so it's always the
 // account the wallet signs with. Embedded (email/social) wallets sign with the
 // active chain's account only — asking them to sign as the other namespace's
@@ -297,7 +324,11 @@ function useLoginAccount() {
   const { caipNetwork } = useAppKitNetwork();
   const active = caipNetwork?.chainNamespace;
 
-  const evmAddress = evm.isConnected ? evm.address : undefined;
+  const evmAddress = evm.isConnected && evm.address
+    ? evm.embeddedWalletInfo
+      ? pinEmbeddedEvmLogin(evm.address, (evm.embeddedWalletInfo.user as { accounts?: EmbeddedAccount[] } | undefined)?.accounts)
+      : evm.address
+    : undefined;
   const solanaAddress = solana.isConnected ? solana.address : undefined;
 
   const evmState = (address: string) => ({
@@ -486,7 +517,13 @@ function AccountMenu({ address, namespace, className }: { address: string; names
   const { switchNetwork } = useAppKitNetwork();
   const evm = useAppKitAccount({ namespace: "eip155" });
   const solana = useAppKitAccount({ namespace: "solana" });
-  const evmAddress = namespace === "eip155" ? address : evm.isConnected ? evm.address : undefined;
+  const evmAddress = namespace === "eip155"
+    ? address
+    : evm.isConnected && evm.address
+      ? evm.embeddedWalletInfo
+        ? pinEmbeddedEvmLogin(evm.address, (evm.embeddedWalletInfo.user as { accounts?: EmbeddedAccount[] } | undefined)?.accounts)
+        : evm.address
+      : undefined;
   const solanaAddress = namespace === "solana" ? address : solana.isConnected ? solana.address : undefined;
   // Embedded (email/social) wallets hold both accounts and connect the other
   // one on switch; other wallets can only switch to a namespace they're on.
