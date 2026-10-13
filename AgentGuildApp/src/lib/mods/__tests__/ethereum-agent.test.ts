@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { privateKeyToAccount } from "viem/accounts";
 import type { ServerMod, RouteContext } from "../sdk";
 
 // Capabilities granted to the test agent; tests flip entries on and off.
@@ -165,4 +166,59 @@ describe("owner policy", () => {
     expect((await res.json()).enabled).toEqual(["eth-inspect", "eth-simulate", "eth-testnet", "eth-trade"]);
     expect((await call("POST", "/upgrade", SESSION_CTX("member"), { orgId: "o1" })).status).toBe(403);
   });
+});
+
+describe("tools the agent doesn't have alone", () => {
+  // Throwaway test key; holds nothing anywhere.
+  const KEY = `0x${"11".repeat(32)}` as const;
+  const KEY_ADDR = privateKeyToAccount(KEY).address;
+
+  it("eth_util needs eth-inspect for an agent and works for a session", async () => {
+    expect((await call("POST", "/dev/util", AGENT_CTX, { op: "selector", signature: "transfer(address,uint256)" })).status).toBe(403);
+    granted.add("eth-inspect");
+    const res = await call("POST", "/dev/util", AGENT_CTX, { op: "selector", signature: "transfer(address,uint256)" });
+    expect(await res.json()).toMatchObject({ op: "selector", selector: "0xa9059cbb" });
+    expect((await call("POST", "/dev/util", SESSION_CTX(), { op: "keccak256", text: "" })).status).toBe(200);
+  });
+
+  it("signs a message with the dev wallet, and refuses typed data for a mainnet domain", async () => {
+    granted.add("eth-testnet");
+    getKey.mockResolvedValue(KEY);
+    const msg = await call("POST", "/dev/sign", AGENT_CTX, { message: "hello" });
+    expect(msg.status).toBe(200);
+    const signed = await msg.json();
+    expect(signed).toMatchObject({ address: KEY_ADDR, kind: "message" });
+    const { verifyMessage } = await import("viem");
+    expect(await verifyMessage({ address: KEY_ADDR, message: "hello", signature: signed.signature })).toBe(true);
+
+    const typed = (chainId: number) => ({
+      typedData: {
+        domain: { name: "Permit", version: "1", chainId, verifyingContract: DEV },
+        types: { Mail: [{ name: "contents", type: "string" }] }, primaryType: "Mail", message: { contents: "hi" },
+      },
+    });
+    const refused = await call("POST", "/dev/sign", AGENT_CTX, typed(1));
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error).toMatch(/testnet/);
+    expect((await call("POST", "/dev/sign", AGENT_CTX, typed(11155111))).status).toBe(200);
+  });
+
+  it("deploy-source returns compile errors and sends nothing", async () => {
+    granted.add("eth-testnet");
+    const res = await call("POST", "/dev/deploy-source", AGENT_CTX, { source: "pragma solidity ^0.8.20; contract X { function f() public { nope(); } }" });
+    expect(res.status).toBe(400);
+    const out = await res.json();
+    expect(out.status).toBe("compile-failed");
+    expect(out.errors[0].message).toMatch(/Undeclared identifier/);
+    expect(getKey).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it("compile needs eth-simulate for an agent", async () => {
+    const src = { source: "pragma solidity ^0.8.20; contract X { uint public n; }" };
+    expect((await call("POST", "/dev/compile", AGENT_CTX, src)).status).toBe(403);
+    granted.add("eth-simulate");
+    const out = await (await call("POST", "/dev/compile", AGENT_CTX, src)).json();
+    expect(out).toMatchObject({ ok: true, contracts: [{ name: "X", functions: ["n() view returns (uint256)"] }] });
+    expect(out.contracts[0].bytecode).toBeUndefined();
+  }, 60_000);
 });

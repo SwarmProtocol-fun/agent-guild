@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Connection } from "@solana/web3.js";
 import {
-  Activity, Bot, CandlestickChart, Bug, ChevronsUpDown, Coins, FileCode, Fingerprint, FlaskConical, Hammer, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
+  Activity, Bot, CandlestickChart, Bug, ChevronsUpDown, Clock, Coins, FileCode, Fingerprint, FlaskConical, Hammer, Lock, Receipt, RefreshCw, Search, Wallet, type LucideProps,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
@@ -14,6 +14,7 @@ import { SimulateTab } from "./simulate-tab";
 import { AnchorTab } from "./anchor-tab";
 import { SettlementTab } from "./settlement-tab";
 import { TradeTab } from "./trade-tab";
+import { AutomateTab } from "./automate-tab";
 import { Button, Notice, TextInput, cx, muted, type Env, type Seed, type SelectedAgent, type Tab } from "./ui";
 
 // The Solana panel shell. The sidebar's agent switcher decides who the
@@ -29,6 +30,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     items: [
       { id: "agent", label: "Overview", icon: Bot },
       { id: "trade", label: "Trade", icon: CandlestickChart, capability: "solana-dev-trade" },
+      { id: "automate", label: "While away", icon: Clock },
       { id: "settlement", label: "Payouts", icon: Coins, capability: "solana-settlement" },
     ],
   },
@@ -329,6 +331,7 @@ function SolanaPanel({ modId, address, api }: PanelProps) {
               <div hidden={tab !== "anchor"}><AnchorTab env={env} seed={seeds.anchor} /></div>
               <div hidden={tab !== "network"}><NetworkTool env={env} status={status} address={agent?.devWallet ?? address} /></div>
               <div hidden={tab !== "trade"}><TradeTab env={env} api={api} /></div>
+              <div hidden={tab !== "automate"}><AutomateTab env={env} api={api} /></div>
               <div hidden={tab !== "settlement"}><SettlementTab api={api} agents={agents ?? []} /></div>
             </div>
           )}

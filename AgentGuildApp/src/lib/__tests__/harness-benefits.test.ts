@@ -107,6 +107,15 @@ describe("harness benefits", () => {
     expect(byId(result, "bindings").state).toBe("locked");
   });
 
+  it("says what each Ethereum upgrade does that the agent can't do alone", () => {
+    const tools = byId(buildHarnessBenefits(input({ capabilities: ["eth-testnet", "eth-inspect", "polymarket-trade"] })), "tools");
+    expect(tools.detail).toContain("deploy Solidity source as a verified contract");
+    expect(tools.detail).toContain("eth_util");
+    // Keys without a description are still listed, just by name.
+    expect(tools.detail).toContain("polymarket-trade");
+    expect(byId(buildHarnessBenefits(input({ capabilities: ["hyperliquid-trade"] })), "tools").detail).not.toContain("With them you can");
+  });
+
   it("does not call a high unverified score Prime", () => {
     const resolved = resolveBenefitPolicy(880);
     expect(resolved.policy.name).toBe("standard");

@@ -26,6 +26,9 @@ const nextConfig: NextConfig = {
     "google-auth-library",
     "google-gax",
     "gcp-metadata",
+    // The Ethereum mod's Solidity compiler: a 9 MB emscripten build that
+    // must be required at runtime, not bundled.
+    "solc",
   ],
   // Skip TS type checking during build to avoid OOM on Netlify.
   // Run `npx tsc --noEmit` locally or in CI for type safety.

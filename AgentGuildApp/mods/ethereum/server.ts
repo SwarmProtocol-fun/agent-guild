@@ -1,16 +1,18 @@
 import { defineServerMod, type RouteContext } from "@agent-guild/sdk";
-import { formatEther, type PublicClient } from "viem";
+import { encodeDeployData, formatEther, type Abi, type PublicClient } from "viem";
 import { getAgentsByOrg, getOrganizationsByWalletAdmin } from "@/lib/firestore-admin";
 import { listAgentWallets } from "@/lib/agent-wallets";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import {
   ConfigError, DevtoolsInputError, addressHistory, buildCall, decodeCalldata, decodeRevert, gasOracle, holdings, inspectAddress,
-  inspectTransaction, networkStatus, parseAddress, parseEthAmount, parseHash, parseHexData, readContract, resolveEns, simulateCall,
+  coerceArgs, inspectTransaction, networkStatus, parseAddress, parseEthAmount, parseHash, parseHexData, readContract, resolveEns, simulateCall,
   type CallSpec,
 } from "./devtools";
+import { ethUtil, getLogs, mappingSlot, multiRead, parseStateOverride, readStorage } from "./chaintools";
+import { compileSolidity, contractAbi, parseSources, pickContract, verifyOnSourcify, type CompileResult } from "./solidity";
 import {
   AccessError, CAP, DEV_WALLET_LABEL, activityFor, capabilityMap, clientFor, devBalances, enableAllUpgrades, ensureDevWallet,
-  getDevWallet, logActivity, parseNetwork, requireCaller, resolveCaller, sendAsAgent, transferAsAgent, type Caller, type SendResult,
+  getDevWallet, logActivity, parseNetwork, requireCaller, resolveCaller, sendAsAgent, signAsAgent, transferAsAgent, type Caller, type SendResult,
 } from "./agent";
 import { NETWORKS, explorerUrl, type EthNetwork } from "./networks";
 import { AGENT_TOOLS } from "./tools";
@@ -55,6 +57,30 @@ const callSpecOf = (b: Record<string, unknown>): CallSpec => ({
   signature: b.signature as string | undefined, args: b.args, bytecode: b.bytecode as string | undefined,
   constructorSignature: b.constructorSignature as string | undefined,
 });
+
+const optionalBlock = (v: unknown): bigint | undefined => {
+  if (v == null || v === "") return undefined;
+  if (!/^\d+$/.test(String(v).trim())) throw new DevtoolsInputError("blockNumber must be a block number");
+  return BigInt(String(v).trim());
+};
+
+const compileOptsOf = (b: Record<string, unknown>) => ({
+  optimize: b.optimize == null ? undefined : b.optimize !== false && b.optimize !== "false",
+  runs: b.runs == null ? undefined : Number(b.runs),
+  evmVersion: typeof b.evmVersion === "string" ? b.evmVersion : undefined,
+});
+
+/** What an agent sees of a compile: no std-JSON echo, bytecode only on request. */
+function compileView(out: CompileResult, includeBytecode: boolean) {
+  return {
+    ok: out.ok, compilerVersion: out.compilerVersion, errors: out.errors, warnings: out.warnings,
+    contracts: out.contracts.map((c) => ({
+      name: c.name, identifier: c.identifier, constructorSignature: c.constructorSignature, functions: c.functions,
+      deployedBytecodeSize: c.deployedBytecodeSize, overSizeLimit: c.deployedBytecodeSize > 24_576,
+      abi: c.abi, ...(includeBytecode ? { bytecode: c.bytecode } : {}),
+    })),
+  };
+}
 
 /**
  * Read-only chain tools. A browser session can use them freely (they read
@@ -161,6 +187,8 @@ export default defineServerMod({
           "Signing tools (send, transfer, deploy) only work on sepolia/base-sepolia with the agent's own eth-dev wallet. Mainnets are read and simulate only.",
           "Address inputs accept \"self\" (the agent's dev wallet) and ENS names.",
           "Paper trades fill at live Ethereum mainnet KyberSwap quotes and pay that route's real gas.",
+          "Don't compute hashes, selectors, addresses or storage slots yourself, and don't guess a contract's functions from memory: use eth_util and eth_contract_abi. They're exact.",
+          "To ship a contract: eth_compile until it builds, then eth_deploy_source (compiles, deploys, verifies on Sourcify).",
         ],
         tools: AGENT_TOOLS,
       }),
@@ -450,7 +478,8 @@ export default defineServerMod({
           if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet yet — create one (eth_create_wallet) or pass a `from` address to simulate as");
           from = wallet.address;
         } else throw new DevtoolsInputError("Pass a `from` address to simulate as, or pick an agent");
-        const simulation = await simulateCall(clientFor(network), from, built);
+        const blockNumber = optionalBlock(b.blockNumber);
+        const simulation = await simulateCall(clientFor(network), from, built, { stateOverride: parseStateOverride(b.stateOverride), blockNumber });
         if (caller) {
           logActivity(caller, {
             action: "simulate", network, ok: simulation.success,
@@ -458,6 +487,156 @@ export default defineServerMod({
           });
         }
         return { network, simulation };
+      }),
+
+    /**
+     * POST /dev/compile — Solidity → ABI + bytecode with the pinned solc.
+     * Body: { source | sources, optimize?, runs?, evmVersion?, includeBytecode? }
+     * Pure compute, so a session can use it freely; an agent needs eth-simulate.
+     */
+    "POST /dev/compile": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = ctx.agent || b.agentId ? await requireCaller(ctx, b.agentId as string, CAP.simulate) : null;
+        if (!caller && !ctx.session) throw new AccessError("Authentication required", 401);
+        const out = await compileSolidity(parseSources(b.source, b.sources), compileOptsOf(b));
+        if (caller) logActivity(caller, { action: "compile", ok: out.ok, summary: out.ok ? `compiled ${out.contracts.map((c) => c.name).join(", ") || "nothing deployable"}` : `compile failed: ${out.errors[0]?.message.split("\n")[0] ?? "?"}`.slice(0, 160) });
+        return compileView(out, b.includeBytecode === true);
+      }),
+
+    /**
+     * POST /dev/verify — submit source for an already-deployed contract to Sourcify.
+     * Body: { network?, address, source | sources, contract?, optimize?, runs?, evmVersion?, creationTxHash? }
+     */
+    "POST /dev/verify": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = ctx.agent || b.agentId ? await requireCaller(ctx, b.agentId as string, CAP.simulate) : null;
+        if (!caller && !ctx.session) throw new AccessError("Authentication required", 401);
+        const network = parseNetwork(b.network);
+        const address = parseAddress(b.address, "address");
+        const out = await compileSolidity(parseSources(b.source, b.sources), compileOptsOf(b));
+        if (!out.ok) return Response.json({ error: "Source doesn't compile", errors: out.errors }, { status: 400 });
+        const contract = pickContract(out, b.contract as string | undefined);
+        const verification = await verifyOnSourcify({
+          chainId: NETWORKS[network].chainId, address, stdJsonInput: out.stdJsonInput, compilerVersion: out.compilerVersion,
+          identifier: contract.identifier, creationTxHash: typeof b.creationTxHash === "string" ? b.creationTxHash : null,
+        });
+        if (caller) logActivity(caller, { action: "verify", network, ok: verification.status !== "failed", summary: `${contract.name} at ${address.slice(0, 10)}… ${verification.status}` });
+        return { network, address, contract: contract.name, verification };
+      }),
+
+    // ── Exact math & deeper reads ───────────────────────────────────────
+
+    /** POST /dev/util — hashing, ABI encoding, address/slot derivation. Body: { op, ...input }. No RPC. */
+    "POST /dev/util": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const { op, ...input } = b;
+        const result = ethUtil(op, input);
+        if (caller) logActivity(caller, { action: "util", ok: true, summary: String(op) });
+        return { op, ...result };
+      }),
+
+    /** GET /dev/abi/:address — a verified contract's ABI (Sourcify, then Etherscan), proxies resolved. */
+    "GET /dev/abi/:address": (req, ctx) =>
+      readTool(req, ctx, `abi ${ctx.params.address}`, null, async (client, network) => {
+        const address = await resolveTarget(ctx, req, ctx.params.address);
+        const info = await inspectAddress(client, address).catch(() => null);
+        if (info && !info.isContract) throw new DevtoolsInputError(`${address} has no code on ${NETWORKS[network].label}. It's a wallet, not a contract`);
+        const out = await contractAbi(NETWORKS[network].chainId, address, info?.proxy?.implementation ?? null);
+        const full = query(req, "full") === "true";
+        return { contract: full ? out : { ...out, abi: undefined }, explorerUrl: explorerUrl("address", address, network) };
+      }),
+
+    /** POST /dev/logs — Body: { network?, address?, event?, args?, fromBlock?, toBlock?, limit? } */
+    "POST /dev/logs": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const network = parseNetwork(b.network);
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const out = await getLogs(clientFor(network), b);
+        if (caller) logActivity(caller, { action: "logs", network, ok: true, summary: `${String(b.event ?? "logs").split("(")[0]} · ${out.total} in ${out.fromBlock}–${out.toBlock}` });
+        return { network, ...out };
+      }),
+
+    /**
+     * POST /dev/storage — raw storage. Body: { network?, address, slot | slots, keys?, blockNumber? }.
+     * With `keys` ([{ type, value }], outermost first) the slot is a mapping's base slot.
+     */
+    "POST /dev/storage": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const network = parseNetwork(b.network);
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const address = await resolveTarget(ctx, req, String(b.address ?? ""));
+        let slots = b.slots ?? b.slot;
+        if (Array.isArray(b.keys) && b.keys.length) {
+          let slot: unknown = b.slot;
+          for (const k of b.keys as { type: string; value: unknown }[]) slot = mappingSlot(String(k?.type), k?.value, slot);
+          slots = slot;
+        }
+        const values = await readStorage(clientFor(network), address, slots, optionalBlock(b.blockNumber));
+        if (caller) logActivity(caller, { action: "storage", network, ok: true, summary: `${values.length} slot(s) of ${address.slice(0, 10)}…` });
+        return { network, address, values };
+      }),
+
+    /** POST /dev/multicall — Body: { network?, calls: [{ address, signature, args? }], blockNumber? } */
+    "POST /dev/multicall": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const network = parseNetwork(b.network);
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const results = await multiRead(clientFor(network), b.calls, optionalBlock(b.blockNumber));
+        if (caller) logActivity(caller, { action: "multicall", network, ok: true, summary: `${results.length} reads, ${results.filter((r) => !r.ok).length} failed` });
+        return { network, results };
+      }),
+
+    // ── Act on testnets: source → verified contract, and signatures ─────
+
+    /**
+     * POST /dev/deploy-source — compile, deploy from the dev wallet, verify on Sourcify.
+     * Body: { agentId?, network?, source | sources, contract?, args?, value?, optimize?, runs?, evmVersion?, verify? }
+     */
+    "POST /dev/deploy-source": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.testnet);
+        const network = parseNetwork(b.network);
+        const compiled = await compileSolidity(parseSources(b.source, b.sources), compileOptsOf(b));
+        if (!compiled.ok) {
+          logActivity(caller, { action: "deploy", network, ok: false, summary: `compile failed: ${compiled.errors[0]?.message.split("\n")[0] ?? "?"}`.slice(0, 160) });
+          return Response.json({ status: "compile-failed", errors: compiled.errors, warnings: compiled.warnings }, { status: 400 });
+        }
+        const contract = pickContract(compiled, b.contract as string | undefined);
+        if (contract.deployedBytecodeSize > 24_576) throw new DevtoolsInputError(`${contract.name} is ${contract.deployedBytecodeSize} bytes; the EIP-170 limit is 24,576. Turn the optimizer on or split it`);
+        const ctor = contract.abi.find((i) => i.type === "constructor") as { inputs: readonly { type: string }[] } | undefined;
+        const bytecode = encodeDeployData({ abi: contract.abi as Abi, bytecode: contract.bytecode, args: (ctor ? coerceArgs(ctor, b.args) : []) as never });
+        const spec: CallSpec = { bytecode, value: b.value as string | undefined };
+        const eth = Number(formatEther(parseEthAmount(spec.value)));
+        const violation = transferPolicyViolation(await getPolicy(caller.agentId, caller.orgId), { to: null, eth: eth > 0 ? eth : null });
+        if (violation) throw new AccessError(violation, 403);
+        const result = await sendAsAgent(caller, network, spec);
+        logSend(caller, "deploy", result, `deployed ${contract.name} at ${result.contractAddress ?? "?"}`);
+        const verification = result.status === "success" && result.contractAddress && b.verify !== false
+          ? await verifyOnSourcify({ chainId: NETWORKS[network].chainId, address: result.contractAddress, stdJsonInput: compiled.stdJsonInput, compilerVersion: compiled.compilerVersion, identifier: contract.identifier, creationTxHash: result.hash })
+          : null;
+        const { simulation: _s, ...rest } = result;
+        return {
+          ...rest, contract: contract.name, functions: contract.functions, compilerVersion: compiled.compilerVersion, warnings: compiled.warnings,
+          contractExplorerUrl: result.contractAddress ? explorerUrl("address", result.contractAddress, network) : null, verification,
+        };
+      }),
+
+    /** POST /dev/sign — EIP-191 message or EIP-712 typed data (testnet domains only) with the dev wallet. Body: { agentId?, message | typedData } */
+    "POST /dev/sign": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.testnet);
+        const out = await signAsAgent(caller, { message: b.message, typedData: b.typedData });
+        logActivity(caller, { action: "sign", ok: true, summary: out.kind === "message" ? `signed message "${String(b.message).slice(0, 60)}"` : `signed ${(b.typedData as { primaryType?: string }).primaryType ?? "typed data"}` });
+        return out;
       }),
 
     // ── Act on testnets (agent's own eth-dev wallet) ────────────────────

@@ -587,13 +587,21 @@ export interface Simulation {
   canAfford: boolean | null;
 }
 
+export interface SimulateOptions {
+  /** viem StateOverride (chaintools.parseStateOverride): pretend balances, code or storage. */
+  stateOverride?: { address: `0x${string}`; balance?: bigint; nonce?: number; code?: Hex; stateDiff?: { slot: Hex; value: Hex }[] }[];
+  blockNumber?: bigint;
+}
+
 /** Dry-runs a call/deploy from `from` with eth_call + estimateGas. Nothing is signed. */
-export async function simulateCall(client: PublicClient, from: `0x${string}`, built: BuiltCall): Promise<Simulation> {
+export async function simulateCall(client: PublicClient, from: `0x${string}`, built: BuiltCall, opts: SimulateOptions = {}): Promise<Simulation> {
   const base = { from, to: built.to ?? null, valueEth: formatEther(built.value), data: built.data };
+  const { stateOverride, blockNumber } = opts;
   try {
-    const { data: ret } = await client.call({ account: from, to: built.to, data: built.data, value: built.value });
+    const { data: ret } = await client.call({ account: from, to: built.to, data: built.data, value: built.value, stateOverride, blockNumber });
     const [gas, fees] = await Promise.all([
-      client.estimateGas({ account: from, to: built.to, data: built.data, value: built.value }).catch(() => null),
+      // estimateGas takes no state override on most nodes; with one, the estimate can fail where the call succeeded.
+      client.estimateGas({ account: from, to: built.to, data: built.data, value: built.value, blockNumber, ...(stateOverride ? { stateOverride } : {}) }).catch(() => null),
       client.estimateFeesPerGas().catch(() => null),
     ]);
     let result: unknown = null;
@@ -601,7 +609,8 @@ export async function simulateCall(client: PublicClient, from: `0x${string}`, bu
       try { const d = decodeAbiParameters(built.fn.outputs, ret); result = jsonSafe(d.length === 1 ? d[0] : d); } catch { /* leave raw */ }
     }
     const perGas = fees?.maxFeePerGas ?? fees?.gasPrice ?? null;
-    const balance = await client.getBalance({ address: from }).catch(() => null);
+    const overridden = stateOverride?.find((o) => o.address.toLowerCase() === from.toLowerCase())?.balance;
+    const balance = overridden ?? (await client.getBalance({ address: from, blockNumber }).catch(() => null));
     const cost = gas != null && perGas != null ? gas * perGas : null;
     return {
       ...base, success: true, returnData: ret ?? "0x", result,

@@ -18,6 +18,7 @@ import { evaluateCronTriggers, evaluateRegularCronJobs } from "@/lib/workflow/cr
 import { getRedis } from "@/lib/redis";
 import { runHyperliquidStrategyTick, runAiTraderTick, runHyperliquidPaperTick } from "../../../../../mods/hyperliquid-trading/server";
 import { runPolymarketTick } from "../../../../../mods/polymarket-trading/server";
+import { runSolanaTick } from "../../../../../mods/solana-settlement/server";
 import { sweepStaleAgents } from "@/lib/heartbeat";
 
 /** Max runs to advance per tick (fits within 10s Netlify timeout) */
@@ -156,6 +157,17 @@ export async function POST(req: NextRequest) {
     polymarketResult.errors = 1;
   }
 
+  // ── Phase 8: Solana. Fills standing paper orders whose trigger fired,
+  // fires price/address watches and confirms payment requests, for agents
+  // that aren't running.
+  let solanaResult: Awaited<ReturnType<typeof runSolanaTick>> | { errors: number } = { errors: 0 };
+  try {
+    solanaResult = await runSolanaTick();
+  } catch (err) {
+    console.error("[tick] Solana automation failed:", err);
+    solanaResult = { errors: 1 };
+  }
+
   // ── Release lock ────────────────────────────────────────────────────────
   if (redis) {
     try {
@@ -175,6 +187,7 @@ export async function POST(req: NextRequest) {
     hyperliquidPaper: hyperliquidPaperResult,
     aiTraders: aiTraderResult,
     polymarket: polymarketResult,
+    solana: solanaResult,
     presenceFlipped,
   });
 }

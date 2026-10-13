@@ -13,21 +13,31 @@ import {
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import {
-  DevtoolsInputError, clusterStatus, inspectAccount, inspectTransaction, fetchIdl,
+  DevtoolsInputError, parsePubkey, clusterStatus, inspectAccount, inspectTransaction, fetchIdl,
   derivePda, decodeProgramError, parseErrorCode, priorityFees, rentExempt, explorerUrl, walletHoldings, addressHistory,
   type SeedSpec,
 } from "./devtools";
 import type { InstructionSpec } from "./txbuilder";
 import {
-  CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, requireCaller, resolveCaller, capabilityMap, hasCapability,
+  CAP, AccessError, SIGNING_CLUSTERS, ANCHOR_VERSIONS, parseCluster, connectionFor, rpcFor, requireCaller, resolveCaller, capabilityMap, hasCapability,
   logActivity, activityFor, getDevWallet, DEV_WALLET_LABEL, ensureDevWallet, sendAsAgent, simulateAsAgent, airdropToAgent,
-  createTokenAsAgent, transferAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
+  createTokenAsAgent, transferAsAgent, signExternalAsAgent, enqueueAnchorJob, enableAllUpgrades, getAnchorJob, anchorWorkersOnline, type ServerCluster, type Caller,
 } from "./agent";
-import { AGENT_TOOLS } from "./tools";
-import { resolveMint, swapQuote, tokenPrices, toUi } from "./market";
+import { AGENT_TOOLS, HARNESS_ONLY } from "./tools";
+import { SYMBOL_MINTS, resolveMint, swapQuote, tokenInfo, tokenPrices, toUi } from "./market";
 import { PaperTradeError, normalizePolicy, transferPolicyViolation, valuePortfolio, type PaperWallet } from "./paper";
 import { bookPaperTrade, getPaperWallet, getPolicy, listOrgPaperWallets, listPaperTrades, resetPaperWallet, setPolicy } from "./paper-store";
 import { listAgentWallets } from "@/lib/agent-wallets";
+import {
+  checkTrigger, cleanNote, describeTrigger, expiryFrom, fmtUsd, isExpired, newReference, parseOrderAmount, parsePriceTrigger, parseSlippage,
+  solanaPayUrl, stepPriceWatch, type PaymentRequest, type StandingOrder, type Watch,
+} from "./automation";
+import {
+  acquireSolanaTickLock, activeWatches, cancelOrder, cancelWatch, claimOrder, createOrder, createPaymentRequest, createWatch,
+  getPaymentRequest, listAlerts, listOrders, listPaymentRequests, listWatches, markAlertsRead, openOrders, pendingPaymentRequests,
+  pushAlert, releaseSolanaTickLock, updateOrder, updatePaymentRequest, updateWatch,
+} from "./automation-store";
+import { assessToken, externalSignRefusal, findPayment, parseBase64Tx, previewExternalTx, readMintFacts } from "./chainchecks";
 
 // ── Request helpers ──────────────────────────────────────────────────────
 
@@ -132,6 +142,37 @@ function paperAmount(wallet: PaperWallet, mint: string, amount: unknown): string
   return toUi(raw.toString(), h.decimals);
 }
 
+/**
+ * One paper swap at the live Jupiter quote, booked against the owner's
+ * policy. Shared by POST /paper/swap and standing orders filled by the tick.
+ */
+async function executePaperSwap(
+  caller: Caller,
+  p: { inputMint: string; outputMint: string; amount: unknown; slippageBps?: number; note: string | null; via?: string },
+) {
+  const inputMint = resolveMint(p.inputMint, "inputMint");
+  const outputMint = resolveMint(p.outputMint, "outputMint");
+  const wallet = await getPaperWallet(caller.agentId, caller.orgId);
+  const amount = paperAmount(wallet, inputMint, p.amount);
+  const quote = await swapQuote({ inputMint, outputMint, amount, slippageBps: p.slippageBps });
+  if (quote.usdValue == null) throw new PaperTradeError("Couldn't price this swap in USD — try a more liquid token");
+  const action = p.via ?? "paper-swap";
+  try {
+    const { trade, wallet: next } = await bookPaperTrade(caller.agentId, caller.orgId, {
+      inputMint, outputMint, inRaw: BigInt(quote.inAmount), outRaw: BigInt(quote.outAmount),
+      inDecimals: quote.inDecimals, outDecimals: quote.outDecimals, usdValue: quote.usdValue,
+    }, {
+      inSymbol: quote.inSymbol, outSymbol: quote.outSymbol, inUi: quote.inUi, outUi: quote.outUi,
+      priceImpactPct: quote.priceImpactPct, route: quote.route, note: p.note,
+    });
+    logActivity(caller, { action, ok: true, summary: `${trade.inUi} ${trade.inSymbol ?? trade.inputMint.slice(0, 4)} → ${trade.outUi} ${trade.outSymbol ?? trade.outputMint.slice(0, 4)} ($${trade.usdValue.toFixed(2)})` });
+    return { trade, portfolio: await valueWallet(next) };
+  } catch (err) {
+    if (err instanceof PaperTradeError) logActivity(caller, { action, ok: false, summary: err.message.slice(0, 160) });
+    throw err;
+  }
+}
+
 /** Org owner of `orgId`, from a browser session. */
 async function requireOrgOwner(ctx: RouteContext, orgId: string): Promise<void> {
   if (!ctx.session) throw new AccessError("Sign in as the org owner", 401);
@@ -143,6 +184,52 @@ async function requireOrgOwner(ctx: RouteContext, orgId: string): Promise<void> 
 /** Refuses anything the agent's wallet would sign while its owner has paused it. */
 async function assertNotPaused(caller: Caller): Promise<void> {
   if ((await getPolicy(caller.agentId, caller.orgId)).paused) throw new AccessError("Signing is paused for this agent by its org owner", 403);
+}
+
+
+// ── Payment requests ─────────────────────────────────────────────────────
+
+const DEVNET_USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+
+/** null = SOL. "USDC" means the cluster's USDC; other symbols are mainnet mints. */
+function paymentMint(value: unknown, cluster: ServerCluster): string | null {
+  if (value == null || value === "") return null;
+  const v = String(value).trim();
+  if (/^(SOL|WSOL)$/i.test(v)) return null;
+  if (/^USDC$/i.test(v)) return cluster === "mainnet-beta" ? SYMBOL_MINTS.USDC : DEVNET_USDC;
+  if (cluster !== "mainnet-beta" && SYMBOL_MINTS[v.toUpperCase()]) throw new DevtoolsInputError(`${v} is a mainnet symbol — pass the ${cluster} mint address`);
+  return resolveMint(v);
+}
+
+/** A wallet the agent owns: "self"/omitted = dev wallet, else its identity or a custodial Solana wallet. */
+async function ownSolanaWallet(caller: Caller, requested: unknown): Promise<string> {
+  const dev = await getDevWallet(caller);
+  if (requested == null || requested === "" || requested === "self") {
+    if (!dev) throw new DevtoolsInputError("This agent has no dev wallet — create one (solana_create_wallet) or pass recipient");
+    return dev.address;
+  }
+  const agent = await getAgent(caller.agentId);
+  const custodial = (await listAgentWallets(caller.agentId)).filter((w) => w.chain === "solana" && w.orgId === caller.orgId).map((w) => w.publicKey);
+  const own = [...(agent?.solanaAddress ? [agent.solanaAddress] : []), ...custodial];
+  if (typeof requested !== "string" || !own.includes(requested)) throw new AccessError("recipient must be one of this agent's own Solana wallets", 403);
+  return requested;
+}
+
+/** Checks a pending request on-chain; marks it paid (and alerts) when verified. */
+async function checkPaymentRequest(request: PaymentRequest) {
+  const verdict = await findPayment(connectionFor(request.cluster), {
+    recipient: request.recipient, mint: request.mint, amount: request.amount, reference: request.reference, memo: request.memo,
+  });
+  if (!verdict.verified || !verdict.signature) return { request, verdict };
+  const paid: PaymentRequest = { ...request, status: "paid", paidSignature: verdict.signature, payer: verdict.payer, paidAt: new Date().toISOString() };
+  await updatePaymentRequest(request.id, { status: "paid", paidSignature: verdict.signature, payer: verdict.payer, paidAt: paid.paidAt });
+  await pushAlert({
+    agentId: request.agentId, orgId: request.orgId, source: "payment", refId: request.id,
+    title: `Paid: ${verdict.received} ${request.mint ? "tokens" : "SOL"}${request.label ? ` for ${request.label}` : ""}`,
+    detail: `${verdict.payer ?? "Someone"} paid ${verdict.received} ${request.mint ?? "SOL"} to ${request.recipient} on ${request.cluster}${verdict.finalized ? "" : " (confirmed, not yet finalized)"}.`,
+    signature: verdict.signature, explorerUrl: explorerUrl("tx", verdict.signature, request.cluster),
+  });
+  return { request: paid, verdict };
 }
 
 // ── Settlement guards ────────────────────────────────────────────────────
@@ -401,7 +488,9 @@ export default defineServerMod({
           "Every tool takes an optional cluster: devnet (default), testnet, or mainnet-beta.",
           "Signing tools (send, airdrop, create_token, anchor deploy) only work on devnet/testnet with the agent's own solana-dev wallet.",
           "Addresses accept placeholders: \"payer\"/\"self\" = the agent's dev wallet, \"new:<label>\" = a fresh keypair that signs its own creation.",
+          "Start every session with solana_alerts: the hub keeps working while you're offline and leaves its results there.",
         ],
+        harness: HARNESS_ONLY,
         tools: AGENT_TOOLS,
       }),
     },
@@ -413,10 +502,11 @@ export default defineServerMod({
         if (!agentId) throw new DevtoolsInputError("agentId query param is required for a browser session");
         // No capability required: an agent with none should still learn what it could be granted.
         const caller = await resolveCaller(ctx, agentId);
-        const [capabilities, wallet, workers] = await Promise.all([
+        const [capabilities, wallet, workers, unread] = await Promise.all([
           capabilityMap(caller.agentId, caller.orgId),
           getDevWallet(caller),
           anchorWorkersOnline(caller.orgId).catch(() => 0),
+          listAlerts(caller.agentId, caller.orgId, { unreadOnly: true, limit: 200 }).then((a) => a.length).catch(() => null),
         ]);
         let balances: Record<string, number | null> | null = null;
         if (wallet) {
@@ -431,6 +521,7 @@ export default defineServerMod({
           capabilities,
           devWallet: wallet ? { address: wallet.address, balances } : null,
           anchor: { workersOnline: workers, versions: ANCHOR_VERSIONS },
+          unreadAlerts: unread,
         };
       }),
 
@@ -617,27 +708,10 @@ export default defineServerMod({
         const b = await body(req);
         const caller = await requireCaller(ctx, b.agentId as string, CAP.trade);
         if (typeof b.inputMint !== "string" || typeof b.outputMint !== "string") throw new DevtoolsInputError("inputMint and outputMint are required");
-        const inputMint = resolveMint(b.inputMint, "inputMint");
-        const outputMint = resolveMint(b.outputMint, "outputMint");
-        const wallet = await getPaperWallet(caller.agentId, caller.orgId);
-        const amount = paperAmount(wallet, inputMint, b.amount);
-        const quote = await swapQuote({ inputMint, outputMint, amount, slippageBps: b.slippageBps != null ? Number(b.slippageBps) : undefined });
-        if (quote.usdValue == null) throw new PaperTradeError("Couldn't price this swap in USD — try a more liquid token");
-        const note = typeof b.note === "string" && b.note.trim() ? b.note.trim().slice(0, 280) : null;
-        try {
-          const { trade, wallet: next } = await bookPaperTrade(caller.agentId, caller.orgId, {
-            inputMint, outputMint, inRaw: BigInt(quote.inAmount), outRaw: BigInt(quote.outAmount),
-            inDecimals: quote.inDecimals, outDecimals: quote.outDecimals, usdValue: quote.usdValue,
-          }, {
-            inSymbol: quote.inSymbol, outSymbol: quote.outSymbol, inUi: quote.inUi, outUi: quote.outUi,
-            priceImpactPct: quote.priceImpactPct, route: quote.route, note,
-          });
-          logActivity(caller, { action: "paper-swap", ok: true, summary: `${trade.inUi} ${trade.inSymbol ?? trade.inputMint.slice(0, 4)} → ${trade.outUi} ${trade.outSymbol ?? trade.outputMint.slice(0, 4)} ($${trade.usdValue.toFixed(2)})` });
-          return { trade, portfolio: await valueWallet(next) };
-        } catch (err) {
-          if (err instanceof PaperTradeError) logActivity(caller, { action: "paper-swap", ok: false, summary: err.message.slice(0, 160) });
-          throw err;
-        }
+        return executePaperSwap(caller, {
+          inputMint: b.inputMint, outputMint: b.outputMint, amount: b.amount,
+          slippageBps: b.slippageBps != null ? Number(b.slippageBps) : undefined, note: cleanNote(b.note),
+        });
       }),
 
     /** GET /paper/trades — this paper wallet's fills since its last reset, newest first. ?limit=1–200 */
@@ -843,5 +917,416 @@ export default defineServerMod({
         if (!job) throw new NotFoundError("Anchor job not found");
         return job;
       }),
+
+    // ── Runs while the agent is offline (filled by runSolanaTick) ───────
+
+    /**
+     * POST /orders — a standing paper order: when `trigger` fires, swap
+     * `amount` of inputMint into outputMint at the live quote.
+     * Body: { agentId?, inputMint, outputMint, amount, trigger: { mint, op: above|below|trail, usd | trailPct }, ttlDays?, slippageBps?, note? }
+     */
+    "POST /orders": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.trade);
+        if ((await getPolicy(caller.agentId, caller.orgId)).paused) throw new AccessError("Trading is paused for this agent by its org owner", 403);
+        if (typeof b.inputMint !== "string" || typeof b.outputMint !== "string") throw new DevtoolsInputError("inputMint and outputMint are required");
+        const inputMint = resolveMint(b.inputMint, "inputMint");
+        const outputMint = resolveMint(b.outputMint, "outputMint");
+        if (inputMint === outputMint) throw new DevtoolsInputError("inputMint and outputMint are the same token");
+        const trigger = parsePriceTrigger(b.trigger, (v) => resolveMint(v, "trigger.mint"));
+        const [price] = await tokenPrices([trigger.mint]);
+        if (price.usdPrice == null) throw new DevtoolsInputError(`Jupiter has no price for ${trigger.mint}, so the trigger could never fire`);
+        const order = await createOrder({
+          agentId: caller.agentId, orgId: caller.orgId, status: "open", createdAt: new Date().toISOString(), expiresAt: expiryFrom(b.ttlDays),
+          inputMint, outputMint, amount: parseOrderAmount(b.amount), slippageBps: parseSlippage(b.slippageBps),
+          trigger: trigger.op === "trail" ? { ...trigger, peakUsd: price.usdPrice } : trigger, note: cleanNote(b.note),
+        });
+        const desc = describeTrigger(order.trigger, price.symbol);
+        logActivity(caller, { action: "order", ok: true, summary: `when ${desc}: ${order.amount} ${b.inputMint} → ${b.outputMint}` });
+        return { order, currentPriceUsd: price.usdPrice, fires: `when ${desc}`, note: "The hub checks this every minute while you're offline. Read solana_alerts when you wake." };
+      }),
+
+    /** GET /orders — this agent's standing orders, newest first. */
+    "GET /orders": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        return { orders: await listOrders(caller.agentId, caller.orgId) };
+      }),
+
+    /** POST /orders/:id/cancel */
+    "POST /orders/:id/cancel": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req).catch(() => ({} as Record<string, unknown>));
+        const caller = await resolveCaller(ctx, (b.agentId as string) ?? query(req, "agentId"));
+        const order = await cancelOrder(ctx.params.id, caller.agentId, caller.orgId);
+        if (!order) throw new NotFoundError("Order not found");
+        logActivity(caller, { action: "order-cancel", ok: true, summary: `cancelled ${order.id}` });
+        return { order };
+      }),
+
+    /**
+     * POST /watches — alert this agent when something happens.
+     * Body: { agentId?, kind: "price", trigger, repeat?, ttlDays?, note? }
+     *     | { agentId?, kind: "activity", address ("self" ok), cluster?, repeat? (default true), ttlDays?, note? }
+     */
+    "POST /watches": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.inspect);
+        const common = {
+          agentId: caller.agentId, orgId: caller.orgId, status: "active" as const, createdAt: new Date().toISOString(),
+          expiresAt: expiryFrom(b.ttlDays), note: cleanNote(b.note), fireCount: 0,
+        };
+        let watch: Watch;
+        let summary: string;
+        if (b.kind === "price") {
+          const trigger = parsePriceTrigger(b.trigger, (v) => resolveMint(v, "trigger.mint"));
+          const [price] = await tokenPrices([trigger.mint]);
+          if (price.usdPrice == null) throw new DevtoolsInputError(`Jupiter has no price for ${trigger.mint}`);
+          const armed = !checkTrigger(trigger, price.usdPrice).hit;
+          const armedTrigger = trigger.op === "trail" ? { ...trigger, peakUsd: price.usdPrice } : trigger;
+          watch = await createWatch({ ...common, kind: "price", repeat: b.repeat === true, armed, trigger: armedTrigger });
+          summary = `price: ${describeTrigger(armedTrigger, price.symbol)}${armed ? "" : " (already true — fires after it next clears and crosses again)"}`;
+        } else if (b.kind === "activity") {
+          if (typeof b.address !== "string") throw new DevtoolsInputError("address is required");
+          const cluster = parseCluster(b.cluster);
+          const address = parsePubkey(await resolveSelf(ctx, req, b.address.trim()), "address").toBase58();
+          const [newest] = await connectionFor(cluster).getSignaturesForAddress(new PublicKey(address), { limit: 1 });
+          watch = await createWatch({ ...common, kind: "activity", repeat: b.repeat !== false, address, cluster, lastSignature: newest?.signature ?? null });
+          summary = `activity on ${address} (${cluster})`;
+        } else {
+          throw new DevtoolsInputError("kind must be price or activity");
+        }
+        logActivity(caller, { action: "watch", ok: true, summary });
+        return { watch, watching: summary };
+      }),
+
+    /** GET /watches — this agent's watches, newest first. */
+    "GET /watches": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        return { watches: await listWatches(caller.agentId, caller.orgId) };
+      }),
+
+    /** POST /watches/:id/cancel */
+    "POST /watches/:id/cancel": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req).catch(() => ({} as Record<string, unknown>));
+        const caller = await resolveCaller(ctx, (b.agentId as string) ?? query(req, "agentId"));
+        const watch = await cancelWatch(ctx.params.id, caller.agentId, caller.orgId);
+        if (!watch) throw new NotFoundError("Watch not found");
+        return { watch };
+      }),
+
+    /** GET /alerts — what fired while the agent was away, newest first. ?unread=1&limit=1–200 */
+    "GET /alerts": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        const alerts = await listAlerts(caller.agentId, caller.orgId, { unreadOnly: query(req, "unread") === "1", limit: Number(query(req, "limit") ?? 50) || 50 });
+        return { alerts, unread: alerts.filter((a) => !a.read).length };
+      }),
+
+    /** POST /alerts/read — Body: { agentId?, ids?: string[], all?: true } */
+    "POST /alerts/read": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await resolveCaller(ctx, b.agentId as string);
+        const ids = b.all === true
+          ? (await listAlerts(caller.agentId, caller.orgId, { unreadOnly: true, limit: 200 })).map((a) => a.id)
+          : Array.isArray(b.ids) ? b.ids.map(String) : [];
+        if (!ids.length && b.all !== true) throw new DevtoolsInputError("Pass ids or all: true");
+        return { marked: await markAlertsRead(caller.agentId, caller.orgId, ids) };
+      }),
+
+    // ── Get paid directly (Solana Pay) ──────────────────────────────────
+
+    /**
+     * POST /payments/request — a Solana Pay link with a fresh reference.
+     * The tick watches the reference and alerts the agent once it's paid.
+     * Body: { agentId?, amount, mint? (omit = SOL; "USDC" ok), recipient? (one of the agent's own wallets; default dev wallet),
+     *         cluster?, label?, message?, memo?, ttlDays? }
+     */
+    "POST /payments/request": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.inspect);
+        const cluster = parseCluster(b.cluster);
+        const mint = paymentMint(b.mint, cluster);
+        const amount = String(b.amount ?? "").trim();
+        if (!/^\d+(\.\d+)?$/.test(amount) || !(Number(amount) > 0)) throw new DevtoolsInputError("amount must be a positive decimal, e.g. \"5\" or \"0.25\"");
+        const recipient = await ownSolanaWallet(caller, b.recipient);
+        const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+        const reference = newReference();
+        const fields = { recipient, amount, mint, reference, label: text(b.label, 64), message: text(b.message, 140), memo: text(b.memo, 120) };
+        const request = await createPaymentRequest({
+          agentId: caller.agentId, orgId: caller.orgId, status: "pending", createdAt: new Date().toISOString(), expiresAt: expiryFrom(b.ttlDays),
+          cluster, ...fields, url: solanaPayUrl(fields),
+        });
+        logActivity(caller, { action: "payment-request", cluster, ok: true, summary: `${amount} ${mint ? mint.slice(0, 6) + "…" : "SOL"} to ${recipient.slice(0, 6)}…` });
+        return { request, payUrl: request.url, note: "Send payUrl (or a QR of it) to the payer. The hub checks for it every minute and posts an alert when it lands; solana_payment_status checks now." };
+      }),
+
+    /** GET /payments — this agent's payment requests, newest first. */
+    "GET /payments": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        return { requests: await listPaymentRequests(caller.agentId, caller.orgId) };
+      }),
+
+    /** GET /payments/:id — a request, re-checked on-chain right now if still pending. */
+    "GET /payments/:id": (req, ctx) =>
+      handle(async () => {
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        const request = await getPaymentRequest(ctx.params.id, caller.agentId, caller.orgId);
+        if (!request) throw new NotFoundError("Payment request not found");
+        if (request.status !== "pending") return { request };
+        const check = await checkPaymentRequest(request);
+        return { request: check.request, check: check.verdict };
+      }),
+
+    /**
+     * POST /payments/verify — did `recipient` really get paid? By signature,
+     * or by Solana Pay reference. Body: { recipient ("self" ok), amount?, mint?, signature?, reference?, memo?, cluster? }
+     */
+    "POST /payments/verify": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const cluster = parseCluster(b.cluster);
+        if (typeof b.recipient !== "string") throw new DevtoolsInputError("recipient is required");
+        const recipient = await resolveSelf(ctx, req, b.recipient.trim());
+        const verdict = await findPayment(connectionFor(cluster), {
+          recipient, mint: paymentMint(b.mint, cluster), amount: b.amount != null ? String(b.amount) : null,
+          signature: typeof b.signature === "string" ? b.signature : null, reference: typeof b.reference === "string" ? b.reference : null,
+          memo: typeof b.memo === "string" ? b.memo : null,
+        });
+        if (caller) logActivity(caller, { action: "verify-payment", cluster, ok: verdict.verified, summary: verdict.verified ? `verified ${verdict.received} from ${verdict.payer?.slice(0, 6)}…` : `not verified: ${verdict.reason}`, ...(verdict.signature ? { signature: verdict.signature } : {}) });
+        return { cluster, ...verdict, ...(verdict.signature ? { explorerUrl: explorerUrl("tx", verdict.signature, cluster) } : {}) };
+      }),
+
+    // ── Due diligence ───────────────────────────────────────────────────
+
+    /** GET /token/safety/:mint — rug-risk report: authorities, Token-2022 traps, concentration, liquidity. ?cluster= (default mainnet-beta) */
+    "GET /token/safety/:mint": (req, ctx) =>
+      handle(async () => {
+        const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
+        const cluster = parseCluster(query(req, "cluster") ?? "mainnet-beta");
+        const mint = resolveMint(ctx.params.mint, "mint");
+        const conn = connectionFor(cluster);
+        const facts = await readMintFacts(conn, mint);
+        const [largest, info, price] = await Promise.all([
+          // No retry loop: public RPCs rate-limit this call hard, and Jupiter's holder share is the fallback.
+          new Connection(rpcFor(cluster), { commitment: "confirmed", disableRetryOnRateLimit: true })
+            .getTokenLargestAccounts(new PublicKey(mint)).then((r) => r.value.map((a) => a.amount)).catch(() => [] as string[]),
+          cluster === "mainnet-beta" ? tokenInfo(mint).catch(() => null) : Promise.resolve(null),
+          cluster === "mainnet-beta" ? tokenPrices([mint]).then(([p]) => p.usdPrice).catch(() => null) : Promise.resolve(null),
+        ]);
+        let sellImpactPct: number | null = null;
+        if (price && price > 0 && mint !== SYMBOL_MINTS.USDC) {
+          const amount = (1000 / price).toFixed(Math.min(facts.decimals, 6));
+          sellImpactPct = await swapQuote({ inputMint: mint, outputMint: SYMBOL_MINTS.USDC, amount, slippageBps: 100 }).then((q) => q.priceImpactPct).catch(() => null);
+        } else if (mint === SYMBOL_MINTS.USDC) {
+          sellImpactPct = 0;
+        }
+        const report = assessToken({ mint, facts, largestRaw: largest, info, priceUsd: price, sellImpactPct });
+        if (caller) logActivity(caller, { action: "token-safety", cluster, ok: true, summary: `${report.symbol ?? mint.slice(0, 6)}: ${report.verdict}` });
+        return { cluster, report };
+      }),
+
+    /**
+     * POST /tx/preview — decode and simulate a transaction someone else
+     * built, and report what it does to the agent's dev wallet.
+     * Body: { agentId?, transaction (base64), cluster?, wallet? (preview as this address instead) }
+     */
+    "POST /tx/preview": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.simulate);
+        const cluster = parseCluster(b.cluster);
+        const tx = parseBase64Tx(b.transaction as string);
+        const wallet = typeof b.wallet === "string" && b.wallet ? parsePubkey(b.wallet, "wallet").toBase58() : (await getDevWallet(caller))?.address;
+        if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet — create one or pass wallet");
+        const preview = await previewExternalTx(connectionFor(cluster), tx, wallet);
+        logActivity(caller, { action: "tx-preview", cluster, ok: preview.simulation.success, summary: `${preview.verdict}: ${preview.instructions.length} ix, ${preview.forAgent.solDelta} SOL` });
+        return { cluster, wallet, preview };
+      }),
+
+    /**
+     * POST /tx/sign — preview, then sign with the agent's dev wallet and send
+     * (devnet/testnet). Refuses a high-risk preview unless acceptRisks is
+     * true, and always refuses one that would fail or hand over the wallet.
+     * Body: { agentId?, transaction (base64), cluster?, acceptRisks? }
+     */
+    "POST /tx/sign": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await requireCaller(ctx, b.agentId as string, CAP.devnet);
+        const cluster = parseCluster(b.cluster);
+        if (!SIGNING_CLUSTERS.includes(cluster)) throw new DevtoolsInputError(`The dev wallet only signs on ${SIGNING_CLUSTERS.join("/")} — use /tx/preview for ${cluster}`);
+        const policy = await getPolicy(caller.agentId, caller.orgId);
+        if (policy.paused) throw new AccessError("Signing is paused for this agent by its org owner", 403);
+        const wallet = await getDevWallet(caller);
+        if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet yet — call solana_create_wallet first");
+        const tx = parseBase64Tx(b.transaction as string);
+        const preview = await previewExternalTx(connectionFor(cluster), tx, wallet.address);
+        const refusal = externalSignRefusal(preview, policy.maxTransferSol, b.acceptRisks === true);
+        if (refusal) {
+          logActivity(caller, { action: "tx-sign", cluster, ok: false, summary: `refused: ${refusal}`.slice(0, 160) });
+          return Response.json({ error: refusal, preview }, { status: 409 });
+        }
+        const sent = await signExternalAsAgent(caller, cluster, tx);
+        logActivity(caller, { action: "tx-sign", cluster, ok: sent.success, summary: `${preview.instructions.length} ix, ${preview.forAgent.solDelta} SOL`, signature: sent.signature, explorerUrl: sent.explorerUrl });
+        return { cluster, ...sent, preview };
+      }),
   },
 });
+
+
+// ── The minute tick ──────────────────────────────────────────────────────
+
+const TICK_BUDGET_MS = 20_000;
+
+/** Prices for many mints, 20 per Jupiter call. Failed batches come back missing. */
+async function priceMap(mints: string[]): Promise<Map<string, { usd: number | null; symbol: string | null }>> {
+  const out = new Map<string, { usd: number | null; symbol: string | null }>();
+  const unique = [...new Set(mints)];
+  for (let i = 0; i < unique.length; i += 20) {
+    try {
+      for (const p of await tokenPrices(unique.slice(i, i + 20))) out.set(p.mint, { usd: p.usdPrice, symbol: p.symbol });
+    } catch (err) {
+      console.warn("[solana-tick] price batch failed:", (err as Error).message);
+    }
+  }
+  return out;
+}
+
+const tickCaller = (row: { agentId: string; orgId: string }): Caller => ({ agentId: row.agentId, orgId: row.orgId, via: "agent" });
+
+async function fillOrder(order: StandingOrder, priceUsd: number, symbol: string | null): Promise<"filled" | "failed" | "skipped"> {
+  if (!(await claimOrder(order.id))) return "skipped";
+  const caller = tickCaller(order);
+  const fired = `${describeTrigger(order.trigger, symbol)} (now $${fmtUsd(priceUsd)})`;
+  try {
+    if (!(await hasCapability(order.agentId, order.orgId, CAP.trade))) throw new PaperTradeError(`The "${CAP.trade}" upgrade was turned off`);
+    const { trade } = await executePaperSwap(caller, {
+      inputMint: order.inputMint, outputMint: order.outputMint, amount: order.amount, slippageBps: order.slippageBps ?? undefined,
+      note: `[standing order ${order.id}] ${order.note ?? fired}`.slice(0, 280), via: "standing-order",
+    });
+    const result = `${trade.inUi} ${trade.inSymbol ?? ""} → ${trade.outUi} ${trade.outSymbol ?? ""} ($${trade.usdValue.toFixed(2)})`.replace(/\s+/g, " ");
+    await updateOrder(order.id, { status: "filled", closedAt: new Date().toISOString(), firedPriceUsd: priceUsd, tradeId: trade.id, result });
+    await pushAlert({ agentId: order.agentId, orgId: order.orgId, source: "order", refId: order.id, title: `Order filled: ${result}`, detail: `Fired when ${fired}.${order.note ? ` Your note: ${order.note}` : ""}` });
+    return "filled";
+  } catch (err) {
+    const msg = (err as Error).message.slice(0, 240);
+    await updateOrder(order.id, { status: "failed", closedAt: new Date().toISOString(), firedPriceUsd: priceUsd, result: msg });
+    await pushAlert({ agentId: order.agentId, orgId: order.orgId, source: "order", refId: order.id, title: "Order fired but didn't fill", detail: `Fired when ${fired}, then: ${msg}` });
+    return "failed";
+  }
+}
+
+async function stepActivityWatch(watch: Extract<Watch, { kind: "activity" }>): Promise<boolean> {
+  const conn = connectionFor(watch.cluster);
+  const sigs = await conn.getSignaturesForAddress(new PublicKey(watch.address), { limit: 10, ...(watch.lastSignature ? { until: watch.lastSignature } : {}) });
+  if (!sigs.length) return false;
+  const newest = sigs[0];
+  const failed = sigs.filter((s) => s.err).length;
+  await pushAlert({
+    agentId: watch.agentId, orgId: watch.orgId, source: "watch", refId: watch.id,
+    title: `${sigs.length === 10 ? "10+" : sigs.length} new transaction${sigs.length === 1 ? "" : "s"} on ${watch.address.slice(0, 6)}…`,
+    detail: `${watch.address} (${watch.cluster})${failed ? `, ${failed} failed` : ""}. Newest: ${newest.signature}${newest.memo ? ` memo ${newest.memo}` : ""}. Inspect with solana_inspect_transaction.${watch.note ? ` Your note: ${watch.note}` : ""}`,
+    signature: newest.signature, explorerUrl: explorerUrl("tx", newest.signature, watch.cluster),
+  });
+  await updateWatch(watch.id, { lastSignature: newest.signature, fireCount: watch.fireCount + 1, lastFiredAt: new Date().toISOString(), ...(watch.repeat ? {} : { status: "done" as const }) });
+  return true;
+}
+
+/**
+ * One minute of the hub working for agents that aren't running: fills
+ * standing orders whose trigger fired, fires watches, and confirms payment
+ * requests. A Firestore lock makes overlapping calls a no-op.
+ */
+export async function runSolanaTick(now = Date.now()) {
+  const result = { orders: 0, filled: 0, failed: 0, expired: 0, watches: 0, alerts: 0, payments: 0, paid: 0, errors: 0, locked: false };
+  const holder = `tick-${now}-${Math.random().toString(36).slice(2, 8)}`;
+  if (!(await acquireSolanaTickLock(holder, 50_000, now))) return { ...result, locked: true };
+  const started = Date.now();
+  const inBudget = () => Date.now() - started < TICK_BUDGET_MS;
+  const safe = async (what: string, fn: () => Promise<unknown>) => {
+    try { await fn(); } catch (err) { result.errors++; console.error(`[solana-tick] ${what}:`, (err as Error).message); }
+  };
+  try {
+    const [orders, watches, payments] = await Promise.all([openOrders(), activeWatches(), pendingPaymentRequests()]);
+    result.orders = orders.length;
+    result.watches = watches.length;
+    result.payments = payments.length;
+    const prices = await priceMap([
+      ...orders.map((o) => o.trigger.mint),
+      ...watches.flatMap((w) => (w.kind === "price" ? [w.trigger.mint] : [])),
+    ]);
+
+    for (const order of orders) {
+      if (!inBudget()) break;
+      await safe(`order ${order.id}`, async () => {
+        if (isExpired(order.expiresAt, now)) {
+          await updateOrder(order.id, { status: "expired", closedAt: new Date(now).toISOString() });
+          await pushAlert({ agentId: order.agentId, orgId: order.orgId, source: "order", refId: order.id, title: "Order expired unfilled", detail: `Waited for ${describeTrigger(order.trigger)} until ${order.expiresAt}.` });
+          result.expired++;
+          return;
+        }
+        const p = prices.get(order.trigger.mint);
+        const check = checkTrigger(order.trigger, p?.usd ?? null);
+        if (check.hit) {
+          const out = await fillOrder({ ...order, trigger: check.next }, p!.usd!, p!.symbol);
+          if (out === "filled") result.filled++;
+          if (out === "failed") result.failed++;
+          if (out !== "skipped") result.alerts++;
+        } else if (check.changed) {
+          await updateOrder(order.id, { trigger: check.next });
+        }
+      });
+    }
+
+    for (const watch of watches) {
+      if (!inBudget()) break;
+      await safe(`watch ${watch.id}`, async () => {
+        if (isExpired(watch.expiresAt, now)) {
+          await updateWatch(watch.id, { status: "expired" });
+          return;
+        }
+        if (watch.kind === "activity") {
+          if (await stepActivityWatch(watch)) result.alerts++;
+          return;
+        }
+        const p = prices.get(watch.trigger.mint);
+        const step = stepPriceWatch(watch, p?.usd ?? null);
+        if (step.fire) {
+          await pushAlert({
+            agentId: watch.agentId, orgId: watch.orgId, source: "watch", refId: watch.id,
+            title: `Price alert: ${describeTrigger(watch.trigger, p?.symbol)}`,
+            detail: `${p?.symbol ?? watch.trigger.mint} is $${fmtUsd(p!.usd!)}.${watch.note ? ` Your note: ${watch.note}` : ""}`,
+          });
+          result.alerts++;
+          await updateWatch(watch.id, { ...step.next, fireCount: watch.fireCount + 1, lastFiredAt: new Date(now).toISOString(), ...(watch.repeat ? {} : { status: "done" as const }) });
+        } else if (step.changed) {
+          await updateWatch(watch.id, { trigger: step.next.trigger, armed: step.next.armed });
+        }
+      });
+    }
+
+    for (const request of payments) {
+      if (!inBudget()) break;
+      await safe(`payment ${request.id}`, async () => {
+        const checked = await checkPaymentRequest(request);
+        if (checked.request.status === "paid") { result.paid++; result.alerts++; return; }
+        if (isExpired(request.expiresAt, now)) {
+          await updatePaymentRequest(request.id, { status: "expired" });
+          await pushAlert({ agentId: request.agentId, orgId: request.orgId, source: "payment", refId: request.id, title: "Payment request expired unpaid", detail: `${request.amount} ${request.mint ?? "SOL"} to ${request.recipient} (${request.cluster}). ${checked.verdict.reason ?? ""}`.trim() });
+        }
+      });
+    }
+    return result;
+  } finally {
+    await releaseSolanaTickLock(holder).catch(() => {});
+  }
+}

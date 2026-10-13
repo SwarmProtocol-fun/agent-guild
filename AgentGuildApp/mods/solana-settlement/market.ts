@@ -159,3 +159,41 @@ export async function swapQuote(
     inSymbol: inInfo.symbol, outSymbol: outInfo.symbol,
   };
 }
+
+export interface TokenInfo {
+  mint: string;
+  name: string | null;
+  symbol: string | null;
+  isVerified: boolean;
+  tags: string[];
+  holderCount: number | null;
+  liquidityUsd: number | null;
+  mcapUsd: number | null;
+  /** Jupiter's organic-volume grade: high / medium / low. */
+  organicScoreLabel: string | null;
+  topHoldersPct: number | null;
+  createdAt: string | null;
+}
+
+/** Jupiter's token directory entry for a mint, or null when it isn't listed. */
+export async function tokenInfo(mint: string, fetchImpl?: typeof fetch): Promise<TokenInfo | null> {
+  const rows = await jup<Array<Record<string, unknown>>>(`/tokens/v2/search?query=${resolveMint(mint)}`, fetchImpl);
+  const row = Array.isArray(rows) ? rows.find((r) => r.id === resolveMint(mint)) : undefined;
+  if (!row) return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  const audit = (row.audit ?? {}) as Record<string, unknown>;
+  return {
+    mint: String(row.id),
+    name: str(row.name),
+    symbol: str(row.symbol),
+    isVerified: row.isVerified === true,
+    tags: Array.isArray(row.tags) ? row.tags.filter((t): t is string => typeof t === "string").slice(0, 12) : [],
+    holderCount: num(row.holderCount),
+    liquidityUsd: num(row.liquidity),
+    mcapUsd: num(row.mcap),
+    organicScoreLabel: str(row.organicScoreLabel),
+    topHoldersPct: num(audit.topHoldersPercentage),
+    createdAt: str(row.createdAt),
+  };
+}

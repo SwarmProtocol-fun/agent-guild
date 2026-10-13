@@ -9,7 +9,7 @@
  * Sepolia / Base Sepolia: every signing path calls assertSigningNetwork,
  * and the network → RPC mapping is server-controlled (never a caller URL).
  */
-import { createPublicClient, createWalletClient, erc20Abi, formatEther, http, type Hex, type PublicClient } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, formatEther, hashMessage, hashTypedData, http, type Hex, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { RouteContext } from "@agent-guild/sdk";
 // Server-side capability reads must use the admin SDK (see the Solana mod's agent.ts).
@@ -19,6 +19,7 @@ import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { generateAgentWallet, getAgentWalletEvmPrivateKey, listAgentWallets } from "@/lib/agent-wallets";
 import { DevtoolsInputError, buildCall, decodeRevert, parseAddress, revertOutcome, shortError, simulateCall, toRaw, toUi, type CallSpec, type DecodedRevert, type Simulation } from "./devtools";
 import { NETWORKS, NETWORK_IDS, SIGNING_NETWORKS, explorerUrl, type EthNetwork } from "./networks";
+import { typedData } from "./chaintools";
 
 // ── Networks ─────────────────────────────────────────────────────────────
 
@@ -302,4 +303,32 @@ export async function transferAsAgent(caller: Caller, network: EthNetwork, param
   const result = await sendAsAgent(caller, network, { to: token, signature: "transfer(address,uint256) returns (bool)", args: [to, raw.toString()] });
   const { simulation: _s, contractAddress: _c, ...rest } = result;
   return { ...rest, to, token, symbol, amountUi: toUi(raw, decimals) };
+}
+
+// ── Message signing ──────────────────────────────────────────────────────
+
+const SIGNING_CHAIN_IDS = new Set(SIGNING_NETWORKS.map((n) => NETWORKS[n].chainId));
+
+/**
+ * Signs with the agent's dev wallet: an EIP-191 message (SIWE logins,
+ * off-chain attestations) or EIP-712 typed data. Typed data must name a
+ * testnet chainId in its domain, so a permit or order signed here can't
+ * authorise anything on a mainnet even if mainnet funds land in the wallet.
+ */
+export async function signAsAgent(
+  caller: Caller,
+  input: { message?: unknown; typedData?: unknown },
+): Promise<{ address: string; kind: "message" | "typed-data"; signature: Hex; hash: Hex }> {
+  const account = await devAccount(caller);
+  if (input.typedData != null) {
+    const td = typedData(input.typedData as Record<string, unknown>) as { domain: { chainId?: unknown } };
+    const chainId = Number(td.domain.chainId);
+    if (!SIGNING_CHAIN_IDS.has(chainId)) {
+      throw new DevtoolsInputError(`Typed data must set domain.chainId to a testnet (${[...SIGNING_CHAIN_IDS].join(" or ")}); got ${td.domain.chainId ?? "none"}`);
+    }
+    return { address: account.address, kind: "typed-data", signature: await account.signTypedData(td as never), hash: hashTypedData(td as never) };
+  }
+  if (typeof input.message !== "string" || !input.message) throw new DevtoolsInputError("Pass `message` (text) or `typedData` ({ domain, types, primaryType, message })");
+  if (input.message.length > 10_000) throw new DevtoolsInputError("message is over 10,000 characters");
+  return { address: account.address, kind: "message", signature: await account.signMessage({ message: input.message }), hash: hashMessage(input.message) };
 }

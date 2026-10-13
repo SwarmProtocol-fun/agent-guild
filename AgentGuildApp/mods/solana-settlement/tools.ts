@@ -296,6 +296,180 @@ export const AGENT_TOOLS: AgentTool[] = [
     input_schema: { type: "object", properties: { taskId: { type: "string" } }, required: ["taskId"] },
   },
 
+  // ── Runs while you're offline (the hub checks every minute) ──
+  {
+    name: "solana_alerts",
+    description: "What happened while you weren't running: standing orders that filled, failed or expired, watches that fired, payments that landed. Newest first. Check this first every time you wake, then mark what you've handled with solana_alerts_read.",
+    method: "GET", path: "alerts", capability: null,
+    input_schema: { type: "object", properties: { unread: { type: "string", enum: ["1"], description: "\"1\" = unread only" }, limit: { type: "integer", minimum: 1, maximum: 200 } } },
+  },
+  {
+    name: "solana_alerts_read",
+    description: "Mark alerts handled so the next solana_alerts call with unread=1 skips them.",
+    method: "POST", path: "alerts/read", capability: null,
+    input_schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, all: { type: "boolean" } } },
+  },
+  {
+    name: "solana_order",
+    description:
+      "Leave a standing paper order that the hub fills for you when a price trigger fires, even while you're offline (checked every minute at live Jupiter prices). " +
+      "Limit buy: trigger { mint: \"SOL\", op: \"below\", usd: 140 } with inputMint USDC. Take profit: op \"above\". Stop loss: op \"below\" selling the token. " +
+      "Trailing stop: op \"trail\", trailPct 8 — sells once the price falls 8% from the highest price seen after you place it. The owner's limits apply at fill time. The result lands in solana_alerts.",
+    method: "POST", path: "orders", capability: CAP.trade,
+    input_schema: {
+      type: "object",
+      properties: {
+        inputMint: { type: "string", description: "Token to spend (symbol or mint)" },
+        outputMint: { type: "string", description: "Token to receive" },
+        amount: { type: "string", description: "\"1.5\", \"all\" or \"25%\" of the input holding at fill time" },
+        trigger: {
+          type: "object",
+          properties: {
+            mint: { type: "string", description: "Token whose USD price is watched" },
+            op: { type: "string", enum: ["above", "below", "trail"] },
+            usd: { type: "number", description: "Price level for above/below" },
+            trailPct: { type: "number", minimum: 0.5, maximum: 50, description: "Drop from the high, for trail" },
+          },
+          required: ["mint", "op"],
+        },
+        ttlDays: { type: "number", maximum: 30, description: "Defaults to 7" },
+        slippageBps: { type: "integer", minimum: 1, maximum: 1000 },
+        note: { type: "string", maxLength: 280, description: "Your reason — it comes back in the alert" },
+      },
+      required: ["inputMint", "outputMint", "amount", "trigger"],
+    },
+  },
+  {
+    name: "solana_orders",
+    description: "Your standing orders, newest first: open ones with their trigger (and the trailing high so far), and closed ones with how they ended.",
+    method: "GET", path: "orders", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "solana_order_cancel",
+    description: "Cancel an open standing order.",
+    method: "POST", path: "orders/{id}/cancel", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "solana_watch",
+    description:
+      "Have the hub watch something for you and post an alert when it happens. kind \"price\": a trigger like solana_order's (above/below/trail); repeat=true re-arms it after the price moves back. " +
+      "kind \"activity\": any new transaction touching an address (\"self\" = your dev wallet) on a cluster — use it to notice incoming payments, a counterparty acting, or a program being upgraded.",
+    method: "POST", path: "watches", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["price", "activity"] },
+        trigger: { type: "object", description: "For price: { mint, op: above|below|trail, usd | trailPct }" },
+        address: { type: "string", description: "For activity: address (base58) or \"self\"" },
+        cluster,
+        repeat: { type: "boolean", description: "Keep firing (default true for activity, false for price)" },
+        ttlDays: { type: "number", maximum: 30 },
+        note: { type: "string", maxLength: 280 },
+      },
+      required: ["kind"],
+    },
+  },
+  {
+    name: "solana_watches",
+    description: "Your watches, newest first, with how many times each has fired.",
+    method: "GET", path: "watches", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "solana_watch_cancel",
+    description: "Stop a watch.",
+    method: "POST", path: "watches/{id}/cancel", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+
+  // ── Get paid directly ──
+  {
+    name: "solana_payment_request",
+    description:
+      "Bill someone directly: returns a Solana Pay link (solana:…) for an amount of SOL or a token to one of your own wallets, tagged with a fresh reference key. " +
+      "Any Solana wallet can pay it. The hub watches the reference and posts an alert the minute it's paid, so you don't have to stay up waiting.",
+    method: "POST", path: "payments/request", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        amount: { type: "string", description: "UI amount, e.g. \"5\"" },
+        mint: { type: "string", description: "Omit for SOL. \"USDC\" = the cluster's USDC; otherwise a mint address" },
+        recipient: { type: "string", description: "One of your own Solana wallets; defaults to your dev wallet" },
+        cluster,
+        label: { type: "string", maxLength: 64, description: "Who's asking, shown in the payer's wallet" },
+        message: { type: "string", maxLength: 140, description: "What it's for" },
+        memo: { type: "string", maxLength: 120, description: "Put on-chain with the payment, e.g. an invoice id" },
+        ttlDays: { type: "number", maximum: 30 },
+      },
+      required: ["amount"],
+    },
+  },
+  {
+    name: "solana_payment_status",
+    description: "Check one of your payment requests now (re-read on-chain if still pending): paid or not, payer, signature.",
+    method: "GET", path: "payments/{id}", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "solana_payment_requests",
+    description: "All your payment requests, newest first.",
+    method: "GET", path: "payments", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "solana_verify_payment",
+    description:
+      "Prove a payment happened instead of taking someone's word (or screenshot) for it: reads the chain and says whether `recipient` really received at least `amount` of SOL or `mint`, in a given signature or in any transaction carrying a Solana Pay `reference`, with the payer, memo match and finality.",
+    method: "POST", path: "payments/verify", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        recipient: { type: "string", description: "Address that should have been paid, or \"self\"" },
+        amount: { type: "string" },
+        mint: { type: "string", description: "Omit for SOL; \"USDC\" or a mint address" },
+        signature: { type: "string" },
+        reference: { type: "string" },
+        memo: { type: "string", description: "Text the payment memo must contain" },
+        cluster,
+      },
+      required: ["recipient"],
+    },
+  },
+
+  // ── Due diligence ──
+  {
+    name: "solana_token_safety",
+    description:
+      "Rug check a token before buying or accepting it: live mint authority (supply can be inflated), freeze authority (you can be frozen), Token-2022 traps (permanent delegate, transfer hook, transfer fee, pausable, non-transferable), " +
+      "holder concentration, whether $1,000 can actually be sold back to USDC and at what price impact, and Jupiter verification. Returns a verdict (high-risk / caution / no-red-flags) with each finding. Defaults to mainnet.",
+    method: "GET", path: "token/safety/{mint}", capability: CAP.inspect,
+    input_schema: { type: "object", properties: { mint: { type: "string", description: "Symbol or mint address" }, cluster }, required: ["mint"] },
+  },
+  {
+    name: "solana_preview_transaction",
+    description:
+      "Before signing a transaction someone else built (a dApp's API, a Solana Action/Blink, a counterparty), see what it really does: every instruction decoded where possible, a simulation, your wallet's SOL and token changes, and red flags such as a token delegate approval, an authority handover, a wallet reassignment or a program nobody can decode. Pass the base64 transaction. Works on mainnet (read-only).",
+    method: "POST", path: "tx/preview", capability: CAP.simulate,
+    input_schema: {
+      type: "object",
+      properties: { transaction: { type: "string", description: "Base64 serialized transaction" }, cluster, wallet: address("Preview as this wallet instead of your dev wallet") },
+      required: ["transaction"],
+    },
+  },
+  {
+    name: "solana_sign_transaction",
+    description:
+      "Sign a transaction someone else built with your dev wallet and send it (devnet/testnet). It is previewed first: one that would fail or hand over your wallet is always refused, other high-risk findings need acceptRisks: true, and SOL out is capped by your owner's limit. Other signers must have signed already.",
+    method: "POST", path: "tx/sign", capability: CAP.devnet,
+    input_schema: {
+      type: "object",
+      properties: { transaction: { type: "string", description: "Base64 serialized transaction" }, cluster: signingCluster, acceptRisks: { type: "boolean" } },
+      required: ["transaction"],
+    },
+  },
+
   // ── Get paid ──
   {
     name: "solana_settle_job",
@@ -310,4 +484,17 @@ export const AGENT_TOOLS: AgentTool[] = [
       required: ["taskId"],
     },
   },
+];
+
+/**
+ * Why an agent runs these through the hub instead of on its own: each is a
+ * capability a model can't have by itself. Served with the tool list.
+ */
+export const HARNESS_ONLY: { capability: string; tools: string[]; why: string }[] = [
+  { capability: "Acts while you're offline", tools: ["solana_order", "solana_watch", "solana_alerts"], why: "You exist only while a prompt runs. The hub checks prices and addresses every minute, fills standing orders and leaves the result in your alerts." },
+  { capability: "Gets paid and knows it", tools: ["solana_payment_request", "solana_verify_payment", "solana_settle_job"], why: "A payer's \"sent!\" proves nothing. The hub issues a Solana Pay reference, reads the chain, and confirms the amount, payer and memo." },
+  { capability: "Signs without holding a key", tools: ["solana_send", "solana_transfer", "solana_sign_transaction"], why: "Your dev wallet's key stays encrypted on the hub. It signs only on devnet/testnet, inside your owner's limits, after a simulation." },
+  { capability: "Sees what a transaction will do", tools: ["solana_preview_transaction", "solana_simulate", "solana_inspect_transaction"], why: "Base64 is opaque to you. The hub decodes it, simulates it against live state and lists your balance changes and red flags before anything is signed." },
+  { capability: "Spots a rug before buying", tools: ["solana_token_safety"], why: "Mint and freeze authorities, Token-2022 extensions, holder concentration and real sell-side liquidity are chain state, not something you can reason out." },
+  { capability: "Builds and deploys programs", tools: ["solana_anchor_job"], why: "Compiling Rust and running a validator needs a sandbox. The hub queues it on a GatewayAgent worker." },
 ];

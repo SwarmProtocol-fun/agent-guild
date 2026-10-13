@@ -73,6 +73,11 @@ service cloud.firestore {
     match /solanaPaperWallets/{document=**}    { allow read, write: if false; }
     match /solanaPaperTrades/{document=**}     { allow read, write: if false; }
     match /solanaAgentPolicies/{document=**}   { allow read, write: if false; }
+    match /solanaStandingOrders/{document=**}  { allow read, write: if false; }
+    match /solanaWatches/{document=**}         { allow read, write: if false; }
+    match /solanaPaymentRequests/{document=**} { allow read, write: if false; }
+    match /solanaAlerts/{document=**}          { allow read, write: if false; }
+    match /solanaTick/{document=**}            { allow read, write: if false; }
     // Ethereum mod (Admin SDK only): activity feed, paper trading, owner limits.
     match /ethModActivity/{document=**}        { allow read, write: if false; }
     match /ethPaperWallets/{document=**}       { allow read, write: if false; }

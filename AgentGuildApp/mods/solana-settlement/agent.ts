@@ -9,7 +9,7 @@
  * It only ever signs for devnet/testnet: `sendAsAgent` refuses mainnet, and
  * the cluster → RPC mapping is server-controlled (never a caller URL).
  */
-import { Connection, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction, type Keypair } from "@solana/web3.js";
+import { Connection, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction, type Keypair, type VersionedTransaction } from "@solana/web3.js";
 import { createMint, getMint, getOrCreateAssociatedTokenAccount, mintTo, transferChecked } from "@solana/spl-token";
 import type { RouteContext } from "@agent-guild/sdk";
 // Server-side capability reads must use the admin SDK: lib/skills.ts's
@@ -357,6 +357,41 @@ export async function transferAsAgent(
     signature, explorerUrl: explorerUrl("tx", signature, cluster), to: to.toBase58(), mint: mint.toBase58(),
     amountRaw: raw.toString(), amountUi: toUi(raw.toString(), decimals), recipientTokenAccount: dest.address.toBase58(),
   };
+}
+
+/**
+ * Signs a transaction someone else built (a dApp API, a Solana Action) with
+ * the agent's dev wallet and sends it. The caller previews it first
+ * (chainchecks.previewExternalTx). Other required signers must already have
+ * signed. When the agent is the only signer an expired blockhash is
+ * refreshed; otherwise the transaction is sent as built.
+ */
+export async function signExternalAsAgent(caller: Caller, cluster: ServerCluster, tx: VersionedTransaction): Promise<{ signature: string; explorerUrl: string; success: boolean; err: unknown }> {
+  assertSigningCluster(cluster);
+  const conn = connectionFor(cluster);
+  const payer = await devKeypair(caller);
+  const msg = tx.message;
+  const signers = msg.staticAccountKeys.slice(0, msg.header.numRequiredSignatures).map((k) => k.toBase58());
+  const me = payer.publicKey.toBase58();
+  const myIndex = signers.indexOf(me);
+  if (myIndex < 0) throw new DevtoolsInputError(`The agent's dev wallet ${me} isn't a required signer of this transaction`);
+  const missing = signers.filter((s, i) => s !== me && tx.signatures[i].every((b) => b === 0));
+  if (missing.length) throw new DevtoolsInputError(`Still needs signatures from ${missing.join(", ")} before the agent can send it`);
+
+  const latest = await conn.getLatestBlockhash("confirmed");
+  const { lastValidBlockHeight } = latest;
+  let { blockhash } = latest;
+  if (signers.length === 1) {
+    msg.recentBlockhash = blockhash;
+  } else if (!(await conn.isBlockhashValid(msg.recentBlockhash, { commitment: "confirmed" })).value) {
+    throw new DevtoolsInputError("The transaction's blockhash has expired and other signers already signed it — ask the dApp for a fresh one");
+  } else {
+    blockhash = msg.recentBlockhash;
+  }
+  tx.sign([payer]);
+  const signature = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, preflightCommitment: "confirmed" });
+  const confirmation = await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  return { signature, explorerUrl: explorerUrl("tx", signature, cluster), success: !confirmation.value.err, err: confirmation.value.err ?? null };
 }
 
 // ── Anchor sandbox ───────────────────────────────────────────────────────

@@ -288,6 +288,18 @@ function lending(input: HarnessBenefitInput): HarnessBenefit {
   };
 }
 
+/**
+ * What a granted capability lets the agent do that a model on its own can't:
+ * no compiler, no RPC, no keys, no exact hashing. Keys without an entry are
+ * listed by name only.
+ */
+export const CAPABILITY_POWERS: Record<string, string> = {
+  "eth-inspect": "read any Ethereum/Base contract by its verified ABI, decode failed txs, query logs and raw storage, and compute exact hashes, selectors and slots (eth_contract_abi, eth_logs, eth_storage, eth_util)",
+  "eth-simulate": "compile Solidity and dry-run any call on mainnet against pretend balances or storage (eth_compile, eth_simulate with stateOverride)",
+  "eth-testnet": "deploy Solidity source as a verified contract, transact and sign with your own Sepolia wallet (eth_deploy_source, eth_send, eth_sign_message)",
+  "eth-trade": "paper-trade at live mainnet KyberSwap prices and gas (eth_paper_swap)",
+};
+
 function tools(input: HarnessBenefitInput): HarnessBenefit {
   const keys = [...new Set(input.capabilities.map((k) => k.trim()).filter((k) => k && k !== "agent-wallet"))].slice(0, 12);
   if (keys.length === 0) {
@@ -304,8 +316,13 @@ function tools(input: HarnessBenefitInput): HarnessBenefit {
     title: "Tools you don't have alone",
     state: "live",
     command: "agent-guild capabilities",
-    detail: `Installed: ${keys.join(", ")}. agent-guild capabilities lists them. agent-guild mod tools <mod> lists the calls, and agent-guild mod call <mod> <tool> '<json>' runs one. agent-guild mod status <mod> shows the mode and why nothing is trading. Trading calls print MODE: PAPER (the default), TESTNET (--testnet: your own testnet wallet, no real funds) or LIVE (mainnet, only if the owner allows it). Risk limits stay on the hub, and agent-guild inbox lists AI trading questions and open positions with your messages.`,
+    detail: `Installed: ${keys.join(", ")}.${powersLine(keys)} agent-guild capabilities lists them. agent-guild mod tools <mod> lists the calls, and agent-guild mod call <mod> <tool> '<json>' runs one. agent-guild mod status <mod> shows the mode and why nothing is trading. Trading calls print MODE: PAPER (the default), TESTNET (--testnet: your own testnet wallet, no real funds) or LIVE (mainnet, only if the owner allows it). Risk limits stay on the hub, and agent-guild inbox lists AI trading questions and open positions with your messages.`,
   };
+}
+
+function powersLine(keys: string[]): string {
+  const powers = keys.map((k) => CAPABILITY_POWERS[k]).filter(Boolean);
+  return powers.length ? ` With them you can ${powers.join("; ")}.` : "";
 }
 
 function bindings(input: HarnessBenefitInput): HarnessBenefit {

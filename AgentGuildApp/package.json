@@ -84,6 +84,7 @@
     "react-chartjs-2": "^5.2.0",
     "react-dom": "19.2.3",
     "recharts": "^3.8.0",
+    "solc": "^0.8.37",
     "tailwind-merge": "^3.4.0",
     "three": "^0.183.1",
     "tweetnacl": "^1.0.3",
