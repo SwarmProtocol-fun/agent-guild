@@ -885,6 +885,8 @@ export interface Job {
   collaboratorAgentIds?: string[];
   /** The task auto-created for the assigned agent (server-side claims only) — closed on approval/cancel. */
   taskId?: string;
+  /** How the poster paid the agent for this job (lib/job-payments.ts). Server-written; once set the job is no longer payable. */
+  payment?: JobPayment;
   /** Set when the poster withdraws the job (status → "closed"). */
   cancelledAt?: unknown;
   cancelledBy?: string;
@@ -953,6 +955,25 @@ export async function getOpenJobs(orgId: string): Promise<Job[]> {
   const q = query(collection(db, "jobs"), where("orgId", "==", orgId), where("status", "==", "open"));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() } as Job));
+}
+
+export type JobPaymentMethod = "base-usdc" | "solana-usdc" | "offplatform";
+
+export interface JobPayment {
+  method: JobPaymentMethod;
+  amountUsdc: number;
+  /** Agent wallet the transfer went to (on-chain methods). */
+  to?: string;
+  /** Wallet that sent it (on-chain methods). */
+  from?: string;
+  txSig?: string;
+  explorerUrl?: string;
+  /** Off-platform only: how it was paid ("bank", "paypal", …) and the poster's reference. */
+  channel?: string;
+  reference?: string;
+  note?: string;
+  paidBy: string;
+  paidAt: number;
 }
 
 export interface JobReviewEvent {

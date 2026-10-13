@@ -3,6 +3,7 @@ import type { ServerMod } from "@agent-guild/sdk";
 
 export const serverMods: Record<string, () => Promise<{ default: ServerMod }>> = {
   "dimos-bench": () => import("../../../../mods/dimos-bench/server"),
+  "ethereum": () => import("../../../../mods/ethereum/server"),
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/server"),
   "opengym": () => import("../../../../mods/opengym/server"),
   "polymarket-trading": () => import("../../../../mods/polymarket-trading/server"),

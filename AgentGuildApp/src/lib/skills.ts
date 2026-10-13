@@ -508,6 +508,32 @@ export const SKILL_REGISTRY: Skill[] = [
         },
     },
     {
+        id: "ethereum",
+        name: "Ethereum",
+        description: "Upgrades your agents into Ethereum developers. They can debug transactions (decoded calldata, token transfers and revert reasons), inspect addresses, contracts and proxies, read any contract, check gas, and simulate calls and deployments on Ethereum and Base mainnet. On Sepolia and Base Sepolia they act with their own wallet: send, transfer ETH and tokens, deploy contracts. They can also paper-trade any token at live mainnet KyberSwap prices, paying real gas, under limits you set. Includes a dev-tools panel for you.",
+        type: "mod",
+        source: "verified",
+        category: "Developer",
+        icon: "◆",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["ethereum", "evm", "base", "developer-tools", "agents", "sepolia", "trading", "kyberswap"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Ethereum", href: "/mods/ethereum/ethereum", iconName: "Diamond" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            // Capability keys — mods/ethereum/agent.ts CAP must match.
+            agentSkills: [
+                { id: "eth-inspect", name: "Read & Debug Chain", description: "Inspect transactions with decoded calldata, logs and revert reasons; addresses, contracts, proxies and tokens; read contracts, gas, prices and swap quotes.", type: "skill", invocation: "GET /dev/tx/:hash" },
+                { id: "eth-simulate", name: "Simulate Calls", description: "Dry-run any contract call, ETH send or deployment on any network for the result, gas and a decoded revert.", type: "skill", invocation: "POST /dev/simulate" },
+                { id: "eth-testnet", name: "Act on Testnets", description: "Sign with the agent's own wallet on Sepolia and Base Sepolia: send transactions, transfer ETH and tokens, deploy contracts.", type: "skill", invocation: "POST /dev/send" },
+                { id: "eth-trade", name: "Trade (Paper)", description: "Swap any Ethereum token at live KyberSwap quotes, paying real gas, in a paper wallet with P&L and owner-set limits.", type: "skill", invocation: "POST /paper/swap" },
+            ],
+        },
+    },
+    {
         id: "tempo-settlement",
         name: "Tempo Payouts",
         description: "Pay your agents for approved jobs in stablecoins on Tempo, from your own wallet into each agent's wallet. Each payment's memo carries a fingerprint of the job's delivery, and the payment is only marked done once it's found on-chain.",

@@ -19,7 +19,7 @@ beforeAll(() => {
 
 describe("isHiddenRoute", () => {
   it("matches hidden prefixes on whole path segments", () => {
-    for (const p of ["/discover", "/discover/abc", "/compute", "/compute/computers/x", "/mods/opengym/gym", "/market/opengym"]) {
+    for (const p of ["/discover", "/discover/abc", "/compute", "/compute/computers/x", "/mods/opengym/gym", "/market/opengym", "/mods/tempo-settlement/settlements", "/market/tempo-settlement"]) {
       expect(isHiddenRoute(p), p).toBe(true);
     }
     for (const p of ["/dashboard", "/computers", "/discovery", "/mods/hyperliquid-trading/x", "/market", "/market/opengym-x", "/directory"]) {

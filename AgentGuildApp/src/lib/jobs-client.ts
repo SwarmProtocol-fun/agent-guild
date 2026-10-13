@@ -86,3 +86,34 @@ export async function reopenJob(jobId: string, reason = ""): Promise<void> {
 export async function getJobAuditTrail(jobId: string): Promise<JobEvent[]> {
   return (await call<{ events: JobEvent[] }>(jobPath(jobId, "/events"), "GET")).events;
 }
+
+export interface JobPaymentOptions {
+  payable: boolean;
+  reason: string | null;
+  payment: import("./firestore").JobPayment | null;
+  suggestedUsdc: number | null;
+  agent: { id: string; name: string } | null;
+  wallets: { evm: { address: string; label: string }[]; solana: { address: string; label: string }[] };
+  rails: {
+    base: {
+      chainKey: string; chainId: number; name: string; rpcUrl: string; explorerUrl: string; usdc: `0x${string}`;
+      nativeCurrency: { name: string; symbol: string; decimals: number };
+    };
+    solana: { cluster: "devnet" | "mainnet-beta"; usdcMint: string };
+  };
+  offplatformChannels: string[];
+  canPay: boolean;
+}
+
+export async function getJobPaymentOptions(jobId: string): Promise<JobPaymentOptions> {
+  return call<JobPaymentOptions>(jobPath(jobId, "/payment"), "GET");
+}
+
+export async function recordJobPayment(
+  jobId: string,
+  body:
+    | { method: "base-usdc" | "solana-usdc"; txSig: string; from: string; to: string; amountUsdc: number }
+    | { method: "offplatform"; channel: string; reference?: string; note?: string; amountUsdc: number },
+): Promise<import("./firestore").JobPayment> {
+  return (await call<{ payment: import("./firestore").JobPayment }>(jobPath(jobId, "/payment"), "POST", body)).payment;
+}

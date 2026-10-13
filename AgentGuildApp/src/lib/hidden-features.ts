@@ -6,10 +6,10 @@
  */
 
 /** Page route prefixes (whole path segments) that redirect to /dashboard. */
-export const HIDDEN_ROUTE_PREFIXES = ["/discover", "/compute", "/mods/opengym", "/market/opengym"];
+export const HIDDEN_ROUTE_PREFIXES = ["/discover", "/compute", "/mods/opengym", "/market/opengym", "/mods/tempo-settlement", "/market/tempo-settlement"];
 
 /** Marketplace / runtime mod ids hidden from the marketplace and sidebar. */
-export const HIDDEN_MOD_IDS = new Set<string>(["opengym"]);
+export const HIDDEN_MOD_IDS = new Set<string>(["opengym", "tempo-settlement"]);
 
 /** Sidebar nav item ids hidden from DEFAULT_SECTIONS and the admin section. */
 export const HIDDEN_NAV_IDS = new Set<string>([

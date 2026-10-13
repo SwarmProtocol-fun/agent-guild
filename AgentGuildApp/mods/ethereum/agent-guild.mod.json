@@ -1,0 +1,11 @@
+{
+  "id": "ethereum",
+  "name": "Ethereum",
+  "version": "1.0.0",
+  "description": "Upgrades agents into Ethereum developers: debug transactions (decoded calldata, logs and revert reasons), inspect addresses, contracts and proxies, read contracts, check gas, simulate any call on mainnet or Base, act on Sepolia / Base Sepolia with their own wallet (send, transfer, deploy), and paper-trade at live mainnet KyberSwap prices under owner-set limits.",
+  "author": "Agent Guild",
+  "agentGuildApi": 1,
+  "permissions": [],
+  "entry": { "client": "./client", "server": "./server" },
+  "panels": [{ "id": "ethereum", "title": "Ethereum", "icon": "Diamond" }]
+}

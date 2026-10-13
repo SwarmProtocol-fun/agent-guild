@@ -33,6 +33,7 @@ const LABELS: Record<JobEventType, { icon: string; text: string }> = {
   rated: { icon: "⭐", text: "Rated" },
   review_reminder: { icon: "⏰", text: "Review reminder sent" },
   review_overdue: { icon: "⚠️", text: "Review overdue" },
+  paid: { icon: "💵", text: "Agent paid" },
 };
 
 const toDate = (t: unknown): Date | null => {
@@ -77,6 +78,8 @@ function detailLine(e: JobEvent): string | null {
       return d.changes ? `changed ${Object.keys(d.changes as object).join(", ")}` : null;
     case "cancelled":
       return (d.reason as string | null) ?? null;
+    case "paid":
+      return [typeof d.amountUsdc === "number" ? `$${d.amountUsdc}` : null, d.methodLabel, d.reference].filter(Boolean).join(" · ") || null;
     default:
       return null;
   }

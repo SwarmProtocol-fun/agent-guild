@@ -322,7 +322,8 @@ export type JobEventType =
   | "auto_approved"
   | "rated"
   | "review_reminder"
-  | "review_overdue";
+  | "review_overdue"
+  | "paid";
 
 export interface JobActor {
   type: "user" | "agent" | "system";

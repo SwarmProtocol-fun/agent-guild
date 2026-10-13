@@ -95,6 +95,11 @@ export async function claimSolanaSettlement(agentId: string, taskId: string, org
   return { state: "pending" };
 }
 
+/** Whether the solana-settlement mod has started or finished paying this agent's task (a job id). */
+export async function hasSolanaSettlementClaim(agentId: string, taskId: string): Promise<boolean> {
+  return (await adminDb().collection(KEYS).doc(taskKey(agentId, taskId)).get()).exists;
+}
+
 /** Drop a claim when the chain call failed before any transfer. */
 export async function releaseSolanaSettlementClaim(agentId: string, taskId: string): Promise<void> {
   await adminDb().collection(KEYS).doc(taskKey(agentId, taskId)).delete();

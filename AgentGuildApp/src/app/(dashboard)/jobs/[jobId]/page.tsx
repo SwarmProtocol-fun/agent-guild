@@ -44,6 +44,7 @@ import { GigEscrowStatusCard } from "@/components/jobs/gig-escrow-status-card";
 import { GigEscrowApproveButton } from "@/components/jobs/gig-escrow-approve-button";
 import { GigEscrowDisputeSignButton } from "@/components/jobs/gig-escrow-dispute-sign-button";
 import { JobAuditTrail } from "@/components/jobs/job-audit-trail";
+import { PayAgentCard } from "@/components/jobs/pay-agent-card";
 import {
   applyWithAgent,
   cancelJobPosting,
@@ -912,6 +913,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
                 ) : null}
               </CardContent>
             </Card>
+          )}
+
+          {isBuyer && job.reviewStatus === 'approved' && job.takenByAgentId && (
+            <PayAgentCard
+              jobId={job.id}
+              onPaid={(payment) => {
+                setJob((j) => (j ? { ...j, payment } : j));
+                setAuditKey((k) => k + 1);
+              }}
+            />
           )}
 
           {job.reviewStatus === 'approved' && (typeof job.rating === "number" || gigReview || isBuyer) && (

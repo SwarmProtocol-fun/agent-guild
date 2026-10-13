@@ -1,5 +1,5 @@
 // Generic mod tools: any installed mod that serves GET /agent/tools
-// (polymarket-trading, hyperliquid-trading, solana-settlement, …) can be
+// (polymarket-trading, hyperliquid-trading, solana-settlement, ethereum, …) can be
 // driven from the CLI and MCP without a per-mod command. Pure helpers only;
 // the signed fetch lives in agent-guild.mjs (modRequest).
 

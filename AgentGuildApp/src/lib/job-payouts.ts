@@ -1,6 +1,6 @@
 /**
- * Rules shared by every mod that pays an agent for a job (tempo-settlement,
- * solana-settlement): which jobs are payable, and what a job's free-text
+ * Rules shared by everything that pays an agent for a job (lib/job-payments,
+ * tempo-settlement, solana-settlement): which jobs are payable, and what a job's free-text
  * reward is worth in dollars. The job record is the source of truth for
  * both — never an amount or recipient the caller sends.
  */
@@ -22,6 +22,8 @@ export function parseUsdReward(reward: string | undefined): number | null {
 /** Approved jobs that went to an agent and were not already paid some other way. */
 export function isPayable(job: Job): boolean {
   if (!job.takenByAgentId) return false;
+  // Already paid through the core payment flow (lib/job-payments.ts).
+  if (job.payment) return false;
   // Delivery marks a job "completed" with review pending — pay only once the
   // poster approved it (jobs from before reviews existed have no reviewStatus).
   if (job.reviewStatus && job.reviewStatus !== "approved") return false;

@@ -3,6 +3,7 @@ import type { ClientMod } from "@agent-guild/sdk";
 
 export const clientMods: Record<string, () => Promise<{ default: ClientMod }>> = {
   "dimos-bench": () => import("../../../../mods/dimos-bench/client"),
+  "ethereum": () => import("../../../../mods/ethereum/client"),
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/client"),
   "opengym": () => import("../../../../mods/opengym/client"),
   "polymarket-trading": () => import("../../../../mods/polymarket-trading/client"),

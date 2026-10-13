@@ -273,7 +273,7 @@ const { openIdentityVault, sealIdentityVault } = await (async () => {
 // --- inlined from ./mod-tools.mjs (build-standalone.mjs) ---
 const { buildToolRequest, checkModId, formatToolList } = await (async () => {
   // Generic mod tools: any installed mod that serves GET /agent/tools
-  // (polymarket-trading, hyperliquid-trading, solana-settlement, …) can be
+  // (polymarket-trading, hyperliquid-trading, solana-settlement, ethereum, …) can be
   // driven from the CLI and MCP without a per-mod command. Pure helpers only;
   // the signed fetch lives in agent-guild.mjs (modRequest).
 
@@ -5589,7 +5589,7 @@ const MCP_TOOLS = {
     argv: () => ["capabilities"],
   },
   guild_mod_tools: {
-    description: "List the tools an installed mod gives this agent, e.g. polymarket-trading (prediction markets, paper or live), hyperliquid-trading, solana-settlement. Call this before guild_mod_call.",
+    description: "List the tools an installed mod gives this agent, e.g. polymarket-trading (prediction markets, paper or live), hyperliquid-trading, solana-settlement, ethereum (debug, simulate, Sepolia wallet, paper trading). Call this before guild_mod_call.",
     properties: { mod: str("Mod id, e.g. polymarket-trading") },
     required: ["mod"],
     argv: (a) => ["mod", "tools", a.mod],
