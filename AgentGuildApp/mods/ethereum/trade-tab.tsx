@@ -35,7 +35,7 @@ const TOKENS = ["ETH", "USDC", "WBTC", "LINK", "UNI", "AAVE", "PEPE"];
 const ALL_SYMBOLS = ["ETH", "WETH", "USDC", "USDT", "DAI", "WBTC", "LINK", "UNI", "AAVE", "LDO", "PEPE", "SHIB", "STETH"];
 
 /** Prices under $1 keep 4 significant digits so PEPE doesn't read as $0.00. */
-const price = (n: number | null) => (n == null ? "—" : n >= 1 || n === 0 ? usd(n) : `$${n.toPrecision(4).replace(/0+$/, "")}`);
+const price = (n: number | null) => (n == null ? "—" : n >= 1000 ? usd(n, 0) : n >= 1 || n === 0 ? usd(n) : `$${n.toPrecision(3).replace(/0+$/, "")}`);
 const pct = (n: number | null) => (n == null ? "—" : `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toFixed(2)}%`);
 const signed = (n: number) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${usd(Math.abs(n))}`;
 const toneOf = (n: number | null) => (n == null || Math.abs(n) < 0.005 ? undefined : n > 0 ? "success" as const : "danger" as const);
@@ -131,9 +131,9 @@ function PricesCard({ env }: { env: Env }) {
     <Card title="Prices" description={pricedAt ? `Ethereum mainnet, via DefiLlama · updated ${timeAgo(pricedAt)}` : "Ethereum mainnet, via DefiLlama"}
       actions={<Button className="h-8" variant="ghost" icon={RefreshCw} onClick={load}>Refresh</Button>}>
       {error ? <ErrorNote message={error} onRetry={load} /> : (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] gap-2">
           {(prices ?? TOKENS.map(() => null)).map((p, i) => p ? (
-            <Stat key={p.token} wrap label={p.symbol ?? shortAddr(p.token)} value={price(p.usdPrice)}
+            <Stat key={p.token} label={p.symbol ?? shortAddr(p.token)} value={price(p.usdPrice)}
               sub={<span className={pnlClass(p.priceChange24hPct)}>{pct(p.priceChange24hPct)} 24h</span>} />
           ) : <Skeleton key={i} className="h-[68px]" />)}
         </div>
@@ -141,6 +141,9 @@ function PricesCard({ env }: { env: Env }) {
     </Card>
   );
 }
+
+/** Up to 6 significant digits, so a quote never wraps mid-number. */
+const sig = (n: number) => n.toLocaleString(undefined, { maximumSignificantDigits: 6 });
 
 function QuoteSummary({ q }: { q: Quote }) {
   const inLabel = tokenLabel(q.inSymbol, q.inputToken);
@@ -151,13 +154,13 @@ function QuoteSummary({ q }: { q: Quote }) {
     <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-3">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className={cx("text-xs", muted)}>You get about</span>
-        <span className="font-mono text-xl font-semibold tabular-nums">{Number(q.outUi).toLocaleString(undefined, { maximumFractionDigits: 6 })}</span>
+        <span className="font-mono text-xl font-semibold tabular-nums">{sig(Number(q.outUi))}</span>
         <span className="text-sm">{outLabel}</span>
         <span className={cx("text-xs", muted)}>for {q.inUi} {inLabel}</span>
       </div>
-      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-        <Stat wrap label="Rate" value={`1 ${inLabel} = ${q.rate.toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${outLabel}`} />
-        <Stat wrap label="At least" value={Number(q.minOutUi).toLocaleString(undefined, { maximumFractionDigits: 6 })} sub={`after ${q.slippageBps / 100}% slippage`} />
+      <div className="grid grid-cols-2 gap-2">
+        <Stat wrap label="Rate" value={q.rate >= 1 || q.rate <= 0 ? `1 ${inLabel} = ${sig(q.rate)} ${outLabel}` : `1 ${outLabel} = ${sig(1 / q.rate)} ${inLabel}`} />
+        <Stat label="At least" value={sig(Number(q.minOutUi))} sub={`after ${q.slippageBps / 100}% slippage`} />
         <Stat label="Price impact" value={<Badge tone={impactTone}>{q.priceImpactPct < 0.01 ? "<0.01%" : `${q.priceImpactPct.toFixed(2)}%`}</Badge>} sub={usd(q.usdValue)} />
         <Stat label="Gas" value={<span className="inline-flex items-center gap-1"><Fuel className="h-3 w-3" aria-hidden />{q.gasUsd != null ? usd(q.gasUsd, 2) : "—"}</span>}
           sub={gasShare != null ? `${gasShare < 0.01 ? "<0.01" : gasShare.toFixed(2)}% of the swap` : undefined} />

@@ -34,7 +34,7 @@ export class GcpComputeProvider implements ComputeProvider {
   }
 
   async createInstance(config: InstanceConfig): Promise<ProviderResult> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const instancesClient = new compute.InstancesClient();
 
     const zone = config.providerRegion ? `${config.providerRegion}-b` : this.resolveZone(config.region);
@@ -95,28 +95,28 @@ export class GcpComputeProvider implements ComputeProvider {
   }
 
   async startInstance(providerInstanceId: string): Promise<void> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
     await client.start({ project: this.projectId, zone, instance: providerInstanceId });
   }
 
   async stopInstance(providerInstanceId: string): Promise<void> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
     await client.stop({ project: this.projectId, zone, instance: providerInstanceId });
   }
 
   async restartInstance(providerInstanceId: string): Promise<void> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
     await client.reset({ project: this.projectId, zone, instance: providerInstanceId });
   }
 
   async deleteInstance(providerInstanceId: string): Promise<void> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
     await client.delete({ project: this.projectId, zone, instance: providerInstanceId });
@@ -124,7 +124,7 @@ export class GcpComputeProvider implements ComputeProvider {
 
   async takeScreenshot(providerInstanceId: string): Promise<{ url: string; base64?: string }> {
     // GCP has a native screenshot API
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
     const [response] = await client.getScreenshot({
@@ -183,7 +183,7 @@ export class GcpComputeProvider implements ComputeProvider {
   }
 
   async createSnapshot(providerInstanceId: string, label: string): Promise<string> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(providerInstanceId);
 
@@ -229,7 +229,7 @@ export class GcpComputeProvider implements ComputeProvider {
   }
 
   private async getPublicIp(instanceId: string): Promise<string | null> {
-    const compute = await import("@google-cloud/compute");
+    const compute = await import("@google-cloud/compute/build/src/v1");
     const client = new compute.InstancesClient();
     const zone = await this.getInstanceZone(instanceId);
     const [instance] = await client.get({ project: this.projectId, zone, instance: instanceId });

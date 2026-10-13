@@ -78,11 +78,17 @@ service cloud.firestore {
     match /solanaPaymentRequests/{document=**} { allow read, write: if false; }
     match /solanaAlerts/{document=**}          { allow read, write: if false; }
     match /solanaTick/{document=**}            { allow read, write: if false; }
-    // Ethereum mod (Admin SDK only): activity feed, paper trading, owner limits.
+    // Ethereum mod (Admin SDK only): activity feed, paper trading, owner limits,
+    // and what the minute tick runs for offline agents.
     match /ethModActivity/{document=**}        { allow read, write: if false; }
     match /ethPaperWallets/{document=**}       { allow read, write: if false; }
     match /ethPaperTrades/{document=**}        { allow read, write: if false; }
     match /ethAgentPolicies/{document=**}      { allow read, write: if false; }
+    match /ethStandingOrders/{document=**}     { allow read, write: if false; }
+    match /ethWatches/{document=**}            { allow read, write: if false; }
+    match /ethPaymentRequests/{document=**}    { allow read, write: if false; }
+    match /ethAlerts/{document=**}             { allow read, write: if false; }
+    match /ethTick/{document=**}               { allow read, write: if false; }
     // One ciphertext, three wraps (protocol, agent, user). The hub serves
     // it only while those identity NFT copies are still with their holders.
     match /identityVault/{document=**}          { allow read, write: if false; }

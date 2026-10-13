@@ -71,12 +71,13 @@ export const sol = (lamports: number) => `${(lamports / LAMPORTS_PER_SOL).toLoca
 
 export const shortAddr = (a: string, n = 4) => (a.length > n * 2 + 3 ? `${a.slice(0, n)}…${a.slice(-n)}` : a);
 
+/** "5m ago" for the past, "in 7d" for the future (expiry times). */
 export function timeAgo(iso: string | number): string {
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  const diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  const s = Math.abs(diff);
   if (s < 45) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
+  const span = s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+  return diff < 0 ? `in ${span}` : `${span} ago`;
 }
 
 // ── Buttons ──────────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ export function PricesCard({ api }: { api: Api }) {
     <Card title="Prices" description={pricedAt ? `Mainnet, via Jupiter · updated ${timeAgo(pricedAt)}` : "Mainnet, via Jupiter"}
       actions={<Button className="h-8" variant="ghost" icon={RefreshCw} onClick={load}>Refresh</Button>}>
       {error ? <ErrorNote message={error} onRetry={load} /> : (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] gap-2">
           {(prices ?? TOKENS.map(() => null)).map((p, i) => p ? (
             <Stat key={p.mint} label={p.symbol ?? p.mint.slice(0, 6)} value={usd(p.usdPrice)}
               sub={<span className={cx(p.priceChange24hPct != null && p.priceChange24hPct > 0 && "text-green-600 dark:text-green-400", p.priceChange24hPct != null && p.priceChange24hPct < 0 && "text-red-600 dark:text-red-400")}>{pct(p.priceChange24hPct)} 24h</span>} />
@@ -76,6 +76,9 @@ export function PricesCard({ api }: { api: Api }) {
   );
 }
 
+/** Up to 6 significant digits, so a quote never wraps mid-number. */
+const sig = (n: number) => n.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+
 /** What a swap would fill at right now: output, rate, slippage floor, impact, route. */
 export function QuoteSummary({ q }: { q: Quote }) {
   const inLabel = q.inSymbol ?? `${q.inputMint.slice(0, 4)}…`;
@@ -85,13 +88,13 @@ export function QuoteSummary({ q }: { q: Quote }) {
     <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-3">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <span className={cx("text-xs", muted)}>You get about</span>
-        <span className="font-mono text-xl font-semibold tabular-nums">{q.outUi}</span>
+        <span className="font-mono text-xl font-semibold tabular-nums">{sig(Number(q.outUi))}</span>
         <span className="text-sm">{outLabel}</span>
         <span className={cx("text-xs", muted)}>for {q.inUi} {inLabel}</span>
       </div>
-      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-        <Stat wrap label="Rate" value={`1 ${inLabel} = ${q.rate.toLocaleString(undefined, { maximumSignificantDigits: 6 })} ${outLabel}`} />
-        <Stat wrap label="At least" value={q.minOutUi} sub={`after ${q.slippageBps / 100}% slippage`} />
+      <div className="grid grid-cols-2 gap-2">
+        <Stat wrap label="Rate" value={q.rate >= 1 || q.rate <= 0 ? `1 ${inLabel} = ${sig(q.rate)} ${outLabel}` : `1 ${outLabel} = ${sig(1 / q.rate)} ${inLabel}`} />
+        <Stat label="At least" value={sig(Number(q.minOutUi))} sub={`after ${q.slippageBps / 100}% slippage`} />
         <Stat label="Price impact" value={<Badge tone={impactTone}>{q.priceImpactPct < 0.01 ? "<0.01%" : `${q.priceImpactPct.toFixed(2)}%`}</Badge>} />
         <Stat label="Value" value={usd(q.usdValue)} />
       </div>

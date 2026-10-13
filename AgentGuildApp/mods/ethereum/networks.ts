@@ -34,11 +34,11 @@ export const NETWORKS: Record<EthNetwork, NetworkInfo> = {
   },
   base: {
     id: "base", label: "Base", chain: base, chainId: 8453, testnet: false,
-    publicRpc: "https://mainnet.base.org", explorer: "https://basescan.org", faucets: [],
+    publicRpc: "https://base-rpc.publicnode.com", explorer: "https://basescan.org", faucets: [],
   },
   "base-sepolia": {
     id: "base-sepolia", label: "Base Sepolia", chain: baseSepolia, chainId: 84532, testnet: true,
-    publicRpc: "https://sepolia.base.org", explorer: "https://sepolia.basescan.org",
+    publicRpc: "https://base-sepolia-rpc.publicnode.com", explorer: "https://sepolia.basescan.org",
     faucets: [
       { label: "Coinbase CDP", url: "https://portal.cdp.coinbase.com/products/faucet" },
       { label: "Alchemy", url: "https://www.alchemy.com/faucets/base-sepolia" },

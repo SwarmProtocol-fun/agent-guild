@@ -87,9 +87,10 @@ async function readTool<T extends object>(req: Request, ctx: RouteContext, descr
 }
 
 /** "self" in an address slot means the calling agent's dev wallet. */
-async function resolveSelf(ctx: RouteContext, req: Request, address: string): Promise<string> {
+/** `agentIdHint` covers a session that names its agent in the JSON body instead of the query string. */
+async function resolveSelf(ctx: RouteContext, req: Request, address: string, agentIdHint?: unknown): Promise<string> {
   if (address !== "self") return address;
-  const caller = await resolveCaller(ctx, query(req, "agentId"));
+  const caller = await resolveCaller(ctx, query(req, "agentId") ?? (typeof agentIdHint === "string" ? agentIdHint : null));
   const wallet = await getDevWallet(caller);
   if (!wallet) throw new DevtoolsInputError("This agent has no dev wallet yet — create one first (solana_create_wallet)");
   return wallet.address;
@@ -991,7 +992,7 @@ export default defineServerMod({
         } else if (b.kind === "activity") {
           if (typeof b.address !== "string") throw new DevtoolsInputError("address is required");
           const cluster = parseCluster(b.cluster);
-          const address = parsePubkey(await resolveSelf(ctx, req, b.address.trim()), "address").toBase58();
+          const address = parsePubkey(await resolveSelf(ctx, req, b.address.trim(), b.agentId), "address").toBase58();
           const [newest] = await connectionFor(cluster).getSignaturesForAddress(new PublicKey(address), { limit: 1 });
           watch = await createWatch({ ...common, kind: "activity", repeat: b.repeat !== false, address, cluster, lastSignature: newest?.signature ?? null });
           summary = `activity on ${address} (${cluster})`;
@@ -1095,7 +1096,7 @@ export default defineServerMod({
         const caller = ctx.agent ? await requireCaller(ctx, null, CAP.inspect) : null;
         const cluster = parseCluster(b.cluster);
         if (typeof b.recipient !== "string") throw new DevtoolsInputError("recipient is required");
-        const recipient = await resolveSelf(ctx, req, b.recipient.trim());
+        const recipient = await resolveSelf(ctx, req, b.recipient.trim(), b.agentId);
         const verdict = await findPayment(connectionFor(cluster), {
           recipient, mint: paymentMint(b.mint, cluster), amount: b.amount != null ? String(b.amount) : null,
           signature: typeof b.signature === "string" ? b.signature : null, reference: typeof b.reference === "string" ? b.reference : null,

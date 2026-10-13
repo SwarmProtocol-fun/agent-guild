@@ -15,9 +15,9 @@ describe("eth_util: exact math with known vectors", () => {
   });
 
   it("derives CREATE and CREATE2 addresses", () => {
-    expect(ethUtil("create_address", { from: A, nonce: "0" }).address.toLowerCase()).toBe("0xcd234a471b72ba2f1ccf0a70fcaba648a5eecd8d");
+    expect((ethUtil("create_address", { from: A, nonce: "0" }) as { address: string }).address.toLowerCase()).toBe("0xcd234a471b72ba2f1ccf0a70fcaba648a5eecd8d");
     // EIP-1014 example 1.
-    expect(ethUtil("create2_address", { from: "0x0000000000000000000000000000000000000000", salt: "0x00", bytecode: "0x00" }).address.toLowerCase())
+    expect((ethUtil("create2_address", { from: "0x0000000000000000000000000000000000000000", salt: "0x00", bytecode: "0x00" }) as { address: string }).address.toLowerCase())
       .toBe("0x4d1a2e2bb4f88f0250f26ffff098b0b30b26bf38");
   });
 

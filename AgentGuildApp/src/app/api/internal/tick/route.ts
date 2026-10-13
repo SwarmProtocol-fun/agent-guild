@@ -19,6 +19,7 @@ import { getRedis } from "@/lib/redis";
 import { runHyperliquidStrategyTick, runAiTraderTick, runHyperliquidPaperTick } from "../../../../../mods/hyperliquid-trading/server";
 import { runPolymarketTick } from "../../../../../mods/polymarket-trading/server";
 import { runSolanaTick } from "../../../../../mods/solana-settlement/server";
+import { runEthTick } from "../../../../../mods/ethereum/server";
 import { sweepStaleAgents } from "@/lib/heartbeat";
 
 /** Max runs to advance per tick (fits within 10s Netlify timeout) */
@@ -168,6 +169,16 @@ export async function POST(req: NextRequest) {
     solanaResult = { errors: 1 };
   }
 
+  // ── Phase 9: Ethereum. Same jobs for Ethereum agents: standing paper
+  // orders, price/address/event watches and EIP-681 payment requests.
+  let ethResult: Awaited<ReturnType<typeof runEthTick>> | { errors: number } = { errors: 0 };
+  try {
+    ethResult = await runEthTick();
+  } catch (err) {
+    console.error("[tick] Ethereum automation failed:", err);
+    ethResult = { errors: 1 };
+  }
+
   // ── Release lock ────────────────────────────────────────────────────────
   if (redis) {
     try {
@@ -188,6 +199,7 @@ export async function POST(req: NextRequest) {
     aiTraders: aiTraderResult,
     polymarket: polymarketResult,
     solana: solanaResult,
+    ethereum: ethResult,
     presenceFlipped,
   });
 }

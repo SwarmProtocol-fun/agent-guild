@@ -60,12 +60,13 @@ export const inputClass = cx(
 
 export const shortAddr = (a: string, n = 4) => (a.length > n * 2 + 3 ? `${a.slice(0, n)}…${a.slice(-n)}` : a);
 
+/** "5m ago" for the past, "in 7d" for the future (expiry times). */
 export function timeAgo(iso: string | number): string {
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  const diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  const s = Math.abs(diff);
   if (s < 45) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
+  const span = s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+  return diff < 0 ? `in ${span}` : `${span} ago`;
 }
 
 // ── Buttons ──────────────────────────────────────────────────────────────
@@ -373,8 +374,12 @@ export async function json<T>(res: Promise<Response>): Promise<T> {
   return d as T;
 }
 
-export const usd = (n: number | null | undefined, digits?: number) =>
-  n == null ? "—" : n.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: digits ?? (Math.abs(n) >= 1 || n === 0 ? 2 : 4), maximumFractionDigits: digits ?? (Math.abs(n) >= 1 || n === 0 ? 2 : 6) });
+/** Dollars to the cent; amounts under a cent keep 2 significant digits so gas doesn't read as $0.00. */
+export const usd = (n: number | null | undefined, digits?: number) => {
+  if (n == null) return "—";
+  if (digits == null && n !== 0 && Math.abs(n) < 0.01) return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumSignificantDigits: 2 });
+  return n.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: digits ?? 2, maximumFractionDigits: digits ?? 2 });
+};
 
 /** Trims a decimal string for display without float rounding surprises on big values. */
 export const amt = (s: string | number, max = 6) => {

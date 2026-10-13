@@ -363,4 +363,165 @@ export const AGENT_TOOLS: AgentTool[] = [
       },
     },
   },
+
+  // ── Bridge testnet ETH ──
+  {
+    name: "eth_bridge_testnet",
+    description: "Move ETH from your dev wallet on Sepolia to the same address on Base Sepolia through Base's official bridge. Lands in about 1–5 minutes. Use it when you have Sepolia ETH but need gas on Base Sepolia (faucets are per-network).",
+    method: "POST", path: "dev/bridge", capability: CAP.testnet,
+    input_schema: { type: "object", properties: { amount: { type: "string", description: "ETH to bridge, e.g. \"0.05\"." } }, required: ["amount"] },
+  },
+
+  // ── Acts while you're offline ──
+  {
+    name: "eth_alerts",
+    description: "What happened while you were away: standing orders that filled or failed, watches that fired, payments received. Newest first. Check this first whenever you wake.",
+    method: "GET", path: "alerts", capability: null,
+    input_schema: { type: "object", properties: { unread: { type: "string", enum: ["1"], description: "\"1\" for unread only." }, limit: { type: "integer", minimum: 1, maximum: 200 } } },
+  },
+  {
+    name: "eth_alerts_read",
+    description: "Mark alerts as read once you've acted on them.",
+    method: "POST", path: "alerts/read", capability: null,
+    input_schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, all: { type: "boolean" } } },
+  },
+  {
+    name: "eth_order",
+    description: "Leave a standing paper order that the hub fills while you're offline: when the trigger token's price crosses a level (limit / stop) or falls trailPct from its high (trailing stop), swap `amount` of inputToken into outputToken at the live quote. Checked every minute; the result lands in eth_alerts. Expires after ttlDays (default 7, max 30).",
+    method: "POST", path: "orders", capability: CAP.trade,
+    input_schema: {
+      type: "object",
+      properties: {
+        inputToken: { type: "string" }, outputToken: { type: "string" },
+        amount: { type: "string", description: "\"1.5\", \"25%\" or \"all\" of the input holding at fill time." },
+        trigger: { type: "object", description: "{ token, op: \"above\"|\"below\", usd } or { token, op: \"trail\", trailPct }", properties: { token: { type: "string" }, op: { type: "string", enum: ["above", "below", "trail"] }, usd: { type: "number" }, trailPct: { type: "number", minimum: 0.5, maximum: 50 } }, required: ["token", "op"] },
+        slippageBps: { type: "integer", minimum: 1, maximum: 1000 }, ttlDays: { type: "number", maximum: 30 }, note: { type: "string", maxLength: 280 },
+      },
+      required: ["inputToken", "outputToken", "amount", "trigger"],
+    },
+  },
+  {
+    name: "eth_orders",
+    description: "Your standing orders and their status (open, filled, failed, expired, cancelled), newest first.",
+    method: "GET", path: "orders", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "eth_order_cancel",
+    description: "Cancel an open standing order.",
+    method: "POST", path: "orders/{id}/cancel", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "eth_watch",
+    description: "Have the hub watch something and alert you in eth_alerts. kind \"price\": a token crosses a level or trails off its high. kind \"activity\": an address sends a transaction, its ETH balance changes, or ERC-20s move in or out (\"self\" = your dev wallet). kind \"event\": a contract emits an event matching `event` and indexed `args`, e.g. Transfer to you, or a governance ProposalCreated. Checked every minute.",
+    method: "POST", path: "watches", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["price", "activity", "event"] },
+        trigger: { type: "object", description: "price: { token, op, usd | trailPct }" },
+        address: { type: "string", description: "activity: the address (\"self\" ok). event: optional contract filter." },
+        event: { type: "string", description: "event: e.g. \"Transfer(address indexed from, address indexed to, uint256 value)\"." },
+        args: { type: "object", description: "event: indexed-arg filters by name, e.g. { \"to\": \"0x…\" }." },
+        network,
+        repeat: { type: "boolean", description: "Keep firing after the first alert. Default false for price, true otherwise." },
+        ttlDays: { type: "number", maximum: 30 }, note: { type: "string", maxLength: 280 },
+      },
+      required: ["kind"],
+    },
+  },
+  {
+    name: "eth_watches",
+    description: "Your watches and how often each fired.",
+    method: "GET", path: "watches", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "eth_watch_cancel",
+    description: "Stop a watch.",
+    method: "POST", path: "watches/{id}/cancel", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+
+  // ── Get paid and know it ──
+  {
+    name: "eth_payment_request",
+    description: "Bill someone directly: returns an EIP-681 payment link and an exact amount (your amount plus a few base units that identify this request, under a cent). The hub scans the chain every minute and alerts you when it lands. Works on mainnet and Base too, since receiving needs no signature. Pays into your dev wallet unless `recipient` is another of your own wallets.",
+    method: "POST", path: "payments/request", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: {
+        amount: { type: "string", description: "e.g. \"25\"" },
+        token: { type: "string", description: "\"ETH\" (default), \"USDC\", or an ERC-20 address." },
+        network: { ...network, description: "Defaults to sepolia. Use base or mainnet to be paid real funds." },
+        recipient: { type: "string" }, label: { type: "string", maxLength: 64 }, ttlDays: { type: "number", maximum: 30 },
+      },
+      required: ["amount"],
+    },
+  },
+  {
+    name: "eth_payment_status",
+    description: "A payment request, re-checked on-chain right now.",
+    method: "GET", path: "payments/{id}", capability: null,
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "eth_payment_requests",
+    description: "Your payment requests (pending, paid, expired), newest first.",
+    method: "GET", path: "payments", capability: null,
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "eth_verify_payment",
+    description: "Someone says they paid you: check it. Given a tx hash, confirms it succeeded and moved at least `amount` of ETH or the token to `recipient`, with the payer and confirmations. Never trust a \"sent!\" message without this.",
+    method: "POST", path: "payments/verify", capability: CAP.inspect,
+    input_schema: {
+      type: "object",
+      properties: { hash: { type: "string" }, recipient: address("Who should have been paid"), token: { type: "string", description: "\"ETH\" (default), \"USDC\", or an ERC-20 address." }, amount: { type: "string", description: "Minimum expected." }, network },
+      required: ["hash", "recipient"],
+    },
+  },
+
+  // ── Due diligence ──
+  {
+    name: "eth_token_safety",
+    description: "Due diligence on an ERC-20 before you buy or accept it: verified source, upgradeable proxy, owner powers in the ABI (mint, blacklist, pause, fee changes) and whether ownership is renounced, plus on mainnet a real $1,000 buy-and-sell-back through the aggregator to expose transfer taxes and thin liquidity. Returns findings and a verdict.",
+    method: "GET", path: "token/safety/{token}", capability: CAP.inspect,
+    input_schema: { type: "object", properties: { token: { type: "string", description: "Address, or a symbol on mainnet." }, network: { ...network, description: "Defaults to mainnet." } }, required: ["token"] },
+  },
+  {
+    name: "eth_preview_transaction",
+    description: "Before you sign a transaction someone else built (a dapp's \"sign this\", an API's swap tx, another agent's request), see what it does: the decoded call, every ETH and token balance change for your wallet from a full simulation, and red flags (unlimited approvals, operator grants to unverified contracts or plain wallets, calls that fail). Calldata is opaque to you; this isn't.",
+    method: "POST", path: "tx/preview", capability: CAP.simulate,
+    input_schema: {
+      type: "object",
+      properties: {
+        transaction: { type: "object", description: "{ to, data, value } with value in wei, the shape wallets receive.", properties: { to: { type: "string" }, data: { type: "string" }, value: { type: "string" } } },
+        network, from: { type: "string", description: "Preview as this address instead of your dev wallet." },
+      },
+      required: ["transaction"],
+    },
+  },
+  {
+    name: "eth_sign_transaction",
+    description: "Preview, then sign and send someone else's transaction with your dev wallet (Sepolia / Base Sepolia). Refuses one that fails in simulation or breaks your owner's limits; refuses a high-risk one unless you pass acceptRisks: true after reading the preview.",
+    method: "POST", path: "tx/sign", capability: CAP.testnet,
+    input_schema: {
+      type: "object",
+      properties: { transaction: { type: "object", properties: { to: { type: "string" }, data: { type: "string" }, value: { type: "string" } } }, network: signingNetwork, acceptRisks: { type: "boolean" } },
+      required: ["transaction"],
+    },
+  },
+];
+
+/** What each harness-only capability gives an agent, and why it can't do it alone. Served with the tools. */
+export const HARNESS_ONLY: { capability: string; tools: string[]; why: string }[] = [
+  { capability: "Acts while you're offline", tools: ["eth_order", "eth_watch", "eth_alerts"], why: "You exist only while a prompt runs. The hub checks prices, addresses and contract events every minute, fills standing orders and leaves the result in your alerts." },
+  { capability: "Gets paid and knows it", tools: ["eth_payment_request", "eth_verify_payment"], why: "A payer's \"sent!\" proves nothing. The hub gives each request a unique amount, scans the chain and confirms who paid what." },
+  { capability: "Sees what a transaction will do", tools: ["eth_preview_transaction", "eth_simulate", "eth_inspect_transaction"], why: "Calldata is opaque to you. The hub decodes it, simulates it against live state and lists your balance changes and approvals before anything is signed." },
+  { capability: "Signs without holding a key", tools: ["eth_send", "eth_transfer", "eth_sign_transaction", "eth_sign_message", "eth_bridge_testnet"], why: "Your dev wallet's key stays encrypted on the hub. It signs only on Sepolia / Base Sepolia, inside your owner's limits, after a simulation." },
+  { capability: "Spots a bad token before buying", tools: ["eth_token_safety"], why: "Owner powers, proxies and transfer taxes live in bytecode and chain state; a round-trip quote shows what you'd really get back." },
+  { capability: "Compiles and verifies Solidity", tools: ["eth_compile", "eth_deploy_source", "eth_verify_contract"], why: "You can write Solidity but not run solc. The hub compiles it, deploys it and publishes the source on Sourcify." },
+  { capability: "Exact math and chain reads", tools: ["eth_util", "eth_contract_abi", "eth_storage", "eth_logs", "eth_multicall"], why: "Hashes, selectors, CREATE2 addresses and storage slots can't be guessed; ABIs, logs and storage are chain state you can't see." },
 ];
