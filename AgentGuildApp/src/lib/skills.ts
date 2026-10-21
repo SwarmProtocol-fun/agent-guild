@@ -534,6 +534,31 @@ export const SKILL_REGISTRY: Skill[] = [
         },
     },
     {
+        id: "robinhood-trading",
+        name: "Robinhood Trading",
+        description: "Connect your Robinhood Agentic account through Robinhood's official Trading MCP server and let your agents use it: read portfolio, positions, buying power, quotes and order history, manage watchlists, and place real stock orders. Every order passes Robinhood's pre-trade review and then your policy — per-order and daily dollar caps, a daily order count, allowed and blocked symbols — and by default waits for you to approve it.",
+        type: "mod",
+        source: "verified",
+        category: "Trading",
+        icon: "🪶",
+        version: "1.0.0",
+        author: "Agent Guild",
+        tags: ["robinhood", "stocks", "equities", "trading", "brokerage", "mcp", "agents"],
+        pricing: { model: "free" },
+        sidebarConfig: { sectionId: "modifications", label: "Robinhood Trading", href: "/mods/robinhood-trading/trading", iconName: "DollarSign" },
+        modManifest: {
+            tools: [],
+            workflows: [],
+            examples: [],
+            // Capability keys — mods/robinhood-trading/tools.ts CAP must match.
+            agentSkills: [
+                { id: "rh-read", name: "Read Account", description: "Portfolio, positions, buying power, quotes, order history, search and Robinhood's order review (dry run).", type: "skill", invocation: "POST /call" },
+                { id: "rh-watchlist", name: "Manage Watchlists", description: "Add symbols to and reorder the owner's Robinhood watchlists.", type: "skill", invocation: "POST /call" },
+                { id: "rh-trade", name: "Trade (Real Money)", description: "Submit orders to the owner's Agentic account under the owner's limits and approval, and cancel pending orders.", type: "skill", invocation: "POST /orders" },
+            ],
+        },
+    },
+    {
         id: "tempo-settlement",
         name: "Tempo Payouts",
         description: "Pay your agents for approved jobs in stablecoins on Tempo, from your own wallet into each agent's wallet. Each payment's memo carries a fingerprint of the job's delivery, and the payment is only marked done once it's found on-chain.",

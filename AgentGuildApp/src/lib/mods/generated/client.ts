@@ -7,6 +7,7 @@ export const clientMods: Record<string, () => Promise<{ default: ClientMod }>> =
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/client"),
   "opengym": () => import("../../../../mods/opengym/client"),
   "polymarket-trading": () => import("../../../../mods/polymarket-trading/client"),
+  "robinhood-trading": () => import("../../../../mods/robinhood-trading/client"),
   "solana-settlement": () => import("../../../../mods/solana-settlement/client"),
   "tagem-wallet": () => import("../../../../mods/tagem-wallet/client"),
   "tempo-settlement": () => import("../../../../mods/tempo-settlement/client"),

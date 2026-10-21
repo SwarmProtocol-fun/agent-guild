@@ -1,0 +1,20 @@
+{
+  "id": "robinhood-trading",
+  "name": "Robinhood Trading",
+  "version": "1.0.0",
+  "description": "Connects an org owner's Robinhood Agentic account through Robinhood's official Trading MCP server (OAuth, no password shared) and lets the org's agents use it: read portfolio, positions, buying power, quotes, order history and watchlists, and place real stock orders. Every order goes through Robinhood's own pre-trade review and then the owner's policy — per-order and daily dollar caps, a daily order count, allowed and blocked symbols, options and crypto switches — and, by default, waits for the owner to approve it on the panel. Idempotency keys stop a retrying agent from ordering twice, and every action lands in an activity log.",
+  "author": "Agent Guild",
+  "agentGuildApi": 1,
+  "permissions": [],
+  "entry": {
+    "client": "./client",
+    "server": "./server"
+  },
+  "panels": [
+    {
+      "id": "trading",
+      "title": "Robinhood Trading",
+      "icon": "DollarSign"
+    }
+  ]
+}

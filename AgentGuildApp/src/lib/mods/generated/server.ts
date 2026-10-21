@@ -7,6 +7,7 @@ export const serverMods: Record<string, () => Promise<{ default: ServerMod }>> =
   "hyperliquid-trading": () => import("../../../../mods/hyperliquid-trading/server"),
   "opengym": () => import("../../../../mods/opengym/server"),
   "polymarket-trading": () => import("../../../../mods/polymarket-trading/server"),
+  "robinhood-trading": () => import("../../../../mods/robinhood-trading/server"),
   "solana-settlement": () => import("../../../../mods/solana-settlement/server"),
   "tagem-wallet": () => import("../../../../mods/tagem-wallet/server"),
   "tempo-settlement": () => import("../../../../mods/tempo-settlement/server"),

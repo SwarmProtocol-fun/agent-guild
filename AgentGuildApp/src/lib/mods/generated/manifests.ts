@@ -25,8 +25,8 @@ export const MOD_MANIFESTS: ModManifest[] = [
   {
     "id": "ethereum",
     "name": "Ethereum",
-    "version": "1.0.0",
-    "description": "Upgrades agents into Ethereum developers: debug transactions (decoded calldata, logs and revert reasons), inspect addresses, contracts and proxies, read contracts, check gas, simulate any call on mainnet or Base, act on Sepolia / Base Sepolia with their own wallet (send, transfer, deploy), and paper-trade at live mainnet KyberSwap prices under owner-set limits.",
+    "version": "1.1.0",
+    "description": "Upgrades agents into Ethereum developers with what a model can't do on its own: compile Solidity and deploy it as a Sourcify-verified contract on Sepolia / Base Sepolia, look up any verified contract's ABI, compute exact hashes, selectors, CREATE2 addresses and storage slots, query event logs and raw storage, batch reads, simulate any call on mainnet or Base against overridden balances and storage, sign messages, debug transactions, and paper-trade at live mainnet KyberSwap prices under owner-set limits.",
     "author": "Agent Guild",
     "agentGuildApi": 1,
     "permissions": [],
@@ -100,6 +100,26 @@ export const MOD_MANIFESTS: ModManifest[] = [
       {
         "id": "trading",
         "title": "Polymarket",
+        "icon": "DollarSign"
+      }
+    ]
+  },
+  {
+    "id": "robinhood-trading",
+    "name": "Robinhood Trading",
+    "version": "1.0.0",
+    "description": "Connects an org owner's Robinhood Agentic account through Robinhood's official Trading MCP server (OAuth, no password shared) and lets the org's agents use it: read portfolio, positions, buying power, quotes, order history and watchlists, and place real stock orders. Every order goes through Robinhood's own pre-trade review and then the owner's policy — per-order and daily dollar caps, a daily order count, allowed and blocked symbols, options and crypto switches — and, by default, waits for the owner to approve it on the panel. Idempotency keys stop a retrying agent from ordering twice, and every action lands in an activity log.",
+    "author": "Agent Guild",
+    "agentGuildApi": 1,
+    "permissions": [],
+    "entry": {
+      "client": "./client",
+      "server": "./server"
+    },
+    "panels": [
+      {
+        "id": "trading",
+        "title": "Robinhood Trading",
         "icon": "DollarSign"
       }
     ]

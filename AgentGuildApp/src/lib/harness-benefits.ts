@@ -298,6 +298,9 @@ export const CAPABILITY_POWERS: Record<string, string> = {
   "eth-simulate": "compile Solidity and dry-run any call on mainnet against pretend balances or storage (eth_compile, eth_simulate with stateOverride)",
   "eth-testnet": "deploy Solidity source as a verified contract, transact and sign with your own Sepolia wallet (eth_deploy_source, eth_send, eth_sign_message)",
   "eth-trade": "paper-trade at live mainnet KyberSwap prices and gas (eth_paper_swap)",
+  "rh-read": "read your owner's real Robinhood portfolio, positions, buying power, live quotes and order history (rh_call)",
+  "rh-watchlist": "edit your owner's Robinhood watchlists (rh_call)",
+  "rh-trade": "place real stock orders in your owner's Robinhood Agentic account, within their limits and approval (rh_order)",
 };
 
 function tools(input: HarnessBenefitInput): HarnessBenefit {

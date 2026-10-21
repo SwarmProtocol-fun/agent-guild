@@ -26,8 +26,6 @@ export async function GET(req: NextRequest) {
       const statusField = statusFilter === "pending" ? "pending" : statusFilter;
       const snap = await adminDb().collection("communityMarketItems")
         .where("status", "==", statusField)
-        .orderBy("submittedAt", "desc")
-        .limit(limitParam)
         .get();
       for (const d of snap.docs) {
         results.push({ source: "community", id: d.id, ...d.data() });
@@ -39,15 +37,19 @@ export async function GET(req: NextRequest) {
       const agentStatus = statusFilter === "pending" ? "review" : statusFilter;
       const snap = await adminDb().collection("marketplaceAgents")
         .where("status", "==", agentStatus)
-        .orderBy("submittedAt", "desc")
-        .limit(limitParam)
         .get();
       for (const d of snap.docs) {
         results.push({ source: "agents", id: d.id, ...d.data() });
       }
     }
 
-    return Response.json({ ok: true, submissions: results });
+    // Sorted here rather than with orderBy(): status + submittedAt would need a
+    // composite index per collection, and a missing one 500s the whole admin page.
+    const ts = (v: unknown) =>
+      typeof v === "object" && v !== null && "seconds" in v ? Number((v as { seconds: number }).seconds) : 0;
+    results.sort((a, b) => ts(b.submittedAt) - ts(a.submittedAt));
+
+    return Response.json({ ok: true, submissions: results.slice(0, limitParam) });
   } catch (err) {
     return Response.json({
       error: err instanceof Error ? err.message : "Failed to fetch submissions",
