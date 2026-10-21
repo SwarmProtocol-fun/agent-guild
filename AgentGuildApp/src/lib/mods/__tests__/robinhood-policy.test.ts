@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
-  DEFAULT_POLICY, PolicyInputError, classifyTool, costIn, describeOrder, estimateNotional, evaluateOrder, normalizePolicy, priceIn,
-  reviewToolFor, warningsIn, type Policy,
+  DEFAULT_POLICY, PolicyInputError, classifyTool, costIn, describeOrder, estimateNotional, evaluateOrder, findAgenticAccounts, maskAccountNumbers, normalizePolicy, priceIn, riskIn,
+  reviewToolFor, shapeOrder, warningsIn, type Policy,
 } from "../../../../mods/robinhood-trading/policy";
-import { parseSse, resultValue } from "../../../../mods/robinhood-trading/mcp";
+import { PROTOCOL_VERSION, parseSse, resultValue } from "../../../../mods/robinhood-trading/mcp";
 import { quoteArgs } from "../../../../mods/robinhood-trading/robinhood";
 
 const open: Policy = { ...DEFAULT_POLICY, approval: "never", maxOrderUsd: 500, maxDailyUsd: 1000, maxDailyOrders: 5 };
@@ -16,6 +16,8 @@ describe("classifyTool", () => {
     expect(classifyTool("review_equity_order")).toBe("read");
     expect(classifyTool("place_equity_order")).toBe("trade");
     expect(classifyTool("place_option_order")).toBe("trade");
+    expect(classifyTool("preview_crypto_order")).toBe("read");
+    expect(classifyTool("exercise_option")).toBe("trade");
     expect(classifyTool("cancel_equity_order")).toBe("cancel");
     expect(classifyTool("add_to_watchlist")).toBe("write");
     expect(classifyTool("update_watchlist")).toBe("write");
@@ -23,8 +25,12 @@ describe("classifyTool", () => {
     expect(classifyTool("transfer_funds")).toBe("write");
   });
 
-  it("maps an order tool to its dry run", () => {
+  it("maps an order tool to its dry run and leaves exercise alone", () => {
     expect(reviewToolFor("place_equity_order")).toBe("review_equity_order");
+    expect(reviewToolFor("place_option_order")).toBe("review_option_order");
+    expect(reviewToolFor("place_crypto_order")).toBe("preview_crypto_order");
+    expect(reviewToolFor("exercise_option")).toBe("");
+    expect(PROTOCOL_VERSION).toBe("2025-11-25");
   });
 });
 
@@ -41,10 +47,35 @@ describe("describeOrder / estimateNotional", () => {
     expect(estimateNotional(describeOrder("place_equity_order", { symbol: "SPY", side: "buy", quantity: 3 }), null)).toBeNull();
   });
 
-  it("prices option contracts at 100 shares", () => {
+  it("prices a long option at 100 shares and a debit spread at the premium", () => {
     const o = describeOrder("place_option_order", { chain_symbol: "AAPL", side: "buy", quantity: 2, price: 1.2 });
     expect(o.assetClass).toBe("option");
     expect(estimateNotional(o, null)).toBe(240);
+    const debit = describeOrder("place_option_order", {
+      chain_symbol: "HOOD", direction: "debit", quantity: 8, price: 2.55, type: "limit",
+      legs: [
+        { option_id: "a", side: "buy", position_effect: "open" },
+        { option_id: "b", side: "sell", position_effect: "open" },
+      ],
+    });
+    expect(estimateNotional(debit, 999)).toBe(2040);
+  });
+
+  it("does not treat a credit or a short option as if the premium were the risk", () => {
+    const credit = describeOrder("place_option_order", {
+      chain_symbol: "HOOD", direction: "credit", quantity: 5, price: 1.2,
+      legs: [
+        { option_id: "a", side: "sell", position_effect: "open" },
+        { option_id: "b", side: "buy", position_effect: "open" },
+      ],
+    });
+    expect(estimateNotional(credit, null)).toBeNull();
+    expect(evaluateOrder(open, credit, null, none).outcome).toBe("approve");
+    const naked = describeOrder("place_option_order", {
+      chain_symbol: "HOOD", quantity: 1, price: 1.5,
+      legs: [{ option_id: "a", side: "sell", position_effect: "open" }],
+    });
+    expect(estimateNotional(naked, null)).toBeNull();
   });
 });
 
@@ -85,8 +116,8 @@ describe("evaluateOrder", () => {
     expect(evaluateOrder({ ...open, blockedSymbols: ["AAPL"] }, buy, 10, none).outcome).toBe("deny");
     expect(evaluateOrder({ ...open, tradingEnabled: false }, buy, 10, none).outcome).toBe("deny");
     const opt = describeOrder("place_option_order", { symbol: "AAPL", side: "buy", quantity: 1, price: 0.5 });
-    expect(evaluateOrder(open, opt, 50, none).reasons[0]).toMatch(/Options/);
-    expect(evaluateOrder({ ...open, allowOptions: true }, opt, 50, none).outcome).toBe("allow");
+    expect(evaluateOrder({ ...open, allowOptions: false }, opt, 50, none).reasons[0]).toMatch(/Options/);
+    expect(evaluateOrder(open, opt, 50, none).outcome).toBe("allow");
     expect(evaluateOrder(open, describeOrder("place_equity_order", { side: "buy", quantity: 1 }), 10, none).reasons[0]).toMatch(/no symbol/);
   });
 });
@@ -111,6 +142,7 @@ describe("reading Robinhood replies", () => {
   it("finds prices, costs and warnings in nested results", () => {
     const review = { order: { estimated_cost: { amount: "381.00" }, price: "190.5" }, warnings: [{ message: "Market is closed" }, "Pattern day trader"] };
     expect(costIn(review)).toBe(381);
+    expect(riskIn({ order: { collateral: { amount: "1900.00" }, estimated_cost: { amount: "600" } } })).toBe(1900);
     expect(priceIn({ quotes: [{ symbol: "AAPL", last_trade_price: "190.10" }] })).toBe(190.1);
     expect(warningsIn(review)).toEqual(["Market is closed", "Pattern day trader"]);
   });
@@ -130,5 +162,37 @@ describe("reading Robinhood replies", () => {
     expect(resultValue({ structuredContent: { a: 1 }, content: [{ type: "text", text: "x" }] })).toEqual({ a: 1 });
     expect(resultValue({ content: [{ type: "text", text: '{"b":2}' }] })).toEqual({ b: 2 });
     expect(resultValue({ content: [{ type: "text", text: "hello" }] })).toBe("hello");
+  });
+});
+
+const LEGS = [
+  { option_id: "11111111-1111-4111-8111-111111111111", side: "buy", position_effect: "open" },
+  { option_id: "22222222-2222-4222-8222-222222222222", side: "sell", position_effect: "open" },
+];
+
+describe("shapeOrder", () => {
+  it("keeps chain_symbol on the review and ref_id on the place", () => {
+    const shaped = shapeOrder("place_option_order", {
+      chain_symbol: "hood", quantity: 8, price: "2.55", direction: "debit",
+      legs: LEGS, ref_id: "33333333-3333-4333-8333-333333333333", extra: "nope",
+    });
+    expect(shaped.issues).toEqual([]);
+    expect(shaped.reviewArgs).toMatchObject({ chain_symbol: "HOOD", underlying_type: "equity", direction: "debit", type: "limit", quantity: "8" });
+    expect(shaped.reviewArgs).not.toHaveProperty("ref_id");
+    expect(shaped.reviewArgs).not.toHaveProperty("extra");
+    expect(shaped.placeArgs).not.toHaveProperty("chain_symbol");
+    expect(shaped.placeArgs).not.toHaveProperty("underlying_type");
+    expect(shaped.placeArgs.ref_id).toBe("33333333-3333-4333-8333-333333333333");
+  });
+
+  it("rejects an option market order before it can be sent", () => {
+    const shaped = shapeOrder("place_option_order", { quantity: 1, type: "market", legs: [LEGS[0]] });
+    expect(shaped.issues.join(" ")).toMatch(/limit/);
+  });
+
+  it("finds the agentic account and masks the number", () => {
+    const accounts = findAgenticAccounts({ results: [{ account_number: "00008451", agentic_allowed: false }, { account_number: "00006632", agentic_allowed: true, option_level: "option_level_3" }] });
+    expect(accounts.map((a) => a.accountNumber)).toEqual(["00006632"]);
+    expect(maskAccountNumbers({ account_number: "00006632", legs: LEGS })).toMatchObject({ account_number: "••••6632" });
   });
 });

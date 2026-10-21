@@ -24,8 +24,17 @@ const PLATFORM_ADMIN_SET = new Set(
     .filter(Boolean),
 );
 
+/**
+ * Temporary: NEXT_PUBLIC_DISABLE_ADMIN_GATE=true treats every signed-in wallet
+ * as a platform admin. Ignored in production builds.
+ */
+export const ADMIN_GATE_DISABLED =
+  process.env.NEXT_PUBLIC_DISABLE_ADMIN_GATE === "true" &&
+  process.env.NODE_ENV !== "production";
+
 /** Check if a wallet address is a platform admin */
 export function isPlatformAdmin(address: string | null | undefined): boolean {
   if (!address) return false;
+  if (ADMIN_GATE_DISABLED) return true;
   return PLATFORM_ADMIN_SET.has(canonicalizeWalletAddress(address));
 }

@@ -1,20 +1,23 @@
 /**
- * The org's live link to Robinhood: a fresh access token, the tool list, and
+ * An agent's live link to Robinhood: a fresh access token, the tool list, and
  * the one path every order takes (review → policy → approval or placement).
- * Server-only.
+ * Each agent has its own connection (see store.ts ConnRef); the policy, daily
+ * limits and approvals are the org's. Server-only.
  */
 import { OAuthError, refreshTokens } from "./oauth";
 import { McpAuthError, callTool, forgetSession, listTools, resultValue, type McpTool } from "./mcp";
 import {
-  classifyTool, costIn, describeOrder, estimateNotional, evaluateOrder, priceIn, reviewToolFor, warningsIn,
-  type ToolKind, type Verdict,
+  assetClassOf, classifyTool, costIn, describeOrder, estimateNotional, evaluateOrder, findAgenticAccounts, maskAccount, priceIn, reviewToolFor, riskIn, shapeOrder, warningsIn,
+  type ShapedOrder, type ToolKind, type Verdict,
 } from "./policy";
 import {
-  APPROVAL_TTL_MS, createOrder, getConnection, getDailyUsage, getPolicy, logActivity, markNeedsReconnect, releaseDaily,
-  reserveDaily, updateOrder, updateTokens, type OrderRecord,
+  APPROVAL_TTL_MS, connKey, createOrder, getConnection, getDailyUsage, getPolicy, logActivity, markNeedsReconnect, releaseDaily,
+  reserveDaily, updateOrder, updateTokens, type ConnRef, type OrderRecord,
 } from "./store";
 
 export class NotConnectedError extends Error {}
+
+const RECONNECT_HINT = "run `node rh-agent.mjs login` on the agent's machine, or connect it from the Robinhood panel";
 
 // ── Tokens ───────────────────────────────────────────────────────────────
 
@@ -22,40 +25,42 @@ export class NotConnectedError extends Error {}
 // token, and a second refresh with the spent one would kill the grant.
 const refreshing = new Map<string, Promise<string>>();
 
-async function accessToken(orgId: string, force = false): Promise<string> {
-  const conn = await getConnection(orgId);
-  if (!conn) throw new NotConnectedError("This org hasn't connected Robinhood yet — the owner connects it on the Robinhood panel");
-  if (conn.status === "needs_reconnect") throw new NotConnectedError(`The Robinhood connection needs the owner to reconnect (${conn.lastError ?? "grant expired"})`);
+async function accessToken(ref: ConnRef, force = false): Promise<string> {
+  const conn = await getConnection(ref);
+  if (!conn) throw new NotConnectedError(`Agent ${ref.agentId} hasn't connected Robinhood yet — ${RECONNECT_HINT}`);
+  if (conn.status === "needs_reconnect") throw new NotConnectedError(`Agent ${ref.agentId}'s Robinhood connection needs a fresh sign-in (${conn.lastError ?? "grant expired"}) — ${RECONNECT_HINT}`);
   if (!force && conn.tokens.expiresAt - Date.now() > 60_000) return conn.tokens.accessToken;
   if (!conn.tokens.refreshToken) {
-    await markNeedsReconnect(orgId, "Access token expired and Robinhood issued no refresh token");
-    throw new NotConnectedError("The Robinhood session expired — the owner needs to reconnect");
+    await markNeedsReconnect(ref, "Access token expired and Robinhood issued no refresh token");
+    throw new NotConnectedError(`The Robinhood session expired — ${RECONNECT_HINT}`);
   }
-  let pending = refreshing.get(orgId);
+  const key = connKey(ref);
+  let pending = refreshing.get(key);
   if (!pending) {
     pending = refreshTokens(conn.clientId, conn.tokens.refreshToken)
-      .then(async (tokens) => { await updateTokens(orgId, tokens); return tokens.accessToken; })
+      .then(async (tokens) => { await updateTokens(ref, tokens); return tokens.accessToken; })
       .catch(async (err) => {
         if (err instanceof OAuthError && err.reconnect) {
-          await markNeedsReconnect(orgId, err.message);
-          throw new NotConnectedError("Robinhood ended the session — the owner needs to reconnect");
+          await markNeedsReconnect(ref, err.message);
+          throw new NotConnectedError(`Robinhood ended the session — ${RECONNECT_HINT}`);
         }
         throw err;
       })
-      .finally(() => refreshing.delete(orgId));
-    refreshing.set(orgId, pending);
+      .finally(() => refreshing.delete(key));
+    refreshing.set(key, pending);
   }
   return pending;
 }
 
 /** Runs fn with a valid token, refreshing and retrying once when Robinhood rejects it. */
-async function withToken<T>(orgId: string, fn: (token: string) => Promise<T>): Promise<T> {
+async function withToken<T>(ref: ConnRef, fn: (token: string, key: string) => Promise<T>): Promise<T> {
+  const key = connKey(ref);
   try {
-    return await fn(await accessToken(orgId));
+    return await fn(await accessToken(ref), key);
   } catch (err) {
     if (!(err instanceof McpAuthError)) throw err;
-    forgetSession(orgId);
-    return fn(await accessToken(orgId, true));
+    forgetSession(key);
+    return fn(await accessToken(ref, true), key);
   }
 }
 
@@ -66,11 +71,11 @@ export interface ToolInfo extends McpTool { kind: ToolKind }
 const TOOLS_TTL_MS = 5 * 60_000;
 const toolCache = new Map<string, { at: number; tools: ToolInfo[] }>();
 
-export async function robinhoodTools(orgId: string, fresh = false): Promise<ToolInfo[]> {
-  const hit = toolCache.get(orgId);
+export async function robinhoodTools(ref: ConnRef, fresh = false): Promise<ToolInfo[]> {
+  const hit = toolCache.get(connKey(ref));
   if (hit && !fresh && Date.now() - hit.at < TOOLS_TTL_MS) return hit.tools;
-  const tools = (await withToken(orgId, (t) => listTools(orgId, t))).map((tool) => ({ ...tool, kind: classifyTool(tool.name) }));
-  toolCache.set(orgId, { at: Date.now(), tools });
+  const tools = (await withToken(ref, (t, key) => listTools(key, t))).map((tool) => ({ ...tool, kind: classifyTool(tool.name) }));
+  toolCache.set(connKey(ref), { at: Date.now(), tools });
   return tools;
 }
 
@@ -79,16 +84,16 @@ export class ToolCallError extends Error {
 }
 
 /** Calls one Robinhood tool and returns its value; a tool-level error (isError) throws with Robinhood's message. */
-export async function invoke(orgId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
-  const result = await withToken(orgId, (t) => callTool(orgId, t, name, args));
+export async function invoke(ref: ConnRef, name: string, args: Record<string, unknown>): Promise<unknown> {
+  const result = await withToken(ref, (t, key) => callTool(key, t, name, args));
   const value = resultValue(result);
   if (result.isError) throw new ToolCallError(`Robinhood ${name}: ${typeof value === "string" ? value : JSON.stringify(value).slice(0, 300)}`, value);
   return value;
 }
 
-export function clearToolCache(orgId: string): void {
-  toolCache.delete(orgId);
-  forgetSession(orgId);
+export function clearToolCache(ref: ConnRef): void {
+  toolCache.delete(connKey(ref));
+  forgetSession(connKey(ref));
 }
 
 /** The argument object for a quote tool, built from its schema: a `symbols` array or a single `symbol`. */
@@ -122,40 +127,100 @@ export interface OrderOutcome {
  * the owner's policy, then either a held order for the owner, a refusal, or
  * the real placement.
  */
+/** Writes the one agentic account onto both argument sets. Refuses every other account. */
+async function pinAccount(ref: ConnRef, tool: string, shaped: ShapedOrder): Promise<void> {
+  const cls = assetClassOf(tool);
+  let accounts;
+  try {
+    accounts = findAgenticAccounts(await invoke(ref, "get_accounts", {}));
+  } catch (err) {
+    if (shaped.placeArgs.account_number || shaped.placeArgs.rhs_account_number) return;
+    throw new ToolCallError(`Couldn't read accounts to find the agentic one: ${(err as Error).message}`, null);
+  }
+  if (!accounts.length) throw new ToolCallError("This login has no agentic account. Robinhood only accepts orders on the account with agentic_allowed", null);
+
+  if (cls === "crypto") {
+    const given = typeof shaped.placeArgs.rhs_account_number === "string" ? shaped.placeArgs.rhs_account_number : "";
+    const match = given
+      ? accounts.find((a) => a.rhsAccountNumber === given || a.accountNumber === given)
+      : accounts.length === 1 ? accounts[0] : undefined;
+    if (!match) {
+      throw new ToolCallError(given
+        ? `${maskAccount(given)} is not an agentic crypto account`
+        : "More than one agentic account. Pass rhs_account_number", null);
+    }
+    if (!match.rhsAccountNumber) throw new ToolCallError(`Account ${maskAccount(match.accountNumber)} has no crypto account number`, null);
+    shaped.reviewArgs.rhs_account_number = match.rhsAccountNumber;
+    shaped.placeArgs.rhs_account_number = match.rhsAccountNumber;
+    return;
+  }
+
+  const given = typeof shaped.placeArgs.account_number === "string" ? shaped.placeArgs.account_number : "";
+  const match = given ? accounts.find((a) => a.accountNumber === given) : accounts.length === 1 ? accounts[0] : undefined;
+  if (!match) {
+    const hint = accounts.map((a) => maskAccount(a.accountNumber)).join(", ");
+    throw new ToolCallError(given
+      ? `${maskAccount(given)} is not agent-tradable. The agentic account is ${hint}`
+      : `More than one agentic account (${hint}). Pass account_number`, null);
+  }
+  if (cls === "option" && match.optionLevel) {
+    const legs = Array.isArray(shaped.placeArgs.legs) ? shaped.placeArgs.legs.length : 1;
+    if (match.optionLevel === "option_level_0") throw new ToolCallError(`Account ${maskAccount(match.accountNumber)} cannot trade options`, null);
+    if (legs >= 2 && !match.optionLevel.includes("3")) throw new ToolCallError(`Multi-leg spreads need options level 3. Account ${maskAccount(match.accountNumber)} is ${match.optionLevel}`, null);
+  }
+  shaped.reviewArgs.account_number = match.accountNumber;
+  shaped.placeArgs.account_number = match.accountNumber;
+}
+
 export async function submitOrder(req: OrderRequest): Promise<OrderOutcome> {
-  const tools = await robinhoodTools(req.orgId);
+  const ref = { orgId: req.orgId, agentId: req.agentId };
+  const tools = await robinhoodTools(ref);
   const tool = tools.find((t) => t.name === req.tool);
   if (!tool) throw new ToolCallError(`Robinhood has no tool named ${req.tool}`, null);
   if (tool.kind !== "trade") throw new ToolCallError(`${req.tool} isn't an order tool — use rh_call`, null);
 
-  const facts = describeOrder(req.tool, req.arguments);
+  const shaped = shapeOrder(req.tool, req.arguments, req.idempotencyKey);
+  if (shaped.issues.length) throw new ToolCallError(shaped.issues.join("; "), null);
+  await pinAccount(ref, req.tool, shaped);
+  const facts = describeOrder(req.tool, { ...shaped.placeArgs, ...shaped.reviewArgs });
 
-  // The dry run: a failed review is itself a warning, not a reason to place blind.
+  // Review uses the review field set (chain_symbol, no ref_id). A failed review never auto-places.
   let review: unknown = null;
   let warnings: string[] = [];
+  let reviewFailed = false;
   const reviewName = reviewToolFor(req.tool);
-  if (tools.some((t) => t.name === reviewName)) {
+  const reviewTool = tools.find((t) => t.name === reviewName);
+  if (reviewTool) {
     try {
-      review = await invoke(req.orgId, reviewName, req.arguments);
+      review = await invoke(ref, reviewName, shaped.reviewArgs);
       warnings = warningsIn(review);
     } catch (err) {
+      reviewFailed = true;
       warnings = [`Robinhood's review failed: ${(err as Error).message}`];
       review = err instanceof ToolCallError ? err.value : null;
     }
+  } else {
+    reviewFailed = true;
+    warnings = [reviewName ? `Robinhood has no ${reviewName} dry-run, so this waits for the owner` : "This order has no dry-run, so it waits for the owner"];
   }
 
   let marketPrice = priceIn(review);
   if (facts.dollarAmount == null && facts.price == null && marketPrice == null && facts.symbol && facts.assetClass === "equity") {
     const quoteTool = tools.find((t) => t.name === "get_equity_quotes") ?? tools.find((t) => t.kind === "read" && /quote/.test(t.name));
-    if (quoteTool) marketPrice = priceIn(await invoke(req.orgId, quoteTool.name, quoteArgs(quoteTool, facts.symbol)).catch(() => null));
+    if (quoteTool) marketPrice = priceIn(await invoke(ref, quoteTool.name, quoteArgs(quoteTool, facts.symbol)).catch(() => null));
   }
-  const notional = costIn(review) ?? estimateNotional(facts, marketPrice);
+  const notional = facts.assetClass === "option"
+    ? (riskIn(review) ?? estimateNotional(facts, null))
+    : (costIn(review) ?? estimateNotional(facts, marketPrice));
 
   const [policy, today] = await Promise.all([getPolicy(req.orgId), getDailyUsage(req.orgId)]);
-  const verdict = evaluateOrder(policy, facts, notional, today);
+  let verdict = evaluateOrder(policy, facts, notional, today);
+  if (reviewFailed && verdict.outcome === "allow") {
+    verdict = { outcome: "approve", reasons: ["Robinhood's review did not succeed, so this waits for the owner", ...verdict.reasons], notionalUsd: verdict.notionalUsd };
+  }
 
   const base: Omit<OrderRecord, "id" | "status"> = {
-    orgId: req.orgId, agentId: req.agentId, tool: req.tool, arguments: req.arguments, facts, notionalUsd: notional,
+    orgId: req.orgId, agentId: req.agentId, tool: req.tool, arguments: shaped.placeArgs, facts, notionalUsd: notional,
     reason: req.reason, reasons: verdict.reasons, warnings, review, createdAt: new Date().toISOString(),
     ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}),
   };
@@ -199,7 +264,8 @@ export async function place(order: OrderRecord, verdict: Pick<Verdict, "notional
   }
 
   try {
-    const result = await invoke(order.orgId, order.tool, order.arguments);
+    // Placed through the agent that asked for it: its own Robinhood connection.
+    const result = await invoke({ orgId: order.orgId, agentId: order.agentId }, order.tool, order.arguments);
     const patch = { status: "placed" as const, result, ...decided };
     await updateOrder(order.id, patch);
     logActivity({ orgId: order.orgId, agentId: order.agentId, via, tool: order.tool, orderId: order.id, ok: true, action: "order_placed", summary: `${orderSummary(order)} — placed${approvedBy ? " after owner approval" : ""}` });
@@ -223,8 +289,16 @@ export const isExpired = (order: OrderRecord, now = Date.now()) => order.status 
 
 export function orderSummary(order: Pick<OrderRecord, "facts" | "notionalUsd" | "tool">): string {
   const f = order.facts;
-  const size = f.dollarAmount != null ? `$${f.dollarAmount}` : f.quantity != null ? `${f.quantity}${f.assetClass === "option" ? " contracts" : ""}` : "?";
-  const px = f.price != null ? ` @ ${f.price}` : "";
   const est = order.notionalUsd != null && f.dollarAmount == null ? ` (~$${order.notionalUsd.toFixed(2)})` : "";
+  if (f.assetClass === "option") {
+    const dir = f.direction ? f.direction.toUpperCase() : (f.side ?? "option").toUpperCase();
+    const size = f.quantity != null ? `${f.quantity}` : "?";
+    const legs = f.legs && f.legs.length > 1 ? ` ${f.legs.length}-leg` : "";
+    const px = f.price != null ? ` @ ${f.price}` : "";
+    const risk = order.notionalUsd != null ? ` (max loss ~$${order.notionalUsd.toFixed(2)})` : "";
+    return `${dir} ${size}${legs} ${f.symbol ?? "option"}${px}${risk} via ${order.tool}`;
+  }
+  const size = f.dollarAmount != null ? `$${f.dollarAmount}` : f.quantity != null ? `${f.quantity}` : "?";
+  const px = f.price != null ? ` @ ${f.price}` : "";
   return `${(f.side ?? "trade").toUpperCase()} ${size} ${f.symbol ?? "?"}${px}${est} via ${order.tool}`;
 }

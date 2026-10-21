@@ -21,6 +21,7 @@ import type { Organization } from "@/lib/firestore";
 // signed-in user and Firestore rules deny every read.
 import { getAgent, getOrganization } from "@/lib/firestore-admin";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
+import { ADMIN_GATE_DISABLED } from "@/lib/platform-admins";
 import crypto from "crypto";
 
 // ─── Standard error responses ────────────────────────────
@@ -57,6 +58,11 @@ export function requirePlatformAdmin(req: NextRequest): { ok: boolean; error?: s
   }
 
   if (walletAddress && PLATFORM_ADMINS.has(walletAddress)) {
+    return { ok: true };
+  }
+
+  // Temporary gate bypass — still needs a middleware-verified wallet session.
+  if (walletAddress && ADMIN_GATE_DISABLED) {
     return { ok: true };
   }
 

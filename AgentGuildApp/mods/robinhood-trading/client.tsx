@@ -4,16 +4,18 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import { Activity as ActivityIcon, Bot, Check, ClipboardList, Link2, Play, RefreshCw, ShieldCheck, Unlink, X } from "lucide-react";
 import { defineClientMod, type PanelProps } from "@agent-guild/sdk";
 import { Badge, Button, Card, Json, Notice, Stat, TextInput, cx, inputClass, json, muted, timeAgo, usd, type Tone } from "./ui";
-import type { Policy } from "./policy";
+import { findAgenticAccounts, maskAccountNumbers, type Policy } from "./policy";
 
-// The owner's side of the Robinhood mod: connect the Agentic account, set
-// the policy every agent order is checked against, approve held orders, and
-// see what agents did. Agents themselves use the HTTP tools (GET /agent/tools).
+// The owner's side of the Robinhood mod: see which agents have connected
+// Robinhood (or connect one by hand), set the policy every agent order is
+// checked against, approve held orders, and see what agents did. Agents
+// connect themselves with rh-agent.mjs and use the HTTP tools (GET /agent/tools).
 
 interface AgentRow { agentId: string; name: string; capabilities: Record<string, boolean> }
 interface OrgRow { orgId: string; orgName: string; isOwner: boolean; agents: AgentRow[] }
+interface AgentConnection { agentId: string; status: "connected" | "needs_reconnect"; connectedBy: string; connectedVia: "agent" | "session"; connectedAt: string; lastError: string | null }
 interface ConnectionInfo {
-  connection: { connected: false } | { connected: true; status: "connected" | "needs_reconnect"; connectedBy: string | null; connectedAt: string | null; lastError: string | null };
+  connections: AgentConnection[];
   policy: Policy;
   today: { orders: number; usd: number };
 }
@@ -45,15 +47,6 @@ function RobinhoodPanel({ api }: PanelProps) {
   const [activity, setActivity] = useState<ActivityRow[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
-
-  // Robinhood's redirect lands back here with ?robinhood=connected|error.
-  useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    const result = p.get("robinhood");
-    if (!result) return;
-    setFlash(result === "connected" ? { tone: "success", text: "Robinhood connected." } : { tone: "danger", text: p.get("reason") ?? "Connecting Robinhood failed." });
-    window.history.replaceState(null, "", window.location.pathname);
-  }, []);
 
   const loadOrgs = useCallback(() => {
     json<{ orgs: OrgRow[] }>(api("my-agents"))
@@ -105,13 +98,9 @@ function RobinhoodPanel({ api }: PanelProps) {
 
   const post = (path: string, payload: object) => json(api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }));
 
-  const connect = () => act("connect", async () => {
-    const { authorizeUrl } = await post("connect", { orgId }) as { authorizeUrl: string };
-    window.location.assign(authorizeUrl);
-  });
-
-  const conn = info?.connection;
-  const live = conn?.connected && conn.status === "connected";
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const connections = useMemo(() => new Map((info?.connections ?? []).map((c) => [c.agentId, c])), [info]);
+  const liveAgents = (org?.agents ?? []).filter((a) => connections.get(a.agentId)?.status === "connected");
   const isOwner = !!org?.isOwner;
   const pending = orders.filter((o) => o.status === "pending_approval");
 
@@ -123,7 +112,7 @@ function RobinhoodPanel({ api }: PanelProps) {
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#00C805] text-lg font-bold text-black" aria-hidden>R</div>
             <div>
               <h1 className="text-base font-semibold leading-tight">Robinhood Trading</h1>
-              <p className={cx("text-xs", muted)}>Your agents trade your Agentic account, inside your limits</p>
+              <p className={cx("text-xs", muted)}>Options and stock in the Agentic account. Nothing places until you approve it.</p>
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
@@ -140,32 +129,59 @@ function RobinhoodPanel({ api }: PanelProps) {
       <main className="mx-auto max-w-5xl space-y-4 px-4 py-6 lg:px-6">
         {flash && <Notice tone={flash.tone}>{flash.text}</Notice>}
         {error && <Notice title="Couldn't load" action={<Button className="h-8" onClick={() => { loadOrgs(); refresh(); }}>Retry</Button>}>{error}</Notice>}
-        {orgs && !orgs.length && <Notice tone="info">Create an organization first — Robinhood connects per org.</Notice>}
+        {orgs && !orgs.length && <Notice tone="info">Create an organization and an agent first — each agent connects Robinhood itself.</Notice>}
 
         {org && info && (
           <>
             <Card
-              title="Connection"
-              description="Robinhood's official Trading MCP server. You sign in on robinhood.com and open (or reuse) your dedicated Agentic account — this app never sees your password, and agents can only trade in that account."
-              actions={isOwner && (conn?.connected
-                ? <>
-                    {!live && <Button variant="primary" icon={Link2} loading={busy === "connect"} onClick={connect}>Reconnect</Button>}
-                    <Button variant="danger" icon={Unlink} loading={busy === "disconnect"}
-                      onClick={() => confirm("Disconnect Robinhood? Agents lose access immediately.") && act("disconnect", () => post("disconnect", { orgId }), "Disconnected.")}>Disconnect</Button>
-                  </>
-                : <Button variant="primary" icon={Link2} loading={busy === "connect"} onClick={connect}>Connect Robinhood</Button>)}>
-              {conn?.connected ? (
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <Badge tone={live ? "success" : "warning"}>{live ? "Connected" : "Needs reconnect"}</Badge>
-                  {conn.connectedAt && <span className={muted}>since {new Date(conn.connectedAt).toLocaleDateString()} by <span className="font-mono text-xs">{conn.connectedBy}</span></span>}
-                  {conn.lastError && <span className="text-xs text-amber-700 dark:text-amber-300">{conn.lastError}</span>}
+              title="Agents"
+              description="Each agent connects Robinhood itself, from its own machine — Robinhood only signs in to localhost apps. The sign-in opens your dedicated Agentic account; this app never sees your password. Upgrades apply org-wide; your policy and approvals still decide what's placed.">
+              <div className="mb-3 rounded-lg bg-[hsl(var(--muted))]/40 p-3 text-xs">
+                <div className="font-medium">On the agent&apos;s machine (with its AGENT_GUILD_TOKEN set):</div>
+                <code className="mt-1 block font-mono">node mods/robinhood-trading/agent/rh-agent.mjs login</code>
+                <div className={cx("mt-1", muted)}>No browser there (Docker, a server)? Use Connect below and paste back the address the sign-in lands on.</div>
+              </div>
+              {org.agents.length ? (
+                <ul className="divide-y divide-[hsl(var(--border))]">
+                  {org.agents.map((a) => {
+                    const c = connections.get(a.agentId);
+                    return (
+                      <li key={a.agentId} className="py-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Bot className={cx("h-4 w-4", muted)} aria-hidden />
+                          <span className="text-sm font-medium">{a.name}</span>
+                          <Badge tone={!c ? "neutral" : c.status === "connected" ? "success" : "warning"}>{!c ? "Robinhood not connected" : c.status === "connected" ? "Robinhood connected" : "Needs sign-in"}</Badge>
+                          <span className="flex flex-wrap gap-1">{CAPS.map((cap) => <Badge key={cap.key} tone={a.capabilities[cap.key] ? "info" : "neutral"}>{cap.label}</Badge>)}</span>
+                          {isOwner && (
+                            <span className="ml-auto flex gap-2">
+                              <Button className="h-8" icon={Link2} onClick={() => setConnecting(connecting === a.agentId ? null : a.agentId)}>{c ? "Reconnect" : "Connect"}</Button>
+                              {c && (
+                                <Button className="h-8" variant="danger" icon={Unlink} loading={busy === `d:${a.agentId}`}
+                                  onClick={() => confirm(`Disconnect Robinhood from ${a.name}? It loses access immediately.`) && act(`d:${a.agentId}`, () => post("connection/disconnect", { agentId: a.agentId }), "Disconnected.")}>Disconnect</Button>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                        {c?.lastError && <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{c.lastError}</p>}
+                        {c && <p className={cx("mt-0.5 text-xs", muted)}>Connected {timeAgo(c.connectedAt)} {c.connectedVia === "agent" ? "by the agent" : "from the panel"}</p>}
+                        {connecting === a.agentId && (
+                          <ConnectFlow api={api} agentId={a.agentId} onDone={() => { setConnecting(null); setFlash({ tone: "success", text: `${a.name} is connected to Robinhood.` }); refresh(); }} />
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : <p className={cx("text-sm", muted)}>No agents in this org yet.</p>}
+              {isOwner && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button icon={ShieldCheck} loading={busy === "up-read"} onClick={() => act("up-read", () => post("upgrade", { orgId, capabilities: ["rh-read", "rh-watchlist"] }), "Read and watchlist upgrades enabled.")}>Enable read + watchlists</Button>
+                  <Button variant="primary" icon={ShieldCheck} loading={busy === "up-all"}
+                    onClick={() => confirm("Let this org's agents submit real-money orders (still subject to your policy)?") && act("up-all", () => post("upgrade", { orgId }), "All upgrades enabled, including Trade.")}>Enable trading too</Button>
                 </div>
-              ) : (
-                <p className={cx("text-sm", muted)}>{isOwner ? "Not connected yet." : "Not connected — the org owner connects Robinhood."}</p>
               )}
             </Card>
 
-            {conn?.connected && (
+            {(info.connections.length > 0 || pending.length > 0) && (
               <Card title={`Waiting for you${pending.length ? ` (${pending.length})` : ""}`} description="Orders your policy holds for approval. Approving places the order with Robinhood right away; held orders expire after 24 hours.">
                 {pending.length ? (
                   <ul className="space-y-3">
@@ -203,28 +219,7 @@ function RobinhoodPanel({ api }: PanelProps) {
             <PolicyCard policy={info.policy} editable={isOwner} busy={busy === "policy"}
               onSave={(policy) => act("policy", () => post("policy", { orgId, policy }), "Policy saved.")} />
 
-            <Card title="Agents" description="Upgrades apply org-wide. Trade lets agents submit orders; your policy and approvals still decide what's placed.">
-              {org.agents.length ? (
-                <ul className="divide-y divide-[hsl(var(--border))]">
-                  {org.agents.map((a) => (
-                    <li key={a.agentId} className="flex flex-wrap items-center gap-2 py-2">
-                      <Bot className={cx("h-4 w-4", muted)} aria-hidden />
-                      <span className="text-sm font-medium">{a.name}</span>
-                      <span className="ml-auto flex flex-wrap gap-1">{CAPS.map((c) => <Badge key={c.key} tone={a.capabilities[c.key] ? "success" : "neutral"}>{c.label}</Badge>)}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : <p className={cx("text-sm", muted)}>No agents in this org yet.</p>}
-              {isOwner && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button icon={ShieldCheck} loading={busy === "up-read"} onClick={() => act("up-read", () => post("upgrade", { orgId, capabilities: ["rh-read", "rh-watchlist"] }), "Read and watchlist upgrades enabled.")}>Enable read + watchlists</Button>
-                  <Button variant="primary" icon={ShieldCheck} loading={busy === "up-all"}
-                    onClick={() => confirm("Let this org's agents submit real-money orders (still subject to your policy)?") && act("up-all", () => post("upgrade", { orgId }), "All upgrades enabled, including Trade.")}>Enable trading too</Button>
-                </div>
-              )}
-            </Card>
-
-            {live && isOwner && <AccountCard api={api} orgId={org.orgId} />}
+            {liveAgents.length > 0 && isOwner && <AccountCard api={api} agents={liveAgents} />}
 
             <Card title="Orders" description="Every order an agent asked for through this mod.">
               {orders.length ? (
@@ -295,7 +290,7 @@ function PolicyCard({ policy, editable, busy, onSave }: { policy: Policy; editab
   );
 
   return (
-    <Card title="Policy" description="Checked on every order, after Robinhood's own review. Orders whose dollar size can't be worked out always wait for you.">
+    <Card title="Policy" description="Checked after Robinhood's review. Option size is max loss: the debit, or the collateral on a credit. A credit with no collateral waits for you. Orders over the caps are refused, not queued. The default cap is $5,000.">
       <form onSubmit={submit} className="space-y-4">
         <div className="flex flex-wrap gap-x-6 gap-y-2">
           {toggle("tradingEnabled", "Trading on")}
@@ -336,8 +331,53 @@ function PolicyCard({ policy, editable, busy, onSave }: { policy: Policy; editab
   );
 }
 
-/** The owner reading their own account through the same MCP tools agents use (read tools only). */
-function AccountCard({ api, orgId }: { api: PanelProps["api"]; orgId: string }) {
+/**
+ * Connecting an agent by hand, for agents with no browser. Robinhood only
+ * redirects to localhost, so the sign-in lands on a localhost page that
+ * won't load here; its address carries the code, which the owner pastes back.
+ */
+function ConnectFlow({ api, agentId, onDone }: { api: PanelProps["api"]; agentId: string; onDone: () => void }) {
+  const [link, setLink] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const post = (path: string, payload: object) => json(api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }));
+
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    setError(null);
+    try { await fn(); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-[hsl(var(--border))] p-3 text-sm">
+      {!link ? (
+        <Button variant="primary" loading={busy} onClick={() => run(async () => {
+          const { authorizeUrl } = (await post("connection/start", { agentId })) as { authorizeUrl: string };
+          setLink(authorizeUrl);
+          window.open(authorizeUrl, "_blank", "noopener");
+        })}>Open Robinhood sign-in</Button>
+      ) : (
+        <>
+          <p className={cx("text-xs", muted)}>
+            Sign in on the tab that opened (<a className="underline" href={link} target="_blank" rel="noreferrer">open it again</a>). It ends on a <span className="font-mono">localhost</span> page
+            that won&apos;t load — copy that page&apos;s full address and paste it here within 15 minutes.
+          </p>
+          <form className="flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); run(async () => { await post("connection/finish", { callbackUrl: pasted }); onDone(); }); }}>
+            <TextInput aria-label="Address the sign-in landed on" placeholder="http://localhost:53682/callback?code=…&state=…" className="min-w-[16rem] flex-1 font-mono text-xs" value={pasted} onChange={(e) => setPasted(e.target.value)} />
+            <Button type="submit" variant="primary" loading={busy} disabled={!pasted.includes("code=")}>Finish</Button>
+          </form>
+        </>
+      )}
+      {error && <Notice>{error}</Notice>}
+    </div>
+  );
+}
+
+/** The owner reading an agent's connected account through the same MCP tools agents use (read tools only). */
+function AccountCard({ api, agents }: { api: PanelProps["api"]; agents: AgentRow[] }) {
+  const [agentId, setAgentId] = useState(agents[0].agentId);
+  useEffect(() => { if (!agents.some((a) => a.agentId === agentId)) setAgentId(agents[0].agentId); }, [agents, agentId]);
   const [tools, setTools] = useState<ToolRow[] | null>(null);
   const [tool, setTool] = useState("get_portfolio");
   const [args, setArgs] = useState("{}");
@@ -346,13 +386,43 @@ function AccountCard({ api, orgId }: { api: PanelProps["api"]; orgId: string }) 
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    json<{ tools: ToolRow[] }>(api(`panel/tools?orgId=${encodeURIComponent(orgId)}`))
+    setTools(null);
+    setResult(null);
+    json<{ tools: ToolRow[] }>(api(`panel/tools?agentId=${encodeURIComponent(agentId)}`))
       .then(({ tools: list }) => {
         setTools(list);
         if (!list.some((t) => t.name === "get_portfolio") && list[0]) setTool(list.find((t) => t.kind === "read")?.name ?? list[0].name);
       })
       .catch((err: Error) => setError(err.message));
-  }, [api, orgId]);
+  }, [api, agentId]);
+
+  async function snapshot() {
+    setLoading(true);
+    setError(null);
+    try {
+      const accounts = await json<{ result: unknown }>(api("panel/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId, tool: "get_accounts", arguments: {} }) }));
+      const agentic = findAgenticAccounts(accounts.result);
+      if (!agentic.length) throw new Error("No agentic account on this connection");
+      const account_number = agentic[0].accountNumber;
+      const portfolio = await json<{ result: unknown }>(api("panel/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId, tool: "get_portfolio", arguments: { account_number } }) }));
+      let positions: unknown = null;
+      try {
+        const opt = await json<{ result: unknown }>(api("panel/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId, tool: "get_option_positions", arguments: { account_number } }) }));
+        positions = opt.result;
+      } catch (err) {
+        positions = (err as Error).message;
+      }
+      setResult(maskAccountNumbers({
+        accounts: agentic.map((a) => ({ account_number: a.accountNumber, option_level: a.optionLevel, rhs_account_number: a.rhsAccountNumber })),
+        portfolio: portfolio.result,
+        option_positions: positions,
+      }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function run(e?: FormEvent) {
     e?.preventDefault();
@@ -360,7 +430,7 @@ function AccountCard({ api, orgId }: { api: PanelProps["api"]; orgId: string }) 
     setError(null);
     try {
       const parsed = JSON.parse(args || "{}");
-      const out = await json<{ result: unknown }>(api("panel/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orgId, tool, arguments: parsed }) }));
+      const out = await json<{ result: unknown }>(api("panel/call", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId, tool, arguments: parsed }) }));
       setResult(out.result);
     } catch (err) {
       setError(err instanceof SyntaxError ? "Arguments must be JSON" : (err as Error).message);
@@ -373,13 +443,19 @@ function AccountCard({ api, orgId }: { api: PanelProps["api"]; orgId: string }) 
   const others = (tools ?? []).filter((t) => t.kind !== "read");
 
   return (
-    <Card title="Your account" description="Run any Robinhood read tool — what your agents see." actions={<ClipboardList className={cx("h-4 w-4", muted)} aria-hidden />}>
+    <Card title="Account" description="Run any Robinhood read tool through an agent's connection — exactly what that agent sees." actions={<ClipboardList className={cx("h-4 w-4", muted)} aria-hidden />}>
       <form onSubmit={run} className="flex flex-wrap gap-2">
+        {agents.length > 1 && (
+          <select aria-label="Agent" className={cx(inputClass, "w-auto")} value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+            {agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.name}</option>)}
+          </select>
+        )}
         <select aria-label="Tool" className={cx(inputClass, "w-auto")} value={tool} onChange={(e) => setTool(e.target.value)} disabled={!tools}>
           {reads.map((t) => <option key={t.name} value={t.name} title={t.description}>{t.name}</option>)}
         </select>
         <TextInput aria-label="Arguments (JSON)" className="min-w-[12rem] flex-1 font-mono text-xs" value={args} onChange={(e) => setArgs(e.target.value)} />
         <Button type="submit" variant="primary" icon={Play} loading={loading} disabled={!tools}>Run</Button>
+        <Button type="button" loading={loading} disabled={!tools} onClick={() => snapshot()}>Buying power</Button>
       </form>
       {tools && reads.find((t) => t.name === tool)?.description && <p className={cx("mt-2 text-xs", muted)}>{reads.find((t) => t.name === tool)!.description}</p>}
       {error && <div className="mt-3"><Notice>{error}</Notice></div>}

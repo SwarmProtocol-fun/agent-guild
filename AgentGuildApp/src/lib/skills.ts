@@ -536,14 +536,14 @@ export const SKILL_REGISTRY: Skill[] = [
     {
         id: "robinhood-trading",
         name: "Robinhood Trading",
-        description: "Connect your Robinhood Agentic account through Robinhood's official Trading MCP server and let your agents use it: read portfolio, positions, buying power, quotes and order history, manage watchlists, and place real stock orders. Every order passes Robinhood's pre-trade review and then your policy — per-order and daily dollar caps, a daily order count, allowed and blocked symbols — and by default waits for you to approve it.",
+        description: "Your agents connect your Robinhood Agentic account through Robinhood's official Trading MCP — each signs in once from its own machine — and then read buying power, chains, and quotes, and submit equity and option orders. Option orders use the live shape (legs, limit, debit or credit) and only the agentic account. Every order is reviewed first and, by default, waits for you. Max loss is capped at $5,000. Crypto stays off until you allow it.",
         type: "mod",
         source: "verified",
         category: "Trading",
         icon: "🪶",
-        version: "1.0.0",
+        version: "1.2.0",
         author: "Agent Guild",
-        tags: ["robinhood", "stocks", "equities", "trading", "brokerage", "mcp", "agents"],
+        tags: ["robinhood", "stocks", "options", "equities", "trading", "brokerage", "mcp", "agents"],
         pricing: { model: "free" },
         sidebarConfig: { sectionId: "modifications", label: "Robinhood Trading", href: "/mods/robinhood-trading/trading", iconName: "DollarSign" },
         modManifest: {

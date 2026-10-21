@@ -6,7 +6,8 @@
  */
 import { MCP_URL } from "./oauth";
 
-const PROTOCOL_VERSION = "2025-06-18";
+/** What the live trading server negotiated on 2026-10-21. */
+export const PROTOCOL_VERSION = "2025-11-25";
 
 /** The access token was rejected: refresh it and retry once. */
 export class McpAuthError extends Error {}
@@ -78,18 +79,20 @@ async function openSession(key: string, token: string): Promise<string | null> {
   const init = await rpc(token, null, "initialize", {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: "agent-guild-robinhood-trading", version: "1.0.0" },
+    clientInfo: { name: "agent-guild-robinhood-trading", version: "1.2.0" },
   });
-  if (init.sessionId) {
-    sessions.set(key, init.sessionId);
-    await post(token, init.sessionId, { jsonrpc: "2.0", method: "notifications/initialized" });
-  }
+  // An empty string means "this server does not use session ids", so the next
+  // call does not initialize again. The live server often omits the header.
+  sessions.set(key, init.sessionId ?? "");
+  await post(token, init.sessionId, { jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => {});
   return init.sessionId;
 }
 
 /** One request in the org's session, re-initializing once if the server dropped it. */
 export async function request(key: string, token: string, method: string, params: object): Promise<unknown> {
-  let sessionId = sessions.get(key) ?? (await openSession(key, token));
+  let sessionId: string | null;
+  if (sessions.has(key)) sessionId = sessions.get(key) || null;
+  else sessionId = await openSession(key, token);
   let out = await rpc(token, sessionId, method, params);
   if (out.status === 404) {
     sessions.delete(key);

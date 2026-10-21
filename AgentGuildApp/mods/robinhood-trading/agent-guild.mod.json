@@ -1,8 +1,8 @@
 {
   "id": "robinhood-trading",
   "name": "Robinhood Trading",
-  "version": "1.0.0",
-  "description": "Connects an org owner's Robinhood Agentic account through Robinhood's official Trading MCP server (OAuth, no password shared) and lets the org's agents use it: read portfolio, positions, buying power, quotes, order history and watchlists, and place real stock orders. Every order goes through Robinhood's own pre-trade review and then the owner's policy — per-order and daily dollar caps, a daily order count, allowed and blocked symbols, options and crypto switches — and, by default, waits for the owner to approve it on the panel. Idempotency keys stop a retrying agent from ordering twice, and every action lands in an activity log.",
+  "version": "1.2.0",
+  "description": "Each agent connects its own Robinhood Agentic account through Robinhood's official Trading MCP. A one-time localhost sign-in (rh-agent.mjs login) or a pasted localhost callback stores the grant encrypted on the hub. Agents read portfolio, buying power, chains, and quotes, and submit equity, option, and crypto orders. Option orders use Robinhood's real shape: legs, a limit, debit or credit, and the agentic account only. Every order is reviewed first. The default policy holds it for the owner, caps max loss at $5,000, allows options, and leaves crypto off. A credit spread is sized by collateral, not by the credit collected.",
   "author": "Agent Guild",
   "agentGuildApi": 1,
   "permissions": [],

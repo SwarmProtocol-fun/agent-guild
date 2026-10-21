@@ -2,9 +2,9 @@
  * Robinhood mod — Firestore persistence (Admin SDK, server-only).
  *
  * Collections:
- *   robinhoodConnections  — {orgId}: the org owner's Robinhood grant, tokens AES-256-GCM encrypted
+ *   robinhoodConnections  — {orgId}_{agentId}: one agent's Robinhood grant, tokens AES-256-GCM encrypted
  *   robinhoodOAuthClients — {hash of redirect URI}: client_id from dynamic registration
- *   robinhoodOAuthStates  — {state}: PKCE verifier for a sign-in in progress (10 min)
+ *   robinhoodOAuthStates  — {state}: PKCE verifier for a sign-in in progress (15 min)
  *   robinhoodPolicy       — {orgId}: the owner's trading limits
  *   robinhoodDaily        — {orgId}_{UTC date}: orders and dollars used today
  *   robinhoodOrders       — every order an agent asked for: queued, placed, refused, rejected
@@ -37,7 +37,11 @@ function masterKey(): string {
   if (!key) throw new ConfigError("Set ROBINHOOD_TOKEN_ENCRYPTION_KEY (or AGENT_WALLET_ENCRYPTION_KEY) to store Robinhood tokens");
   return key;
 }
-const salt = (orgId: string) => `robinhood:${orgId}`;
+const salt = (ref: ConnRef) => `robinhood:${ref.orgId}:${ref.agentId}`;
+
+/** Robinhood is connected per agent: the agent runs the sign-in on its own machine (Robinhood only redirects to localhost). */
+export interface ConnRef { orgId: string; agentId: string }
+export const connKey = (ref: ConnRef) => `${ref.orgId}_${ref.agentId}`;
 
 // ── OAuth client + sign-in state ─────────────────────────────────────────
 
@@ -50,9 +54,18 @@ export async function cachedClientId(redirectUri: string, register: () => Promis
   return clientId;
 }
 
-export interface OAuthState { orgId: string; address: string; verifier: string; clientId: string; redirectUri: string; createdAt: number }
+export interface OAuthState {
+  orgId: string;
+  agentId: string;
+  /** Who may finish this sign-in: the agent itself, or the operator's wallet address that started it from the panel. */
+  startedBy: { via: "agent"; agentId: string } | { via: "session"; address: string };
+  verifier: string;
+  clientId: string;
+  redirectUri: string;
+  createdAt: number;
+}
 
-const STATE_TTL_MS = 10 * 60_000;
+const STATE_TTL_MS = 15 * 60_000;
 
 export async function saveOAuthState(state: string, value: OAuthState): Promise<void> {
   await db().collection(STATES).doc(state).set(value);
@@ -72,9 +85,10 @@ export async function takeOAuthState(state: string): Promise<OAuthState | null> 
 
 // ── Connection ───────────────────────────────────────────────────────────
 
-export interface Connection {
-  orgId: string;
+export interface Connection extends ConnRef {
+  /** The agent that ran the sign-in, or the operator address that did it from the panel. */
   connectedBy: string;
+  connectedVia: "agent" | "session";
   connectedAt: string;
   clientId: string;
   /** "needs_reconnect" once Robinhood refuses the refresh token. */
@@ -85,30 +99,42 @@ export interface Connection {
 
 interface ConnectionDoc extends Connection { tokens: { encryptedValue: string; iv: string } }
 
+const connRef = (ref: ConnRef) => db().collection(CONNECTIONS).doc(connKey(ref));
+
 export async function saveConnection(conn: Omit<Connection, "expiresAt" | "status">, tokens: Tokens): Promise<void> {
-  const enc = encryptValue(JSON.stringify(tokens), salt(conn.orgId), masterKey());
+  const enc = encryptValue(JSON.stringify(tokens), salt(conn), masterKey());
   const doc: ConnectionDoc = { ...conn, status: "connected", expiresAt: tokens.expiresAt, tokens: enc };
-  await db().collection(CONNECTIONS).doc(conn.orgId).set(doc);
+  await connRef(conn).set(doc);
 }
 
-export async function getConnection(orgId: string): Promise<(Connection & { tokens: Tokens }) | null> {
-  const snap = await db().collection(CONNECTIONS).doc(orgId).get();
+export async function getConnection(ref: ConnRef): Promise<(Connection & { tokens: Tokens }) | null> {
+  const snap = await connRef(ref).get();
   if (!snap.exists) return null;
   const { tokens, ...rest } = snap.data() as ConnectionDoc;
-  return { ...rest, tokens: JSON.parse(decryptValue(tokens.encryptedValue, tokens.iv, salt(orgId), masterKey())) as Tokens };
+  return { ...rest, tokens: JSON.parse(decryptValue(tokens.encryptedValue, tokens.iv, salt(ref), masterKey())) as Tokens };
 }
 
-export async function updateTokens(orgId: string, tokens: Tokens): Promise<void> {
-  const enc = encryptValue(JSON.stringify(tokens), salt(orgId), masterKey());
-  await db().collection(CONNECTIONS).doc(orgId).update({ tokens: enc, expiresAt: tokens.expiresAt, status: "connected", lastError: FieldValue.delete() });
+/** Every agent connection in an org, without tokens (for the panel). */
+export async function listConnections(orgId: string): Promise<Connection[]> {
+  const snap = await db().collection(CONNECTIONS).where("orgId", "==", orgId).get();
+  return snap.docs.map((d) => {
+    const rest: Partial<ConnectionDoc> = { ...(d.data() as ConnectionDoc) };
+    delete rest.tokens;
+    return rest as Connection;
+  });
 }
 
-export async function markNeedsReconnect(orgId: string, error: string): Promise<void> {
-  await db().collection(CONNECTIONS).doc(orgId).update({ status: "needs_reconnect", lastError: error.slice(0, 300) });
+export async function updateTokens(ref: ConnRef, tokens: Tokens): Promise<void> {
+  const enc = encryptValue(JSON.stringify(tokens), salt(ref), masterKey());
+  await connRef(ref).update({ tokens: enc, expiresAt: tokens.expiresAt, status: "connected", lastError: FieldValue.delete() });
 }
 
-export async function deleteConnection(orgId: string): Promise<void> {
-  await db().collection(CONNECTIONS).doc(orgId).delete();
+export async function markNeedsReconnect(ref: ConnRef, error: string): Promise<void> {
+  await connRef(ref).update({ status: "needs_reconnect", lastError: error.slice(0, 300) });
+}
+
+export async function deleteConnection(ref: ConnRef): Promise<void> {
+  await connRef(ref).delete();
 }
 
 // ── Policy ───────────────────────────────────────────────────────────────

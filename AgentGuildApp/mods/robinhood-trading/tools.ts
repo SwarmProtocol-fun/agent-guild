@@ -34,7 +34,7 @@ export interface AgentTool {
 export const AGENT_TOOLS: AgentTool[] = [
   {
     name: "rh_me",
-    description: "Whether your org has connected Robinhood, which Robinhood upgrades you have, the owner's trading policy (limits, approval mode, allowed symbols) and how much of today's limit is used. Call this first.",
+    description: "Whether you have connected Robinhood (connection.connected — if not, ask your human to run rh-agent.mjs login), which Robinhood upgrades you have, the owner's trading policy (limits, approval mode, allowed symbols) and how much of today's org-wide limit is used. Call this first.",
     method: "GET", path: "me", capability: null,
     input_schema: { type: "object", properties: {} },
   },
@@ -59,7 +59,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   },
   {
     name: "rh_order",
-    description: "Place a real-money order in the owner's Robinhood Agentic account. Robinhood reviews it first (warnings come back), then the owner's policy decides: placed now, held for the owner's approval (status pending_approval — check back with rh_orders), or refused with reasons. Pass the same arguments the order tool's schema asks for, including `symbol` and `side`.",
+    description: "Place a real-money order in the agent's Robinhood Agentic account. Robinhood reviews it first, then the owner's policy holds it, refuses it, or (only if the owner turned approval off) places it. Equity: symbol, side, type, and quantity or dollar_amount. Options: place_option_order with legs (option_id, side, position_effect), quantity, type limit, a positive price, and direction debit or credit when there are 2+ legs. Pass chain_symbol. Leave account_number off unless you already know the agentic account — this mod fills that in and rejects every other account. A fresh ref_id is added on place. Credit-spread size is max loss from the review, not the credit.",
     method: "POST", path: "orders", capability: CAP.trade,
     input_schema: {
       type: "object",
@@ -87,10 +87,12 @@ export const AGENT_TOOLS: AgentTool[] = [
 ];
 
 export const NOTES = [
-  "Every order is real money in the owner's Robinhood Agentic account. Paper-trade elsewhere first.",
-  "Start with rh_me: it tells you if trading is on, the limits and whether the owner approves each order.",
-  "Use rh_tools for the live schema of every Robinhood tool before calling it; names and arguments come from Robinhood and change.",
-  "Before an order, check buying power (get_accounts / get_portfolio) and the quote (get_equity_quotes).",
-  "Always send idempotencyKey with rh_order, and reuse it when retrying after a timeout.",
-  "A held order isn't placed until the owner approves it on the panel; held orders expire after 24 hours.",
+  "You connect Robinhood yourself, once: run `node mods/robinhood-trading/agent/rh-agent.mjs login` on your machine and have your human sign in on the page it opens (Robinhood only signs in to localhost). Until then every Robinhood tool answers 409.",
+  "Orders go only to the account with agentic_allowed. Other accounts are read-only. This mod fills account_number from get_accounts when there is exactly one agentic account, and refuses any other account number.",
+  "Buying power is get_portfolio, not get_accounts. Pass the agentic account_number.",
+  "Option orders are place_option_order: 1 to 4 legs on one underlying, each a different option_id from get_option_instruments. Multi-leg is limit only, price is the net premium and always positive, and direction is debit or credit. Pass chain_symbol and underlying_type equity so the review includes collateral. Market and stop-market option orders are rejected here.",
+  "A debit risks the premium. A credit spread's size is the collateral from the review (width minus credit), not the credit. If that number is missing, the order waits for the owner.",
+  "Nothing is placed while the owner's approval mode is always (the default), options or not. A held order expires after 24 hours. Caps are a hard ceiling: an order over them is refused, not queued.",
+  "Always send idempotencyKey with rh_order, and reuse it when retrying after a timeout. The same key is sent to Robinhood as ref_id when it is a UUID.",
+  "Start with rh_me, then rh_tools. Names and arguments come from Robinhood and change.",
 ];

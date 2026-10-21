@@ -3,19 +3,28 @@ import { enableModCapabilities, getAgent, getAgentCapabilities, getAgentsByOrg, 
 import { requireOrgMembershipByAddress } from "@/lib/auth-guard";
 import { canonicalizeWalletAddress } from "@/lib/wallet-address";
 import { OAuthError, authorizeUrl, exchangeCode, pkcePair, randomState, registerClient } from "./oauth";
-import { McpError } from "./mcp";
-import { PolicyInputError, normalizePolicy } from "./policy";
+import { McpError, forgetSession, listTools } from "./mcp";
+import { PolicyInputError, maskAccountNumbers, normalizePolicy } from "./policy";
 import { NotConnectedError, ToolCallError, clearToolCache, invoke, isExpired, orderSummary, place, robinhoodTools, submitOrder } from "./robinhood";
 import {
-  ConfigError, activityFor, cachedClientId, claimPending, deleteConnection, getConnection, getDailyUsage, getOrder, getPolicy, listOrders,
-  logActivity, saveConnection, saveOAuthState, setPolicy, takeOAuthState, updateOrder, type OrderRecord, type OrderStatus,
+  ConfigError, activityFor, cachedClientId, claimPending, connKey, deleteConnection, getConnection, getDailyUsage, getOrder, getPolicy,
+  listConnections, listOrders, logActivity, saveConnection, saveOAuthState, setPolicy, takeOAuthState, updateOrder,
+  type ConnRef, type OAuthState, type OrderRecord, type OrderStatus,
 } from "./store";
 import { AGENT_TOOLS, CAP, NOTES, type CapKey } from "./tools";
 
 const MOD_ID = "robinhood-trading";
 /** MOD_REGISTRY id for this mod (lib/skills.ts prefixes the SKILL_REGISTRY id). */
 const REGISTRY_MOD_ID = `mod-${MOD_ID}`;
-const PANEL_PATH = `/mods/${MOD_ID}/trading`;
+
+/**
+ * Robinhood only sends a sign-in back to localhost (the "localhost
+ * platforms" its docs list: Claude Code, Codex…), never to a hosted web app.
+ * So each agent signs in from its own machine: rh-agent.mjs listens on this
+ * port, or, for an agent with no browser, the operator pastes the localhost
+ * URL the browser lands on into the panel.
+ */
+export const DEFAULT_REDIRECT_URI = "http://localhost:53682/callback";
 
 // ── Request helpers ──────────────────────────────────────────────────────
 
@@ -71,10 +80,10 @@ const objectArg = (v: unknown): Record<string, unknown> => {
 interface Caller { agentId: string; orgId: string; via: "agent" | "session" }
 
 /** An agent signature always wins; a browser session must name an agent in an org it belongs to. */
-async function resolveCaller(ctx: RouteContext, agentIdHint: string | null | undefined): Promise<Caller> {
+async function resolveCaller(ctx: RouteContext, agentIdHint: unknown): Promise<Caller> {
   if (ctx.agent) return { agentId: ctx.agent.agentId, orgId: ctx.agent.orgId, via: "agent" };
   if (!ctx.session) throw new AccessError("Authentication required", 401);
-  if (!agentIdHint) throw new AccessError("agentId is required for a browser session", 400);
+  if (typeof agentIdHint !== "string" || !agentIdHint) throw new AccessError("agentId is required for a browser session", 400);
   const agent = await getAgent(agentIdHint);
   if (!agent) throw new AccessError("Agent not found", 404);
   const membership = await requireOrgMembershipByAddress(ctx.session.address, agent.orgId);
@@ -100,38 +109,73 @@ async function requireMember(ctx: RouteContext, orgId: string): Promise<string> 
   return ctx.session.address;
 }
 
-/** Connecting a brokerage account, setting limits and approving orders is the owner's alone. */
+async function isOwner(address: string, orgId: string): Promise<boolean> {
+  const org = (await getOrganizationsByWalletAdmin(address)).find((o) => o.id === orgId);
+  return !!org?.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(address);
+}
+
+/** Setting limits and approving orders is the owner's alone. */
 async function requireOwner(ctx: RouteContext, orgId: string): Promise<string> {
   if (!ctx.session) throw new AccessError("Sign in as the org owner", 401);
-  const org = (await getOrganizationsByWalletAdmin(ctx.session.address)).find((o) => o.id === orgId);
-  const isOwner = !!org?.ownerAddress && canonicalizeWalletAddress(org.ownerAddress) === canonicalizeWalletAddress(ctx.session.address);
-  if (!isOwner) throw new AccessError("Only the org owner can do this", 403);
+  if (!(await isOwner(ctx.session.address, orgId))) throw new AccessError("Only the org owner can do this", 403);
   return ctx.session.address;
 }
 
-// ── OAuth helpers ────────────────────────────────────────────────────────
-
-/** The public base URL Robinhood redirects back to: the configured one, else this request's origin. */
-function redirectUri(req: Request): string {
-  const base = (process.env.NEXT_PUBLIC_BASE_URL || new URL(req.url).origin).replace(/\/+$/, "");
-  return `${base}/api/mods/${MOD_ID}/oauth/callback`;
+/**
+ * Connecting or disconnecting an agent's Robinhood: the agent itself, or the
+ * org owner from the panel on the agent's behalf.
+ */
+async function connectionActor(ctx: RouteContext, agentIdHint: unknown): Promise<Caller> {
+  const caller = await resolveCaller(ctx, agentIdHint);
+  if (caller.via === "session" && !(await isOwner(ctx.session!.address, caller.orgId))) {
+    throw new AccessError("Only the org owner can connect Robinhood for an agent from the panel — or run rh-agent.mjs login as the agent", 403);
+  }
+  return caller;
 }
 
-function backToPanel(req: Request, params: Record<string, string>): Response {
-  const base = (process.env.NEXT_PUBLIC_BASE_URL || new URL(req.url).origin).replace(/\/+$/, "");
-  return Response.redirect(`${base}${PANEL_PATH}?${new URLSearchParams(params)}`, 302);
+// ── Sign-in ──────────────────────────────────────────────────────────────
+
+/** Loopback only: a sign-in code can then only land on the machine that asked for it. */
+export function parseRedirectUri(value: unknown): string {
+  if (value == null || value === "") return DEFAULT_REDIRECT_URI;
+  let url: URL;
+  try { url = new URL(String(value)); } catch { throw new InputError("redirectUri must be a URL"); }
+  if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+    throw new InputError("redirectUri must be a loopback address like http://localhost:53682/callback — Robinhood only signs in to localhost");
+  }
+  url.hash = "";
+  url.search = "";
+  return url.toString();
+}
+
+/** { state, code } directly, or the whole localhost URL the browser landed on. */
+function codeAndState(b: Record<string, unknown>): { state: string; code: string } {
+  if (typeof b.callbackUrl === "string" && b.callbackUrl.trim()) {
+    let url: URL;
+    try { url = new URL(b.callbackUrl.trim()); } catch { throw new InputError("callbackUrl must be the full address from the browser bar"); }
+    const err = url.searchParams.get("error");
+    if (err) throw new InputError(`Robinhood refused the sign-in: ${url.searchParams.get("error_description") ?? err}`);
+    return { state: str(url.searchParams.get("state"), "state in callbackUrl", 100), code: str(url.searchParams.get("code"), "code in callbackUrl", 2000) };
+  }
+  return { state: str(b.state, "state", 100), code: str(b.code, "code", 2000) };
+}
+
+/** The sign-in must be finished by whoever started it. */
+function mayFinish(saved: OAuthState, ctx: RouteContext): boolean {
+  if (saved.startedBy.via === "agent") return ctx.agent?.agentId === saved.startedBy.agentId && ctx.agent.orgId === saved.orgId;
+  return !!ctx.session && canonicalizeWalletAddress(ctx.session.address) === canonicalizeWalletAddress(saved.startedBy.address);
 }
 
 // ── Views ────────────────────────────────────────────────────────────────
 
-async function connectionView(orgId: string) {
-  const conn = await getConnection(orgId).catch((err) => {
+async function connectionView(ref: ConnRef) {
+  const conn = await getConnection(ref).catch((err) => {
     // A token that no longer decrypts (rotated key) reads as "reconnect", not a crash.
     if (err instanceof ConfigError) throw err;
-    return { status: "needs_reconnect" as const, connectedBy: null, connectedAt: null, lastError: "Stored tokens can't be read — reconnect" };
+    return { status: "needs_reconnect" as const, connectedBy: null, connectedVia: null, connectedAt: null, lastError: "Stored tokens can't be read — sign in again" };
   });
   if (!conn) return { connected: false as const };
-  return { connected: true as const, status: conn.status, connectedBy: conn.connectedBy, connectedAt: conn.connectedAt, lastError: conn.lastError ?? null };
+  return { connected: true as const, status: conn.status, connectedBy: conn.connectedBy, connectedVia: conn.connectedVia, connectedAt: conn.connectedAt, lastError: conn.lastError ?? null };
 }
 
 /** Expired holds are marked as such when read, so nobody can approve a day-old decision. */
@@ -145,7 +189,7 @@ async function expireStale(orders: OrderRecord[]): Promise<OrderRecord[]> {
 
 /** What an agent sees of its order: no raw review blob unless asked. */
 const orderView = (o: OrderRecord, full = false) => ({
-  id: o.id, status: o.status, summary: orderSummary(o), tool: o.tool, arguments: o.arguments, notionalUsd: o.notionalUsd,
+  id: o.id, status: o.status, summary: orderSummary(o), tool: o.tool, arguments: maskAccountNumbers(o.arguments), notionalUsd: o.notionalUsd,
   reason: o.reason, reasons: o.reasons, warnings: o.warnings, createdAt: o.createdAt, decidedAt: o.decidedAt ?? null,
   error: o.error ?? null, result: o.result ?? null, ...(full ? { review: o.review, agentId: o.agentId, decidedBy: o.decidedBy ?? null } : {}),
 });
@@ -172,19 +216,75 @@ export default defineServerMod({
         mod: MOD_ID,
         basePath: `/api/mods/${MOD_ID}`,
         auth: "Authorization: Bearer agt_… (mods:call scope), Ed25519 agent/sig/ts, or agentId/apiKey",
+        connect: "Run `node mods/robinhood-trading/agent/rh-agent.mjs login` on the agent's machine once: it opens Robinhood's sign-in and hands the result to the hub.",
         notes: NOTES,
         tools: AGENT_TOOLS,
       }),
     },
 
-    /** GET /me — connection, upgrades, policy and today's usage for the calling agent. */
+    /** GET /me — this agent's Robinhood connection, upgrades, the org's policy and today's usage. */
     "GET /me": (req, ctx) =>
       handle(async () => {
         const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? query(req, "agentId"));
         const [capabilities, connection, policy, today] = await Promise.all([
-          capabilityMap(caller.agentId, caller.orgId), connectionView(caller.orgId), getPolicy(caller.orgId), getDailyUsage(caller.orgId),
+          capabilityMap(caller.agentId, caller.orgId), connectionView(caller), getPolicy(caller.orgId), getDailyUsage(caller.orgId),
         ]);
         return { agentId: caller.agentId, orgId: caller.orgId, via: caller.via, capabilities, connection, policy, today };
+      }),
+
+    /**
+     * POST /connection/start — begin a Robinhood sign-in for this agent.
+     * Body: { redirectUri? (loopback, default http://localhost:53682/callback), agentId (panel only) }
+     * → { authorizeUrl, state, redirectUri }. The PKCE verifier stays on the server.
+     */
+    "POST /connection/start": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req);
+        const caller = await connectionActor(ctx, ctx.agent?.agentId ?? b.agentId);
+        await requireCapability(caller, CAP.read);
+        const redirectUri = parseRedirectUri(b.redirectUri);
+        const clientId = await cachedClientId(redirectUri, () => registerClient(redirectUri));
+        const { verifier, challenge } = pkcePair();
+        const state = randomState();
+        await saveOAuthState(state, {
+          orgId: caller.orgId, agentId: caller.agentId, verifier, clientId, redirectUri, createdAt: Date.now(),
+          startedBy: caller.via === "agent" ? { via: "agent", agentId: caller.agentId } : { via: "session", address: ctx.session!.address },
+        });
+        return { authorizeUrl: authorizeUrl({ clientId, redirectUri, state, challenge }), state, redirectUri, expiresInSeconds: 900 };
+      }),
+
+    /**
+     * POST /connection/finish — trade the sign-in code for tokens, check them
+     * against Robinhood, and store them for this agent.
+     * Body: { state, code } or { callbackUrl } (the localhost URL the browser landed on).
+     */
+    "POST /connection/finish": (req, ctx) =>
+      handle(async () => {
+        const { state, code } = codeAndState(await body(req));
+        const saved = await takeOAuthState(state);
+        if (!saved) throw new InputError("This sign-in expired or was already used — start again");
+        if (!mayFinish(saved, ctx)) throw new AccessError("Finish the sign-in as the same agent (or panel user) that started it", 403);
+        const ref = { orgId: saved.orgId, agentId: saved.agentId };
+        const tokens = await exchangeCode({ clientId: saved.clientId, redirectUri: saved.redirectUri, code, verifier: saved.verifier });
+        // Prove the grant works before saving it, so "connected" means the agent can actually reach Robinhood.
+        const verifyKey = `verify:${connKey(ref)}`;
+        const tools = await listTools(verifyKey, tokens.accessToken).finally(() => forgetSession(verifyKey));
+        const connectedBy = saved.startedBy.via === "agent" ? saved.startedBy.agentId : saved.startedBy.address;
+        await saveConnection({ ...ref, clientId: saved.clientId, connectedBy, connectedVia: saved.startedBy.via, connectedAt: new Date().toISOString() }, tokens);
+        clearToolCache(ref);
+        logActivity({ ...ref, via: saved.startedBy.via, action: "connected", ok: true, summary: `Robinhood connected (${tools.length} tools) by ${connectedBy}` });
+        return { connected: true, agentId: ref.agentId, tools: tools.length };
+      }),
+
+    /** POST /connection/disconnect — forget this agent's Robinhood tokens. The agent, or the owner with { agentId }. */
+    "POST /connection/disconnect": (req, ctx) =>
+      handle(async () => {
+        const b = await body(req).catch(() => ({} as Record<string, unknown>));
+        const caller = await connectionActor(ctx, ctx.agent?.agentId ?? b.agentId);
+        await deleteConnection(caller);
+        clearToolCache(caller);
+        logActivity({ orgId: caller.orgId, agentId: caller.agentId, via: caller.via, action: "disconnected", ok: true, summary: "Robinhood disconnected" });
+        return { connected: false };
       }),
 
     /** GET /tools — Robinhood's live tool list with schemas and the guard's classification. */
@@ -192,7 +292,7 @@ export default defineServerMod({
       handle(async () => {
         const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? query(req, "agentId"));
         await requireCapability(caller, CAP.read);
-        const tools = await robinhoodTools(caller.orgId, query(req, "fresh") === "true");
+        const tools = await robinhoodTools(caller, query(req, "fresh") === "true");
         return { tools: tools.map((t) => ({ name: t.name, kind: t.kind, description: t.description ?? t.title ?? "", inputSchema: t.inputSchema ?? null, viaTool: t.kind === "trade" ? "rh_order" : "rh_call" })) };
       }),
 
@@ -200,16 +300,16 @@ export default defineServerMod({
     "POST /call": (req, ctx) =>
       handle(async () => {
         const b = await body(req);
-        const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? (b.agentId as string | undefined));
+        const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? b.agentId);
         const name = str(b.tool, "tool", 100);
         const args = objectArg(b.arguments);
-        const tool = (await robinhoodTools(caller.orgId)).find((t) => t.name === name);
+        const tool = (await robinhoodTools(caller)).find((t) => t.name === name);
         if (!tool) throw new NotFoundError(`Robinhood has no tool named ${name} — see rh_tools`);
         if (tool.kind === "trade") throw new InputError(`${name} places an order — use rh_order so the owner's policy applies`);
         await requireCapability(caller, tool.kind === "read" ? CAP.read : tool.kind === "cancel" ? CAP.trade : CAP.watchlist);
         try {
-          const result = await invoke(caller.orgId, name, args);
-          if (tool.kind !== "read") logActivity({ orgId: caller.orgId, agentId: caller.agentId, via: caller.via, tool: name, ok: true, action: tool.kind, summary: `${name} ${JSON.stringify(args).slice(0, 200)}` });
+          const result = await invoke(caller, name, args);
+          if (tool.kind !== "read") logActivity({ orgId: caller.orgId, agentId: caller.agentId, via: caller.via, tool: name, ok: true, action: tool.kind, summary: `${name} ${JSON.stringify(maskAccountNumbers(args)).slice(0, 200)}` });
           return { tool: name, result };
         } catch (err) {
           if (tool.kind !== "read") logActivity({ orgId: caller.orgId, agentId: caller.agentId, via: caller.via, tool: name, ok: false, action: tool.kind, summary: `${name} failed: ${(err as Error).message}`.slice(0, 300) });
@@ -221,7 +321,7 @@ export default defineServerMod({
     "POST /orders": (req, ctx) =>
       handle(async () => {
         const b = await body(req);
-        const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? (b.agentId as string | undefined));
+        const caller = await resolveCaller(ctx, ctx.agent?.agentId ?? b.agentId);
         await requireCapability(caller, CAP.trade);
         const out = await submitOrder({
           orgId: caller.orgId, agentId: caller.agentId, via: caller.via,
@@ -284,71 +384,18 @@ export default defineServerMod({
         };
       }),
 
-    /** GET /connection?orgId — connection status, policy and today's usage. Org members. */
+    /** GET /connection?orgId — every agent's connection, the policy and today's usage. Org members. */
     "GET /connection": (req, ctx) =>
       handle(async () => {
         const orgId = str(query(req, "orgId"), "orgId");
         await requireMember(ctx, orgId);
-        const [connection, policy, today] = await Promise.all([connectionView(orgId), getPolicy(orgId), getDailyUsage(orgId)]);
-        return { connection, policy, today };
-      }),
-
-    /** POST /connect — start Robinhood sign-in. Owner only. Body: { orgId } → { authorizeUrl } */
-    "POST /connect": (req, ctx) =>
-      handle(async () => {
-        const { orgId: raw } = await body(req);
-        const orgId = str(raw, "orgId");
-        const address = await requireOwner(ctx, orgId);
-        const uri = redirectUri(req);
-        const clientId = await cachedClientId(uri, () => registerClient(uri));
-        const { verifier, challenge } = pkcePair();
-        const state = randomState();
-        await saveOAuthState(state, { orgId, address, verifier, clientId, redirectUri: uri, createdAt: Date.now() });
-        return { authorizeUrl: authorizeUrl({ clientId, redirectUri: uri, state, challenge }) };
-      }),
-
-    /**
-     * GET /oauth/callback — Robinhood's redirect back. Public so a missing
-     * session lands on the panel instead of a bare 401, but the browser must
-     * still be signed in as the owner who started this sign-in: otherwise an
-     * owner could send their authorize link to someone else and receive that
-     * person's Robinhood account into their org.
-     */
-    "GET /oauth/callback": {
-      public: true,
-      handler: async (req, ctx) => {
-        const url = new URL(req.url);
-        const state = url.searchParams.get("state");
-        const saved = state ? await takeOAuthState(state).catch(() => null) : null;
-        if (!saved) return backToPanel(req, { robinhood: "error", reason: "Sign-in expired or was already used — start again" });
-        if (!ctx.session || canonicalizeWalletAddress(ctx.session.address) !== canonicalizeWalletAddress(saved.address)) {
-          return backToPanel(req, { robinhood: "error", reason: "Finish connecting in the same browser, signed in as the owner who started it" });
-        }
-        const denied = url.searchParams.get("error");
-        if (denied) return backToPanel(req, { robinhood: "error", reason: url.searchParams.get("error_description") ?? denied });
-        const code = url.searchParams.get("code");
-        if (!code) return backToPanel(req, { robinhood: "error", reason: "Robinhood sent no authorization code" });
-        try {
-          const tokens = await exchangeCode({ clientId: saved.clientId, redirectUri: saved.redirectUri, code, verifier: saved.verifier });
-          await saveConnection({ orgId: saved.orgId, connectedBy: saved.address, connectedAt: new Date().toISOString(), clientId: saved.clientId }, tokens);
-          clearToolCache(saved.orgId);
-          logActivity({ orgId: saved.orgId, agentId: null, via: "session", action: "connected", ok: true, summary: `Robinhood connected by ${saved.address}` });
-          return backToPanel(req, { robinhood: "connected" });
-        } catch (err) {
-          return backToPanel(req, { robinhood: "error", reason: (err as Error).message.slice(0, 200) });
-        }
-      },
-    },
-
-    /** POST /disconnect — forget the org's Robinhood tokens. Owner only. Body: { orgId } */
-    "POST /disconnect": (req, ctx) =>
-      handle(async () => {
-        const orgId = str((await body(req)).orgId, "orgId");
-        const address = await requireOwner(ctx, orgId);
-        await deleteConnection(orgId);
-        clearToolCache(orgId);
-        logActivity({ orgId, agentId: null, via: "session", action: "disconnected", ok: true, summary: `Robinhood disconnected by ${address}` });
-        return { connected: false };
+        const [connections, policy, today] = await Promise.all([listConnections(orgId), getPolicy(orgId), getDailyUsage(orgId)]);
+        return {
+          connections: connections.map((c) => ({
+            agentId: c.agentId, status: c.status, connectedBy: c.connectedBy, connectedVia: c.connectedVia, connectedAt: c.connectedAt, lastError: c.lastError ?? null,
+          })),
+          policy, today,
+        };
       }),
 
     /** POST /policy — change the org's trading limits. Owner only. Body: { orgId, policy: Partial<Policy> } */
@@ -402,25 +449,25 @@ export default defineServerMod({
         return out;
       }),
 
-    /** POST /panel/call — the owner reading their account from the panel (read tools only). Body: { orgId, tool, arguments } */
+    /** POST /panel/call — the owner reading an agent's connected account from the panel (read tools only). Body: { agentId, tool, arguments } */
     "POST /panel/call": (req, ctx) =>
       handle(async () => {
         const b = await body(req);
-        const orgId = str(b.orgId, "orgId");
-        await requireOwner(ctx, orgId);
+        const caller = await resolveCaller(ctx, b.agentId);
+        await requireOwner(ctx, caller.orgId);
         const name = str(b.tool, "tool", 100);
-        const tool = (await robinhoodTools(orgId)).find((t) => t.name === name);
+        const tool = (await robinhoodTools(caller)).find((t) => t.name === name);
         if (!tool) throw new NotFoundError(`Robinhood has no tool named ${name}`);
         if (tool.kind !== "read") throw new InputError("The panel only reads — trade in the Robinhood app, or through an agent");
-        return { tool: name, result: await invoke(orgId, name, objectArg(b.arguments)) };
+        return { tool: name, result: await invoke(caller, name, objectArg(b.arguments)) };
       }),
 
-    /** GET /panel/tools?orgId — Robinhood's tool list for the panel. Owner only. */
+    /** GET /panel/tools?agentId — Robinhood's tool list through an agent's connection. Owner only. */
     "GET /panel/tools": (req, ctx) =>
       handle(async () => {
-        const orgId = str(query(req, "orgId"), "orgId");
-        await requireOwner(ctx, orgId);
-        const tools = await robinhoodTools(orgId, query(req, "fresh") === "true");
+        const caller = await resolveCaller(ctx, query(req, "agentId"));
+        await requireOwner(ctx, caller.orgId);
+        const tools = await robinhoodTools(caller, query(req, "fresh") === "true");
         return { tools: tools.map((t) => ({ name: t.name, kind: t.kind, description: t.description ?? t.title ?? "", inputSchema: t.inputSchema ?? null })) };
       }),
 
